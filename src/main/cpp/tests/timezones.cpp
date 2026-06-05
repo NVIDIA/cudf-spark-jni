@@ -344,3 +344,85 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesSubMillisBeforeGap)
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
+
+namespace {
+// US-style DST rule: DST on the 2nd Sunday of March at 02:00 standard, off the
+// 1st Sunday of November at 01:00 standard, +1h savings. Mirrors the encoding
+// produced by OrcDstRuleExtractor (0-based month; dayOfWeek 1=Sun..7=Sat;
+// mode 2 = DOW_GE_DOM; timeMode 1 = STANDARD).
+spark_rapids_jni::dst_rule make_us_dst_rule()
+{
+  spark_rapids_jni::dst_rule rule{};
+  rule.has_dst         = true;
+  rule.dst_savings     = 3600000;
+  rule.start_month     = 2;        // March
+  rule.start_day       = 8;        // "first Sunday on or after the 8th" == 2nd Sunday
+  rule.start_dow       = 1;        // Sunday
+  rule.start_time      = 7200000;  // 02:00
+  rule.start_time_mode = 1;        // STANDARD
+  rule.start_mode      = 2;        // DOW_GE_DOM
+  rule.end_month       = 10;       // November
+  rule.end_day         = 1;        // "first Sunday on or after the 1st"
+  rule.end_dow         = 1;
+  rule.end_time        = 3600000;  // 01:00
+  rule.end_time_mode   = 1;
+  rule.end_mode        = 2;
+  return rule;
+}
+}  // namespace
+
+// DST path with no transition table: every instant resolves through the DST
+// rule (compute_dst_offset). Writer is fixed UTC (offset 0), reader carries the
+// US rule on a raw offset of 0, so a winter instant (standard) is unchanged and
+// a summer instant (DST +1h) is shifted back one hour. 2030-01-15 is before the
+// 2030 DST window (starts Mar 10) and 2030-07-15 is inside it (ends Nov 3).
+TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
+{
+  auto const reader_dst = make_us_dst_rule();
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst = false;
+
+  auto const input    = micros_col{1894665600000000L, 1910304000000000L};
+  auto const expected = micros_col{1894665600000000L, 1910300400000000L};
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/int64_t{0},
+    /*writer_tz_info_table=*/nullptr,
+    /*writer_initial_offset=*/0,
+    /*writer_raw_offset=*/0,
+    no_dst,
+    /*reader_tz_info_table=*/nullptr,
+    /*reader_initial_offset=*/0,
+    /*reader_raw_offset=*/0,
+    reader_dst,
+    cudf::get_default_stream(),
+    rmm::mr::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
+// Converting a DST zone to itself must be the identity for every instant
+// (writer and reader offsets cancel), exercising the DST math on both the
+// standard (winter) and daylight (summer) branches.
+TEST_F(TimeZoneTest, ConvertOrcTimezonesSameDstZoneIsIdentity)
+{
+  auto const rule = make_us_dst_rule();
+
+  auto const input    = micros_col{1894665600000000L, 1910304000000000L};
+  auto const expected = micros_col{1894665600000000L, 1910304000000000L};
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/int64_t{0},
+    /*writer_tz_info_table=*/nullptr,
+    /*writer_initial_offset=*/0,
+    /*writer_raw_offset=*/0,
+    rule,
+    /*reader_tz_info_table=*/nullptr,
+    /*reader_initial_offset=*/0,
+    /*reader_raw_offset=*/0,
+    rule,
+    cudf::get_default_stream(),
+    rmm::mr::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
