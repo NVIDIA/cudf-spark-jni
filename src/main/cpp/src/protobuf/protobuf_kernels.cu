@@ -1006,7 +1006,7 @@ void maybe_check_required_fields(field_location const* locations,
 {
   if (num_rows == 0 || field_indices.empty()) { return; }
 
-  bool has_required = false;
+  bool has_required   = false;
   auto& h_is_required = keep_pinned_staging(
     cudf::detail::make_pinned_vector_async<uint8_t>(field_indices.size(), stream),
     pinned_staging_buffers);

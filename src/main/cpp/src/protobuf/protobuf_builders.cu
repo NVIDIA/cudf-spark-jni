@@ -178,9 +178,9 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
     h_name_offsets[k + 1] = static_cast<int32_t>(total_name_chars);
   }
 
-  auto& h_name_chars = keep_pinned_staging(
-    cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream),
-    pinned_staging_buffers);
+  auto& h_name_chars =
+    keep_pinned_staging(cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream),
+                        pinned_staging_buffers);
   int32_t cursor = 0;
   for (auto const& name : enum_name_bytes) {
     if (!name.empty()) {
@@ -301,7 +301,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   auto const rep_blocks =
     static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto const lookup = make_enum_string_lookup_tables(
+  auto const lookup     = make_enum_string_lookup_tables(
     valid_enums, enum_name_bytes, pinned_staging_buffers, stream, mr);
 
   // 1. Extract enum integer values from occurrences

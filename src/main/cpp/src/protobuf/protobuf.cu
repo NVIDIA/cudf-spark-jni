@@ -897,16 +897,15 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             CUDF_EXPECTS(!valid_enums.empty() && valid_enums.size() == enum_name_bytes.size(),
                          "Protobuf decode error: missing or mismatched enum metadata for "
                          "enum-as-string field");
-            column_map[schema_idx] = build_enum_string_column(
-              out,
-              valid,
-              valid_enums,
-              enum_name_bytes,
-              pinned_staging_buffers,
-              d_row_force_null,
-              num_rows,
-              stream,
-              mr);
+            column_map[schema_idx] = build_enum_string_column(out,
+                                                              valid,
+                                                              valid_enums,
+                                                              enum_name_bytes,
+                                                              pinned_staging_buffers,
+                                                              d_row_force_null,
+                                                              num_rows,
+                                                              stream,
+                                                              mr);
           } else {
             // Regular protobuf STRING (length-delimited)
             bool has_def_str    = has_def;
