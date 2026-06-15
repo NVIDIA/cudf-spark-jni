@@ -16,6 +16,7 @@
 
 #include "protobuf/protobuf_kernels.cuh"
 
+#include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/lists/detail/lists_column_factories.hpp>
 #include <cudf/strings/detail/strings_column_factories.cuh>
 
@@ -65,7 +66,7 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
       return cudf::make_fixed_width_column(dtype, num_rows, cudf::mask_state::ALL_NULL, stream, mr);
     case cudf::type_id::STRING: {
       rmm::device_uvector<cudf::strings::detail::string_index_pair> pairs(num_rows, stream, mr);
-      thrust::fill(rmm::exec_policy_nosync(stream),
+      thrust::fill(rmm::exec_policy_nosync(stream, mr),
                    pairs.data(),
                    pairs.end(),
                    cudf::strings::detail::string_index_pair{nullptr, 0});
@@ -119,7 +120,7 @@ std::unique_ptr<cudf::column> make_null_list_column_with_child(
   rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
-  thrust::fill(rmm::exec_policy_nosync(stream), offsets.begin(), offsets.end(), 0);
+  thrust::fill(rmm::exec_policy_nosync(stream, mr), offsets.begin(), offsets.end(), 0);
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                                     num_rows + 1,
                                                     offsets.release(),
@@ -251,9 +252,9 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   bool propagate_invalid_rows)
 {
   auto lookup = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
-  rmm::device_uvector<bool> d_item_has_invalid_enum(
-    num_rows, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
+  rmm::device_uvector<bool> d_item_has_invalid_enum(num_rows, stream, scratch_mr);
+  thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                d_item_has_invalid_enum.begin(),
                d_item_has_invalid_enum.end(),
                false);
@@ -313,7 +314,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   // (elem_valid was already populated by extract_varint_kernel: true for success, false for
   // failure)
   rmm::device_uvector<bool> d_elem_has_invalid_enum(total_count, stream, scratch_mr);
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                d_elem_has_invalid_enum.begin(),
                d_elem_has_invalid_enum.end(),
                false);
@@ -326,7 +327,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
                               stream);
 
   rmm::device_uvector<int32_t> d_top_row_indices(total_count, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     d_occurrences.begin(),
                     d_occurrences.end(),
                     d_top_row_indices.begin(),
@@ -454,10 +455,9 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
 /**
  * Build a STRUCT column for a nested protobuf message.
  *
- * 3b.2 scope: only scalar numeric/bool children are fully decoded. STRING/LIST<UINT8>/STRUCT
- * children, repeated children, and proto2 required-field checks land in subsequent PRs
- * (3b.3 / 3b.4 / 3b.5 / 3b.6); for now those child slots are filled with typed null columns
- * so the output schema is still well-formed.
+ * Scalar, string, bytes, enum-as-string, default values, proto2 required-field checks,
+ * and recursive STRUCT children are decoded. Repeated children are still emitted as
+ * typed null LIST columns.
  */
 std::unique_ptr<cudf::column> build_nested_struct_column(
   uint8_t const* message_data,
@@ -511,11 +511,10 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   rmm::device_uvector<field_descriptor> d_child_field_descs(
     std::max(num_child_fields, 1), stream, scratch_mr);
   if (num_child_fields > 0) {
-    CUDF_CUDA_TRY(cudaMemcpyAsync(d_child_field_descs.data(),
-                                  h_child_field_descs.data(),
-                                  num_child_fields * sizeof(field_descriptor),
-                                  cudaMemcpyHostToDevice,
-                                  stream.value()));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_child_field_descs.data(),
+                                             h_child_field_descs.data(),
+                                             num_child_fields * sizeof(field_descriptor),
+                                             stream));
   }
 
   auto const child_location_count = static_cast<size_t>(num_rows) * num_child_fields;
@@ -523,7 +522,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     std::max(child_location_count, size_t{1}), stream, scratch_mr);
   // Scan over every child descriptor (including repeated ones) so STRICT-mode wire-type
   // validation still runs on repeated occurrences. Repeated child slots in d_child_locations
-  // are not consumed; 3b.5 / 3b.6 produce them via dedicated count/scan kernels.
+  // are reserved for a dedicated nested repeated count/scan path.
   launch_scan_nested_message_fields(message_data,
                                     message_data_size,
                                     list_offsets,
@@ -538,6 +537,18 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                     top_row_indices,
                                     stream);
 
+  maybe_check_required_fields(d_child_locations.data(),
+                              child_field_indices,
+                              schema,
+                              num_rows,
+                              nullptr,
+                              0,
+                              d_parent_locs.data(),
+                              d_row_force_null.size() > 0 ? d_row_force_null.data() : nullptr,
+                              top_row_indices,
+                              d_error.data(),
+                              stream);
+
   std::vector<std::unique_ptr<cudf::column>> struct_children;
   for (int ci = 0; ci < num_child_fields; ci++) {
     int child_schema_idx = child_field_indices[ci];
@@ -546,8 +557,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     bool has_def         = schema[child_schema_idx].has_default_value;
     bool is_repeated     = schema[child_schema_idx].is_repeated;
 
-    // Repeated children inside nested messages land in 3b.5 / 3b.6; emit a typed null LIST
-    // so the struct schema is still well-formed.
+    // Keep the struct schema well-formed until nested repeated children are decoded.
     if (is_repeated) {
       struct_children.push_back(
         make_null_column_with_schema(schema, child_schema_idx, num_fields, num_rows, stream, mr));
@@ -592,14 +602,142 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                propagate_invalid_rows));
         break;
       }
-      case cudf::type_id::STRING:
-      case cudf::type_id::LIST:  // bytes represented as LIST<UINT8>
-      case cudf::type_id::STRUCT:
-        // Nested string/bytes/enum-as-string (3b.3) and recursive struct (3b.4) children are
-        // not decoded yet; emit a typed null column so the output schema still matches.
-        struct_children.push_back(
-          make_null_column_with_schema(schema, child_schema_idx, num_fields, num_rows, stream, mr));
+      case cudf::type_id::STRING: {
+        nested_location_provider loc_provider{list_offsets,
+                                              base_offset,
+                                              d_parent_locs.data(),
+                                              d_child_locations.data(),
+                                              ci,
+                                              num_child_fields};
+        if (enc == encoding_value(proto_encoding::ENUM_STRING)) {
+          rmm::device_uvector<int32_t> out(num_rows, stream, mr);
+          rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
+          extract_varint_kernel<int32_t, false, nested_location_provider>
+            <<<blocks, threads, 0, stream.value()>>>(message_data,
+                                                     loc_provider,
+                                                     num_rows,
+                                                     out.data(),
+                                                     valid.data(),
+                                                     d_error.data(),
+                                                     has_def,
+                                                     has_def ? ctx.default_ints[child_schema_idx]
+                                                             : 0);
+          if (child_schema_idx < static_cast<int>(ctx.enum_valid_values.size()) &&
+              child_schema_idx < static_cast<int>(ctx.enum_names.size()) &&
+              !ctx.enum_valid_values[child_schema_idx].empty() &&
+              ctx.enum_valid_values[child_schema_idx].size() ==
+                ctx.enum_names[child_schema_idx].size()) {
+            struct_children.push_back(
+              build_enum_string_column(out,
+                                       valid,
+                                       ctx.enum_valid_values[child_schema_idx],
+                                       ctx.enum_names[child_schema_idx],
+                                       d_row_force_null,
+                                       num_rows,
+                                       stream,
+                                       mr,
+                                       top_row_indices,
+                                       propagate_invalid_rows));
+          } else {
+            set_error_once_async(d_error.data(), ERR_MISSING_ENUM_META, stream);
+            struct_children.push_back(make_null_column(dt, num_rows, stream, mr));
+          }
+        } else {
+          auto valid_fn = [plocs = d_parent_locs.data(),
+                           flocs = d_child_locations.data(),
+                           ci,
+                           num_child_fields,
+                           has_def] __device__(cudf::size_type row) {
+            return (plocs[row].offset >= 0 &&
+                    flocs[flat_index(static_cast<size_t>(row),
+                                     static_cast<size_t>(num_child_fields),
+                                     static_cast<size_t>(ci))]
+                        .offset >= 0) ||
+                   has_def;
+          };
+          struct_children.push_back(
+            extract_and_build_string_or_bytes_column(false,
+                                                     message_data,
+                                                     num_rows,
+                                                     loc_provider,
+                                                     loc_provider,
+                                                     valid_fn,
+                                                     has_def,
+                                                     ctx.default_strings[child_schema_idx],
+                                                     d_error,
+                                                     stream,
+                                                     mr));
+        }
         break;
+      }
+      case cudf::type_id::LIST: {  // bytes represented as LIST<UINT8>
+        nested_location_provider loc_provider{list_offsets,
+                                              base_offset,
+                                              d_parent_locs.data(),
+                                              d_child_locations.data(),
+                                              ci,
+                                              num_child_fields};
+        auto valid_fn = [plocs = d_parent_locs.data(),
+                         flocs = d_child_locations.data(),
+                         ci,
+                         num_child_fields,
+                         has_def] __device__(cudf::size_type row) {
+          return (plocs[row].offset >= 0 && flocs[flat_index(static_cast<size_t>(row),
+                                                             static_cast<size_t>(num_child_fields),
+                                                             static_cast<size_t>(ci))]
+                                                .offset >= 0) ||
+                 has_def;
+        };
+        struct_children.push_back(
+          extract_and_build_string_or_bytes_column(true,
+                                                   message_data,
+                                                   num_rows,
+                                                   loc_provider,
+                                                   loc_provider,
+                                                   valid_fn,
+                                                   has_def,
+                                                   ctx.default_strings[child_schema_idx],
+                                                   d_error,
+                                                   stream,
+                                                   mr));
+        break;
+      }
+      case cudf::type_id::STRUCT: {
+        auto gc_indices = find_child_field_indices(schema, num_fields, child_schema_idx);
+        if (gc_indices.empty()) {
+          struct_children.push_back(make_null_column_with_schema(
+            schema, child_schema_idx, num_fields, num_rows, stream, mr));
+          break;
+        }
+
+        rmm::device_uvector<field_location> d_gc_parent_locs(num_rows, stream, scratch_mr);
+        launch_compute_grandchild_parent_locations(d_parent_locs.data(),
+                                                   d_child_locations.data(),
+                                                   ci,
+                                                   num_child_fields,
+                                                   d_gc_parent_locs.data(),
+                                                   num_rows,
+                                                   d_error.data(),
+                                                   stream);
+        struct_children.push_back(build_nested_struct_column(message_data,
+                                                             message_data_size,
+                                                             list_offsets,
+                                                             base_offset,
+                                                             d_gc_parent_locs,
+                                                             gc_indices,
+                                                             schema,
+                                                             num_fields,
+                                                             ctx,
+                                                             d_row_force_null,
+                                                             d_error,
+                                                             num_rows,
+                                                             stream,
+                                                             mr,
+                                                             top_row_indices,
+                                                             depth + 1,
+                                                             propagate_invalid_rows));
+        break;
+      }
       default:
         // List the supported/deferred types above explicitly so a newly-introduced output type
         // fails loudly here instead of silently decoding as all-null.
@@ -609,7 +747,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 
   rmm::device_uvector<bool> struct_valid(num_rows, stream, scratch_mr);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     struct_valid.data(),

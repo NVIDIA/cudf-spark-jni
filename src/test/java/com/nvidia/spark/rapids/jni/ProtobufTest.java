@@ -2544,26 +2544,6 @@ public class ProtobufTest {
   }
 
   @Test
-  void testZeroLengthNestedMessage() {
-    Byte[] row = concat(
-        box(tag(1, WT_LEN)),
-        box(encodeVarint(0)));
-
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
-             input.getColumn(0),
-             new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRUCT).down()
-                     .addField(1, DType.INT32)
-                 .up()
-                 .build(),
-             false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-    }
-  }
-
-  @Test
   void testRepeatedFieldOutputShape() {
     // Schema: message Msg { repeated int32 values = 1; }
     ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
@@ -2690,6 +2670,227 @@ public class ProtobufTest {
              ColumnVector expOuter = ColumnVector.makeStruct(expInner)) {
           AssertUtils.assertStructColumnsAreEqual(expOuter, result);
         }
+    }
+  }
+
+  @Test
+  void testNestedMessageVarlenChildren() {
+    // message Inner { string name = 1; bytes payload = 2; }
+    // message Outer { Inner inner = 1; }
+    byte[] payload = new byte[]{1, 2, 3};
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(5)), box("alice".getBytes()),
+        box(tag(2, WT_LEN)), box(encodeVarint(payload.length)), box(payload));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedName = ColumnVector.fromStrings("alice");
+         ColumnVector expectedPayload = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.UINT8)),
+             Arrays.asList((byte) 1, (byte) 2, (byte) 3));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedName, expectedPayload);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING)
+                     .addField(2, DType.LIST)
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedMessageStringDefault() {
+    // message Inner { optional string name = 1 [default = "missing"]; }
+    // message Outer { Inner inner = 1; }
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{}));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedName = ColumnVector.fromStrings("missing");
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedName);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).defaultValue("missing".getBytes())
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testDeepNestedMessageDepth3() {
+    // message Inner  { int32 a = 1; string b = 2; bool c = 3; }
+    // message Middle { Inner inner = 1; int64 m = 2; }
+    // message Outer  { Middle middle = 1; float score = 2; }
+    Byte[] inner = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(7)),
+        box(tag(2, WT_LEN)), box(encodeVarint(3)), box("abc".getBytes()),
+        box(tag(3, WT_VARINT)), box(encodeVarint(1)));
+    Byte[] middle = concat(
+        box(tag(1, WT_LEN)), encodeMessage(inner),
+        box(tag(2, WT_VARINT)), box(encodeVarint(123L)));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(middle),
+        box(tag(2, WT_32BIT)), box(encodeFloat(1.25f)));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedA = ColumnVector.fromBoxedInts(7);
+         ColumnVector expectedB = ColumnVector.fromStrings("abc");
+         ColumnVector expectedC = ColumnVector.fromBoxedBooleans(true);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedA, expectedB, expectedC);
+         ColumnVector expectedM = ColumnVector.fromBoxedLongs(123L);
+         ColumnVector expectedMiddle = ColumnVector.makeStruct(expectedInner, expectedM);
+         ColumnVector expectedScore = ColumnVector.fromBoxedFloats(1.25f);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedMiddle, expectedScore);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRUCT).down()
+                         .addField(1, DType.INT32)
+                         .addField(2, DType.STRING)
+                         .addField(3, DType.BOOL8)
+                     .up()
+                     .addField(2, DType.INT64)
+                 .up()
+                 .addField(2, DType.FLOAT32)
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisible() {
+    // message Outer { int32 id = 1; Inner inner = 2; string name = 3; }
+    // message Inner { enum Status { UNKNOWN=0; OK=1; BAD=2; } Status status = 1;
+    //                 int32 count = 2; }
+    Byte[] innerValid = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(10)));
+    Byte[] innerInvalid = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] row0 = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_LEN)), encodeMessage(innerValid),
+        box(tag(3, WT_LEN)), box(encodeVarint(2)), box("ok".getBytes()));
+    Byte[] row1 = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(2, WT_LEN)), encodeMessage(innerInvalid),
+        box(tag(3, WT_LEN)), box(encodeVarint(3)), box("bad".getBytes()));
+    byte[][] enumNames = new byte[][]{
+        "UNKNOWN".getBytes(), "OK".getBytes(), "BAD".getBytes()};
+
+    try (Table input = new Table.TestBuilder().column(row0, row1).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32)
+                 .addField(2, DType.STRUCT).down()
+                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING)
+                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .addField(3, DType.STRING)
+                 .build(),
+             false);
+         ColumnVector inner = actual.getChildColumnView(1).copyToColumnVector();
+         ColumnVector status = inner.getChildColumnView(0).copyToColumnVector();
+         ColumnVector count = inner.getChildColumnView(1).copyToColumnVector();
+         HostColumnVector hostOuter = actual.copyToHost();
+         HostColumnVector hostInner = inner.copyToHost();
+         HostColumnVector hostStatus = status.copyToHost();
+         HostColumnVector hostCount = count.copyToHost()) {
+      assertEquals(0, actual.getNullCount(), "Invalid nested enum should not null outer rows");
+      assertFalse(hostOuter.isNull(0));
+      assertFalse(hostOuter.isNull(1));
+      assertEquals(0, inner.getNullCount(), "Nested struct rows should stay present");
+      assertFalse(hostInner.isNull(1));
+      assertEquals("OK", hostStatus.getJavaString(0));
+      assertTrue(hostStatus.isNull(1), "Unknown nested enum should null only the enum field");
+      assertEquals(20, hostCount.getInt(1));
+    }
+  }
+
+  @Test
+  void testRequiredFieldInsideNestedMessageMissing_Failfast() {
+    // message Outer { Inner inner = 1; }
+    // message Inner { required int32 id = 1; optional string note = 2; }
+    Byte[] inner = concat(box(tag(2, WT_LEN)), box(encodeVarint(4)), box("oops".getBytes()));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.STRUCT).down()
+                    .addField(1, DType.INT32).required()
+                    .addField(2, DType.STRING)
+                .up()
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testRequiredFieldInsideNestedMessageMissing_Permissive() {
+    // message Outer { Inner inner = 1; string name = 2; }
+    // message Inner { required int32 id = 1; optional string note = 2; }
+    Byte[] inner = concat(box(tag(2, WT_LEN)), box(encodeVarint(4)), box("oops".getBytes()));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(inner),
+        box(tag(2, WT_LEN)), box(encodeVarint(7)), box("outside".getBytes()));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).required()
+                     .addField(2, DType.STRING)
+                 .up()
+                 .addField(2, DType.STRING)
+                 .build(),
+             false)) {
+      assertSingleNullStructRow(actual,
+          "Missing nested required field should null the outer row in PERMISSIVE mode");
+    }
+  }
+
+  @Test
+  void testAbsentNestedParentSkipsRequiredChildCheck_Failfast() {
+    // message Outer { optional Inner inner = 1; }
+    // message Inner { required int32 id = 1; }
+    Byte[] row = new Byte[0];
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).required()
+                 .up()
+                 .build(),
+             true);
+         ColumnVector inner = actual.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostOuter = actual.copyToHost();
+         HostColumnVector hostInner = inner.copyToHost()) {
+      assertEquals(0, actual.getNullCount(), "Outer row should remain valid");
+      assertFalse(hostOuter.isNull(0), "Top-level row should not be null");
+      assertEquals(1, inner.getNullCount(), "Absent nested parent should stay null");
+      assertTrue(hostInner.isNull(0), "Missing optional nested struct should skip child required");
     }
   }
 

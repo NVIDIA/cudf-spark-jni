@@ -431,6 +431,15 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
 
+void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
+                                                field_location const* child_locs,
+                                                int child_idx,
+                                                int num_child_fields,
+                                                field_location* gc_parent_locs,
+                                                int num_rows,
+                                                int* error_flag,
+                                                rmm::cuda_stream_view stream);
+
 // ============================================================================
 // Host-side template helpers that launch CUDA kernels
 // ============================================================================
@@ -672,7 +681,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   }
 
   rmm::device_uvector<bool> valid(num_rows, stream, mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, mr),
                     thrust::make_counting_iterator<cudf::size_type>(0),
                     thrust::make_counting_iterator<cudf::size_type>(num_rows),
                     valid.data(),

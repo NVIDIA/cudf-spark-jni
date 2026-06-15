@@ -519,7 +519,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
 
 /**
  * Scan one nested message per parent row to locate its direct singleton child fields.
- * Repeated children are intentionally left to a separate count/scan path (3b.5/3b.6);
+ * Repeated children are intentionally left to a separate count/scan path;
  * this kernel only records last-one-wins locations for non-repeated descendants.
  */
 CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
@@ -574,8 +574,8 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
   auto get_expected_wire_type = [&](int f) { return field_descs[f].expected_wire_type; };
   auto validate_repeated =
     [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
-      // Values come from the dedicated nested repeated count/scan path (3b.5/3b.6); here we only
-      // validate the occurrence so strict/permissive errors surface.
+      // Values come from the dedicated nested repeated path; here we only validate the occurrence
+      // so strict/permissive errors surface.
       auto noop = []([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) { return true; };
       return walk_repeated_element(
         cur, msg_end, msg_base, wt, get_expected_wire_type(f), error_flag, noop);
@@ -591,6 +591,35 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
                                     validate_repeated)) {
     mark_row_error();
   }
+}
+
+CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const* parent_locs,
+                                                            field_location const* child_locs,
+                                                            int child_idx,
+                                                            int num_child_fields,
+                                                            field_location* gc_parent_locs,
+                                                            int num_rows,
+                                                            int* error_flag)
+{
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= num_rows) return;
+
+  auto const& parent_loc = parent_locs[row];
+  auto const& child_loc  = child_locs[flat_index(row, num_child_fields, child_idx)];
+  if (parent_loc.offset < 0 || child_loc.offset < 0) {
+    gc_parent_locs[row] = {-1, 0};
+    return;
+  }
+
+  auto const abs_offset = static_cast<int64_t>(parent_loc.offset) + child_loc.offset;
+  if (abs_offset < cuda::std::numeric_limits<int32_t>::min() ||
+      abs_offset > cuda::std::numeric_limits<int32_t>::max()) {
+    gc_parent_locs[row] = {-1, 0};
+    set_error_once(error_flag, ERR_OVERFLOW);
+    return;
+  }
+
+  gc_parent_locs[row] = {static_cast<int32_t>(abs_offset), child_loc.length};
 }
 
 /**
@@ -895,6 +924,21 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
     top_row_indices);
 }
 
+void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
+                                                field_location const* child_locs,
+                                                int child_idx,
+                                                int num_child_fields,
+                                                field_location* gc_parent_locs,
+                                                int num_rows,
+                                                int* error_flag,
+                                                rmm::cuda_stream_view stream)
+{
+  if (num_rows == 0) return;
+  auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+  compute_grandchild_parent_locations_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
+    parent_locs, child_locs, child_idx, num_child_fields, gc_parent_locs, num_rows, error_flag);
+}
+
 void launch_validate_enum_values(int32_t const* values,
                                  bool* valid,
                                  bool* row_has_invalid_enum,
@@ -997,10 +1041,11 @@ void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_
 {
   if (num_items == 0 || row_invalid.size() == 0 || !propagate_to_rows) return;
 
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
   if (top_row_indices == nullptr) {
     CUDF_EXPECTS(static_cast<size_t>(num_items) <= row_invalid.size(),
                  "enum invalid-row propagation exceeded row buffer");
-    thrust::transform(rmm::exec_policy_nosync(stream),
+    thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                       row_invalid.begin(),
                       row_invalid.begin() + num_items,
                       item_invalid.begin(),
@@ -1016,7 +1061,7 @@ void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_
   // Although every racing write stores the same value (`true`), non-atomic concurrent writes
   // to the same address are UB under the CUDA memory model. Use atomic_ref like set_error_once.
   thrust::for_each(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(num_items),
     [item_invalid = item_invalid.data(),
@@ -1040,13 +1085,13 @@ void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values
 {
   if (num_items == 0 || valid_enums.empty()) return;
 
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto const blocks  = static_cast<int>((num_items + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
-  auto d_valid_enums = cudf::detail::make_device_uvector_async(
-    valid_enums, stream, cudf::get_current_device_resource_ref());
+  auto d_valid_enums = cudf::detail::make_device_uvector_async(valid_enums, stream, scratch_mr);
 
-  rmm::device_uvector<bool> item_invalid(
-    num_items, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(rmm::exec_policy_nosync(stream), item_invalid.begin(), item_invalid.end(), false);
+  rmm::device_uvector<bool> item_invalid(num_items, stream, scratch_mr);
+  thrust::fill(
+    rmm::exec_policy_nosync(stream, scratch_mr), item_invalid.begin(), item_invalid.end(), false);
   validate_enum_values_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
     values.data(),
     valid.data(),
