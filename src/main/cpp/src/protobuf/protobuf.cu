@@ -18,10 +18,12 @@
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 
 #include <thrust/binary_search.h>
 
+#include <algorithm>
 #include <limits>
 #include <set>
 #include <string>
@@ -159,6 +161,15 @@ struct repeated_field_work {
   {
   }
 };
+
+template <typename T>
+cudf::detail::host_vector<T> make_pinned_staging_copy(std::vector<T> const& source,
+                                                      rmm::cuda_stream_view stream)
+{
+  auto staging = cudf::detail::make_pinned_vector_async<T>(source.size(), stream);
+  std::copy(source.begin(), source.end(), staging.begin());
+  return staging;
+}
 
 }  // namespace
 
@@ -559,14 +570,20 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested);
 
     if (!h_fn_to_rep.empty()) {
-      d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_fn_to_rep.data(), h_fn_to_rep.data(), h_fn_to_rep.size() * sizeof(int), stream));
+      auto h_pinned_fn_to_rep = make_pinned_staging_copy(h_fn_to_rep, stream);
+      d_fn_to_rep             = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_rep.data(),
+                                               h_pinned_fn_to_rep.data(),
+                                               h_pinned_fn_to_rep.size() * sizeof(int),
+                                               stream));
     }
     if (!h_fn_to_nested.empty()) {
+      auto h_pinned_fn_to_nested = make_pinned_staging_copy(h_fn_to_nested, stream);
       d_fn_to_nested = rmm::device_uvector<int>(h_fn_to_nested.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_fn_to_nested.data(), h_fn_to_nested.data(), h_fn_to_nested.size() * sizeof(int), stream));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_nested.data(),
+                                               h_pinned_fn_to_nested.data(),
+                                               h_pinned_fn_to_nested.size() * sizeof(int),
+                                               stream));
     }
 
     launch_count_repeated_fields(*d_in,
@@ -603,8 +620,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     rmm::device_uvector<field_descriptor> d_field_descs(
       num_scalar, stream, cudf::get_current_device_resource_ref());
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-      d_field_descs.data(), h_field_descs.data(), num_scalar * sizeof(field_descriptor), stream));
+    auto h_pinned_field_descs = make_pinned_staging_copy(h_field_descs, stream);
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_descs.data(),
+                                             h_pinned_field_descs.data(),
+                                             h_pinned_field_descs.size() * sizeof(field_descriptor),
+                                             stream));
 
     rmm::device_uvector<field_location> d_locations(
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
@@ -613,8 +633,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     rmm::device_uvector<int> d_field_lookup(
       h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
     if (!h_field_lookup.empty()) {
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_field_lookup.data(), h_field_lookup.data(), h_field_lookup.size() * sizeof(int), stream));
+      auto h_pinned_field_lookup = make_pinned_staging_copy(h_field_lookup, stream);
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_lookup.data(),
+                                               h_pinned_field_lookup.data(),
+                                               h_pinned_field_lookup.size() * sizeof(int),
+                                               stream));
     }
 
     launch_scan_all_fields(*d_in,
@@ -716,7 +739,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
         std::vector<std::unique_ptr<scalar_buf_pair>> bufs;
         bufs.reserve(nf);
-        std::vector<batched_scalar_desc> h_descs(nf);
+        auto h_descs = cudf::detail::make_pinned_vector_async<batched_scalar_desc>(nf, stream);
 
         for (int j = 0; j < nf; j++) {
           int li   = idxs[j];
@@ -747,7 +770,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
       // Varint launcher for type T with zigzag ZZ
       auto varint_launch = [&](int nf,
-                               std::vector<batched_scalar_desc>& h_descs,
+                               auto& h_descs,
                                std::vector<std::unique_ptr<scalar_buf_pair>>& bufs,
                                size_t elem_size,
                                auto kernel_fn) {
@@ -994,9 +1017,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     if (!h_scan_descs.empty()) {
       rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
         h_scan_descs.size(), stream, scratch_mr);
+      auto h_pinned_scan_descs = make_pinned_staging_copy(h_scan_descs, stream);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
-                                               h_scan_descs.data(),
-                                               h_scan_descs.size() * sizeof(h_scan_descs[0]),
+                                               h_pinned_scan_descs.data(),
+                                               h_pinned_scan_descs.size() * sizeof(h_scan_descs[0]),
                                                stream));
 
       // Build field_number -> scan_desc_index lookup. `build_lookup_table` returns {} when
@@ -1007,9 +1031,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
       int fn_to_scan_size = 0;
       if (!h_fn_to_scan.empty()) {
+        auto h_pinned_fn_to_scan = make_pinned_staging_copy(h_fn_to_scan, stream);
         d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
-        CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-          d_fn_to_scan.data(), h_fn_to_scan.data(), h_fn_to_scan.size() * sizeof(int), stream));
+        CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_scan.data(),
+                                                 h_pinned_fn_to_scan.data(),
+                                                 h_pinned_fn_to_scan.size() * sizeof(int),
+                                                 stream));
         fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
       }
 

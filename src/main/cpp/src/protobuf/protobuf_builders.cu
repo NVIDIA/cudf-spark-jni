@@ -705,8 +705,24 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
       case cudf::type_id::STRUCT: {
         auto gc_indices = find_child_field_indices(schema, num_fields, child_schema_idx);
         if (gc_indices.empty()) {
-          struct_children.push_back(make_null_column_with_schema(
-            schema, child_schema_idx, num_fields, num_rows, stream, mr));
+          rmm::device_uvector<bool> child_valid(num_rows, stream, scratch_mr);
+          thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
+                            thrust::make_counting_iterator<cudf::size_type>(0),
+                            thrust::make_counting_iterator<cudf::size_type>(num_rows),
+                            child_valid.data(),
+                            [plocs = d_parent_locs.data(),
+                             flocs = d_child_locations.data(),
+                             ci,
+                             num_child_fields] __device__(cudf::size_type row) {
+                              return plocs[row].offset >= 0 &&
+                                     flocs[flat_index(static_cast<size_t>(row),
+                                                      static_cast<size_t>(num_child_fields),
+                                                      static_cast<size_t>(ci))]
+                                         .offset >= 0;
+                            });
+          auto [mask, null_count] = make_null_mask_from_valid(child_valid, num_rows, stream, mr);
+          struct_children.push_back(
+            cudf::make_structs_column(num_rows, {}, null_count, std::move(mask), stream, mr));
           break;
         }
 

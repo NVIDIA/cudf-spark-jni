@@ -2967,6 +2967,39 @@ public class ProtobufTest {
   }
 
   @Test
+  void testRecursiveChildlessNestedMessage_PreservesPresence() {
+    // message Empty {}
+    // message Middle { Empty empty = 1; }
+    // message Outer { Middle middle = 1; }
+    Byte[] middleWithEmpty = concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{}));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithEmpty)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{})),
+        new Byte[]{}};
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRUCT)
+                 .up()
+                 .build(),
+             false);
+         ColumnVector middle = result.getChildColumnView(0).copyToColumnVector();
+         ColumnVector empty = middle.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostMiddle = middle.copyToHost();
+         HostColumnVector hostEmpty = empty.copyToHost()) {
+      assertFalse(hostMiddle.isNull(0), "Present middle should produce a valid STRUCT");
+      assertFalse(hostEmpty.isNull(0), "Present empty child should produce a valid STRUCT<>");
+      assertFalse(hostMiddle.isNull(1), "Present middle should stay valid when empty is absent");
+      assertTrue(hostEmpty.isNull(1), "Missing empty child should produce a null STRUCT<>");
+      assertTrue(hostMiddle.isNull(2), "Missing middle should produce a null STRUCT");
+      assertTrue(hostEmpty.isNull(2), "Empty child should inherit missing middle nullability");
+    }
+  }
+
+  @Test
   void testNestedRepeatedWrongWireType_FailsFast() {
     // message Inner { repeated int32 x = 1; }
     // message Outer { Inner inner = 1; }
