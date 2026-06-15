@@ -251,7 +251,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   int32_t const* top_row_indices,
   bool propagate_invalid_rows)
 {
-  auto lookup = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
+  auto lookup           = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<bool> d_item_has_invalid_enum(num_rows, stream, scratch_mr);
   thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
@@ -613,15 +613,15 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
           rmm::device_uvector<int32_t> out(num_rows, stream, mr);
           rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
           extract_varint_kernel<int32_t, false, nested_location_provider>
-            <<<blocks, threads, 0, stream.value()>>>(message_data,
-                                                     loc_provider,
-                                                     num_rows,
-                                                     out.data(),
-                                                     valid.data(),
-                                                     d_error.data(),
-                                                     has_def,
-                                                     has_def ? ctx.default_ints[child_schema_idx]
-                                                             : 0);
+            <<<blocks, threads, 0, stream.value()>>>(
+              message_data,
+              loc_provider,
+              num_rows,
+              out.data(),
+              valid.data(),
+              d_error.data(),
+              has_def,
+              has_def ? ctx.default_ints[child_schema_idx] : 0);
           if (child_schema_idx < static_cast<int>(ctx.enum_valid_values.size()) &&
               child_schema_idx < static_cast<int>(ctx.enum_names.size()) &&
               !ctx.enum_valid_values[child_schema_idx].empty() &&

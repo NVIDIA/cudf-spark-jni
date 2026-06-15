@@ -544,10 +544,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                              stream));
   }
   if (num_nested > 0) {
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_nested_indices.data(),
-                                             nested_field_indices.data(),
-                                             num_nested * sizeof(int),
-                                             stream));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      d_nested_indices.data(), nested_field_indices.data(), num_nested * sizeof(int), stream));
   }
 
   // Count repeated fields at depth 0 (with O(1) field_number lookup tables)
@@ -562,17 +560,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     if (!h_fn_to_rep.empty()) {
       d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_rep.data(),
-                                               h_fn_to_rep.data(),
-                                               h_fn_to_rep.size() * sizeof(int),
-                                               stream));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        d_fn_to_rep.data(), h_fn_to_rep.data(), h_fn_to_rep.size() * sizeof(int), stream));
     }
     if (!h_fn_to_nested.empty()) {
       d_fn_to_nested = rmm::device_uvector<int>(h_fn_to_nested.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_nested.data(),
-                                               h_fn_to_nested.data(),
-                                               h_fn_to_nested.size() * sizeof(int),
-                                               stream));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        d_fn_to_nested.data(), h_fn_to_nested.data(), h_fn_to_nested.size() * sizeof(int), stream));
     }
 
     launch_count_repeated_fields(*d_in,
@@ -609,10 +603,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     rmm::device_uvector<field_descriptor> d_field_descs(
       num_scalar, stream, cudf::get_current_device_resource_ref());
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_descs.data(),
-                                             h_field_descs.data(),
-                                             num_scalar * sizeof(field_descriptor),
-                                             stream));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      d_field_descs.data(), h_field_descs.data(), num_scalar * sizeof(field_descriptor), stream));
 
     rmm::device_uvector<field_location> d_locations(
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
@@ -621,10 +613,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     rmm::device_uvector<int> d_field_lookup(
       h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
     if (!h_field_lookup.empty()) {
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_lookup.data(),
-                                               h_field_lookup.data(),
-                                               h_field_lookup.size() * sizeof(int),
-                                               stream));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        d_field_lookup.data(), h_field_lookup.data(), h_field_lookup.size() * sizeof(int), stream));
     }
 
     launch_scan_all_fields(*d_in,
@@ -968,11 +958,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       // overflow before truncating into the int32 LIST offsets buffer (cudf list offsets are
       // int32). The same total is reused as the `offsets[num_rows]` sentinel below, so this
       // single reduce serves both the overflow guard and the offsets construction.
-      int64_t total_64 =
-        thrust::reduce(rmm::exec_policy_nosync(stream, scratch_mr),
-                       counts_begin,
-                       counts_end,
-                       int64_t{0});
+      int64_t total_64 = thrust::reduce(
+        rmm::exec_policy_nosync(stream, scratch_mr), counts_begin, counts_end, int64_t{0});
       CUDF_EXPECTS(total_64 <= std::numeric_limits<int32_t>::max(),
                    "Top-level repeated field total element count exceeds 2^31-1");
       w.total_count = static_cast<int32_t>(total_64);
@@ -985,10 +972,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                w.offsets.begin(),
                                int32_t{0});
       }
-      thrust::fill_n(rmm::exec_policy_nosync(stream, scratch_mr),
-                     w.offsets.data() + num_rows,
-                     1,
-                     w.total_count);
+      thrust::fill_n(
+        rmm::exec_policy_nosync(stream, scratch_mr), w.offsets.data() + num_rows, 1, w.total_count);
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
@@ -1023,10 +1008,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       int fn_to_scan_size = 0;
       if (!h_fn_to_scan.empty()) {
         d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
-        CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_scan.data(),
-                                                 h_fn_to_scan.data(),
-                                                 h_fn_to_scan.size() * sizeof(int),
-                                                 stream));
+        CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+          d_fn_to_scan.data(), h_fn_to_scan.data(), h_fn_to_scan.size() * sizeof(int), stream));
         fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
       }
 
@@ -1053,9 +1036,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
       // Fail fast rather than silently returning a null LIST<STRUCT>, which would be
       // indistinguishable from a real all-null result downstream.
-      CUDF_EXPECTS(
-        element_type.id() != cudf::type_id::STRUCT,
-        "Protobuf decode: repeated MessageType is not yet supported");
+      CUDF_EXPECTS(element_type.id() != cudf::type_id::STRUCT,
+                   "Protobuf decode: repeated MessageType is not yet supported");
 
       if (total_count <= 0) {
         // All rows empty: w.offsets is already a zero-filled buffer from Phase A.
