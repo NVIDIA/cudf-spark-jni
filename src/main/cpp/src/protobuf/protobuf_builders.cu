@@ -159,14 +159,16 @@ struct enum_string_lookup_tables {
 enum_string_lookup_tables make_enum_string_lookup_tables(
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
   auto d_valid_enums = cudf::detail::make_device_uvector_async(
     valid_enums, stream, cudf::get_current_device_resource_ref());
 
-  auto h_name_offsets =
-    cudf::detail::make_pinned_vector_async<int32_t>(valid_enums.size() + 1, stream);
+  auto& h_name_offsets = keep_pinned_staging(
+    cudf::detail::make_pinned_vector_async<int32_t>(valid_enums.size() + 1, stream),
+    pinned_staging_buffers);
   h_name_offsets[0]        = 0;
   int64_t total_name_chars = 0;
   for (size_t k = 0; k < enum_name_bytes.size(); ++k) {
@@ -176,8 +178,10 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
     h_name_offsets[k + 1] = static_cast<int32_t>(total_name_chars);
   }
 
-  auto h_name_chars = cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream);
-  int32_t cursor    = 0;
+  auto& h_name_chars = keep_pinned_staging(
+    cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream),
+    pinned_staging_buffers);
+  int32_t cursor = 0;
   for (auto const& name : enum_name_bytes) {
     if (!name.empty()) {
       std::copy(name.data(), name.data() + name.size(), h_name_chars.data() + cursor);
@@ -244,6 +248,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   rmm::device_uvector<bool>& valid,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   int num_rows,
   rmm::cuda_stream_view stream,
@@ -251,7 +256,8 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   int32_t const* top_row_indices,
   bool propagate_invalid_rows)
 {
-  auto lookup           = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
+  auto lookup = make_enum_string_lookup_tables(
+    valid_enums, enum_name_bytes, pinned_staging_buffers, stream, mr);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<bool> d_item_has_invalid_enum(num_rows, stream, scratch_mr);
   thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
@@ -286,6 +292,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   int num_rows,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<int>& d_error,
   rmm::cuda_stream_view stream,
@@ -294,7 +301,8 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   auto const rep_blocks =
     static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto const lookup     = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
+  auto const lookup = make_enum_string_lookup_tables(
+    valid_enums, enum_name_bytes, pinned_staging_buffers, stream, mr);
 
   // 1. Extract enum integer values from occurrences
   rmm::device_uvector<int32_t> enum_ints(total_count, stream, scratch_mr);
@@ -469,6 +477,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
   schema_context_view ctx,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<int>& d_error,
   int num_rows,
@@ -498,8 +507,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   int num_child_fields = static_cast<int>(child_field_indices.size());
 
   // Stage child field descriptors through pinned memory so the H2D stays stream-async.
-  auto h_child_field_descs =
-    cudf::detail::make_pinned_vector_async<field_descriptor>(num_child_fields, stream);
+  auto& h_child_field_descs = keep_pinned_staging(
+    cudf::detail::make_pinned_vector_async<field_descriptor>(num_child_fields, stream),
+    pinned_staging_buffers);
   for (int i = 0; i < num_child_fields; i++) {
     int child_idx                             = child_field_indices[i];
     h_child_field_descs[i].field_number       = schema[child_idx].field_number;
@@ -547,6 +557,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                               d_row_force_null.size() > 0 ? d_row_force_null.data() : nullptr,
                               top_row_indices,
                               d_error.data(),
+                              pinned_staging_buffers,
                               stream);
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
@@ -632,6 +643,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                        valid,
                                        ctx.enum_valid_values[child_schema_idx],
                                        ctx.enum_names[child_schema_idx],
+                                       pinned_staging_buffers,
                                        d_row_force_null,
                                        num_rows,
                                        stream,
@@ -744,6 +756,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                              schema,
                                                              num_fields,
                                                              ctx,
+                                                             pinned_staging_buffers,
                                                              d_row_force_null,
                                                              d_error,
                                                              num_rows,

@@ -21,6 +21,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
@@ -30,9 +31,46 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace spark_rapids_jni::protobuf::detail {
+
+// Pinned host buffers used as async-copy sources must outlive the stream work that reads them.
+struct pinned_staging_buffer {
+  virtual ~pinned_staging_buffer() = default;
+};
+
+template <typename T>
+struct typed_pinned_staging_buffer : pinned_staging_buffer {
+  cudf::detail::host_vector<T> data;
+
+  explicit typed_pinned_staging_buffer(cudf::detail::host_vector<T>&& data) : data(std::move(data))
+  {
+  }
+};
+
+using pinned_staging_buffer_store = std::vector<std::unique_ptr<pinned_staging_buffer>>;
+
+template <typename T>
+cudf::detail::host_vector<T>& keep_pinned_staging(cudf::detail::host_vector<T>&& staging,
+                                                  pinned_staging_buffer_store& store)
+{
+  auto holder = std::make_unique<typed_pinned_staging_buffer<T>>(std::move(staging));
+  auto& data  = holder->data;
+  store.push_back(std::move(holder));
+  return data;
+}
+
+template <typename T>
+cudf::detail::host_vector<T>& make_pinned_staging_copy(std::vector<T> const& source,
+                                                       rmm::cuda_stream_view stream,
+                                                       pinned_staging_buffer_store& store)
+{
+  auto staging = cudf::detail::make_pinned_vector_async<T>(source.size(), stream);
+  std::copy(source.begin(), source.end(), staging.begin());
+  return keep_pinned_staging(std::move(staging), store);
+}
 
 // ============================================================================
 // Schema-context bundle
@@ -197,6 +235,7 @@ void maybe_check_required_fields(field_location const* locations,
                                  bool* row_force_null,
                                  int32_t const* top_row_indices,
                                  int* error_flag,
+                                 pinned_staging_buffer_store& pinned_staging_buffers,
                                  rmm::cuda_stream_view stream);
 
 void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
@@ -246,6 +285,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   rmm::device_uvector<bool>& valid,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   int num_rows,
   rmm::cuda_stream_view stream,
@@ -277,6 +317,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   int num_rows,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<int>& d_error,
   rmm::cuda_stream_view stream,
@@ -306,6 +347,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
   schema_context_view ctx,
+  pinned_staging_buffer_store& pinned_staging_buffers,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<int>& d_error,
   int num_rows,
