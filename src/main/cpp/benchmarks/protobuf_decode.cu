@@ -15,6 +15,7 @@
  */
 
 #include <cudf/column/column_factories.hpp>
+#include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
@@ -1066,11 +1067,8 @@ static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
   auto mr     = cudf::get_current_device_resource_ref();
 
   rmm::device_uvector<pb_field_location> d_parent_locs(num_rows, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_parent_locs.data(),
-                                data.parent_locs.data(),
-                                num_rows * sizeof(pb_field_location),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+    d_parent_locs.data(), data.parent_locs.data(), num_rows * sizeof(pb_field_location), stream));
 
   std::vector<spark_rapids_jni::protobuf_detail::device_nested_field_descriptor> h_schema(
     num_repeated_children);
@@ -1089,11 +1087,8 @@ static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
   }
   rmm::device_uvector<spark_rapids_jni::protobuf_detail::device_nested_field_descriptor> d_schema(
     num_repeated_children, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_schema.data(),
-                                h_schema.data(),
-                                num_repeated_children * sizeof(h_schema[0]),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+    d_schema.data(), h_schema.data(), num_repeated_children * sizeof(h_schema[0]), stream));
 
   std::vector<int> h_rep_indices(num_repeated_children);
   for (int i = 0; i < num_repeated_children; i++) {
@@ -1104,11 +1099,8 @@ static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
     h_rep_indices[i] = i;
   }
   rmm::device_uvector<int> d_rep_indices(num_repeated_children, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_rep_indices.data(),
-                                h_rep_indices.data(),
-                                num_repeated_children * sizeof(int),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+    d_rep_indices.data(), h_rep_indices.data(), num_repeated_children * sizeof(int), stream));
 
   size_t total_bytes = 0;
   for (auto const& m : data.messages)
@@ -1151,20 +1143,19 @@ static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
     work.reserve(num_repeated_children);
     for (int ri = 0; ri < num_repeated_children; ri++) {
       auto& w = *work.emplace_back(std::make_unique<rep_work>(num_rows, stream, mr));
-      thrust::transform(rmm::exec_policy_nosync(stream),
+      thrust::transform(rmm::exec_policy_nosync(stream, mr),
                         thrust::make_counting_iterator(0),
                         thrust::make_counting_iterator(num_rows),
                         w.counts.data(),
                         spark_rapids_jni::protobuf_detail::extract_strided_count{
                           d_rep_info.data(), ri, num_repeated_children});
       CUDF_CUDA_TRY(cudaMemsetAsync(w.offsets.data(), 0, sizeof(int32_t), stream.value()));
-      thrust::inclusive_scan(
-        rmm::exec_policy_nosync(stream), w.counts.begin(), w.counts.end(), w.offsets.data() + 1);
-      CUDF_CUDA_TRY(cudaMemcpyAsync(&w.total_count,
-                                    w.offsets.data() + num_rows,
-                                    sizeof(int32_t),
-                                    cudaMemcpyDeviceToHost,
-                                    stream.value()));
+      thrust::inclusive_scan(rmm::exec_policy_nosync(stream, mr),
+                             w.counts.begin(),
+                             w.counts.end(),
+                             w.offsets.data() + 1);
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        &w.total_count, w.offsets.data() + num_rows, sizeof(int32_t), stream));
     }
     stream.synchronize();
 
@@ -1222,11 +1213,8 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
   auto mr     = cudf::get_current_device_resource_ref();
 
   rmm::device_uvector<pb_field_location> d_parent_locs(num_rows, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_parent_locs.data(),
-                                data.parent_locs.data(),
-                                num_rows * sizeof(pb_field_location),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+    d_parent_locs.data(), data.parent_locs.data(), num_rows * sizeof(pb_field_location), stream));
 
   struct precomputed_child {
     rmm::device_uvector<int32_t> counts;
@@ -1247,17 +1235,13 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
     int total = static_cast<int>(data.occurrences_by_child[i].size());
     auto& c =
       *children.emplace_back(std::make_unique<precomputed_child>(num_rows, total, stream, mr));
-    CUDF_CUDA_TRY(cudaMemcpyAsync(c.counts.data(),
-                                  data.counts_by_child[i].data(),
-                                  num_rows * sizeof(int32_t),
-                                  cudaMemcpyHostToDevice,
-                                  stream.value()));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      c.counts.data(), data.counts_by_child[i].data(), num_rows * sizeof(int32_t), stream));
     if (total > 0) {
-      CUDF_CUDA_TRY(cudaMemcpyAsync(c.occs.data(),
-                                    data.occurrences_by_child[i].data(),
-                                    total * sizeof(pb_repeated_occurrence),
-                                    cudaMemcpyHostToDevice,
-                                    stream.value()));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(c.occs.data(),
+                                               data.occurrences_by_child[i].data(),
+                                               total * sizeof(pb_repeated_occurrence),
+                                               stream));
     }
   }
 
@@ -1273,13 +1257,13 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
     for (int i = 0; i < num_repeated_children; i++) {
       auto& c = *children[i];
       rmm::device_uvector<int32_t> list_offs(num_rows + 1, stream, mr);
-      thrust::exclusive_scan(
-        rmm::exec_policy_nosync(stream), c.counts.begin(), c.counts.end(), list_offs.begin(), 0);
-      CUDF_CUDA_TRY(cudaMemcpyAsync(list_offs.data() + num_rows,
-                                    &c.total_count,
-                                    sizeof(int32_t),
-                                    cudaMemcpyHostToDevice,
-                                    stream.value()));
+      thrust::exclusive_scan(rmm::exec_policy_nosync(stream, mr),
+                             c.counts.begin(),
+                             c.counts.end(),
+                             list_offs.begin(),
+                             0);
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        list_offs.data() + num_rows, &c.total_count, sizeof(int32_t), stream));
 
       spark_rapids_jni::protobuf_detail::nested_repeated_location_provider nr_loc{
         row_offsets, 0, d_parent_locs.data(), c.occs.data()};

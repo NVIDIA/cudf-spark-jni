@@ -41,6 +41,13 @@ CUDF_KERNEL void set_error_if_unset_kernel(int* error_flag, int error_code)
   if (blockIdx.x == 0 && threadIdx.x == 0) { set_error_once(error_flag, error_code); }
 }
 
+__device__ inline void set_row_invalid(bool* row_invalid, int32_t row)
+{
+  if (row_invalid == nullptr) { return; }
+  cuda::atomic_ref<bool, cuda::thread_scope_device> ref(row_invalid[row]);
+  ref.store(true, cuda::memory_order_relaxed);
+}
+
 /**
  * Scan one message's bytes [msg_base, msg_end) once, recording the last-one-wins location
  * (relative to msg_base) of every matching non-repeated field into `out[field_index]`.
@@ -517,9 +524,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
 
   auto const top_row =
     top_row_indices != nullptr ? top_row_indices[row] : static_cast<int32_t>(row);
-  auto mark_row_error = [&]() {
-    if (row_has_invalid_data != nullptr) { row_has_invalid_data[top_row] = true; }
-  };
+  auto mark_row_error = [&]() { set_row_invalid(row_has_invalid_data, top_row); };
 
   field_location* field_locations = output_locations + flat_index(row, num_fields, 0);
   for (int f = 0; f < num_fields; f++) {
@@ -993,7 +998,7 @@ CUDF_KERNEL void check_required_fields_kernel(
       if (row_force_null != nullptr) {
         auto const top_row =
           top_row_indices != nullptr ? top_row_indices[row] : static_cast<int32_t>(row);
-        row_force_null[top_row] = true;
+        set_row_invalid(row_force_null, top_row);
       }
       // Required field is missing - set error flag
       set_error_once(error_flag, ERR_REQUIRED);
@@ -1520,7 +1525,7 @@ void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_
   if (top_row_indices == nullptr) {
     CUDF_EXPECTS(static_cast<size_t>(num_items) <= row_invalid.size(),
                  "enum invalid-row propagation exceeded row buffer");
-    thrust::transform(rmm::exec_policy_nosync(stream),
+    thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       row_invalid.begin(),
                       row_invalid.begin() + num_items,
                       item_invalid.begin(),
@@ -1531,13 +1536,13 @@ void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_
     return;
   }
 
-  thrust::for_each(rmm::exec_policy_nosync(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(num_items),
                    [item_invalid = item_invalid.data(),
                     top_row_indices,
                     row_invalid = row_invalid.data()] __device__(int idx) {
-                     if (item_invalid[idx]) row_invalid[top_row_indices[idx]] = true;
+                     if (item_invalid[idx]) { set_row_invalid(row_invalid, top_row_indices[idx]); }
                    });
 }
 
@@ -1558,7 +1563,10 @@ void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values
 
   rmm::device_uvector<bool> item_invalid(
     num_items, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(rmm::exec_policy_nosync(stream), item_invalid.begin(), item_invalid.end(), false);
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+               item_invalid.begin(),
+               item_invalid.end(),
+               false);
   validate_enum_values_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
     values.data(),
     valid.data(),

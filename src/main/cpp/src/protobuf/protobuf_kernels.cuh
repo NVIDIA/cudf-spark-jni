@@ -767,7 +767,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   }
 
   rmm::device_uvector<bool> valid(num_rows, stream, mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, mr),
                     thrust::make_counting_iterator<cudf::size_type>(0),
                     thrust::make_counting_iterator<cudf::size_type>(num_rows),
                     valid.data(),

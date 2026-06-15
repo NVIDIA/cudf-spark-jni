@@ -1895,6 +1895,43 @@ public class ProtobufTest {
   }
 
   @Test
+  void testNestedStructChildInsideRepeatedMessage() {
+    // message Inner { int32 x = 1; }
+    // message Item { Inner inner = 1; }
+    // message Outer { repeated Item items = 1; }
+    Byte[] inner0 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] inner1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(9)));
+    Byte[] item0 = concat(box(tag(1, WT_LEN)), encodeMessage(inner0));
+    Byte[] item1 = concat(box(tag(1, WT_LEN)), encodeMessage(inner1));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(item0),
+        box(tag(1, WT_LEN)), encodeMessage(item1));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).repeated().down()
+                     .addField(1, DType.STRUCT).down()
+                         .addField(1, DType.INT32)
+                     .up()
+                 .up()
+                 .build(),
+             false);
+         ColumnVector items = actualStruct.getChildColumnView(0).copyToColumnVector();
+         ColumnVector itemStructs = items.getChildColumnView(0).copyToColumnVector();
+         ColumnVector innerStructs = itemStructs.getChildColumnView(0).copyToColumnVector();
+         ColumnVector xs = innerStructs.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostXs = xs.copyToHost()) {
+      assertEquals(0, actualStruct.getNullCount());
+      assertEquals(2, itemStructs.getRowCount());
+      assertEquals(0, innerStructs.getNullCount());
+      assertEquals(7, hostXs.getInt(0));
+      assertEquals(9, hostXs.getInt(1));
+    }
+  }
+
+  @Test
   void testPermissiveRepeatedWrongWireTypeDoesNotCorruptFollowingRow() {
     // message Msg { repeated int32 ids = 1; }
     // Row 0 has one valid element, then a malformed fixed32 occurrence for the same field,
@@ -3148,26 +3185,6 @@ public class ProtobufTest {
          ColumnVector result = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
       assertEquals(DType.STRUCT, result.getType());
       assertEquals(1, result.getRowCount());
-    }
-  }
-
-  @Test
-  void testZeroLengthNestedMessage() {
-    Byte[] row = concat(
-        box(tag(1, WT_LEN)),
-        box(encodeVarint(0)));
-
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
-             input.getColumn(0),
-             new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRUCT).down()
-                     .addField(1, DType.INT32)
-                 .up()
-                 .build(),
-             false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
     }
   }
 

@@ -16,11 +16,13 @@
 
 #include "protobuf/protobuf_kernels.cuh"
 
+#include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/lists/detail/lists_column_factories.hpp>
 #include <cudf/strings/detail/strings_column_factories.cuh>
 
 #include <algorithm>
 #include <optional>
+#include <string>
 
 namespace spark_rapids_jni::protobuf::detail {
 
@@ -36,10 +38,15 @@ inline rmm::device_uvector<int32_t> make_list_offsets_from_counts(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
+  CUDF_EXPECTS(num_rows >= 0, "make_list_offsets_from_counts: row count must be non-negative");
+  CUDF_EXPECTS(total_count >= 0, "make_list_offsets_from_counts: total count must be non-negative");
+  CUDF_EXPECTS(counts.size() == static_cast<size_t>(num_rows),
+               "make_list_offsets_from_counts: counts size must match row count");
+
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
   thrust::exclusive_scan(
-    rmm::exec_policy_nosync(stream), counts.begin(), counts.end(), offsets.begin(), 0);
-  thrust::fill_n(rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, mr), counts.begin(), counts.end(), offsets.begin(), 0);
+  thrust::fill_n(rmm::exec_policy_nosync(stream, mr),
                  offsets.data() + num_rows,
                  1,
                  static_cast<int32_t>(total_count));
@@ -68,16 +75,12 @@ make_single_repeated_schema(int child_schema_idx,
   rep_desc.has_default_value = false;
 
   rmm::device_uvector<device_nested_field_descriptor> d_schema(1, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_schema.data(),
-                                &rep_desc,
-                                sizeof(device_nested_field_descriptor),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+    d_schema.data(), &rep_desc, sizeof(device_nested_field_descriptor), stream));
 
   int const zero = 0;
   rmm::device_uvector<int> d_indices(1, stream, mr);
-  CUDF_CUDA_TRY(
-    cudaMemcpyAsync(d_indices.data(), &zero, sizeof(int), cudaMemcpyHostToDevice, stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_indices.data(), &zero, sizeof(int), stream));
   return {std::move(d_schema), std::move(d_indices)};
 }
 
@@ -124,7 +127,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_varlen_column(
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<int32_t> d_lengths(total_count, stream, scratch_mr);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(total_count),
     d_lengths.data(),
@@ -141,7 +144,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_varlen_column(
   rmm::device_uvector<bool> d_valid((total_count > 0 ? total_count : 1), stream, scratch_mr);
 
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(total_count),
     d_valid.data(),
@@ -235,7 +238,7 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
       return cudf::make_fixed_width_column(dtype, num_rows, cudf::mask_state::ALL_NULL, stream, mr);
     case cudf::type_id::STRING: {
       rmm::device_uvector<cudf::strings::detail::string_index_pair> pairs(num_rows, stream, mr);
-      thrust::fill(rmm::exec_policy_nosync(stream),
+      thrust::fill(rmm::exec_policy_nosync(stream, mr),
                    pairs.data(),
                    pairs.end(),
                    cudf::strings::detail::string_index_pair{nullptr, 0});
@@ -289,7 +292,7 @@ std::unique_ptr<cudf::column> make_null_list_column_with_child(
   rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
-  thrust::fill(rmm::exec_policy_nosync(stream), offsets.begin(), offsets.end(), 0);
+  thrust::fill(rmm::exec_policy_nosync(stream, mr), offsets.begin(), offsets.end(), 0);
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                                     num_rows + 1,
                                                     offsets.release(),
@@ -451,10 +454,10 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   int32_t const* top_row_indices,
   bool propagate_invalid_rows)
 {
-  auto lookup = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
-  rmm::device_uvector<bool> d_item_has_invalid_enum(
-    num_rows, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  auto lookup           = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
+  rmm::device_uvector<bool> d_item_has_invalid_enum(num_rows, stream, scratch_mr);
+  thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                d_item_has_invalid_enum.begin(),
                d_item_has_invalid_enum.end(),
                false);
@@ -516,7 +519,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_enum_string_column(
                                              0);
 
   rmm::device_uvector<bool> d_elem_has_invalid_enum(total_count, stream, scratch_mr);
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                d_elem_has_invalid_enum.begin(),
                d_elem_has_invalid_enum.end(),
                false);
@@ -575,7 +578,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   // (elem_valid was already populated by extract_varint_kernel: true for success, false for
   // failure)
   rmm::device_uvector<bool> d_elem_has_invalid_enum(total_count, stream, scratch_mr);
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                d_elem_has_invalid_enum.begin(),
                d_elem_has_invalid_enum.end(),
                false);
@@ -588,7 +591,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
                               stream);
 
   rmm::device_uvector<int32_t> d_top_row_indices(total_count, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     d_occurrences.begin(),
                     d_occurrences.end(),
                     d_top_row_indices.begin(),
@@ -817,22 +820,18 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   }
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<field_descriptor> d_child_descs(num_child_fields, stream, scratch_mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(d_child_descs.data(),
-                                h_child_descs.data(),
-                                num_child_fields * sizeof(field_descriptor),
-                                cudaMemcpyHostToDevice,
-                                stream.value()));
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_child_descs.data(),
+                                           h_child_descs.data(),
+                                           num_child_fields * sizeof(field_descriptor),
+                                           stream));
   auto h_lookup_vec = build_field_lookup_table(h_child_descs.data(), num_child_fields);
   rmm::device_uvector<int> d_child_lookup(0, stream, scratch_mr);
   if (!h_lookup_vec.empty()) {
     auto h_child_lookup = cudf::detail::make_pinned_vector_async<int>(h_lookup_vec.size(), stream);
     std::copy(h_lookup_vec.begin(), h_lookup_vec.end(), h_child_lookup.begin());
     d_child_lookup = rmm::device_uvector<int>(h_child_lookup.size(), stream, scratch_mr);
-    CUDF_CUDA_TRY(cudaMemcpyAsync(d_child_lookup.data(),
-                                  h_child_lookup.data(),
-                                  h_child_lookup.size() * sizeof(int),
-                                  cudaMemcpyHostToDevice,
-                                  stream.value()));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      d_child_lookup.data(), h_child_lookup.data(), h_child_lookup.size() * sizeof(int), stream));
   }
 
   // For each occurrence, we need to scan for child fields
@@ -849,7 +848,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
                                                 d_error_top.data(),
                                                 stream);
   rmm::device_uvector<int32_t> d_top_row_indices(total_count, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     d_occurrences.data(),
                     d_occurrences.end(),
                     d_top_row_indices.data(),
@@ -1072,9 +1071,8 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
         break;
       }
       default:
-        // Unsupported child type - create null column
-        struct_children.push_back(make_null_column(dt, total_count, stream, mr));
-        break;
+        CUDF_FAIL("Protobuf decode internal error: unsupported repeated message child type id=" +
+                  std::to_string(static_cast<int>(dt.id())));
     }
   }
 
@@ -1123,11 +1121,11 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                "Nested protobuf struct depth exceeds supported decode recursion limit");
   CUDF_EXPECTS(d_parent_locs.size() == static_cast<size_t>(num_rows),
                "build_nested_struct_column: parent locations size must match row count");
-  // d_row_force_null comes from the caller; empty means "don't track", otherwise it must be
-  // row-aligned since the scan/extract kernels index it by row.
+  // d_row_force_null is local-row-aligned only when no top-row remap is supplied.
   CUDF_EXPECTS(
-    d_row_force_null.is_empty() || d_row_force_null.size() == static_cast<size_t>(num_rows),
-    "build_nested_struct_column: row-force-null buffer must be empty or row-sized");
+    d_row_force_null.is_empty() || top_row_indices != nullptr ||
+      d_row_force_null.size() == static_cast<size_t>(num_rows),
+    "build_nested_struct_column: row-force-null buffer must be empty, row-sized, or remapped");
 
   if (num_rows == 0) {
     std::vector<std::unique_ptr<cudf::column>> empty_children;
@@ -1167,11 +1165,10 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   rmm::device_uvector<field_descriptor> d_child_field_descs(
     std::max(num_child_fields, 1), stream, scratch_mr);
   if (num_child_fields > 0) {
-    CUDF_CUDA_TRY(cudaMemcpyAsync(d_child_field_descs.data(),
-                                  h_child_field_descs.data(),
-                                  num_child_fields * sizeof(field_descriptor),
-                                  cudaMemcpyHostToDevice,
-                                  stream.value()));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_child_field_descs.data(),
+                                             h_child_field_descs.data(),
+                                             num_child_fields * sizeof(field_descriptor),
+                                             stream));
   }
 
   auto const child_location_count = static_cast<size_t>(num_rows) * num_child_fields;
@@ -1421,13 +1418,15 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                              propagate_invalid_rows));
         break;
       }
-      default: struct_children.push_back(make_null_column(dt, num_rows, stream, mr)); break;
+      default:
+        CUDF_FAIL("Protobuf decode internal error: unsupported nested child type id=" +
+                  std::to_string(static_cast<int>(dt.id())));
     }
   }
 
   rmm::device_uvector<bool> struct_valid((num_rows > 0 ? num_rows : 1), stream, scratch_mr);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     struct_valid.data(),
@@ -1489,13 +1488,15 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                   stream);
 
   rmm::device_uvector<int32_t> d_rep_counts(num_parent_rows, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     d_rep_info.data(),
                     d_rep_info.end(),
                     d_rep_counts.data(),
                     [] __device__(repeated_field_info const& info) { return info.count; });
-  int64_t total_rep_count_64 = thrust::reduce(
-    rmm::exec_policy_nosync(stream), d_rep_counts.data(), d_rep_counts.end(), int64_t{0});
+  int64_t total_rep_count_64 = thrust::reduce(rmm::exec_policy_nosync(stream, scratch_mr),
+                                              d_rep_counts.data(),
+                                              d_rep_counts.end(),
+                                              int64_t{0});
   CUDF_EXPECTS(total_rep_count_64 <= std::numeric_limits<int32_t>::max(),
                "Repeated nested-field total element count exceeds 2^31-1");
   int const total_rep_count = static_cast<int>(total_rep_count_64);
@@ -1503,7 +1504,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   if (total_rep_count == 0) {
     rmm::device_uvector<int32_t> list_offsets_vec(num_parent_rows + 1, stream, mr);
     thrust::fill(
-      rmm::exec_policy_nosync(stream), list_offsets_vec.data(), list_offsets_vec.end(), 0);
+      rmm::exec_policy_nosync(stream, mr), list_offsets_vec.data(), list_offsets_vec.end(), 0);
     auto list_offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                                            num_parent_rows + 1,
                                                            list_offsets_vec.release(),
@@ -1538,7 +1539,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                  stream);
 
   rmm::device_uvector<int32_t> d_rep_top_row_indices(total_rep_count, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     d_rep_occs.begin(),
                     d_rep_occs.end(),
                     d_rep_top_row_indices.begin(),
@@ -1607,7 +1608,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                                  0);
 
         rmm::device_uvector<bool> d_elem_has_invalid_enum(total_rep_count, stream, scratch_mr);
-        thrust::fill(rmm::exec_policy_nosync(stream),
+        thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
                      d_elem_has_invalid_enum.begin(),
                      d_elem_has_invalid_enum.end(),
                      false);
@@ -1688,7 +1689,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                 propagate_invalid_rows);
     }
   } else {
-    child_values = make_empty_column_safe(cudf::data_type{elem_type_id}, stream, mr);
+    CUDF_FAIL("Protobuf decode internal error: unsupported nested repeated child type id=" +
+              std::to_string(static_cast<int>(elem_type_id)));
   }
 
   auto list_offs_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
