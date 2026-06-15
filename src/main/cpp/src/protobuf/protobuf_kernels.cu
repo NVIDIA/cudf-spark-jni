@@ -612,8 +612,7 @@ CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const
   }
 
   auto const abs_offset = static_cast<int64_t>(parent_loc.offset) + child_loc.offset;
-  if (abs_offset < cuda::std::numeric_limits<int32_t>::min() ||
-      abs_offset > cuda::std::numeric_limits<int32_t>::max()) {
+  if (abs_offset > cuda::std::numeric_limits<int32_t>::max()) {
     gc_parent_locs[row] = {-1, 0};
     set_error_once(error_flag, ERR_OVERFLOW);
     return;
