@@ -162,6 +162,16 @@ struct repeated_field_work {
   }
 };
 
+template <typename T>
+cudf::detail::host_vector<T> make_pinned_staging_copy(std::vector<T> const& source,
+                                                      rmm::cuda_stream_view stream)
+{
+  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
+  auto staging = cudf::detail::make_pinned_vector_async<T>(source.size(), stream);
+  std::copy(source.begin(), source.end(), staging.begin());
+  return staging;
+}
+
 }  // namespace
 
 std::unique_ptr<cudf::column> make_null_column_with_schema(
@@ -453,7 +463,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // Scratch allocations consumed inside this function go through the current device resource;
   // only buffers that flow into the returned column should use the caller-supplied `mr`.
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  pinned_staging_buffer_store pinned_staging_buffers;
 
   // Copy schema to device
   std::vector<device_nested_field_descriptor> h_device_schema(num_fields);
@@ -562,17 +571,15 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested);
 
     if (!h_fn_to_rep.empty()) {
-      auto& h_pinned_fn_to_rep =
-        make_pinned_staging_copy(h_fn_to_rep, stream, pinned_staging_buffers);
-      d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
+      auto h_pinned_fn_to_rep = make_pinned_staging_copy(h_fn_to_rep, stream);
+      d_fn_to_rep             = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_rep.data(),
                                                h_pinned_fn_to_rep.data(),
                                                h_pinned_fn_to_rep.size() * sizeof(int),
                                                stream));
     }
     if (!h_fn_to_nested.empty()) {
-      auto& h_pinned_fn_to_nested =
-        make_pinned_staging_copy(h_fn_to_nested, stream, pinned_staging_buffers);
+      auto h_pinned_fn_to_nested = make_pinned_staging_copy(h_fn_to_nested, stream);
       d_fn_to_nested = rmm::device_uvector<int>(h_fn_to_nested.size(), stream, scratch_mr);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_nested.data(),
                                                h_pinned_fn_to_nested.data(),
@@ -614,8 +621,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     rmm::device_uvector<field_descriptor> d_field_descs(
       num_scalar, stream, cudf::get_current_device_resource_ref());
-    auto& h_pinned_field_descs =
-      make_pinned_staging_copy(h_field_descs, stream, pinned_staging_buffers);
+    auto h_pinned_field_descs = make_pinned_staging_copy(h_field_descs, stream);
     CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_descs.data(),
                                              h_pinned_field_descs.data(),
                                              h_pinned_field_descs.size() * sizeof(field_descriptor),
@@ -628,8 +634,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     rmm::device_uvector<int> d_field_lookup(
       h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
     if (!h_field_lookup.empty()) {
-      auto& h_pinned_field_lookup =
-        make_pinned_staging_copy(h_field_lookup, stream, pinned_staging_buffers);
+      auto h_pinned_field_lookup = make_pinned_staging_copy(h_field_lookup, stream);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_lookup.data(),
                                                h_pinned_field_lookup.data(),
                                                h_pinned_field_lookup.size() * sizeof(int),
@@ -658,7 +663,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                 track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                 nullptr,
                                 d_error.data(),
-                                pinned_staging_buffers,
                                 stream);
 
     // Batched scalar extraction: group non-special fixed-width fields by extraction
@@ -736,9 +740,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
         std::vector<std::unique_ptr<scalar_buf_pair>> bufs;
         bufs.reserve(nf);
-        auto& h_descs = keep_pinned_staging(
-          cudf::detail::make_pinned_vector_async<batched_scalar_desc>(nf, stream),
-          pinned_staging_buffers);
+        auto h_descs = cudf::detail::make_pinned_vector_async<batched_scalar_desc>(nf, stream);
 
         for (int j = 0; j < nf; j++) {
           int li   = idxs[j];
@@ -897,15 +899,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             CUDF_EXPECTS(!valid_enums.empty() && valid_enums.size() == enum_name_bytes.size(),
                          "Protobuf decode error: missing or mismatched enum metadata for "
                          "enum-as-string field");
-            column_map[schema_idx] = build_enum_string_column(out,
-                                                              valid,
-                                                              valid_enums,
-                                                              enum_name_bytes,
-                                                              pinned_staging_buffers,
-                                                              d_row_force_null,
-                                                              num_rows,
-                                                              stream,
-                                                              mr);
+            column_map[schema_idx] = build_enum_string_column(
+              out, valid, valid_enums, enum_name_bytes, d_row_force_null, num_rows, stream, mr);
           } else {
             // Regular protobuf STRING (length-delimited)
             bool has_def_str    = has_def;
@@ -1023,8 +1018,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     if (!h_scan_descs.empty()) {
       rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
         h_scan_descs.size(), stream, scratch_mr);
-      auto& h_pinned_scan_descs =
-        make_pinned_staging_copy(h_scan_descs, stream, pinned_staging_buffers);
+      auto h_pinned_scan_descs = make_pinned_staging_copy(h_scan_descs, stream);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
                                                h_pinned_scan_descs.data(),
                                                h_pinned_scan_descs.size() * sizeof(h_scan_descs[0]),
@@ -1038,8 +1032,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
       int fn_to_scan_size = 0;
       if (!h_fn_to_scan.empty()) {
-        auto& h_pinned_fn_to_scan =
-          make_pinned_staging_copy(h_fn_to_scan, stream, pinned_staging_buffers);
+        auto h_pinned_fn_to_scan = make_pinned_staging_copy(h_fn_to_scan, stream);
         d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
         CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_fn_to_scan.data(),
                                                  h_pinned_fn_to_scan.data(),
@@ -1215,7 +1208,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                                        num_rows,
                                                                        field_meta.enum_valid_values,
                                                                        field_meta.enum_names,
-                                                                       pinned_staging_buffers,
                                                                        d_row_force_null,
                                                                        d_error,
                                                                        stream,
@@ -1285,7 +1277,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       schema,
       num_fields,
       {default_ints, default_floats, default_bools, default_strings, enum_valid_values, enum_names},
-      pinned_staging_buffers,
       d_row_force_null,
       d_error,
       num_rows,

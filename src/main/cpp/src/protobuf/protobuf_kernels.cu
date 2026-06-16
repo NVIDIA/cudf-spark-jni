@@ -1001,15 +1001,14 @@ void maybe_check_required_fields(field_location const* locations,
                                  bool* row_force_null,
                                  int32_t const* top_row_indices,
                                  int* error_flag,
-                                 pinned_staging_buffer_store& pinned_staging_buffers,
                                  rmm::cuda_stream_view stream)
 {
   if (num_rows == 0 || field_indices.empty()) { return; }
 
-  bool has_required   = false;
-  auto& h_is_required = keep_pinned_staging(
-    cudf::detail::make_pinned_vector_async<uint8_t>(field_indices.size(), stream),
-    pinned_staging_buffers);
+  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
+  bool has_required = false;
+  auto h_is_required =
+    cudf::detail::make_pinned_vector_async<uint8_t>(field_indices.size(), stream);
   for (size_t i = 0; i < field_indices.size(); ++i) {
     h_is_required[i] = schema[field_indices[i]].is_required ? 1 : 0;
     has_required |= (h_is_required[i] != 0);
