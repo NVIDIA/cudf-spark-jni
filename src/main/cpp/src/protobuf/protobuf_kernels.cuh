@@ -35,6 +35,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/limits>
 #include <cuda/std/type_traits>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -93,16 +94,32 @@ struct nested_location_provider {
   int field_idx;
   int num_fields;
 
-  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  __device__ inline field_location get_nested_parent_location(int thread_idx, int* error_flag) const
   {
     auto ploc = parent_locations[thread_idx];
     auto cloc = child_locations[flat_index(thread_idx, num_fields, field_idx)];
-    if (ploc.offset >= 0 && cloc.offset >= 0) {
-      data_offset = row_offsets[thread_idx] - base_offset + ploc.offset + cloc.offset;
-    } else {
-      cloc.offset = -1;
+    if (ploc.offset < 0 || cloc.offset < 0) { return {-1, 0}; }
+
+    auto const offset = static_cast<int64_t>(ploc.offset) + cloc.offset;
+    if (offset > cuda::std::numeric_limits<int32_t>::max()) {
+      if (error_flag != nullptr) { set_error_once(error_flag, ERR_OVERFLOW); }
+      return {-1, 0};
     }
-    return cloc;
+    return {static_cast<int32_t>(offset), cloc.length};
+  }
+
+  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  {
+    auto child_parent_loc = get_nested_parent_location(thread_idx, nullptr);
+    if (child_parent_loc.offset < 0) { return child_parent_loc; }
+
+    data_offset = row_offsets[thread_idx] - base_offset + child_parent_loc.offset;
+    return child_locations[flat_index(thread_idx, num_fields, field_idx)];
+  }
+
+  __device__ inline bool valid(int thread_idx) const
+  {
+    return get_nested_parent_location(thread_idx, nullptr).offset >= 0;
   }
 };
 
@@ -444,10 +461,7 @@ void launch_compute_grandchild_parent_locations(field_location const* parent_loc
 // Host-side template helpers that launch CUDA kernels
 // ============================================================================
 
-// Build a row-aligned null mask from `valid[row]` boolean flags. The caller must ensure
-// `valid.size() >= num_rows`. If a caller pads `valid` to keep a device_uvector non-empty,
-// it must pass the logical `num_rows` separately so the mask matches the row count rather
-// than the backing buffer length.
+// Build a row-aligned null mask from `valid[row]` boolean flags.
 template <typename T>
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   rmm::device_uvector<T> const& valid,
@@ -474,7 +488,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_column(cudf::data_type dt
                                                               rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<T> out(num_rows, stream, mr);
-  rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
+  rmm::device_uvector<bool> valid(num_rows, stream, mr);
   if (num_rows == 0) {
     return std::make_unique<cudf::column>(dt, 0, out.release(), rmm::device_buffer{}, 0);
   }
@@ -723,8 +737,8 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
   rmm::device_uvector<int>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices = nullptr,
-  bool propagate_invalid_rows    = true)
+  int32_t const* top_row_indices   = nullptr,
+  bool propagate_invalid_enum_rows = true)
 {
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
@@ -774,7 +788,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                            d_row_force_null,
                                            num_items,
                                            top_row_indices,
-                                           propagate_invalid_rows,
+                                           propagate_invalid_enum_rows,
                                            stream);
         }
       }

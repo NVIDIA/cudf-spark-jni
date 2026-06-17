@@ -37,8 +37,7 @@ constexpr int ERR_SKIP                    = 7;
 constexpr int ERR_FIXED_LEN               = 8;
 constexpr int ERR_REQUIRED                = 9;
 constexpr int ERR_SCHEMA_TOO_LARGE        = 10;
-constexpr int ERR_MISSING_ENUM_META       = 11;
-constexpr int ERR_REPEATED_COUNT_MISMATCH = 12;
+constexpr int ERR_REPEATED_COUNT_MISMATCH = 11;
 
 // Threshold for using a direct-mapped lookup table for field_number -> field_index.
 // Field numbers above this threshold fall back to linear search.

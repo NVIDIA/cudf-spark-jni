@@ -21,6 +21,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
@@ -61,34 +62,44 @@ struct schema_context_view {
  * Build a host-side direct-mapped lookup table: field_number -> index.
  * @param get_field_number Callable: (int i) -> field_number for the i-th entry.
  * @param num_entries Number of entries.
- * @return Empty vector if the max field number exceeds the threshold.
+ * @return Empty pinned vector if the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
-inline std::vector<int> build_lookup_table(FieldNumberFn get_field_number, int num_entries)
+inline cudf::detail::host_vector<int> build_pinned_lookup_table(FieldNumberFn get_field_number,
+                                                                int num_entries,
+                                                                rmm::cuda_stream_view stream)
 {
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
     max_fn = std::max(max_fn, get_field_number(i));
   }
-  if (max_fn > FIELD_LOOKUP_TABLE_MAX) { return {}; }
-  std::vector<int> table(max_fn + 1, -1);
+  if (max_fn > FIELD_LOOKUP_TABLE_MAX) {
+    return cudf::detail::make_pinned_vector_async<int>(0, stream);
+  }
+  auto table = cudf::detail::make_pinned_vector_async<int>(max_fn + 1, stream);
+  std::fill(table.begin(), table.end(), -1);
   for (int i = 0; i < num_entries; i++) {
     table[get_field_number(i)] = i;
   }
   return table;
 }
 
-inline std::vector<int> build_index_lookup_table(nested_field_descriptor const* schema,
-                                                 int const* field_indices,
-                                                 int num_indices)
+inline cudf::detail::host_vector<int> build_pinned_index_lookup_table(
+  nested_field_descriptor const* schema,
+  int const* field_indices,
+  int num_indices,
+  rmm::cuda_stream_view stream)
 {
-  return build_lookup_table([&](int i) { return schema[field_indices[i]].field_number; },
-                            num_indices);
+  return build_pinned_lookup_table(
+    [&](int i) { return schema[field_indices[i]].field_number; }, num_indices, stream);
 }
 
-inline std::vector<int> build_field_lookup_table(field_descriptor const* descs, int num_fields)
+inline cudf::detail::host_vector<int> build_pinned_field_lookup_table(field_descriptor const* descs,
+                                                                      int num_fields,
+                                                                      rmm::cuda_stream_view stream)
 {
-  return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields);
+  return build_pinned_lookup_table(
+    [&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
 /**
@@ -250,8 +261,8 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices = nullptr,
-  bool propagate_invalid_rows    = true);
+  int32_t const* top_row_indices   = nullptr,
+  bool propagate_invalid_enum_rows = true);
 
 // Wrap offsets + child into a LIST column, propagating the input's null mask. Note: when
 // `binary_input` has no nulls, `mr` is effectively unused — only the with-nulls path
@@ -313,7 +324,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows = true);
+  bool propagate_invalid_enum_rows = true);
 
 std::unique_ptr<cudf::column> build_repeated_child_list_column(
   uint8_t const* message_data,
@@ -332,7 +343,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows = true);
+  bool propagate_invalid_enum_rows = true);
 
 std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::column_view const& binary_input,

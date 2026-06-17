@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
@@ -127,9 +128,22 @@ public class ProtobufTest {
     return out;
   }
 
+  /** Encode a length-delimited byte sequence: varint length prefix followed by the bytes. */
+  private static Byte[] encodeBytes(Byte[] bytes) {
+    return concat(box(encodeVarint(bytes.length)), bytes);
+  }
+
+  private static Byte[] encodeBytes(byte[] bytes) {
+    return encodeBytes(box(bytes));
+  }
+
+  private static Byte[] encodeString(String value) {
+    return encodeBytes(value.getBytes(StandardCharsets.UTF_8));
+  }
+
   /** Encode a length-delimited submessage: varint length prefix followed by the message bytes. */
   private static Byte[] encodeMessage(Byte[] messageBytes) {
-    return concat(box(encodeVarint(messageBytes.length)), messageBytes);
+    return encodeBytes(messageBytes);
   }
 
   private static void assertSingleNullStructRow(ColumnVector actual, String message) {
@@ -2679,8 +2693,8 @@ public class ProtobufTest {
     // message Outer { Inner inner = 1; }
     byte[] payload = new byte[]{1, 2, 3};
     Byte[] innerMessage = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(5)), box("alice".getBytes()),
-        box(tag(2, WT_LEN)), box(encodeVarint(payload.length)), box(payload));
+        box(tag(1, WT_LEN)), encodeString("alice"),
+        box(tag(2, WT_LEN)), encodeBytes(payload));
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
@@ -2732,11 +2746,11 @@ public class ProtobufTest {
     // message Outer  { Middle middle = 1; float score = 2; }
     Byte[] inner = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(7)),
-        box(tag(2, WT_LEN)), box(encodeVarint(3)), box("abc".getBytes()),
+        box(tag(2, WT_LEN)), encodeString("abc"),
         box(tag(3, WT_VARINT)), box(encodeVarint(1)));
     Byte[] middle = concat(
         box(tag(1, WT_LEN)), encodeMessage(inner),
-        box(tag(2, WT_VARINT)), box(encodeVarint(123L)));
+        box(tag(2, WT_VARINT)), box(encodeVarint(123)));
     Byte[] row = concat(
         box(tag(1, WT_LEN)), encodeMessage(middle),
         box(tag(2, WT_32BIT)), box(encodeFloat(1.25f)));
@@ -2779,18 +2793,19 @@ public class ProtobufTest {
     Byte[] innerInvalid = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(999)),
         box(tag(2, WT_VARINT)), box(encodeVarint(20)));
-    Byte[] row0 = concat(
-        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
-        box(tag(2, WT_LEN)), encodeMessage(innerValid),
-        box(tag(3, WT_LEN)), box(encodeVarint(2)), box("ok".getBytes()));
-    Byte[] row1 = concat(
-        box(tag(1, WT_VARINT)), box(encodeVarint(2)),
-        box(tag(2, WT_LEN)), encodeMessage(innerInvalid),
-        box(tag(3, WT_LEN)), box(encodeVarint(3)), box("bad".getBytes()));
+    Byte[][] rows = new Byte[][]{
+        concat(
+            box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+            box(tag(2, WT_LEN)), encodeMessage(innerValid),
+            box(tag(3, WT_LEN)), encodeString("ok")),
+        concat(
+            box(tag(1, WT_VARINT)), box(encodeVarint(2)),
+            box(tag(2, WT_LEN)), encodeMessage(innerInvalid),
+            box(tag(3, WT_LEN)), encodeString("bad"))};
     byte[][] enumNames = new byte[][]{
         "UNKNOWN".getBytes(), "OK".getBytes(), "BAD".getBytes()};
 
-    try (Table input = new Table.TestBuilder().column(row0, row1).build();
+    try (Table input = new Table.TestBuilder().column(rows).build();
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2825,7 +2840,7 @@ public class ProtobufTest {
   void testRequiredFieldInsideNestedMessageMissing_Failfast() {
     // message Outer { Inner inner = 1; }
     // message Inner { required int32 id = 1; optional string note = 2; }
-    Byte[] inner = concat(box(tag(2, WT_LEN)), box(encodeVarint(4)), box("oops".getBytes()));
+    Byte[] inner = concat(box(tag(2, WT_LEN)), encodeString("oops"));
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
@@ -2848,10 +2863,10 @@ public class ProtobufTest {
   void testRequiredFieldInsideNestedMessageMissing_Permissive() {
     // message Outer { Inner inner = 1; string name = 2; }
     // message Inner { required int32 id = 1; optional string note = 2; }
-    Byte[] inner = concat(box(tag(2, WT_LEN)), box(encodeVarint(4)), box("oops".getBytes()));
+    Byte[] inner = concat(box(tag(2, WT_LEN)), encodeString("oops"));
     Byte[] row = concat(
         box(tag(1, WT_LEN)), encodeMessage(inner),
-        box(tag(2, WT_LEN)), box(encodeVarint(7)), box("outside".getBytes()));
+        box(tag(2, WT_LEN)), encodeString("outside"));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
          ColumnVector actual = Protobuf.decodeToStruct(

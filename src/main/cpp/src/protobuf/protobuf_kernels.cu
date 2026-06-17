@@ -604,21 +604,9 @@ CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const
   int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= num_rows) return;
 
-  auto const& parent_loc = parent_locs[row];
-  auto const& child_loc  = child_locs[flat_index(row, num_child_fields, child_idx)];
-  if (parent_loc.offset < 0 || child_loc.offset < 0) {
-    gc_parent_locs[row] = {-1, 0};
-    return;
-  }
-
-  auto const abs_offset = static_cast<int64_t>(parent_loc.offset) + child_loc.offset;
-  if (abs_offset > cuda::std::numeric_limits<int32_t>::max()) {
-    gc_parent_locs[row] = {-1, 0};
-    set_error_once(error_flag, ERR_OVERFLOW);
-    return;
-  }
-
-  gc_parent_locs[row] = {static_cast<int32_t>(abs_offset), child_loc.length};
+  nested_location_provider loc_provider{
+    nullptr, 0, parent_locs, child_locs, child_idx, num_child_fields};
+  gc_parent_locs[row] = loc_provider.get_nested_parent_location(row, error_flag);
 }
 
 /**
