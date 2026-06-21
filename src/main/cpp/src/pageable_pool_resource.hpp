@@ -26,11 +26,16 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 namespace spark_rapids_jni {
+
+struct pageable_pool_exhausted : std::exception {
+  [[nodiscard]] char const* what() const noexcept override { return "pageable pool exhausted"; }
+};
 
 // ---------------------------------------------------------------------------
 // pageable_memory_resource
@@ -125,7 +130,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   /**
    * @brief Allocate @p bytes from the pool (best-fit).
    *
-   * Rounds up to default_cuda_malloc_host_alignment. Throws std::bad_alloc if
+   * Rounds up to default_cuda_malloc_host_alignment. Throws pageable_pool_exhausted if
    * no free block is large enough.
    */
   [[nodiscard]] void* allocate_sync(
@@ -136,7 +141,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
     bytes = align_up(bytes);
     std::lock_guard<std::mutex> lock(mtx_);
     auto blk = free_list_.get_block(bytes);
-    if (!blk.is_valid()) { throw std::bad_alloc{}; }
+    if (!blk.is_valid()) { throw pageable_pool_exhausted{}; }
     if (blk.size() > bytes) {
       free_list_.insert(rmm::mr::detail::block{blk.pointer() + bytes, blk.size() - bytes, false});
     }

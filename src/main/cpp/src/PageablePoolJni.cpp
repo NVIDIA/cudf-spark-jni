@@ -19,6 +19,15 @@
 
 #include <cuda/memory_resource>
 
+#define CATCH_PAGEABLE_POOL_EXHAUSTED(env, ret_val)                        \
+  JNI_CATCH_BEGIN(env, ret_val)                                            \
+  catch (spark_rapids_jni::pageable_pool_exhausted const&)                 \
+  {                                                                        \
+    return -1; /* Pool exhausted — caller falls back to regular malloc. */ \
+  }                                                                        \
+  CATCH_SPECIAL_EXCEPTION(env, ret_val)                                    \
+  CATCH_STD_EXCEPTION(env, ret_val)
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(
@@ -54,8 +63,7 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_allocFromPageable
     void* ret  = pool->allocate_sync(static_cast<std::size_t>(size));
     return reinterpret_cast<jlong>(ret);
   }
-  JNI_CATCH_BEGIN(env, 0)
-  catch (...) { return -1; }  // Pool exhausted — caller falls back to regular malloc.
+  CATCH_PAGEABLE_POOL_EXHAUSTED(env, 0);
 }
 
 JNIEXPORT void JNICALL Java_ai_rapids_cudf_PageableMemoryPool_freeFromPageablePool(
