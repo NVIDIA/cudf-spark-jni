@@ -108,7 +108,7 @@ TEST(PageablePool, CoalescingAllowsFullReuse)
 }
 
 // ---------------------------------------------------------------------------
-// OOM: exhausting the pool throws std::bad_alloc
+// OOM: exhausting the pool throws pageable_pool_exhausted
 // ---------------------------------------------------------------------------
 TEST(PageablePool, OOMThrows)
 {
@@ -116,7 +116,7 @@ TEST(PageablePool, OOMThrows)
   void* p   = pool.allocate_sync(kPoolSize);
   ASSERT_NE(p, nullptr);
   // Suppress -Werror=unused-result for the nodiscard alloc inside EXPECT_THROW.
-  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(1); }, std::bad_alloc);
+  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(1); }, pageable_pool_exhausted);
   pool.deallocate_sync(p, kPoolSize);
 }
 
@@ -134,7 +134,7 @@ TEST(PageablePool, MultipleAllocsExhaustPool)
     ptrs[i] = pool.allocate_sync(chunk);
     ASSERT_NE(ptrs[i], nullptr);
   }
-  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(chunk); }, std::bad_alloc);
+  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(chunk); }, pageable_pool_exhausted);
   for (int i = 0; i < n; ++i)
     pool.deallocate_sync(ptrs[i], chunk);
 }
@@ -158,7 +158,7 @@ TEST(PageablePool, ConcurrentAllocFree)
         void* p = nullptr;
         try {
           p = pool.allocate_sync(kChunk);
-        } catch (std::bad_alloc const&) {
+        } catch (pageable_pool_exhausted const&) {
           continue;  // Pool transiently full — ok under contention.
         }
         std::memset(p, 0x55, kChunk);
