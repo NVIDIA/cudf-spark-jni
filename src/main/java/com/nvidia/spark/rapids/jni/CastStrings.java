@@ -95,7 +95,7 @@ public class CastStrings {
   }
 
   /**
-   * Convert a float column to a string column.
+   * Convert a float or double column to a string column.
    *
    * @param cv the column data to process
    * @return the converted column
@@ -105,7 +105,7 @@ public class CastStrings {
   }
 
   /**
-   * Convert a float column to a string column.
+   * Convert a float or double column to a string column.
    *
    * @param cv the column data to process
    * @param jsonString true if non-finite values should include JSON quotes, e.g. {@code "NaN"}.
