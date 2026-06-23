@@ -427,6 +427,17 @@ public class CastStringsTest {
     }
   }
 
+  @Test
+  void castFromFloatToJsonStringTest() {
+    try (ColumnVector input = ColumnVector.fromBoxedFloats(100.0f, -4.0f, Float.NaN,
+             Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, -0.0f, null);
+         ColumnVector result = CastStrings.fromFloat(input, true);
+         ColumnVector expected = ColumnVector.fromStrings("100.0", "-4.0", "\"NaN\"",
+             "\"Infinity\"", "\"-Infinity\"", "-0.0", null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
   private void convTestInternal(Table input, Table expected, int fromBase) {
     try(
       ColumnVector intCol = CastStrings.toIntegersWithBase(input.getColumn(0), fromBase, false,
