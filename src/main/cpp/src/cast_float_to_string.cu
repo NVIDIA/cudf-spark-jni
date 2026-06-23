@@ -40,18 +40,16 @@ struct float_to_string_fn {
 
   __device__ cudf::size_type compute_output_size(cudf::size_type idx) const
   {
-    auto const value        = d_floats.element<FloatType>(idx);
-    bool constexpr is_float = cuda::std::is_same_v<FloatType, float>;
+    auto const value = d_floats.element<FloatType>(idx);
     return static_cast<cudf::size_type>(
-      ftos_converter::compute_ftos_size(static_cast<double>(value), is_float, json_string));
+      ftos_converter::compute_ftos_size<FloatType, json_string>(value));
   }
 
   __device__ void float_to_string(cudf::size_type idx) const
   {
-    auto const value        = d_floats.element<FloatType>(idx);
-    bool constexpr is_float = cuda::std::is_same_v<FloatType, float>;
-    auto const output       = d_chars + d_offsets[idx];
-    ftos_converter::float_to_string(static_cast<double>(value), is_float, output, json_string);
+    auto const value  = d_floats.element<FloatType>(idx);
+    auto const output = d_chars + d_offsets[idx];
+    ftos_converter::float_to_string<FloatType, json_string>(value, output);
   }
 
   __device__ void operator()(cudf::size_type idx) const

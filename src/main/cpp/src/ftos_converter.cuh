@@ -1223,22 +1223,41 @@ __device__ inline int compute_f2s_size_json(float value)
 
 //===== APIs =====
 
-__device__ inline int compute_ftos_size(double value, bool is_float, bool json_string = false)
+template <typename FloatType, bool json_string = false>
+__device__ inline int compute_ftos_size(FloatType value)
 {
-  if (is_float) {
-    return json_string ? compute_f2s_size_json(value) : compute_f2s_size(value);
+  static_assert(cuda::std::is_same_v<FloatType, float> || cuda::std::is_same_v<FloatType, double>);
+  if constexpr (cuda::std::is_same_v<FloatType, float>) {
+    if constexpr (json_string) {
+      return compute_f2s_size_json(value);
+    } else {
+      return compute_f2s_size(value);
+    }
   } else {
-    return json_string ? compute_d2s_size_json(value) : compute_d2s_size(value);
+    if constexpr (json_string) {
+      return compute_d2s_size_json(value);
+    } else {
+      return compute_d2s_size(value);
+    }
   }
 }
 
-__device__ inline int float_to_string(
-  double value, bool is_float, char* output, bool json_string = false)
+template <typename FloatType, bool json_string = false>
+__device__ inline int float_to_string(FloatType value, char* output)
 {
-  if (is_float) {
-    return json_string ? f2s_buffered_n_json(value, output) : f2s_buffered_n(value, output);
+  static_assert(cuda::std::is_same_v<FloatType, float> || cuda::std::is_same_v<FloatType, double>);
+  if constexpr (cuda::std::is_same_v<FloatType, float>) {
+    if constexpr (json_string) {
+      return f2s_buffered_n_json(value, output);
+    } else {
+      return f2s_buffered_n(value, output);
+    }
   } else {
-    return json_string ? d2s_buffered_n_json(value, output) : d2s_buffered_n(value, output);
+    if constexpr (json_string) {
+      return d2s_buffered_n_json(value, output);
+    } else {
+      return d2s_buffered_n(value, output);
+    }
   }
 }
 
