@@ -16,6 +16,7 @@
 
 #include "cast_string_to_timestamp_common.hpp"
 #include "datetime_utils.cuh"
+#include "nvtx_ranges.hpp"
 #include "timezones.hpp"
 
 #include <cudf/column/column.hpp>
@@ -28,6 +29,7 @@
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
+#include <cudf/utilities/error.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -245,7 +247,8 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
 // ORC timezone uses java.util.TimeZone rules, which is different from java.time.ZoneId rules.
 
 // ---- Calendar helpers for DST computation on GPU ----
-// Ported from java.util.SimpleTimeZone.getOffset logic.
+// Ported from java.util.SimpleTimeZone.getOffset logic. Keep the rule-mode math aligned with
+// SimpleTimeZone's normalized calendar behavior; tests cover all rule modes.
 
 constexpr int32_t MS_PER_SECOND = 1000;
 constexpr int32_t MS_PER_MINUTE = 60 * MS_PER_SECOND;
@@ -717,6 +720,8 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           rmm::cuda_stream_view stream,
                                           rmm::device_async_resource_ref mr)
 {
+  SRJ_FUNC_RANGE();
+
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
                "Input column must be of type TIMESTAMP_MICROSECONDS");
   auto results = cudf::make_timestamp_column(input.type(),
@@ -770,6 +775,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
     static_cast<int32_t>(reader_initial_offset),
     reader_raw_offset,
     reader_dst);
+  CUDF_CHECK_CUDA(stream.value());
 
   return results;
 }

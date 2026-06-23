@@ -22,9 +22,13 @@
 #include <cudf_test/iterator_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
+#include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
+#include <cstdint>
 #include <limits>
+#include <memory>
 
 auto constexpr int64_min = std::numeric_limits<int64_t>::min();
 
@@ -369,7 +373,91 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
   rule.end_mode        = 2;
   return rule;
 }
+
+[[nodiscard]] spark_rapids_jni::dst_rule make_dst_rule(int32_t start_mode,
+                                                        int32_t start_day,
+                                                        int32_t start_dow,
+                                                        int32_t end_mode,
+                                                        int32_t end_day,
+                                                        int32_t end_dow,
+                                                        int32_t start_month = 2,
+                                                        int32_t end_month   = 9)
+{
+  spark_rapids_jni::dst_rule rule{};
+  rule.has_dst         = true;
+  rule.dst_savings     = 3'600'000;
+  rule.start_month     = start_month;
+  rule.start_day       = start_day;
+  rule.start_dow       = start_dow;
+  rule.start_time      = 0;
+  rule.start_time_mode = 2;  // UTC
+  rule.start_mode      = start_mode;
+  rule.end_month       = end_month;
+  rule.end_day         = end_day;
+  rule.end_dow         = end_dow;
+  rule.end_time        = 0;
+  rule.end_time_mode   = 2;
+  rule.end_mode        = end_mode;
+  return rule;
+}
+
+[[nodiscard]] std::unique_ptr<cudf::column> convert_utc_to_dst_reader(
+  cudf::column_view const& input,
+  spark_rapids_jni::dst_rule reader_dst,
+  int64_t base_offset_us = 0)
+{
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst = false;
+  return spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    base_offset_us,
+    /*writer_tz_info_table=*/nullptr,
+    /*writer_initial_offset=*/0,
+    /*writer_raw_offset=*/0,
+    no_dst,
+    /*reader_tz_info_table=*/nullptr,
+    /*reader_initial_offset=*/0,
+    /*reader_raw_offset=*/0,
+    reader_dst,
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
+}
 }  // namespace
+
+TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
+{
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst = false;
+
+  auto const input    = micros_col{3'600'000'000L, 7'200'000'000L};
+  auto const expected = micros_col{0L, 3'600'000'000L};
+  auto const actual   = convert_utc_to_dst_reader(
+    input, no_dst, /*base_offset_us=*/int64_t{3'600'000'000});
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+
+  auto writer_trans   = int64_col({0L, 1'000'000'000L});
+  auto writer_offsets = int32_col({3'600'000, 0});
+  auto writer_tv      = cudf::table_view({writer_trans, writer_offsets});
+
+  auto const transition_input    = micros_col{1'000L};
+  auto const transition_expected = micros_col{-1'000L};
+  auto const transition_actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    transition_input,
+    /*base_offset_us=*/int64_t{2'000},
+    &writer_tv,
+    /*writer_initial_offset=*/0,
+    /*writer_raw_offset=*/0,
+    no_dst,
+    /*reader_tz_info_table=*/nullptr,
+    /*reader_initial_offset=*/0,
+    /*reader_raw_offset=*/0,
+    no_dst,
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(transition_expected, *transition_actual);
+}
 
 // DST path with no transition table: every instant resolves through the DST
 // rule (compute_dst_offset). Writer is fixed UTC (offset 0), reader carries the
@@ -399,6 +487,100 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
     rmm::mr::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
+TEST_F(TimeZoneTest, ConvertOrcTimezonesDstRuleModes)
+{
+  // Mode 0 = DOM: exact March 15 through exact October 15.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/0, /*start_day=*/15, /*start_dow=*/0, /*end_mode=*/0, 15, 0);
+    auto const input =
+      micros_col{1'899'720'000'000'000L, 1'899'806'400'000'000L, 1'918'296'000'000'000L};
+    auto const expected =
+      micros_col{1'899'720'000'000'000L, 1'899'802'800'000'000L, 1'918'296'000'000'000L};
+    auto const actual = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 1 = DOW_IN_MONTH with a positive occurrence: 2nd Sunday in March
+  // through 1st Sunday in October.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/1, /*start_day=*/2, /*start_dow=*/1, /*end_mode=*/1, 1, 1);
+    auto const input =
+      micros_col{1'899'288'000'000'000L, 1'899'374'400'000'000L, 1'917'518'400'000'000L};
+    auto const expected =
+      micros_col{1'899'288'000'000'000L, 1'899'370'800'000'000L, 1'917'518'400'000'000L};
+    auto const actual = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 1 also supports negative occurrences: last Sunday in March through
+  // last Sunday in October.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/1, /*start_day=*/-1, /*start_dow=*/1, /*end_mode=*/1, -1, 1);
+    auto const input =
+      micros_col{1'901'102'400'000'000L, 1'901'188'800'000'000L, 1'919'332'800'000'000L};
+    auto const expected =
+      micros_col{1'901'102'400'000'000L, 1'901'185'200'000'000L, 1'919'332'800'000'000L};
+    auto const actual = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 1 can normalize positive overflow into the following month.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/1, /*start_day=*/5, /*start_dow=*/1, /*end_mode=*/0, 15, 0, 1);
+    auto const input    = micros_col{1'898'510'400'000'000L, 1'898'730'000'000'000L};
+    auto const expected = micros_col{1'898'510'400'000'000L, 1'898'726'400'000'000L};
+    auto const actual   = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 1 can normalize negative underflow into the previous month.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/1, /*start_day=*/-5, /*start_dow=*/1, /*end_mode=*/0, 15, 0, 1);
+    auto const input    = micros_col{1'895'659'200'000'000L, 1'895'706'000'000'000L};
+    auto const expected = micros_col{1'895'659'200'000'000L, 1'895'702'400'000'000L};
+    auto const actual   = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 3 = DOW_LE_DOM: Sunday on or before March 20 through Sunday on or
+  // before October 20.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/3, /*start_day=*/20, /*start_dow=*/1, /*end_mode=*/3, 20, 1);
+    auto const input =
+      micros_col{1'899'892'800'000'000L, 1'899'979'200'000'000L, 1'918'728'000'000'000L};
+    auto const expected =
+      micros_col{1'899'892'800'000'000L, 1'899'975'600'000'000L, 1'918'728'000'000'000L};
+    auto const actual = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 3 can normalize an anchor beyond month length into the following month.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/3, /*start_day=*/31, /*start_dow=*/7, /*end_mode=*/0, 15, 0, 1);
+    auto const input    = micros_col{1'898'510'400'000'000L, 1'898'643'600'000'000L};
+    auto const expected = micros_col{1'898'510'400'000'000L, 1'898'640'000'000'000L};
+    auto const actual   = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // Mode 2 can normalize a computed day into the following month.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/2, /*start_day=*/31, /*start_dow=*/2, /*end_mode=*/0, 15, 0);
+    auto const input    = micros_col{1'901'188'800'000'000L, 1'901'235'600'000'000L};
+    auto const expected = micros_col{1'901'188'800'000'000L, 1'901'232'000'000'000L};
+    auto const actual   = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
 }
 
 // Converting a DST zone to itself must be the identity for every instant
