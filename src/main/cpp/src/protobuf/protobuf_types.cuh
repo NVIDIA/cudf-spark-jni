@@ -26,18 +26,22 @@ constexpr int MAX_VARINT_BYTES = 10;
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
 
-// Error codes for kernel error reporting.
-constexpr int ERR_BOUNDS                  = 1;
-constexpr int ERR_VARINT                  = 2;
-constexpr int ERR_FIELD_NUMBER            = 3;
-constexpr int ERR_WIRE_TYPE               = 4;
-constexpr int ERR_OVERFLOW                = 5;
-constexpr int ERR_FIELD_SIZE              = 6;
-constexpr int ERR_SKIP                    = 7;
-constexpr int ERR_FIXED_LEN               = 8;
-constexpr int ERR_REQUIRED                = 9;
-constexpr int ERR_SCHEMA_TOO_LARGE        = 10;
-constexpr int ERR_REPEATED_COUNT_MISMATCH = 11;
+enum class protobuf_error : int {
+  NONE                    = 0,
+  BOUNDS                  = 1,
+  VARINT                  = 2,
+  FIELD_NUMBER            = 3,
+  WIRE_TYPE               = 4,
+  OVERFLOW                = 5,
+  FIELD_SIZE              = 6,
+  SKIP                    = 7,
+  FIXED_LEN               = 8,
+  REQUIRED                = 9,
+  SCHEMA_TOO_LARGE        = 10,
+  REPEATED_COUNT_MISMATCH = 11,
+};
+
+CUDF_HOST_DEVICE constexpr int error_code(protobuf_error error) { return static_cast<int>(error); }
 
 // Threshold for using a direct-mapped lookup table for field_number -> field_index.
 // Field numbers above this threshold fall back to linear search.

@@ -38,9 +38,9 @@ namespace {
 // Pass 1: Scan all fields kernel - records (offset, length) for each field
 // ============================================================================
 
-CUDF_KERNEL void set_error_if_unset_kernel(int* error_flag, int error_code)
+CUDF_KERNEL void set_error_if_unset_kernel(int* error_flag, protobuf_error error)
 {
-  if (blockIdx.x == 0 && threadIdx.x == 0) { set_error_once(error_flag, error_code); }
+  if (blockIdx.x == 0 && threadIdx.x == 0) { set_error_once(error_flag, error); }
 }
 
 /**
@@ -82,7 +82,7 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
       if (is_repeated_field(f)) {
         if (!on_repeated(f, cur, msg_end, msg_base, wt)) { return false; }
       } else if (wt != get_expected_wire_type(f)) {
-        set_error_once(error_flag, ERR_WIRE_TYPE);
+        set_error_once(error_flag, protobuf_error::WIRE_TYPE);
         return false;
       } else {
         // Record this field's location relative to the message start (last one wins).
@@ -92,17 +92,17 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
           uint64_t len;
           int len_bytes;
           if (!read_varint(cur, msg_end, len, len_bytes)) {
-            set_error_once(error_flag, ERR_VARINT);
+            set_error_once(error_flag, protobuf_error::VARINT);
             return false;
           }
           if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
               len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
-            set_error_once(error_flag, ERR_OVERFLOW);
+            set_error_once(error_flag, protobuf_error::OVERFLOW);
             return false;
           }
           int32_t data_location;
           if (!checked_add_int32(data_offset, len_bytes, data_location)) {
-            set_error_once(error_flag, ERR_OVERFLOW);
+            set_error_once(error_flag, protobuf_error::OVERFLOW);
             return false;
           }
           if (out != nullptr) { out[f] = {data_location, static_cast<int32_t>(len)}; }
@@ -110,7 +110,7 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
           // Fixed-width / varint: record the offset and the wire-type-derived size.
           int field_size = get_wire_type_size(wt, cur, msg_end);
           if (field_size < 0) {
-            set_error_once(error_flag, ERR_FIELD_SIZE);
+            set_error_once(error_flag, protobuf_error::FIELD_SIZE);
             return false;
           }
           if (out != nullptr) { out[f] = {data_offset, field_size}; }
@@ -121,7 +121,7 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
     // Advance to the next field regardless of whether this one matched the schema.
     uint8_t const* next;
     if (!skip_field(cur, msg_end, wt, next)) {
-      set_error_once(error_flag, ERR_SKIP);
+      set_error_once(error_flag, protobuf_error::SKIP);
       return false;
     }
     cur = next;
@@ -222,7 +222,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
                     expected_wt != wire_type_value(proto_wire_type::LEN));
 
   if (!is_packed && wt != expected_wt) {
-    set_error_once(error_flag, ERR_WIRE_TYPE);
+    set_error_once(error_flag, protobuf_error::WIRE_TYPE);
     return false;
   }
 
@@ -230,12 +230,12 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     uint64_t packed_len;
     int len_bytes;
     if (!read_varint(cur, msg_end, packed_len, len_bytes)) {
-      set_error_once(error_flag, ERR_VARINT);
+      set_error_once(error_flag, protobuf_error::VARINT);
       return false;
     }
     uint8_t const* packed_start = cur + len_bytes;
     if (packed_len > static_cast<uint64_t>(msg_end - packed_start)) {
-      set_error_once(error_flag, ERR_OVERFLOW);
+      set_error_once(error_flag, protobuf_error::OVERFLOW);
       return false;
     }
     uint8_t const* packed_end = packed_start + packed_len;
@@ -252,7 +252,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
           int32_t elem_offset = static_cast<int32_t>(p - msg_base);
           uint64_t dummy;
           if (!read_varint(p, packed_end, dummy, vbytes)) {
-            set_error_once(error_flag, ERR_VARINT);
+            set_error_once(error_flag, protobuf_error::VARINT);
             return false;
           }
           if (!f(elem_offset, vbytes)) return false;
@@ -263,7 +263,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
       case wire_type_value(proto_wire_type::I64BIT): {
         int const width = (expected_wt == wire_type_value(proto_wire_type::I32BIT)) ? 4 : 8;
         if ((packed_len % width) != 0) {
-          set_error_once(error_flag, ERR_FIXED_LEN);
+          set_error_once(error_flag, protobuf_error::FIXED_LEN);
           return false;
         }
         for (uint8_t const* p = packed_start; p < packed_end; p += width) {
@@ -276,7 +276,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
         // Unreachable on a well-formed config: only VARINT / I32BIT / I64BIT are valid for
         // packed wire types here (LEN is already filtered out above by the !is_packed path).
         // Fail loudly rather than silently swallowing an unexpected expected_wt.
-        set_error_once(error_flag, ERR_WIRE_TYPE);
+        set_error_once(error_flag, protobuf_error::WIRE_TYPE);
         return false;
     }
   } else {
@@ -287,7 +287,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     // actions and avoids re-validating field bounds twice.
     int32_t data_offset, data_length;
     if (!get_field_data_location(cur, msg_end, wt, data_offset, data_length)) {
-      set_error_once(error_flag, ERR_FIELD_SIZE);
+      set_error_once(error_flag, protobuf_error::FIELD_SIZE);
       return false;
     }
     int32_t abs_offset = static_cast<int32_t>(cur - msg_base) + data_offset;
@@ -390,18 +390,18 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
           fn, fn_to_nested_idx, fn_to_nested_size, nested_field_indices, num_nested_fields);
         f >= 0) {
       if (wt != wire_type_value(proto_wire_type::LEN)) {
-        set_error_once(error_flag, ERR_WIRE_TYPE);
+        set_error_once(error_flag, protobuf_error::WIRE_TYPE);
         return;
       }
       uint64_t len;
       int len_bytes;
       if (!read_varint(cur, msg_end, len, len_bytes)) {
-        set_error_once(error_flag, ERR_VARINT);
+        set_error_once(error_flag, protobuf_error::VARINT);
         return;
       }
       if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
           len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
-        set_error_once(error_flag, ERR_OVERFLOW);
+        set_error_once(error_flag, protobuf_error::OVERFLOW);
         return;
       }
       // cur - msg_base is bounded by the message length (<= INT32_MAX via check_message_bounds),
@@ -410,7 +410,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
       int const data_offset = static_cast<int>(cur - msg_base);
       int32_t data_location;
       if (!checked_add_int32(data_offset, len_bytes, data_location)) {
-        set_error_once(error_flag, ERR_OVERFLOW);
+        set_error_once(error_flag, protobuf_error::OVERFLOW);
         return;
       }
       nested_locations[flat_index(row, num_nested_fields, f)] = {data_location,
@@ -420,7 +420,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
     // Skip to next field
     uint8_t const* next;
     if (!skip_field(cur, msg_end, wt, next)) {
-      set_error_once(error_flag, ERR_SKIP);
+      set_error_once(error_flag, protobuf_error::SKIP);
       return;
     }
     cur = next;
@@ -459,7 +459,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
   // failure mode (overrunning `write_idx` below) is silent UB — `assert` is a no-op under
   // NDEBUG and would leave the OOB write live in release.
   if (num_scan_fields > MAX_REPEATED_FIELDS_PER_KERNEL) {
-    set_error_once(error_flag, ERR_SCHEMA_TOO_LARGE);
+    set_error_once(error_flag, protobuf_error::SCHEMA_TOO_LARGE);
     return;
   }
   int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL];
@@ -483,7 +483,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
       int const we     = scan_descs[f].row_offsets[row + 1];
       auto scan_action = [&](int32_t off, int32_t len) {
         if (wi >= we) {
-          set_error_once(error_flag, ERR_REPEATED_COUNT_MISMATCH);
+          set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
           return false;
         }
         occs[wi] = {row_i32, off, len};
@@ -507,7 +507,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
 
   for (int f = 0; f < num_scan_fields; f++) {
     if (write_idx[f] != scan_descs[f].row_offsets[row + 1]) {
-      set_error_once(error_flag, ERR_REPEATED_COUNT_MISMATCH);
+      set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
       return;
     }
   }
@@ -606,7 +606,7 @@ CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const
 
   nested_location_provider loc_provider{
     nullptr, 0, parent_locs, child_locs, child_idx, num_child_fields};
-  gc_parent_locs[row] = loc_provider.get_nested_parent_location(row, error_flag);
+  gc_parent_locs[row] = loc_provider.get_rebased_child_location(row, error_flag);
 }
 
 /**
@@ -660,7 +660,7 @@ CUDF_KERNEL void check_required_fields_kernel(
         row_force_null[top_row] = true;
       }
       // Required field is missing - set error flag
-      set_error_once(error_flag, ERR_REQUIRED);
+      set_error_once(error_flag, protobuf_error::REQUIRED);
       return;  // No need to check other fields for this row
     }
   }
@@ -784,9 +784,9 @@ CUDF_KERNEL void copy_enum_string_chars_kernel(
 // Host wrapper functions — callable from other translation units
 // ============================================================================
 
-void set_error_once_async(int* error_flag, int error_code, rmm::cuda_stream_view stream)
+void set_error_once_async(int* error_flag, protobuf_error error, rmm::cuda_stream_view stream)
 {
-  set_error_if_unset_kernel<<<1, 1, 0, stream.value()>>>(error_flag, error_code);
+  set_error_if_unset_kernel<<<1, 1, 0, stream.value()>>>(error_flag, error);
   CUDF_CUDA_TRY(cudaPeekAtLastError());
 }
 

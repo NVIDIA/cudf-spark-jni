@@ -62,12 +62,12 @@ struct schema_context_view {
  * Build a host-side direct-mapped lookup table: field_number -> index.
  * @param get_field_number Callable: (int i) -> field_number for the i-th entry.
  * @param num_entries Number of entries.
- * @return Empty pinned vector if the max field number exceeds the threshold.
+ * @return Empty vector if the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
-inline cudf::detail::host_vector<int> build_pinned_lookup_table(FieldNumberFn get_field_number,
-                                                                int num_entries,
-                                                                rmm::cuda_stream_view stream)
+inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field_number,
+                                                         int num_entries,
+                                                         rmm::cuda_stream_view stream)
 {
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
@@ -84,22 +84,22 @@ inline cudf::detail::host_vector<int> build_pinned_lookup_table(FieldNumberFn ge
   return table;
 }
 
-inline cudf::detail::host_vector<int> build_pinned_index_lookup_table(
+inline cudf::detail::host_vector<int> build_index_lookup_table(
   nested_field_descriptor const* schema,
   int const* field_indices,
   int num_indices,
   rmm::cuda_stream_view stream)
 {
-  return build_pinned_lookup_table(
+  return build_lookup_table(
     [&](int i) { return schema[field_indices[i]].field_number; }, num_indices, stream);
 }
 
-inline cudf::detail::host_vector<int> build_pinned_field_lookup_table(field_descriptor const* descs,
-                                                                      int num_fields,
-                                                                      rmm::cuda_stream_view stream)
+template <typename FieldDesc>
+inline cudf::detail::host_vector<int> build_field_lookup_table(FieldDesc const* descs,
+                                                               int num_fields,
+                                                               rmm::cuda_stream_view stream)
 {
-  return build_pinned_lookup_table(
-    [&](int i) { return descs[i].field_number; }, num_fields, stream);
+  return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
 /**

@@ -573,9 +573,6 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                           d_child_locations.data(),
                                           ci,
                                           num_child_fields};
-    auto valid_fn = [loc_provider, has_def] __device__(cudf::size_type row) {
-      return has_def || loc_provider.valid(row);
-    };
 
     switch (dt.id()) {
       case cudf::type_id::BOOL8:
@@ -636,6 +633,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                      top_row_indices,
                                      propagate_invalid_enum_rows));
         } else {
+          auto valid_fn = [loc_provider, has_def] __device__(cudf::size_type row) {
+            return has_def || loc_provider.valid(row);
+          };
           struct_children.push_back(
             extract_and_build_string_or_bytes_column(dt.id() == cudf::type_id::LIST,
                                                      message_data,

@@ -491,23 +491,24 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // Error flag
   rmm::device_uvector<int> d_error(1, stream, cudf::get_current_device_resource_ref());
   CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(int), stream.value()));
-  auto error_message = [](int code) -> std::string {
-    switch (code) {
-      case ERR_BOUNDS: return "Protobuf decode error: message data out of bounds";
-      case ERR_VARINT: return "Protobuf decode error: invalid or truncated varint";
-      case ERR_FIELD_NUMBER: return "Protobuf decode error: invalid field number";
-      case ERR_WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
-      case ERR_OVERFLOW: return "Protobuf decode error: length-delimited field overflows message";
-      case ERR_FIELD_SIZE: return "Protobuf decode error: invalid field size";
-      case ERR_SKIP: return "Protobuf decode error: unable to skip unknown field";
-      case ERR_FIXED_LEN:
+  auto error_message = [](protobuf_error error) -> std::string {
+    switch (error) {
+      case protobuf_error::BOUNDS: return "Protobuf decode error: message data out of bounds";
+      case protobuf_error::VARINT: return "Protobuf decode error: invalid or truncated varint";
+      case protobuf_error::FIELD_NUMBER: return "Protobuf decode error: invalid field number";
+      case protobuf_error::WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
+      case protobuf_error::OVERFLOW:
+        return "Protobuf decode error: length-delimited field overflows message";
+      case protobuf_error::FIELD_SIZE: return "Protobuf decode error: invalid field size";
+      case protobuf_error::SKIP: return "Protobuf decode error: unable to skip unknown field";
+      case protobuf_error::FIXED_LEN:
         return "Protobuf decode error: invalid fixed-width or packed field length";
-      case ERR_REQUIRED: return "Protobuf decode error: missing required field";
-      case ERR_SCHEMA_TOO_LARGE:
+      case protobuf_error::REQUIRED: return "Protobuf decode error: missing required field";
+      case protobuf_error::SCHEMA_TOO_LARGE:
         return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
                "kernel (" +
                std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
-      case ERR_REPEATED_COUNT_MISMATCH:
+      case protobuf_error::REPEATED_COUNT_MISMATCH:
         return "Protobuf decode error: repeated-field count/scan mismatch";
       default: return "Protobuf decode error: unknown error";
     }
@@ -552,10 +553,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   rmm::device_uvector<int> d_fn_to_nested(0, stream, scratch_mr);
 
   if (num_repeated > 0 || num_nested > 0) {
-    auto h_fn_to_rep = build_pinned_index_lookup_table(
-      schema.data(), repeated_field_indices.data(), num_repeated, stream);
-    auto h_fn_to_nested = build_pinned_index_lookup_table(
-      schema.data(), nested_field_indices.data(), num_nested, stream);
+    auto h_fn_to_rep =
+      build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated, stream);
+    auto h_fn_to_nested =
+      build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested, stream);
 
     if (!h_fn_to_rep.empty()) {
       d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
@@ -611,7 +612,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     rmm::device_uvector<field_location> d_locations(
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
 
-    auto h_field_lookup = build_pinned_field_lookup_table(h_field_descs.data(), num_scalar, stream);
+    auto h_field_lookup = build_field_lookup_table(h_field_descs.data(), num_scalar, stream);
     rmm::device_uvector<int> d_field_lookup(
       h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
     if (!h_field_lookup.empty()) {
@@ -979,34 +980,32 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
-    auto h_scan_descs =
-      cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(num_repeated, stream);
-    int num_scan_descs = 0;
+    auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
 
     for (auto& w : rep_work) {
       if (w.total_count > 0) {
         w.occurrences = std::make_unique<rmm::device_uvector<repeated_occurrence>>(
           w.total_count, stream, scratch_mr);
-        h_scan_descs[num_scan_descs++] = {schema[w.schema_idx].field_number,
-                                          static_cast<int>(schema[w.schema_idx].wire_type),
-                                          w.offsets.data(),
-                                          w.occurrences->data()};
+        h_scan_descs.push_back({schema[w.schema_idx].field_number,
+                                static_cast<int>(schema[w.schema_idx].wire_type),
+                                w.offsets.data(),
+                                w.occurrences->data()});
       }
     }
 
-    if (num_scan_descs > 0) {
+    if (!h_scan_descs.empty()) {
       rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
-        num_scan_descs, stream, scratch_mr);
+        h_scan_descs.size(), stream, scratch_mr);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
                                                h_scan_descs.data(),
-                                               num_scan_descs * sizeof(h_scan_descs[0]),
+                                               h_scan_descs.size() * sizeof(h_scan_descs[0]),
                                                stream));
 
       // Build field_number -> scan_desc_index lookup. The helper returns an empty table when
       // max field_number exceeds FIELD_LOOKUP_TABLE_MAX (would over-allocate); the kernel
       // detects this via fn_to_scan_size == 0 and falls back to a linear scan.
-      auto h_fn_to_scan = build_pinned_lookup_table(
-        [&](int i) { return h_scan_descs[i].field_number; }, num_scan_descs, stream);
+      auto h_fn_to_scan = build_field_lookup_table(
+        h_scan_descs.data(), static_cast<int>(h_scan_descs.size()), stream);
       rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
       int fn_to_scan_size = 0;
       if (!h_fn_to_scan.empty()) {
@@ -1018,7 +1017,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
       launch_scan_all_repeated_occurrences(*d_in,
                                            d_scan_descs.data(),
-                                           num_scan_descs,
+                                           static_cast<int>(h_scan_descs.size()),
                                            d_error.data(),
                                            fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
                                            fn_to_scan_size,
@@ -1278,10 +1277,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   int h_error = 0;
   CUDF_CUDA_TRY(cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(int), stream));
   stream.synchronize();
-  if (h_error == ERR_SCHEMA_TOO_LARGE || h_error == ERR_REPEATED_COUNT_MISMATCH) {
-    throw cudf::logic_error(error_message(h_error));
+  auto const error = static_cast<protobuf_error>(h_error);
+  if (error == protobuf_error::SCHEMA_TOO_LARGE ||
+      error == protobuf_error::REPEATED_COUNT_MISMATCH) {
+    throw cudf::logic_error(error_message(error));
   }
-  if (fail_on_errors && h_error != 0) throw cudf::logic_error(error_message(h_error));
+  if (fail_on_errors && error != protobuf_error::NONE) {
+    throw cudf::logic_error(error_message(error));
+  }
 
   // Build final struct null mask by combining input nulls with PERMISSIVE-mode row invalidation.
   cudf::size_type struct_null_count = 0;

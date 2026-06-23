@@ -94,7 +94,8 @@ struct nested_location_provider {
   int field_idx;
   int num_fields;
 
-  __device__ inline field_location get_nested_parent_location(int thread_idx, int* error_flag) const
+  // Rebase child offsets from the parent message to the row for recursive STRUCT decode.
+  __device__ inline field_location get_rebased_child_location(int thread_idx, int* error_flag) const
   {
     auto ploc = parent_locations[thread_idx];
     auto cloc = child_locations[flat_index(thread_idx, num_fields, field_idx)];
@@ -102,7 +103,7 @@ struct nested_location_provider {
 
     auto const offset = static_cast<int64_t>(ploc.offset) + cloc.offset;
     if (offset > cuda::std::numeric_limits<int32_t>::max()) {
-      if (error_flag != nullptr) { set_error_once(error_flag, ERR_OVERFLOW); }
+      if (error_flag != nullptr) { set_error_once(error_flag, protobuf_error::OVERFLOW); }
       return {-1, 0};
     }
     return {static_cast<int32_t>(offset), cloc.length};
@@ -110,7 +111,7 @@ struct nested_location_provider {
 
   __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
   {
-    auto child_parent_loc = get_nested_parent_location(thread_idx, nullptr);
+    auto child_parent_loc = get_rebased_child_location(thread_idx, nullptr);
     if (child_parent_loc.offset < 0) { return child_parent_loc; }
 
     data_offset = row_offsets[thread_idx] - base_offset + child_parent_loc.offset;
@@ -119,7 +120,7 @@ struct nested_location_provider {
 
   __device__ inline bool valid(int thread_idx) const
   {
-    return get_nested_parent_location(thread_idx, nullptr).offset >= 0;
+    return get_rebased_child_location(thread_idx, nullptr).offset >= 0;
   }
 };
 
@@ -195,7 +196,7 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
   uint64_t v;
   int n;
   if (!read_varint(cur, cur_end, v, n)) {
-    set_error_once(error_flag, ERR_VARINT);
+    set_error_once(error_flag, protobuf_error::VARINT);
     if (valid) valid[idx] = false;
     return;
   }
@@ -236,7 +237,7 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
 
   if constexpr (WT == wire_type_value(proto_wire_type::I32BIT)) {
     if (loc.length < 4) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       if (valid) valid[idx] = false;
       return;
     }
@@ -244,7 +245,7 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
     memcpy(&value, &raw, sizeof(value));
   } else {
     if (loc.length < 8) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       if (valid) valid[idx] = false;
       return;
     }
@@ -305,7 +306,7 @@ CUDF_KERNEL void extract_varint_batched_kernel(uint8_t const* message_data,
   uint64_t v;
   int n;
   if (!read_varint(cur, end, v, n)) {
-    set_error_once(error_flag, ERR_VARINT);
+    set_error_once(error_flag, protobuf_error::VARINT);
     desc.valid[row] = false;
     return;
   }
@@ -353,7 +354,7 @@ CUDF_KERNEL void extract_fixed_batched_kernel(uint8_t const* message_data,
 
   if constexpr (WT == wire_type_value(proto_wire_type::I32BIT)) {
     if (loc.length < 4) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       desc.valid[row] = false;
       return;
     }
@@ -361,7 +362,7 @@ CUDF_KERNEL void extract_fixed_batched_kernel(uint8_t const* message_data,
     memcpy(&value, &raw, sizeof(value));
   } else {
     if (loc.length < 8) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       desc.valid[row] = false;
       return;
     }

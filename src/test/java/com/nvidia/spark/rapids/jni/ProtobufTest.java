@@ -1246,7 +1246,8 @@ public class ProtobufTest {
       assertFalse(hostStruct.isNull(0), "Present required field should keep row 0 valid");
       assertTrue(hostStruct.isNull(1), "Null input row should produce null struct row");
       assertEquals(1, idCol.getNullCount(), "The required child value should be null on the null input row");
-      assertTrue(hostId.isNull(1), "Null input row should produce a null child value, not ERR_REQUIRED");
+      assertTrue(hostId.isNull(1),
+          "Null input row should produce a null child value, not protobuf_error::REQUIRED");
     }
   }
 
@@ -2691,10 +2692,9 @@ public class ProtobufTest {
   void testNestedMessageVarlenChildren() {
     // message Inner { string name = 1; bytes payload = 2; }
     // message Outer { Inner inner = 1; }
-    byte[] payload = new byte[]{1, 2, 3};
     Byte[] innerMessage = concat(
         box(tag(1, WT_LEN)), encodeString("alice"),
-        box(tag(2, WT_LEN)), encodeBytes(payload));
+        box(tag(2, WT_LEN)), encodeBytes(new byte[]{1, 2, 3}));
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
@@ -2982,6 +2982,27 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedChildlessNestedMessage_FailsFast() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // The childless Inner body contains an unknown field with a truncated varint value.
+    Byte[] malformedInner = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(malformedInner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector result = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.STRUCT)
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
   void testRecursiveChildlessNestedMessage_PreservesPresence() {
     // message Empty {}
     // message Middle { Empty empty = 1; }
@@ -3253,7 +3274,7 @@ public class ProtobufTest {
 
   @Test
   void testSchemaWithTooManyRepeatedFields() {
-    // Hits ERR_SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
+    // Hits protobuf_error::SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
     // guard rejects schemas with more than 32 top-level repeated fields.
     int n = 33;
     ProtobufSchemaDescriptorBuilder builder = new ProtobufSchemaDescriptorBuilder();
