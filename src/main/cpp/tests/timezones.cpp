@@ -375,13 +375,13 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
 }
 
 [[nodiscard]] spark_rapids_jni::dst_rule make_dst_rule(int32_t start_mode,
-                                                        int32_t start_day,
-                                                        int32_t start_dow,
-                                                        int32_t end_mode,
-                                                        int32_t end_day,
-                                                        int32_t end_dow,
-                                                        int32_t start_month = 2,
-                                                        int32_t end_month   = 9)
+                                                       int32_t start_day,
+                                                       int32_t start_dow,
+                                                       int32_t end_mode,
+                                                       int32_t end_day,
+                                                       int32_t end_dow,
+                                                       int32_t start_month = 2,
+                                                       int32_t end_month   = 9)
 {
   spark_rapids_jni::dst_rule rule{};
   rule.has_dst         = true;
@@ -402,9 +402,7 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
 }
 
 [[nodiscard]] std::unique_ptr<cudf::column> convert_utc_to_dst_reader(
-  cudf::column_view const& input,
-  spark_rapids_jni::dst_rule reader_dst,
-  int64_t base_offset_us = 0)
+  cudf::column_view const& input, spark_rapids_jni::dst_rule reader_dst, int64_t base_offset_us = 0)
 {
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst = false;
@@ -431,8 +429,8 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
 
   auto const input    = micros_col{3'600'000'000L, 7'200'000'000L};
   auto const expected = micros_col{0L, 3'600'000'000L};
-  auto const actual   = convert_utc_to_dst_reader(
-    input, no_dst, /*base_offset_us=*/int64_t{3'600'000'000});
+  auto const actual =
+    convert_utc_to_dst_reader(input, no_dst, /*base_offset_us=*/int64_t{3'600'000'000});
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 
@@ -442,19 +440,19 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
 
   auto const transition_input    = micros_col{1'000L};
   auto const transition_expected = micros_col{-1'000L};
-  auto const transition_actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
-    transition_input,
-    /*base_offset_us=*/int64_t{2'000},
-    &writer_tv,
-    /*writer_initial_offset=*/0,
-    /*writer_raw_offset=*/0,
-    no_dst,
-    /*reader_tz_info_table=*/nullptr,
-    /*reader_initial_offset=*/0,
-    /*reader_raw_offset=*/0,
-    no_dst,
-    cudf::get_default_stream(),
-    cudf::get_current_device_resource_ref());
+  auto const transition_actual =
+    spark_rapids_jni::convert_orc_writer_reader_timezones(transition_input,
+                                                          /*base_offset_us=*/int64_t{2'000},
+                                                          &writer_tv,
+                                                          /*writer_initial_offset=*/0,
+                                                          /*writer_raw_offset=*/0,
+                                                          no_dst,
+                                                          /*reader_tz_info_table=*/nullptr,
+                                                          /*reader_initial_offset=*/0,
+                                                          /*reader_raw_offset=*/0,
+                                                          no_dst,
+                                                          cudf::get_default_stream(),
+                                                          cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(transition_expected, *transition_actual);
 }
