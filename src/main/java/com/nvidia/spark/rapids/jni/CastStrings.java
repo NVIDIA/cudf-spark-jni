@@ -108,7 +108,7 @@ public class CastStrings {
    * Convert a float column to a string column.
    *
    * @param cv the column data to process
-   * @param jsonString true if non-finite values should be emitted as JSON strings.
+   * @param jsonString true if non-finite values should include JSON quotes, e.g. {@code "NaN"}.
    * @return the converted column
    */
   public static ColumnVector fromFloat(ColumnView cv, boolean jsonString) {
