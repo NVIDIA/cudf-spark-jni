@@ -1156,7 +1156,10 @@ __device__ inline int copy_special_str_json(char* const result,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  // no NaN in json
+  if (mantissa) {
+    memcpy(result, "\"NaN\"", 5);
+    return 5;
+  }
   if (exponent) {
     if (sign) {
       memcpy(result, "\"-Infinity\"", 11);
@@ -1179,7 +1182,7 @@ __device__ inline int special_str_size_json(bool const sign,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  // no NaN in json
+  if (mantissa) { return 5; }
   if (exponent) { return sign + 10; }
   return sign + 3;
 }
@@ -1192,6 +1195,14 @@ __device__ inline int d2s_buffered_n_json(double f, char* result)
   return to_chars(v, sign, result);
 }
 
+__device__ inline int f2s_buffered_n_json(float f, char* result)
+{
+  bool sign = false, special = false;
+  floating_decimal_32 v = f2d(f, sign, special);
+  if (special) { return copy_special_str_json(result, sign, v.exponent, v.mantissa); }
+  return to_chars(v, sign, result);
+}
+
 __device__ inline int compute_d2s_size_json(double value)
 {
   bool sign = false, special = false;
@@ -1200,25 +1211,34 @@ __device__ inline int compute_d2s_size_json(double value)
   return d2s_size(v, sign);
 }
 
+__device__ inline int compute_f2s_size_json(float value)
+{
+  bool sign = false, special = false;
+  floating_decimal_32 v = f2d(value, sign, special);
+  if (special) { return special_str_size_json(sign, v.exponent, v.mantissa); }
+  return f2s_size(v, sign);
+}
+
 }  // namespace
 
 //===== APIs =====
 
-__device__ inline int compute_ftos_size(double value, bool is_float)
+__device__ inline int compute_ftos_size(double value, bool is_float, bool json_string = false)
 {
   if (is_float) {
-    return compute_f2s_size(value);
+    return json_string ? compute_f2s_size_json(value) : compute_f2s_size(value);
   } else {
-    return compute_d2s_size(value);
+    return json_string ? compute_d2s_size_json(value) : compute_d2s_size(value);
   }
 }
 
-__device__ inline int float_to_string(double value, bool is_float, char* output)
+__device__ inline int float_to_string(
+  double value, bool is_float, char* output, bool json_string = false)
 {
   if (is_float) {
-    return f2s_buffered_n(value, output);
+    return json_string ? f2s_buffered_n_json(value, output) : f2s_buffered_n(value, output);
   } else {
-    return d2s_buffered_n(value, output);
+    return json_string ? d2s_buffered_n_json(value, output) : d2s_buffered_n(value, output);
   }
 }
 

@@ -132,6 +132,12 @@ std::unique_ptr<cudf::column> float_to_string(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
+std::unique_ptr<cudf::column> float_to_string(
+  cudf::column_view const& input,
+  bool json_string,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+
 std::unique_ptr<cudf::column> decimal_to_non_ansi_string(
   cudf::column_view const& input,
   rmm::cuda_stream_view stream,
