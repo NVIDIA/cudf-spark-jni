@@ -1156,35 +1156,21 @@ __device__ inline int copy_special_str_json(char* const result,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  if (mantissa) {
-    memcpy(result, "\"NaN\"", 5);
-    return 5;
-  }
-  if (exponent) {
-    if (sign) {
-      memcpy(result, "\"-Infinity\"", 11);
-      return 11;
-    } else {
-      memcpy(result, "\"Infinity\"", 10);
-      return 10;
-    }
-  }
-  if (sign) {
-    memcpy(result, "-0.0", 4);
-    return 4;
-  } else {
-    memcpy(result, "0.0", 3);
-    return 3;
-  }
+  bool const quote = mantissa || exponent;
+  int const offset  = quote ? 1 : 0;
+  int const quotes  = quote ? 2 : 0;
+  if (quote) { result[0] = '"'; }
+  int const length = copy_special_str(result + offset, sign, exponent, mantissa);
+  if (quote) { result[offset + length] = '"'; }
+  return length + quotes;
 }
 
 __device__ inline int special_str_size_json(bool const sign,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  if (mantissa) { return 5; }
-  if (exponent) { return sign + 10; }
-  return sign + 3;
+  int const quotes = (mantissa || exponent) ? 2 : 0;
+  return special_str_size(sign, exponent, mantissa) + quotes;
 }
 
 __device__ inline int d2s_buffered_n_json(double f, char* result)
