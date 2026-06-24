@@ -114,7 +114,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_varlen_column(
   int child_idx,
   int num_child_fields,
   int total_count,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   bool as_bytes,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
@@ -452,7 +452,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
-  bool propagate_invalid_rows)
+  bool propagate_invalid_enum_rows)
 {
   auto lookup           = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
@@ -473,7 +473,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(
                                        d_row_force_null,
                                        num_rows,
                                        top_row_indices,
-                                       propagate_invalid_rows,
+                                       propagate_invalid_enum_rows,
                                        stream);
   return build_enum_string_values_column(enum_values, valid, lookup, num_rows, stream, mr);
 }
@@ -490,8 +490,8 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_enum_string_column(
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::device_uvector<bool>& d_row_force_null,
   int32_t const* top_row_indices,
-  bool propagate_invalid_rows,
-  rmm::device_uvector<int>& d_error,
+  bool propagate_invalid_enum_rows,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -501,7 +501,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_enum_string_column(
   auto lookup           = make_enum_string_lookup_tables(valid_enums, enum_name_bytes, stream, mr);
 
   rmm::device_uvector<int32_t> enum_values(total_count, stream, scratch_mr);
-  rmm::device_uvector<bool> valid((total_count > 0 ? total_count : 1), stream, scratch_mr);
+  rmm::device_uvector<bool> valid(total_count, stream, scratch_mr);
   repeated_msg_child_location_provider loc_provider{d_msg_row_offsets.data(),
                                                     0,
                                                     d_msg_locs.data(),
@@ -534,7 +534,7 @@ std::unique_ptr<cudf::column> build_repeated_msg_child_enum_string_column(
                                        d_row_force_null,
                                        total_count,
                                        top_row_indices,
-                                       propagate_invalid_rows,
+                                       propagate_invalid_enum_rows,
                                        stream);
   return build_enum_string_values_column(enum_values, valid, lookup, total_count, stream, mr);
 }
@@ -551,7 +551,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -626,7 +626,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   int total_count,
   int num_rows,
   bool is_bytes,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -734,13 +734,13 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows);
+  bool propagate_invalid_enum_rows);
 
 // Forward declaration -- build_repeated_child_list_column is defined after
 // build_nested_struct_column but both build_repeated_struct_column and build_nested_struct_column
@@ -757,12 +757,12 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows);
+  bool propagate_invalid_enum_rows);
 
 std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::column_view const& binary_input,
@@ -779,7 +779,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   std::vector<nested_field_descriptor> const& schema,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error_top,
+  rmm::device_uvector<protobuf_error>& d_error_top,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -824,7 +824,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
                                            h_child_descs.data(),
                                            num_child_fields * sizeof(field_descriptor),
                                            stream));
-  auto h_lookup_vec = build_field_lookup_table(h_child_descs.data(), num_child_fields);
+  auto h_lookup_vec = build_field_lookup_table(h_child_descs.data(), num_child_fields, stream);
   rmm::device_uvector<int> d_child_lookup(0, stream, scratch_mr);
   if (!h_lookup_vec.empty()) {
     auto h_child_lookup = cudf::detail::make_pinned_vector_async<int>(h_lookup_vec.size(), stream);
@@ -950,9 +950,9 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
                                blocks,
                                threads,
                                has_def,
-                               has_def ? default_ints[child_schema_idx] : 0,
-                               has_def ? default_floats[child_schema_idx] : 0.0,
-                               has_def ? default_bools[child_schema_idx] : false,
+                               default_ints[child_schema_idx],
+                               default_floats[child_schema_idx],
+                               default_bools[child_schema_idx],
                                default_strings[child_schema_idx],
                                child_schema_idx,
                                enum_valid_values,
@@ -967,30 +967,22 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
       }
       case cudf::type_id::STRING: {
         if (enc == encoding_value(proto_encoding::ENUM_STRING)) {
-          if (child_schema_idx < static_cast<int>(enum_valid_values.size()) &&
-              child_schema_idx < static_cast<int>(enum_names.size()) &&
-              !enum_valid_values[child_schema_idx].empty() &&
-              enum_valid_values[child_schema_idx].size() == enum_names[child_schema_idx].size()) {
-            struct_children.push_back(
-              build_repeated_msg_child_enum_string_column(message_data,
-                                                          d_msg_row_offsets,
-                                                          d_msg_locs,
-                                                          d_child_locs,
-                                                          ci,
-                                                          num_child_fields,
-                                                          total_count,
-                                                          enum_valid_values[child_schema_idx],
-                                                          enum_names[child_schema_idx],
-                                                          d_row_force_null,
-                                                          d_top_row_indices.data(),
-                                                          false,
-                                                          d_error,
-                                                          stream,
-                                                          mr));
-          } else {
-            set_error_once_async(d_error.data(), ERR_MISSING_ENUM_META, stream);
-            struct_children.push_back(make_null_column(dt, total_count, stream, mr));
-          }
+          struct_children.push_back(
+            build_repeated_msg_child_enum_string_column(message_data,
+                                                        d_msg_row_offsets,
+                                                        d_msg_locs,
+                                                        d_child_locs,
+                                                        ci,
+                                                        num_child_fields,
+                                                        total_count,
+                                                        enum_valid_values[child_schema_idx],
+                                                        enum_names[child_schema_idx],
+                                                        d_row_force_null,
+                                                        d_top_row_indices.data(),
+                                                        false,
+                                                        d_error,
+                                                        stream,
+                                                        mr));
         } else {
           struct_children.push_back(build_repeated_msg_child_varlen_column(message_data,
                                                                            d_msg_row_offsets,
@@ -1103,13 +1095,13 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows)
+  bool propagate_invalid_enum_rows)
 {
   auto const& default_ints      = ctx.default_ints;
   auto const& default_floats    = ctx.default_floats;
@@ -1229,9 +1221,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                                  mr,
                                                                  top_row_indices,
                                                                  depth,
-                                                                 propagate_invalid_rows));
+                                                                 propagate_invalid_enum_rows));
       continue;
     }
+
+    nested_location_provider loc_provider{list_offsets,
+                                          base_offset,
+                                          d_parent_locs.data(),
+                                          d_child_locations.data(),
+                                          ci,
+                                          num_child_fields};
 
     switch (dt.id()) {
       case cudf::type_id::BOOL8:
@@ -1241,12 +1240,6 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
       case cudf::type_id::UINT64:
       case cudf::type_id::FLOAT32:
       case cudf::type_id::FLOAT64: {
-        nested_location_provider loc_provider{list_offsets,
-                                              base_offset,
-                                              d_parent_locs.data(),
-                                              d_child_locations.data(),
-                                              ci,
-                                              num_child_fields};
         struct_children.push_back(
           extract_typed_column(dt,
                                enc,
@@ -1256,9 +1249,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                blocks,
                                threads,
                                has_def,
-                               has_def ? default_ints[child_schema_idx] : 0,
-                               has_def ? default_floats[child_schema_idx] : 0.0,
-                               has_def ? default_bools[child_schema_idx] : false,
+                               default_ints[child_schema_idx],
+                               default_floats[child_schema_idx],
+                               default_bools[child_schema_idx],
                                default_strings[child_schema_idx],
                                child_schema_idx,
                                enum_valid_values,
@@ -1268,20 +1261,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                stream,
                                mr,
                                top_row_indices,
-                               propagate_invalid_rows));
+                               propagate_invalid_enum_rows));
         break;
       }
-      case cudf::type_id::STRING: {
-        if (enc == encoding_value(proto_encoding::ENUM_STRING)) {
+      case cudf::type_id::STRING:
+      case cudf::type_id::LIST: {  // bytes represented as LIST<UINT8>
+        bool const is_enum_string =
+          dt.id() == cudf::type_id::STRING && enc == encoding_value(proto_encoding::ENUM_STRING);
+        if (is_enum_string) {
           rmm::device_uvector<int32_t> out(num_rows, stream, mr);
-          rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
-          int64_t def_int = has_def ? default_ints[child_schema_idx] : 0;
-          nested_location_provider loc_provider{list_offsets,
-                                                base_offset,
-                                                d_parent_locs.data(),
-                                                d_child_locations.data(),
-                                                ci,
-                                                num_child_fields};
+          rmm::device_uvector<bool> valid(num_rows, stream, mr);
           extract_varint_kernel<int32_t, false, nested_location_provider>
             <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                      loc_provider,
@@ -1290,106 +1279,40 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                      valid.data(),
                                                      d_error.data(),
                                                      has_def,
-                                                     def_int);
+                                                     default_ints[child_schema_idx]);
 
-          if (child_schema_idx < static_cast<int>(enum_valid_values.size()) &&
-              child_schema_idx < static_cast<int>(enum_names.size())) {
-            auto const& valid_enums     = enum_valid_values[child_schema_idx];
-            auto const& enum_name_bytes = enum_names[child_schema_idx];
-            if (!valid_enums.empty() && valid_enums.size() == enum_name_bytes.size()) {
-              struct_children.push_back(build_enum_string_column(out,
-                                                                 valid,
-                                                                 valid_enums,
-                                                                 enum_name_bytes,
-                                                                 d_row_force_null,
-                                                                 num_rows,
-                                                                 stream,
-                                                                 mr,
-                                                                 top_row_indices,
-                                                                 propagate_invalid_rows));
-            } else {
-              set_error_once_async(d_error.data(), ERR_MISSING_ENUM_META, stream);
-              struct_children.push_back(make_null_column(dt, num_rows, stream, mr));
-            }
-          } else {
-            set_error_once_async(d_error.data(), ERR_MISSING_ENUM_META, stream);
-            struct_children.push_back(make_null_column(dt, num_rows, stream, mr));
-          }
+          struct_children.push_back(build_enum_string_column(out,
+                                                             valid,
+                                                             enum_valid_values[child_schema_idx],
+                                                             enum_names[child_schema_idx],
+                                                             d_row_force_null,
+                                                             num_rows,
+                                                             stream,
+                                                             mr,
+                                                             top_row_indices,
+                                                             propagate_invalid_enum_rows));
         } else {
-          bool has_def_str    = has_def;
-          auto const& def_str = default_strings[child_schema_idx];
-          nested_location_provider loc_provider{list_offsets,
-                                                base_offset,
-                                                d_parent_locs.data(),
-                                                d_child_locations.data(),
-                                                ci,
-                                                num_child_fields};
-          auto valid_fn = [plocs = d_parent_locs.data(),
-                           flocs = d_child_locations.data(),
-                           ci,
-                           num_child_fields,
-                           has_def_str] __device__(cudf::size_type row) {
-            return (plocs[row].offset >= 0 &&
-                    flocs[flat_index(static_cast<size_t>(row),
-                                     static_cast<size_t>(num_child_fields),
-                                     static_cast<size_t>(ci))]
-                        .offset >= 0) ||
-                   has_def_str;
+          auto valid_fn = [loc_provider, has_def] __device__(cudf::size_type row) {
+            return has_def || loc_provider.valid(row);
           };
-          struct_children.push_back(extract_and_build_string_or_bytes_column(false,
-                                                                             message_data,
-                                                                             num_rows,
-                                                                             loc_provider,
-                                                                             loc_provider,
-                                                                             valid_fn,
-                                                                             has_def_str,
-                                                                             def_str,
-                                                                             d_error,
-                                                                             stream,
-                                                                             mr));
+          struct_children.push_back(
+            extract_and_build_string_or_bytes_column(dt.id() == cudf::type_id::LIST,
+                                                     message_data,
+                                                     num_rows,
+                                                     loc_provider,
+                                                     loc_provider,
+                                                     valid_fn,
+                                                     has_def,
+                                                     default_strings[child_schema_idx],
+                                                     d_error,
+                                                     stream,
+                                                     mr));
         }
-        break;
-      }
-      case cudf::type_id::LIST: {
-        // bytes (BinaryType) represented as LIST<UINT8>
-        bool has_def_bytes    = has_def;
-        auto const& def_bytes = default_strings[child_schema_idx];
-        nested_location_provider loc_provider{list_offsets,
-                                              base_offset,
-                                              d_parent_locs.data(),
-                                              d_child_locations.data(),
-                                              ci,
-                                              num_child_fields};
-        auto valid_fn = [plocs = d_parent_locs.data(),
-                         flocs = d_child_locations.data(),
-                         ci,
-                         num_child_fields,
-                         has_def_bytes] __device__(cudf::size_type row) {
-          return (plocs[row].offset >= 0 && flocs[flat_index(static_cast<size_t>(row),
-                                                             static_cast<size_t>(num_child_fields),
-                                                             static_cast<size_t>(ci))]
-                                                .offset >= 0) ||
-                 has_def_bytes;
-        };
-        struct_children.push_back(extract_and_build_string_or_bytes_column(true,
-                                                                           message_data,
-                                                                           num_rows,
-                                                                           loc_provider,
-                                                                           loc_provider,
-                                                                           valid_fn,
-                                                                           has_def_bytes,
-                                                                           def_bytes,
-                                                                           d_error,
-                                                                           stream,
-                                                                           mr));
         break;
       }
       case cudf::type_id::STRUCT: {
+        // Recursive linear child lookup is fine for realistic schemas; precompute if it gets hot.
         auto gc_indices = find_child_field_indices(schema, num_fields, child_schema_idx);
-        if (gc_indices.empty()) {
-          struct_children.push_back(make_null_column(dt, num_rows, stream, mr));
-          break;
-        }
         rmm::device_uvector<field_location> d_gc_parent(num_rows, stream, scratch_mr);
         launch_compute_grandchild_parent_locations(d_parent_locs.data(),
                                                    d_child_locations.data(),
@@ -1415,7 +1338,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                              mr,
                                                              top_row_indices,
                                                              depth + 1,
-                                                             propagate_invalid_rows));
+                                                             propagate_invalid_enum_rows));
         break;
       }
       default:
@@ -1453,12 +1376,12 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows)
+  bool propagate_invalid_enum_rows)
 {
   // This function only consumes enum metadata directly — defaults are forwarded through `ctx`
   // to the recursive `build_nested_struct_column` call.
@@ -1578,59 +1501,51 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                         stream,
                                         mr,
                                         d_rep_top_row_indices.data(),
-                                        propagate_invalid_rows);
+                                        propagate_invalid_enum_rows);
   } else if (elem_type_id == cudf::type_id::STRING || elem_type_id == cudf::type_id::LIST) {
     if (elem_type_id == cudf::type_id::STRING &&
         schema[child_schema_idx].encoding == proto_encoding::ENUM_STRING) {
-      if (child_schema_idx < static_cast<int>(enum_valid_values.size()) &&
-          child_schema_idx < static_cast<int>(enum_names.size()) &&
-          !enum_valid_values[child_schema_idx].empty() &&
-          enum_valid_values[child_schema_idx].size() == enum_names[child_schema_idx].size()) {
-        std::optional<enum_string_lookup_tables> fallback_lookup;
-        auto const& lookup = *get_enum_lookup(ctx,
-                                              child_schema_idx,
-                                              enum_valid_values[child_schema_idx],
-                                              enum_names[child_schema_idx],
-                                              stream,
-                                              mr,
-                                              fallback_lookup);
-        rmm::device_uvector<int32_t> enum_values(total_rep_count, stream, scratch_mr);
-        rmm::device_uvector<bool> valid(
-          (total_rep_count > 0 ? total_rep_count : 1), stream, scratch_mr);
-        extract_varint_kernel<int32_t, false, nested_repeated_location_provider>
-          <<<rep_blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(message_data,
-                                                                 nr_loc,
-                                                                 total_rep_count,
-                                                                 enum_values.data(),
-                                                                 valid.data(),
-                                                                 d_error.data(),
-                                                                 false,
-                                                                 0);
+      std::optional<enum_string_lookup_tables> fallback_lookup;
+      auto const& lookup = *get_enum_lookup(ctx,
+                                            child_schema_idx,
+                                            enum_valid_values[child_schema_idx],
+                                            enum_names[child_schema_idx],
+                                            stream,
+                                            mr,
+                                            fallback_lookup);
+      rmm::device_uvector<int32_t> enum_values(total_rep_count, stream, scratch_mr);
+      rmm::device_uvector<bool> valid(
+        (total_rep_count > 0 ? total_rep_count : 1), stream, scratch_mr);
+      extract_varint_kernel<int32_t, false, nested_repeated_location_provider>
+        <<<rep_blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(message_data,
+                                                               nr_loc,
+                                                               total_rep_count,
+                                                               enum_values.data(),
+                                                               valid.data(),
+                                                               d_error.data(),
+                                                               false,
+                                                               0);
 
-        rmm::device_uvector<bool> d_elem_has_invalid_enum(total_rep_count, stream, scratch_mr);
-        thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
-                     d_elem_has_invalid_enum.begin(),
-                     d_elem_has_invalid_enum.end(),
-                     false);
-        launch_validate_enum_values(enum_values.data(),
-                                    valid.data(),
-                                    d_elem_has_invalid_enum.data(),
-                                    lookup.d_valid_enums.data(),
-                                    static_cast<int>(lookup.d_valid_enums.size()),
-                                    total_rep_count,
-                                    stream);
-        propagate_invalid_enum_flags_to_rows(d_elem_has_invalid_enum,
-                                             d_row_force_null,
-                                             total_rep_count,
-                                             d_rep_top_row_indices.data(),
-                                             propagate_invalid_rows,
-                                             stream);
-        child_values =
-          build_enum_string_values_column(enum_values, valid, lookup, total_rep_count, stream, mr);
-      } else {
-        set_error_once_async(d_error.data(), ERR_MISSING_ENUM_META, stream);
-        child_values = make_null_column(cudf::data_type{elem_type_id}, total_rep_count, stream, mr);
-      }
+      rmm::device_uvector<bool> d_elem_has_invalid_enum(total_rep_count, stream, scratch_mr);
+      thrust::fill(rmm::exec_policy_nosync(stream, scratch_mr),
+                   d_elem_has_invalid_enum.begin(),
+                   d_elem_has_invalid_enum.end(),
+                   false);
+      launch_validate_enum_values(enum_values.data(),
+                                  valid.data(),
+                                  d_elem_has_invalid_enum.data(),
+                                  lookup.d_valid_enums.data(),
+                                  static_cast<int>(lookup.d_valid_enums.size()),
+                                  total_rep_count,
+                                  stream);
+      propagate_invalid_enum_flags_to_rows(d_elem_has_invalid_enum,
+                                           d_row_force_null,
+                                           total_rep_count,
+                                           d_rep_top_row_indices.data(),
+                                           propagate_invalid_enum_rows,
+                                           stream);
+      child_values =
+        build_enum_string_values_column(enum_values, valid, lookup, total_rep_count, stream, mr);
     } else {
       bool as_bytes      = (elem_type_id == cudf::type_id::LIST);
       auto valid_fn      = [] __device__(cudf::size_type) { return true; };
@@ -1686,7 +1601,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                 mr,
                                                 d_rep_top_row_indices.data(),
                                                 depth + 1,
-                                                propagate_invalid_rows);
+                                                propagate_invalid_enum_rows);
     }
   } else {
     CUDF_FAIL("Protobuf decode internal error: unsupported nested repeated child type id=" +

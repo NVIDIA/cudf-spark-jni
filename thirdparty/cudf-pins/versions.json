@@ -57,7 +57,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "3f967c5e38fad9ea73633e733c0cb29b58b8a0d8",
+      "git_tag" : "bdb788f45ef191384a294ecef3312ea2db35a2c7",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
@@ -89,18 +89,10 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "9ad6c33d02913fe384c78b16c02b6ace2ac94a6d",
+      "git_tag" : "a4ab39907900d45f220ea7c2d3ecff1b56d39909",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
-    },
-    "roaring" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "1a2c980f90e533ce79c7610bd2eae5df5a177aff",
-      "git_url" : "https://github.com/RoaringBitmap/CRoaring.git",
-      "version" : "4.3.11"
     },
     "spdlog" : 
     {

@@ -266,31 +266,34 @@ final class OrcDstRuleExtractor {
   }
 
   private static DstRule extractDstRuleByProbing(TimeZone tz, int refYear) {
+    DstTransitions transitions = findDstTransitionsByProbing(tz, refYear);
+    if (transitions == null || !transitions.hasBothTransitions()) {
+      return null;
+    }
+
+    return buildDstRuleFromProbedTransitions(tz, transitions);
+  }
+
+  private static DstTransitions findDstTransitionsByProbing(TimeZone tz, int refYear) {
     long janFirst = OrcTimezoneInfo.utcMillisForDate(refYear, 1, 1);
     long nextJanFirst = OrcTimezoneInfo.utcMillisForDate(refYear + 1, 1, 1);
 
-    long dstOnTransition = -1;
-    long dstOffTransition = -1;
     int initialOffset = tz.getOffset(janFirst - 1);
     int prevOffset = initialOffset;
     long step = 3_600_000L; // 1 hour
+    DstTransitions transitions = new DstTransitions(initialOffset);
 
     for (long ms = janFirst; ms < nextJanFirst; ms += step) {
       int curOffset = tz.getOffset(ms);
-      if (curOffset != prevOffset) {
-        long exactMs = OrcTimezoneInfo.binarySearchTransition(tz, ms - step, ms);
-        if (curOffset > prevOffset) {
-          // More than one DST-on transition in the same year would mean this
-          // year doesn't fit a SimpleTimeZone-style two-transition rule; let
-          // the caller fall back to extractDstRuleFromZoneRules.
-          if (dstOnTransition >= 0) return null;
-          dstOnTransition = exactMs;
-        } else {
-          if (dstOffTransition >= 0) return null;
-          dstOffTransition = exactMs;
-        }
-        prevOffset = curOffset;
+      if (curOffset == prevOffset) {
+        continue;
       }
+
+      long exactMs = OrcTimezoneInfo.binarySearchTransition(tz, ms - step, ms);
+      if (!transitions.recordTransition(prevOffset, curOffset, exactMs)) {
+        return null;
+      }
+      prevOffset = curOffset;
       // SimpleTimeZone-style zones have exactly two transitions per year.
       // Once both are recorded and the running offset is back to the year-
       // start standard offset, the remainder of the year is a no-op tail
@@ -298,19 +301,20 @@ final class OrcDstRuleExtractor {
       // change would correctly trigger the "more than one DST-on/off"
       // early-return above, so the only thing this break can skip is
       // wasted probes -- ~720-2200 calls per year on common DST zones.
-      if (dstOnTransition >= 0 && dstOffTransition >= 0 && prevOffset == initialOffset) {
+      if (transitions.hasCompleteRuleAtOffset(prevOffset)) {
         break;
       }
     }
 
-    if (dstOnTransition < 0 || dstOffTransition < 0) {
-      return null;
-    }
+    return transitions;
+  }
 
+  private static DstRule buildDstRuleFromProbedTransitions(TimeZone tz,
+      DstTransitions transitions) {
     DstRule rule = new DstRule();
     rule.dstSavings = tz.getDSTSavings();
 
-    int[] startFields = decodeTransition(dstOnTransition, tz.getRawOffset());
+    int[] startFields = decodeTransition(transitions.dstOnTransition, tz.getRawOffset());
     rule.startMonth = startFields[0];
     rule.startDay = startFields[1];
     rule.startDayOfWeek = startFields[2];
@@ -319,7 +323,7 @@ final class OrcDstRuleExtractor {
     rule.startTimeMode = DstRule.TIME_MODE_STANDARD;
     rule.startMode = startFields[4];
 
-    int[] endFields = decodeTransition(dstOffTransition, tz.getRawOffset());
+    int[] endFields = decodeTransition(transitions.dstOffTransition, tz.getRawOffset());
     rule.endMonth = endFields[0];
     rule.endDay = endFields[1];
     rule.endDayOfWeek = endFields[2];
@@ -328,6 +332,53 @@ final class OrcDstRuleExtractor {
     rule.endMode = endFields[4];
 
     return rule;
+  }
+
+  private static final class DstTransitions {
+    private static final long MISSING_TRANSITION = -1;
+
+    private final int initialOffset;
+    private long dstOnTransition = MISSING_TRANSITION;
+    private long dstOffTransition = MISSING_TRANSITION;
+
+    private DstTransitions(int initialOffset) {
+      this.initialOffset = initialOffset;
+    }
+
+    private boolean recordTransition(int prevOffset, int curOffset, long exactMs) {
+      if (curOffset > prevOffset) {
+        return recordDstOnTransition(exactMs);
+      }
+      return recordDstOffTransition(exactMs);
+    }
+
+    private boolean recordDstOnTransition(long exactMs) {
+      // More than one DST-on transition in the same year would mean this year
+      // doesn't fit a SimpleTimeZone-style two-transition rule; let the caller
+      // fall back to extractDstRuleFromZoneRules.
+      if (dstOnTransition != MISSING_TRANSITION) {
+        return false;
+      }
+      dstOnTransition = exactMs;
+      return true;
+    }
+
+    private boolean recordDstOffTransition(long exactMs) {
+      if (dstOffTransition != MISSING_TRANSITION) {
+        return false;
+      }
+      dstOffTransition = exactMs;
+      return true;
+    }
+
+    private boolean hasCompleteRuleAtOffset(int offset) {
+      return hasBothTransitions() && offset == initialOffset;
+    }
+
+    private boolean hasBothTransitions() {
+      return dstOnTransition != MISSING_TRANSITION
+          && dstOffTransition != MISSING_TRANSITION;
+    }
   }
 
   /**

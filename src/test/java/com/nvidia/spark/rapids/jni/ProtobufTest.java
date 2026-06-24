@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
@@ -127,9 +128,22 @@ public class ProtobufTest {
     return out;
   }
 
+  /** Encode a length-delimited byte sequence: varint length prefix followed by the bytes. */
+  private static Byte[] encodeBytes(Byte[] bytes) {
+    return concat(box(encodeVarint(bytes.length)), bytes);
+  }
+
+  private static Byte[] encodeBytes(byte[] bytes) {
+    return encodeBytes(box(bytes));
+  }
+
+  private static Byte[] encodeString(String value) {
+    return encodeBytes(value.getBytes(StandardCharsets.UTF_8));
+  }
+
   /** Encode a length-delimited submessage: varint length prefix followed by the message bytes. */
   private static Byte[] encodeMessage(Byte[] messageBytes) {
-    return concat(box(encodeVarint(messageBytes.length)), messageBytes);
+    return encodeBytes(messageBytes);
   }
 
   private static void assertSingleNullStructRow(ColumnVector actual, String message) {
@@ -1232,7 +1246,8 @@ public class ProtobufTest {
       assertFalse(hostStruct.isNull(0), "Present required field should keep row 0 valid");
       assertTrue(hostStruct.isNull(1), "Null input row should produce null struct row");
       assertEquals(1, idCol.getNullCount(), "The required child value should be null on the null input row");
-      assertTrue(hostId.isNull(1), "Null input row should produce a null child value, not ERR_REQUIRED");
+      assertTrue(hostId.isNull(1),
+          "Null input row should produce a null child value, not REQUIRED");
     }
   }
 
@@ -3391,6 +3406,108 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedChildlessNestedMessage_FailsFast() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // The childless Inner body contains an unknown field with a truncated varint value.
+    Byte[] malformedInner = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(malformedInner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector result = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.STRUCT)
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testMalformedChildlessNestedMessage_PermissiveReturnsNull() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // The childless Inner body contains an unknown field with a truncated varint value.
+    Byte[] malformedInner = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(malformedInner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT)
+                 .build(),
+             false);
+         ColumnVector inner = result.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostResult = result.copyToHost();
+         HostColumnVector hostInner = inner.copyToHost()) {
+      assertEquals(1, result.getNullCount(), "Malformed childless nested message should null row");
+      assertTrue(hostResult.isNull(0), "Malformed row should be null in permissive mode");
+      assertEquals(1, inner.getNullCount(), "Child null should reflect the top-level null row");
+      assertTrue(hostInner.isNull(0), "Childless nested struct should be null for malformed row");
+    }
+  }
+
+  @Test
+  void testChildlessNestedMessageWithWellFormedUnknownField_IsPresent() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // Unknown fields inside a childless message are still scanned and skipped.
+    Byte[] innerWithUnknown = concat(box(tag(7, WT_VARINT)), box(encodeVarint(123)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerWithUnknown));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT)
+                 .build(),
+             true);
+         ColumnVector inner = result.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostInner = inner.copyToHost()) {
+      assertEquals(0, result.getNullCount(), "Well-formed unknown child field should pass");
+      assertEquals(0, inner.getNullCount(), "Present childless message should stay valid");
+      assertFalse(hostInner.isNull(0), "Present childless message should produce a valid STRUCT<>");
+    }
+  }
+
+  @Test
+  void testRecursiveChildlessNestedMessage_PreservesPresence() {
+    // message Empty {}
+    // message Middle { Empty empty = 1; }
+    // message Outer { Middle middle = 1; }
+    Byte[] middleWithEmpty = concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{}));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithEmpty)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{})),
+        new Byte[]{}};
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRUCT)
+                 .up()
+                 .build(),
+             false);
+         ColumnVector middle = result.getChildColumnView(0).copyToColumnVector();
+         ColumnVector empty = middle.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostMiddle = middle.copyToHost();
+         HostColumnVector hostEmpty = empty.copyToHost()) {
+      assertFalse(hostMiddle.isNull(0), "Present middle should produce a valid STRUCT");
+      assertFalse(hostEmpty.isNull(0), "Present empty child should produce a valid STRUCT<>");
+      assertFalse(hostMiddle.isNull(1), "Present middle should stay valid when empty is absent");
+      assertTrue(hostEmpty.isNull(1), "Missing empty child should produce a null STRUCT<>");
+      assertTrue(hostMiddle.isNull(2), "Missing middle should produce a null STRUCT");
+      assertTrue(hostEmpty.isNull(2), "Empty child should inherit missing middle nullability");
+    }
+  }
+
+  @Test
   void testNestedRepeatedWrongWireType_FailsFast() {
     // message Inner { repeated int32 x = 1; }
     // message Outer { Inner inner = 1; }
@@ -3629,7 +3746,7 @@ public class ProtobufTest {
 
   @Test
   void testSchemaWithTooManyRepeatedFields() {
-    // Hits ERR_SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
+    // Hits SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
     // guard rejects schemas with more than 32 top-level repeated fields.
     int n = 33;
     ProtobufSchemaDescriptorBuilder builder = new ProtobufSchemaDescriptorBuilder();

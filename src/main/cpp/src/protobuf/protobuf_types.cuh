@@ -18,6 +18,8 @@
 
 #include "protobuf/protobuf.hpp"
 
+#include <string>
+
 namespace spark_rapids_jni::protobuf::detail {
 
 // Protobuf varint encoding uses at most 10 bytes to represent a 64-bit value.
@@ -25,20 +27,6 @@ constexpr int MAX_VARINT_BYTES = 10;
 
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
-
-// Error codes for kernel error reporting.
-constexpr int ERR_BOUNDS                  = 1;
-constexpr int ERR_VARINT                  = 2;
-constexpr int ERR_FIELD_NUMBER            = 3;
-constexpr int ERR_WIRE_TYPE               = 4;
-constexpr int ERR_OVERFLOW                = 5;
-constexpr int ERR_FIELD_SIZE              = 6;
-constexpr int ERR_SKIP                    = 7;
-constexpr int ERR_FIXED_LEN               = 8;
-constexpr int ERR_REQUIRED                = 9;
-constexpr int ERR_SCHEMA_TOO_LARGE        = 10;
-constexpr int ERR_MISSING_ENUM_META       = 11;
-constexpr int ERR_REPEATED_COUNT_MISMATCH = 12;
 
 // Threshold for using a direct-mapped lookup table for field_number -> field_index.
 // Field numbers above this threshold fall back to linear search.
@@ -50,6 +38,43 @@ constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
 // cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
 // error surface depends on the schema, not on which fields happen to have data in a given batch.
 constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
+
+enum class protobuf_error : int {
+  NONE = 0,
+  BOUNDS,
+  VARINT,
+  FIELD_NUMBER,
+  WIRE_TYPE,
+  OVERFLOW,
+  FIELD_SIZE,
+  SKIP,
+  FIXED_LEN,
+  REQUIRED,
+  SCHEMA_TOO_LARGE,
+  REPEATED_COUNT_MISMATCH,
+};
+
+inline std::string error_name(protobuf_error error)
+{
+  switch (error) {
+    using enum protobuf_error;
+    case NONE: return "none";
+    case BOUNDS: return "message data out of bounds";
+    case VARINT: return "invalid or truncated varint";
+    case FIELD_NUMBER: return "invalid field number";
+    case WIRE_TYPE: return "unexpected wire type";
+    case OVERFLOW: return "length-delimited field overflows message";
+    case FIELD_SIZE: return "invalid field size";
+    case SKIP: return "unable to skip unknown field";
+    case FIXED_LEN: return "invalid fixed-width or packed field length";
+    case REQUIRED: return "missing required field";
+    case SCHEMA_TOO_LARGE:
+      return "schema exceeds maximum supported repeated fields per kernel (" +
+             std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
+    case REPEATED_COUNT_MISMATCH: return "repeated-field count/scan mismatch";
+  }
+  return "unknown error";
+}
 
 /**
  * Structure to record field location within a message.

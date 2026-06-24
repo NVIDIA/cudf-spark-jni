@@ -18,6 +18,7 @@
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 
 #include <thrust/binary_search.h>
@@ -500,33 +501,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   int const num_nested   = static_cast<int>(nested_field_indices.size());
   int const num_scalar   = static_cast<int>(scalar_field_indices.size());
 
-  // Error flag
-  rmm::device_uvector<int> d_error(1, stream, cudf::get_current_device_resource_ref());
-  CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(int), stream.value()));
-  auto error_message = [](int code) -> std::string {
-    switch (code) {
-      case ERR_BOUNDS: return "Protobuf decode error: message data out of bounds";
-      case ERR_VARINT: return "Protobuf decode error: invalid or truncated varint";
-      case ERR_FIELD_NUMBER: return "Protobuf decode error: invalid field number";
-      case ERR_WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
-      case ERR_OVERFLOW: return "Protobuf decode error: length-delimited field overflows message";
-      case ERR_FIELD_SIZE: return "Protobuf decode error: invalid field size";
-      case ERR_SKIP: return "Protobuf decode error: unable to skip unknown field";
-      case ERR_FIXED_LEN:
-        return "Protobuf decode error: invalid fixed-width or packed field length";
-      case ERR_REQUIRED: return "Protobuf decode error: missing required field";
-      case ERR_SCHEMA_TOO_LARGE:
-        return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
-               "kernel (" +
-               std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
-      case ERR_MISSING_ENUM_META:
-        return "Protobuf decode error: missing or mismatched enum metadata for enum-as-string "
-               "field";
-      case ERR_REPEATED_COUNT_MISMATCH:
-        return "Protobuf decode error: repeated-field count/scan mismatch";
-      default: return "Protobuf decode error: unknown error";
-    }
-  };
+  rmm::device_uvector<protobuf_error> d_error(1, stream, scratch_mr);
+  CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(protobuf_error), stream.value()));
   // PERMISSIVE-mode row nulling support. Unknown enum values and malformed rows should both
   // surface as null structs instead of partially decoded data.
   bool const track_permissive_null_rows = !fail_on_errors;
@@ -568,9 +544,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   if (num_repeated > 0 || num_nested > 0) {
     auto h_fn_to_rep =
-      build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated);
+      build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated, stream);
     auto h_fn_to_nested =
-      build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested);
+      build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested, stream);
 
     if (!h_fn_to_rep.empty()) {
       d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
@@ -607,7 +583,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Process scalar fields using scan + extract infrastructure
   if (num_scalar > 0) {
-    std::vector<field_descriptor> h_field_descs(num_scalar);
+    auto h_field_descs =
+      cudf::detail::make_pinned_vector_async<field_descriptor>(num_scalar, stream);
     for (int i = 0; i < num_scalar; i++) {
       int schema_idx                      = scalar_field_indices[i];
       h_field_descs[i].field_number       = schema[schema_idx].field_number;
@@ -623,7 +600,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     rmm::device_uvector<field_location> d_locations(
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
 
-    auto h_field_lookup = build_field_lookup_table(h_field_descs.data(), num_scalar);
+    auto h_field_lookup = build_field_lookup_table(h_field_descs.data(), num_scalar, stream);
     rmm::device_uvector<int> d_field_lookup(
       h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
     if (!h_field_lookup.empty()) {
@@ -835,9 +812,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                       blocks,
                                                       threads,
                                                       has_def,
-                                                      has_def ? field_meta.default_int : 0,
-                                                      has_def ? field_meta.default_float : 0.0,
-                                                      has_def ? field_meta.default_bool : false,
+                                                      field_meta.default_int,
+                                                      field_meta.default_float,
+                                                      field_meta.default_bool,
                                                       field_meta.default_string,
                                                       schema_idx,
                                                       enum_valid_values,
@@ -865,11 +842,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             // 1. Decode enum numeric value as INT32 varint.
             // 2. Validate against enum_valid_values.
             // 3. Convert INT32 -> UTF-8 enum name bytes.
-            rmm::device_uvector<int32_t> out(
-              num_rows, stream, cudf::get_current_device_resource_ref());
-            rmm::device_uvector<bool> valid(
-              (num_rows > 0 ? num_rows : 1), stream, cudf::get_current_device_resource_ref());
-            int64_t def_int = has_def ? field_meta.default_int : 0;
+            rmm::device_uvector<int32_t> out(num_rows, stream, scratch_mr);
+            rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
             top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
             extract_varint_kernel<int32_t, false, top_level_location_provider>
@@ -880,7 +854,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                        valid.data(),
                                                        d_error.data(),
                                                        has_def,
-                                                       def_int);
+                                                       field_meta.default_int);
 
             auto const& valid_enums     = enum_valid_values[schema_idx];
             auto const& enum_name_bytes = enum_names[schema_idx];
@@ -984,26 +958,26 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       // overflow before truncating into the int32 LIST offsets buffer (cudf list offsets are
       // int32). The same total is reused as the `offsets[num_rows]` sentinel below, so this
       // single reduce serves both the overflow guard and the offsets construction.
-      int64_t total_64 =
-        thrust::reduce(rmm::exec_policy_nosync(stream, mr), counts_begin, counts_end, int64_t{0});
+      int64_t total_64 = thrust::reduce(
+        rmm::exec_policy_nosync(stream, scratch_mr), counts_begin, counts_end, int64_t{0});
       CUDF_EXPECTS(total_64 <= std::numeric_limits<int32_t>::max(),
                    "Top-level repeated field total element count exceeds 2^31-1");
       w.total_count = static_cast<int32_t>(total_64);
 
       // num_rows == 0: w.offsets has size 1; skip the scan and let fill_n write the sentinel.
       if (num_rows > 0) {
-        thrust::exclusive_scan(rmm::exec_policy_nosync(stream, mr),
+        thrust::exclusive_scan(rmm::exec_policy_nosync(stream, scratch_mr),
                                counts_begin,
                                counts_end,
                                w.offsets.begin(),
                                int32_t{0});
       }
       thrust::fill_n(
-        rmm::exec_policy_nosync(stream, mr), w.offsets.data() + num_rows, 1, w.total_count);
+        rmm::exec_policy_nosync(stream, scratch_mr), w.offsets.data() + num_rows, 1, w.total_count);
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
-    std::vector<repeated_field_scan_desc> h_scan_descs;
+    auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
     h_scan_descs.reserve(num_repeated);
 
     for (auto& w : rep_work) {
@@ -1025,11 +999,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                h_scan_descs.size() * sizeof(h_scan_descs[0]),
                                                stream));
 
-      // Build field_number -> scan_desc_index lookup. `build_lookup_table` returns {} when
+      // Build field_number -> scan_desc_index lookup. The helper returns an empty table when
       // max field_number exceeds FIELD_LOOKUP_TABLE_MAX; the kernel detects this via
       // fn_to_scan_size == 0 and falls back to a linear scan.
-      auto h_fn_to_scan = build_lookup_table([&](int i) { return h_scan_descs[i].field_number; },
-                                             static_cast<int>(h_scan_descs.size()));
+      auto h_fn_to_scan = build_field_lookup_table(h_scan_descs.data(),
+                                                   static_cast<int>(h_scan_descs.size()),
+                                                   stream);
       rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
       int fn_to_scan_size = 0;
       if (!h_fn_to_scan.empty()) {
@@ -1310,14 +1285,20 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                     : make_null_column_with_schema(schema, i, num_fields, num_rows, stream, mr));
   }
 
-  CUDF_CUDA_TRY(cudaPeekAtLastError());
-  int h_error = 0;
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(int), stream));
-  stream.synchronize();
-  if (h_error == ERR_SCHEMA_TOO_LARGE || h_error == ERR_REPEATED_COUNT_MISMATCH) {
-    throw cudf::logic_error(error_message(h_error));
+  {
+    using enum protobuf_error;
+    CUDF_CUDA_TRY(cudaPeekAtLastError());
+    protobuf_error h_error = NONE;
+    CUDF_CUDA_TRY(
+      cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(protobuf_error), stream));
+    stream.synchronize();
+    if (h_error == SCHEMA_TOO_LARGE || h_error == REPEATED_COUNT_MISMATCH) {
+      throw cudf::logic_error("Protobuf decode error: " + error_name(h_error));
+    }
+    if (fail_on_errors && h_error != NONE) {
+      throw cudf::logic_error("Protobuf decode error: " + error_name(h_error));
+    }
   }
-  if (fail_on_errors && h_error != 0) throw cudf::logic_error(error_message(h_error));
 
   // Build final struct null mask by combining input nulls with PERMISSIVE-mode row invalidation.
   cudf::size_type struct_null_count = 0;
