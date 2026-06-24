@@ -828,8 +828,8 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices      = nullptr,
-  bool propagate_invalid_enum_rows    = true)
+  int32_t const* top_row_indices   = nullptr,
+  bool propagate_invalid_enum_rows = true)
 {
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
