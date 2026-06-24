@@ -1156,12 +1156,15 @@ __device__ inline int copy_special_str_json(char* const result,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  bool const quote = mantissa || exponent;
-  int const offset  = quote ? 1 : 0;
-  int const quotes  = quote ? 2 : 0;
-  if (quote) { result[0] = '"'; }
-  int const length = copy_special_str(result + offset, sign, exponent, mantissa);
-  if (quote) { result[offset + length] = '"'; }
+  int offset = 0;
+  int quotes = 0;
+  if (mantissa || exponent) {
+    result[0] = '"';
+    offset    = 1;
+    quotes    = 2;
+  }
+  int length = copy_special_str(result + offset, sign, exponent, mantissa);
+  if (mantissa || exponent) { result[offset + length] = '"'; }
   return length + quotes;
 }
 
