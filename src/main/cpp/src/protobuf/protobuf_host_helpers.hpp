@@ -207,7 +207,7 @@ void maybe_check_required_fields(field_location const* locations,
                                  field_location const* parent_locs,
                                  bool* row_force_null,
                                  int32_t const* top_row_indices,
-                                 int* error_flag,
+                                 protobuf_error* error_flag,
                                  rmm::cuda_stream_view stream);
 
 void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
@@ -289,7 +289,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -303,7 +303,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   int total_count,
   int num_rows,
   bool is_bytes,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -318,7 +318,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
@@ -338,7 +338,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
@@ -360,7 +360,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   std::vector<nested_field_descriptor> const& schema,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error_top,
+  rmm::device_uvector<protobuf_error>& d_error_top,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 

@@ -3003,6 +3003,54 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedChildlessNestedMessage_PermissiveReturnsNull() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // The childless Inner body contains an unknown field with a truncated varint value.
+    Byte[] malformedInner = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(malformedInner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT)
+                 .build(),
+             false);
+         ColumnVector inner = result.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostResult = result.copyToHost();
+         HostColumnVector hostInner = inner.copyToHost()) {
+      assertEquals(1, result.getNullCount(), "Malformed childless nested message should null row");
+      assertTrue(hostResult.isNull(0), "Malformed row should be null in permissive mode");
+      assertEquals(1, inner.getNullCount(), "Child null should reflect the top-level null row");
+      assertTrue(hostInner.isNull(0), "Childless nested struct should be null for malformed row");
+    }
+  }
+
+  @Test
+  void testChildlessNestedMessageWithWellFormedUnknownField_IsPresent() {
+    // message Empty {}
+    // message Outer { Empty inner = 1; }
+    // Unknown fields inside a childless message are still scanned and skipped.
+    Byte[] innerWithUnknown = concat(box(tag(7, WT_VARINT)), box(encodeVarint(123)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerWithUnknown));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector result = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT)
+                 .build(),
+             true);
+         ColumnVector inner = result.getChildColumnView(0).copyToColumnVector();
+         HostColumnVector hostInner = inner.copyToHost()) {
+      assertEquals(0, result.getNullCount(), "Well-formed unknown child field should pass");
+      assertEquals(0, inner.getNullCount(), "Present childless message should stay valid");
+      assertFalse(hostInner.isNull(0), "Present childless message should produce a valid STRUCT<>");
+    }
+  }
+
+  @Test
   void testRecursiveChildlessNestedMessage_PreservesPresence() {
     // message Empty {}
     // message Middle { Empty empty = 1; }

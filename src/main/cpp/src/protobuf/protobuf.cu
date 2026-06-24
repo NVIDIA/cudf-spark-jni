@@ -488,31 +488,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   int const num_nested   = static_cast<int>(nested_field_indices.size());
   int const num_scalar   = static_cast<int>(scalar_field_indices.size());
 
-  // Error flag
-  rmm::device_uvector<int> d_error(1, stream, cudf::get_current_device_resource_ref());
-  CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(int), stream.value()));
-  auto error_message = [](protobuf_error error) -> std::string {
-    switch (error) {
-      case protobuf_error::BOUNDS: return "Protobuf decode error: message data out of bounds";
-      case protobuf_error::VARINT: return "Protobuf decode error: invalid or truncated varint";
-      case protobuf_error::FIELD_NUMBER: return "Protobuf decode error: invalid field number";
-      case protobuf_error::WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
-      case protobuf_error::OVERFLOW:
-        return "Protobuf decode error: length-delimited field overflows message";
-      case protobuf_error::FIELD_SIZE: return "Protobuf decode error: invalid field size";
-      case protobuf_error::SKIP: return "Protobuf decode error: unable to skip unknown field";
-      case protobuf_error::FIXED_LEN:
-        return "Protobuf decode error: invalid fixed-width or packed field length";
-      case protobuf_error::REQUIRED: return "Protobuf decode error: missing required field";
-      case protobuf_error::SCHEMA_TOO_LARGE:
-        return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
-               "kernel (" +
-               std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
-      case protobuf_error::REPEATED_COUNT_MISMATCH:
-        return "Protobuf decode error: repeated-field count/scan mismatch";
-      default: return "Protobuf decode error: unknown error";
-    }
-  };
+  auto d_error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(
+    1, stream, cudf::get_current_device_resource_ref());
   // PERMISSIVE-mode row nulling support. Unknown enum values and malformed rows should both
   // surface as null structs instead of partially decoded data.
   bool const track_permissive_null_rows = !fail_on_errors;
@@ -604,10 +581,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     rmm::device_uvector<field_descriptor> d_field_descs(
       num_scalar, stream, cudf::get_current_device_resource_ref());
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_field_descs.data(),
-                                             h_field_descs.data(),
-                                             h_field_descs.size() * sizeof(field_descriptor),
-                                             stream));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      d_field_descs.data(), h_field_descs.data(), num_scalar * sizeof(field_descriptor), stream));
 
     rmm::device_uvector<field_location> d_locations(
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
@@ -981,6 +956,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
     auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
+    h_scan_descs.reserve(num_repeated);
 
     for (auto& w : rep_work) {
       if (w.total_count > 0) {
@@ -1273,17 +1249,17 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                     : make_null_column_with_schema(schema, i, num_fields, num_rows, stream, mr));
   }
 
-  CUDF_CUDA_TRY(cudaPeekAtLastError());
-  int h_error = 0;
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(int), stream));
-  stream.synchronize();
-  auto const error = static_cast<protobuf_error>(h_error);
-  if (error == protobuf_error::SCHEMA_TOO_LARGE ||
-      error == protobuf_error::REPEATED_COUNT_MISMATCH) {
-    throw cudf::logic_error(error_message(error));
-  }
-  if (fail_on_errors && error != protobuf_error::NONE) {
-    throw cudf::logic_error(error_message(error));
+  {
+    using enum protobuf_error;
+    CUDF_CUDA_TRY(cudaPeekAtLastError());
+    protobuf_error h_error = NONE;
+    CUDF_CUDA_TRY(
+      cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(protobuf_error), stream));
+    stream.synchronize();
+    if (h_error == SCHEMA_TOO_LARGE || h_error == REPEATED_COUNT_MISMATCH) {
+      throw cudf::logic_error(error_message(h_error));
+    }
+    if (fail_on_errors && h_error != NONE) { throw cudf::logic_error(error_message(h_error)); }
   }
 
   // Build final struct null mask by combining input nulls with PERMISSIVE-mode row invalidation.

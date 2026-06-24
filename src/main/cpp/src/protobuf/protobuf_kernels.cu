@@ -38,7 +38,7 @@ namespace {
 // Pass 1: Scan all fields kernel - records (offset, length) for each field
 // ============================================================================
 
-CUDF_KERNEL void set_error_if_unset_kernel(int* error_flag, protobuf_error error)
+CUDF_KERNEL void set_error_if_unset_kernel(protobuf_error* error_flag, protobuf_error error)
 {
   if (blockIdx.x == 0 && threadIdx.x == 0) { set_error_once(error_flag, error); }
 }
@@ -67,7 +67,7 @@ CUDF_KERNEL void set_error_if_unset_kernel(int* error_flag, protobuf_error error
 __device__ bool scan_message_field_locations(uint8_t const* msg_base,
                                              uint8_t const* msg_end,
                                              field_location* out,
-                                             int* error_flag,
+                                             protobuf_error* error_flag,
                                              auto&& lookup_desc_idx,
                                              auto&& is_repeated_field,
                                              auto&& get_expected_wire_type,
@@ -141,7 +141,7 @@ CUDF_KERNEL void scan_all_fields_kernel(
   int const* field_lookup,    // direct-mapped lookup table (nullable)
   int field_lookup_size,      // size of lookup table (0 if null)
   field_location* locations,  // [num_rows * num_fields] row-major
-  int* error_flag,
+  protobuf_error* error_flag,
   bool* row_has_invalid_data)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -215,7 +215,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
                                       uint8_t const* msg_base,
                                       int wt,
                                       int expected_wt,
-                                      int* error_flag,
+                                      protobuf_error* error_flag,
                                       F&& f)
 {
   bool is_packed = (wt == wire_type_value(proto_wire_type::LEN) &&
@@ -317,7 +317,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
                                               field_location* nested_locations,
                                               int num_nested_fields,
                                               int const* nested_field_indices,
-                                              int* error_flag,
+                                              protobuf_error* error_flag,
                                               int const* fn_to_rep_idx,
                                               int fn_to_rep_size,
                                               int const* fn_to_nested_idx,
@@ -434,7 +434,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
 CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view const d_in,
                                                       repeated_field_scan_desc const* scan_descs,
                                                       int num_scan_fields,
-                                                      int* error_flag,
+                                                      protobuf_error* error_flag,
                                                       int const* fn_to_desc_idx,
                                                       int fn_to_desc_size)
 {
@@ -531,7 +531,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
                                                    field_descriptor const* field_descs,
                                                    int num_fields,
                                                    field_location* output_locations,
-                                                   int* error_flag,
+                                                   protobuf_error* error_flag,
                                                    bool* row_has_invalid_data,
                                                    int32_t const* top_row_indices)
 {
@@ -599,7 +599,7 @@ CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const
                                                             int num_child_fields,
                                                             field_location* gc_parent_locs,
                                                             int num_rows,
-                                                            int* error_flag)
+                                                            protobuf_error* error_flag)
 {
   int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= num_rows) return;
@@ -643,7 +643,7 @@ CUDF_KERNEL void check_required_fields_kernel(
   field_location const* parent_locs,          // [num_rows] optional parent presence for nested rows
   bool* row_force_null,            // [top_level_num_rows] optional permissive row nulling
   int32_t const* top_row_indices,  // [num_rows] optional nested-row -> top-row mapping
-  int* error_flag)
+  protobuf_error* error_flag)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= num_rows) return;
@@ -784,7 +784,9 @@ CUDF_KERNEL void copy_enum_string_chars_kernel(
 // Host wrapper functions — callable from other translation units
 // ============================================================================
 
-void set_error_once_async(int* error_flag, protobuf_error error, rmm::cuda_stream_view stream)
+void set_error_once_async(protobuf_error* error_flag,
+                          protobuf_error error,
+                          rmm::cuda_stream_view stream)
 {
   set_error_if_unset_kernel<<<1, 1, 0, stream.value()>>>(error_flag, error);
   CUDF_CUDA_TRY(cudaPeekAtLastError());
@@ -796,7 +798,7 @@ void launch_scan_all_fields(cudf::column_device_view const& d_in,
                             int const* field_lookup,
                             int field_lookup_size,
                             field_location* locations,
-                            int* error_flag,
+                            protobuf_error* error_flag,
                             bool* row_has_invalid_data,
                             int num_rows,
                             rmm::cuda_stream_view stream)
@@ -823,7 +825,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   field_location* nested_locations,
                                   int num_nested_fields,
                                   int const* nested_field_indices,
-                                  int* error_flag,
+                                  protobuf_error* error_flag,
                                   int const* fn_to_rep_idx,
                                   int fn_to_rep_size,
                                   int const* fn_to_nested_idx,
@@ -854,7 +856,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
 void launch_scan_all_repeated_occurrences(cudf::column_device_view const& d_in,
                                           repeated_field_scan_desc const* scan_descs,
                                           int num_scan_fields,
-                                          int* error_flag,
+                                          protobuf_error* error_flag,
                                           int const* fn_to_desc_idx,
                                           int fn_to_desc_size,
                                           int num_rows,
@@ -888,7 +890,7 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        field_descriptor const* field_descs,
                                        int num_fields,
                                        field_location* output_locations,
-                                       int* error_flag,
+                                       protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream)
@@ -917,7 +919,7 @@ void launch_compute_grandchild_parent_locations(field_location const* parent_loc
                                                 int num_child_fields,
                                                 field_location* gc_parent_locs,
                                                 int num_rows,
-                                                int* error_flag,
+                                                protobuf_error* error_flag,
                                                 rmm::cuda_stream_view stream)
 {
   if (num_rows == 0) return;
@@ -988,7 +990,7 @@ void maybe_check_required_fields(field_location const* locations,
                                  field_location const* parent_locs,
                                  bool* row_force_null,
                                  int32_t const* top_row_indices,
-                                 int* error_flag,
+                                 protobuf_error* error_flag,
                                  rmm::cuda_stream_view stream)
 {
   if (num_rows == 0 || field_indices.empty()) { return; }
