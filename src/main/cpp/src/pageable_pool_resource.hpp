@@ -111,10 +111,15 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
       pool_size_(size),
       base_(upstream_.allocate_sync(size, alignof(std::max_align_t)))
   {
-    pretouch_parallel(base_, pool_size_, pretouch_threads);
-    // is_head=false: all sub-blocks live within one contiguous upstream
-    // allocation and may coalesce freely across their boundaries.
-    free_list_.insert(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
+    try {
+      pretouch_parallel(base_, pool_size_, pretouch_threads);
+      // is_head=false: all sub-blocks live within one contiguous upstream
+      // allocation and may coalesce freely across their boundaries.
+      free_list_.insert(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
+    } catch (...) {
+      upstream_.deallocate_sync(base_, pool_size_, alignof(std::max_align_t));
+      throw;
+    }
   }
 
   ~pageable_pool_resource()
@@ -177,20 +182,27 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
     ts.reserve(n);
     std::size_t per = (bytes + n - 1) / static_cast<std::size_t>(n);
     per             = ((per + page_size - 1) / page_size) * page_size;
-    for (int i = 0; i < n; ++i) {
-      std::size_t off = static_cast<std::size_t>(i) * per;
-      if (off >= bytes) break;
-      std::size_t end = std::min(off + per, bytes);
-      ts.emplace_back([base, off, end, page_size]() {
-        // volatile prevents the compiler from eliding these writes — the write's
-        // only purpose is to fault in the page.
-        auto* c = static_cast<volatile char*>(base);
-        for (std::size_t k = off; k < end; k += page_size)
-          c[k] = 0;
-      });
+    try {
+      for (int i = 0; i < n; ++i) {
+        std::size_t off = static_cast<std::size_t>(i) * per;
+        if (off >= bytes) break;
+        std::size_t end = std::min(off + per, bytes);
+        ts.emplace_back([base, off, end, page_size]() {
+          // volatile prevents the compiler from eliding these writes — the write's
+          // only purpose is to fault in the page.
+          auto* c = static_cast<volatile char*>(base);
+          for (std::size_t k = off; k < end; k += page_size)
+            c[k] = 0;
+        });
+      }
+      for (auto& t : ts)
+        t.join();
+    } catch (...) {
+      for (auto& t : ts) {
+        if (t.joinable()) { t.join(); }
+      }
+      throw;
     }
-    for (auto& t : ts)
-      t.join();
   }
 
   static std::size_t system_page_size()
