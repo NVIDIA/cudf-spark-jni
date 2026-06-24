@@ -95,13 +95,24 @@ public class CastStrings {
   }
 
   /**
-   * Convert a float column to a string column.
+   * Convert a float or double column to a string column.
    *
    * @param cv the column data to process
    * @return the converted column
    */
   public static ColumnVector fromFloat(ColumnView cv) {
-    return new ColumnVector(fromFloat(cv.getNativeView()));
+    return fromFloat(cv, false);
+  }
+
+  /**
+   * Convert a float or double column to a string column.
+   *
+   * @param cv the column data to process
+   * @param jsonString true if non-finite values should include JSON quotes, e.g. {@code "NaN"}.
+   * @return the converted column
+   */
+  public static ColumnVector fromFloat(ColumnView cv, boolean jsonString) {
+    return new ColumnVector(fromFloat(cv.getNativeView(), jsonString));
   }
 
   /**
@@ -377,7 +388,7 @@ public class CastStrings {
   private static native long toFloat(long nativeColumnView, boolean ansi_enabled, int dtype);
   private static native long fromDecimal(long nativeColumnView);
   private static native long fromFloatWithFormat(long nativeColumnView, int digits);
-  private static native long fromFloat(long nativeColumnView);
+  private static native long fromFloat(long nativeColumnView, boolean jsonString);
   private static native long fromLongToBinary(long nativeColumnView);
   private static native long toIntegersWithBase(long nativeColumnView, int base,
     boolean ansiEnabled, int dtype);
