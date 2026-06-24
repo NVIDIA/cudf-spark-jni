@@ -16,6 +16,7 @@
 
 #include "cast_string_to_timestamp_common.hpp"
 #include "datetime_utils.cuh"
+#include "integer_utils.cuh"
 #include "nvtx_ranges.hpp"
 #include "timezones.hpp"
 
@@ -444,6 +445,7 @@ __device__ static int32_t compute_dst_offset(int64_t utc_ms,
 {
   if (!rule.has_dst) { return raw_offset_ms; }
 
+  // Use raw offset only to avoid circular DST-year computation; this matches SimpleTimeZone.
   int32_t year = millis_to_year(utc_ms + raw_offset_ms);
 
   // Compute DST-on and DST-off transitions in UTC for this year
@@ -565,7 +567,7 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
 
   // Floor-divide to get epoch millis (handles negative timestamps correctly)
   int64_t const epoch_millis =
-    (adjusted_us >= 0) ? adjusted_us / MICROS_PER_MILLI : (adjusted_us - 999) / MICROS_PER_MILLI;
+    spark_rapids_jni::integer_utils::floor_div(adjusted_us, MICROS_PER_MILLI);
 
   bool const writer_fixed = is_fixed_offset_tz(writer_trans_begin, writer_trans_end, writer_dst);
   bool const reader_fixed = is_fixed_offset_tz(reader_trans_begin, reader_trans_end, reader_dst);
@@ -677,7 +679,7 @@ __global__ void convert_timezones_kernel(cudf::timestamp_us const* __restrict__ 
   int64_t const* rt_end   = rt_begin ? rt_begin + reader_trans_count : nullptr;
   int32_t const* ro_begin = reader_fits ? s_reader_offsets : g_reader_offsets;
 
-  // Handle null transition tables (fixed-offset timezones use nullptr)
+  // Null transition tables are only reachable for fixed-offset timezones.
   if (!g_writer_trans) {
     wt_begin = wt_end = nullptr;
     wo_begin          = nullptr;
@@ -710,12 +712,12 @@ __global__ void convert_timezones_kernel(cudf::timestamp_us const* __restrict__ 
 std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           int64_t base_offset_us,
                                           cudf::table_view const* writer_tz_info_table,
-                                          cudf::size_type writer_initial_offset,
-                                          cudf::size_type writer_raw_offset,
+                                          int32_t writer_initial_offset,
+                                          int32_t writer_raw_offset,
                                           spark_rapids_jni::dst_rule writer_dst,
                                           cudf::table_view const* reader_tz_info_table,
-                                          cudf::size_type reader_initial_offset,
-                                          cudf::size_type reader_raw_offset,
+                                          int32_t reader_initial_offset,
+                                          int32_t reader_raw_offset,
                                           spark_rapids_jni::dst_rule reader_dst,
                                           rmm::cuda_stream_view stream,
                                           rmm::device_async_resource_ref mr)
@@ -766,13 +768,13 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
     writer_trans_ptr,
     writer_offsets_ptr,
     writer_trans_count,
-    static_cast<int32_t>(writer_initial_offset),
+    writer_initial_offset,
     writer_raw_offset,
     writer_dst,
     reader_trans_ptr,
     reader_offsets_ptr,
     reader_trans_count,
-    static_cast<int32_t>(reader_initial_offset),
+    reader_initial_offset,
     reader_raw_offset,
     reader_dst);
   CUDF_CHECK_CUDA(stream.value());
@@ -858,12 +860,12 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   int64_t base_offset_us,
   cudf::table_view const* writer_tz_info_table,
-  cudf::size_type writer_initial_offset,
-  cudf::size_type writer_raw_offset,
+  int32_t writer_initial_offset,
+  int32_t writer_raw_offset,
   dst_rule writer_dst,
   cudf::table_view const* reader_tz_info_table,
-  cudf::size_type reader_initial_offset,
-  cudf::size_type reader_raw_offset,
+  int32_t reader_initial_offset,
+  int32_t reader_raw_offset,
   dst_rule reader_dst,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
@@ -885,9 +887,9 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
 std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   cudf::table_view const* writer_tz_info_table,
-  cudf::size_type writer_raw_offset,
+  int32_t writer_raw_offset,
   cudf::table_view const* reader_tz_info_table,
-  cudf::size_type reader_raw_offset,
+  int32_t reader_raw_offset,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {

@@ -121,12 +121,13 @@ std::unique_ptr<cudf::column> convert_timestamp_to_utc(
  *   0 = WALL_TIME, 1 = STANDARD_TIME, 2 = UTC_TIME
  */
 struct dst_rule {
-  bool has_dst;         // false means no DST, just use raw_offset
-  int32_t dst_savings;  // in milliseconds (typically 3600000)
-  int32_t start_month;  // 0-based (Jan=0..Dec=11)
-  int32_t start_day;    // day-of-month or occurrence, depends on start_mode
-  int32_t start_dow;    // day-of-week 1=Sun..7=Sat, 0 for DOM_MODE
-  int32_t start_time;   // ms within day
+  bool has_dst;               // false means no DST, just use raw_offset
+  int8_t has_dst_padding[3];  // explicit ABI padding for host/JNI serialization
+  int32_t dst_savings;        // in milliseconds (typically 3600000)
+  int32_t start_month;        // 0-based (Jan=0..Dec=11)
+  int32_t start_day;          // day-of-month or occurrence, depends on start_mode
+  int32_t start_dow;          // day-of-week 1=Sun..7=Sat, 0 for DOM_MODE
+  int32_t start_time;         // ms within day
   int32_t start_time_mode;
   int32_t start_mode;  // 0=DOM, 1=DOW_IN_MONTH, 2=DOW_GE_DOM, 3=DOW_LE_DOM
   int32_t end_month;
@@ -163,12 +164,12 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   int64_t base_offset_us,
   cudf::table_view const* writer_tz_info_table,
-  cudf::size_type writer_initial_offset,
-  cudf::size_type writer_raw_offset,
+  int32_t writer_initial_offset,
+  int32_t writer_raw_offset,
   dst_rule writer_dst,
   cudf::table_view const* reader_tz_info_table,
-  cudf::size_type reader_initial_offset,
-  cudf::size_type reader_raw_offset,
+  int32_t reader_initial_offset,
+  int32_t reader_raw_offset,
   dst_rule reader_dst,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
@@ -196,9 +197,9 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
 std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   cudf::table_view const* writer_tz_info_table,
-  cudf::size_type writer_raw_offset,
+  int32_t writer_raw_offset,
   cudf::table_view const* reader_tz_info_table,
-  cudf::size_type reader_raw_offset,
+  int32_t reader_raw_offset,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
