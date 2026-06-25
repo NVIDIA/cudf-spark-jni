@@ -2783,6 +2783,112 @@ public class ProtobufTest {
   }
 
   @Test
+  void testPackedRepeatedInsideNestedMessage() {
+    // message Inner { repeated int32 ids = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    byte[] packedIds = concatBytes(encodeVarint(10), encodeVarint(20), encodeVarint(30));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(packedIds.length)), box(packedIds));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(10, 20, 30));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedEnumAsString() {
+    // message Inner { repeated Priority priority = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
+    byte[] packedPriorities = concatBytes(encodeVarint(0), encodeVarint(2), encodeVarint(1));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(packedPriorities.length)), box(packedPriorities));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+    byte[][] enumNames = new byte[][] {
+        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
+        "FOO".getBytes(StandardCharsets.UTF_8),
+        "BAR".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedPriorities = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("UNKNOWN", "BAR", "FOO"));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING).repeated()
+                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedStringAndBytes() {
+    // message Inner { repeated string name = 1; repeated bytes payload = 2; }
+    // message Outer { Inner inner = 1; }
+    byte[] p0 = new byte[]{0x01, 0x02};
+    byte[] p1 = new byte[]{0x03};
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), encodeString("alpha"),
+        box(tag(1, WT_LEN)), encodeString("beta"),
+        box(tag(2, WT_LEN)), encodeBytes(p0),
+        box(tag(2, WT_LEN)), encodeBytes(p1));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).repeated()
+                     .addField(2, DType.LIST).repeated()
+                 .up()
+                 .build(),
+             false);
+         ColumnView innerStruct = actual.getChildColumnView(0);
+         ColumnView namesList = innerStruct.getChildColumnView(0);
+         ColumnView names = namesList.getChildColumnView(0);
+         ColumnView payloadList = innerStruct.getChildColumnView(1);
+         ColumnView payloads = payloadList.getChildColumnView(0);
+         ColumnView payloadBytes = payloads.getChildColumnView(0);
+         ColumnView payloadOffsetsView = payloads.getListOffsetsView();
+         ColumnVector payloadOffsets = payloadOffsetsView.copyToColumnVector();
+         HostColumnVector hostNames = names.copyToHost();
+         HostColumnVector hostPayloadOffsets = payloadOffsets.copyToHost();
+         HostColumnVector hostPayloadBytes = payloadBytes.copyToHost()) {
+      assertEquals("alpha", hostNames.getJavaString(0));
+      assertEquals("beta", hostNames.getJavaString(1));
+      assertEquals(0, hostPayloadOffsets.getInt(0));
+      assertEquals(p0.length, hostPayloadOffsets.getInt(1));
+      assertEquals(p0.length + p1.length, hostPayloadOffsets.getInt(2));
+      assertEquals((byte) 0x01, hostPayloadBytes.getByte(0));
+      assertEquals((byte) 0x02, hostPayloadBytes.getByte(1));
+      assertEquals((byte) 0x03, hostPayloadBytes.getByte(2));
+    }
+  }
+
+  @Test
   void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisible() {
     // message Outer { int32 id = 1; Inner inner = 2; string name = 3; }
     // message Inner { enum Status { UNKNOWN=0; OK=1; BAD=2; } Status status = 1;

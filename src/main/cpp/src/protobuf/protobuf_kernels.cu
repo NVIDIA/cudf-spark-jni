@@ -593,6 +593,157 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
   }
 }
 
+/**
+ * Count repeated field occurrences within nested messages.
+ *
+ * Unlike the top-level count kernel, this kernel does not check schema depth. Callers pass a
+ * schema slice whose repeated fields are already known to be direct children of the parent
+ * message location.
+ */
+CUDF_KERNEL void count_repeated_in_nested_kernel(uint8_t const* message_data,
+                                                 cudf::size_type message_data_size,
+                                                 cudf::size_type const* row_offsets,
+                                                 cudf::size_type base_offset,
+                                                 field_location const* parent_locs,
+                                                 int num_rows,
+                                                 device_nested_field_descriptor const* schema,
+                                                 [[maybe_unused]] int num_fields,
+                                                 repeated_field_info* repeated_info,
+                                                 int num_repeated,
+                                                 int const* repeated_indices,
+                                                 protobuf_error* error_flag)
+{
+  auto row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (row >= num_rows) return;
+
+  for (int ri = 0; ri < num_repeated; ri++) {
+    repeated_info[flat_index(
+      static_cast<size_t>(row), static_cast<size_t>(num_repeated), static_cast<size_t>(ri))] = {0};
+  }
+
+  auto const& parent_loc = parent_locs[row];
+  if (parent_loc.offset < 0) return;
+
+  int64_t const row_off       = static_cast<int64_t>(row_offsets[row]) - base_offset;
+  int64_t const msg_start_off = row_off + parent_loc.offset;
+  int64_t const msg_end_off   = msg_start_off + parent_loc.length;
+  if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) { return; }
+
+  if (num_repeated > MAX_REPEATED_FIELDS_PER_KERNEL) {
+    set_error_once(error_flag, protobuf_error::SCHEMA_TOO_LARGE);
+    return;
+  }
+
+  uint8_t const* const msg_start = message_data + msg_start_off;
+  uint8_t const* const msg_end   = msg_start + parent_loc.length;
+
+  field_descriptor fd[MAX_REPEATED_FIELDS_PER_KERNEL];
+  for (int ri = 0; ri < num_repeated; ri++) {
+    int si = repeated_indices[ri];
+    fd[ri] = {schema[si].field_number, schema[si].wire_type, true};
+  }
+
+  auto lookup_by_fn = [&fd, num_repeated](int fn) {
+    for (int ri = 0; ri < num_repeated; ri++) {
+      if (fd[ri].field_number == fn) return ri;
+    }
+    return -1;
+  };
+  auto is_repeated_field      = []([[maybe_unused]] int ri) { return true; };
+  auto get_expected_wire_type = [&](int ri) { return fd[ri].expected_wire_type; };
+
+  auto on_repeated_count =
+    [&](int ri, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
+      auto& info        = repeated_info[flat_index(
+        static_cast<size_t>(row), static_cast<size_t>(num_repeated), static_cast<size_t>(ri))];
+      auto count_action = [&info]([[maybe_unused]] int32_t, [[maybe_unused]] int32_t) {
+        info.count++;
+        return true;
+      };
+      return walk_repeated_element(
+        cur, me, mb, wt, get_expected_wire_type(ri), error_flag, count_action);
+    };
+
+  scan_message_field_locations(msg_start,
+                               msg_end,
+                               /*out=*/nullptr,
+                               error_flag,
+                               lookup_by_fn,
+                               is_repeated_field,
+                               get_expected_wire_type,
+                               on_repeated_count);
+}
+
+CUDF_KERNEL void scan_repeated_in_nested_kernel(uint8_t const* message_data,
+                                                cudf::size_type message_data_size,
+                                                cudf::size_type const* row_offsets,
+                                                cudf::size_type base_offset,
+                                                field_location const* parent_locs,
+                                                int num_rows,
+                                                device_nested_field_descriptor const* schema,
+                                                int32_t const* occ_prefix_sums,
+                                                int const* repeated_indices,
+                                                repeated_occurrence* occurrences,
+                                                protobuf_error* error_flag)
+{
+  auto row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (row >= num_rows) return;
+
+  int write_idx          = occ_prefix_sums[row];
+  int const write_end    = occ_prefix_sums[row + 1];
+  auto const& parent_loc = parent_locs[row];
+  if (parent_loc.offset < 0) {
+    if (write_idx != write_end) {
+      set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+    }
+    return;
+  }
+
+  int64_t const row_off       = static_cast<int64_t>(row_offsets[row]) - base_offset;
+  int64_t const msg_start_off = row_off + parent_loc.offset;
+  int64_t const msg_end_off   = msg_start_off + parent_loc.length;
+  if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) { return; }
+
+  uint8_t const* const msg_start = message_data + msg_start_off;
+  uint8_t const* const msg_end   = msg_start + parent_loc.length;
+
+  int const schema_idx  = repeated_indices[0];
+  field_descriptor fd[] = {{schema[schema_idx].field_number, schema[schema_idx].wire_type, true}};
+
+  auto lookup_by_fn           = [&fd](int fn) { return fd[0].field_number == fn ? 0 : -1; };
+  auto is_repeated_field      = []([[maybe_unused]] int) { return true; };
+  auto get_expected_wire_type = [&](int) { return fd[0].expected_wire_type; };
+
+  auto const row_i32 = static_cast<int32_t>(row);
+  auto on_repeated_scan =
+    [&](int f, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
+      auto scan_action = [&](int32_t off, int32_t len) {
+        if (write_idx >= write_end) {
+          set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+          return false;
+        }
+        occurrences[write_idx] = {row_i32, off, len};
+        write_idx++;
+        return true;
+      };
+      return walk_repeated_element(
+        cur, me, mb, wt, get_expected_wire_type(f), error_flag, scan_action);
+    };
+
+  scan_message_field_locations(msg_start,
+                               msg_end,
+                               /*out=*/nullptr,
+                               error_flag,
+                               lookup_by_fn,
+                               is_repeated_field,
+                               get_expected_wire_type,
+                               on_repeated_scan);
+
+  if (write_idx != write_end) {
+    set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+  }
+}
+
 CUDF_KERNEL void compute_grandchild_parent_locations_kernel(field_location const* parent_locs,
                                                             field_location const* child_locs,
                                                             int child_idx,
@@ -911,6 +1062,66 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
     error_flag,
     row_has_invalid_data,
     top_row_indices);
+}
+
+void launch_count_repeated_in_nested(uint8_t const* message_data,
+                                     cudf::size_type message_data_size,
+                                     cudf::size_type const* row_offsets,
+                                     cudf::size_type base_offset,
+                                     field_location const* parent_locs,
+                                     int num_rows,
+                                     device_nested_field_descriptor const* schema,
+                                     int num_fields,
+                                     repeated_field_info* repeated_info,
+                                     int num_repeated,
+                                     int const* repeated_indices,
+                                     protobuf_error* error_flag,
+                                     rmm::cuda_stream_view stream)
+{
+  if (num_rows == 0) return;
+  auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+  count_repeated_in_nested_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
+    message_data,
+    message_data_size,
+    row_offsets,
+    base_offset,
+    parent_locs,
+    num_rows,
+    schema,
+    num_fields,
+    repeated_info,
+    num_repeated,
+    repeated_indices,
+    error_flag);
+}
+
+void launch_scan_repeated_in_nested(uint8_t const* message_data,
+                                    cudf::size_type message_data_size,
+                                    cudf::size_type const* row_offsets,
+                                    cudf::size_type base_offset,
+                                    field_location const* parent_locs,
+                                    int num_rows,
+                                    device_nested_field_descriptor const* schema,
+                                    int32_t const* occ_prefix_sums,
+                                    int const* repeated_indices,
+                                    repeated_occurrence* occurrences,
+                                    protobuf_error* error_flag,
+                                    rmm::cuda_stream_view stream)
+{
+  if (num_rows == 0) return;
+  auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+  scan_repeated_in_nested_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
+    message_data,
+    message_data_size,
+    row_offsets,
+    base_offset,
+    parent_locs,
+    num_rows,
+    schema,
+    occ_prefix_sums,
+    repeated_indices,
+    occurrences,
+    error_flag);
 }
 
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
