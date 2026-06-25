@@ -335,14 +335,12 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int num_parent_rows,
   int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
-  int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
-  int depth,
   bool propagate_invalid_enum_rows = true);
 
 std::unique_ptr<cudf::column> build_repeated_struct_column(

@@ -75,25 +75,33 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent
   return {std::move(mask), null_count};
 }
 
-inline std::pair<rmm::device_uvector<device_nested_field_descriptor>, rmm::device_uvector<int>>
-make_single_repeated_schema(int child_schema_idx,
-                            std::vector<nested_field_descriptor> const& schema,
-                            rmm::cuda_stream_view stream,
-                            rmm::device_async_resource_ref mr)
+inline rmm::device_uvector<device_nested_field_descriptor> make_single_repeated_field_schema(
+  int child_schema_idx,
+  std::vector<nested_field_descriptor> const& schema,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
 {
   auto h_schema = cudf::detail::make_pinned_vector_async<device_nested_field_descriptor>(1, stream);
   h_schema[0]   = device_nested_field_descriptor{schema[child_schema_idx]};
 
-  auto h_indices = cudf::detail::make_pinned_vector_async<int>(1, stream);
-  h_indices[0]   = 0;
-
   rmm::device_uvector<device_nested_field_descriptor> d_schema(1, stream, mr);
-  rmm::device_uvector<int> d_indices(1, stream, mr);
   CUDF_CUDA_TRY(cudf::detail::memcpy_async(
     d_schema.data(), h_schema.data(), sizeof(device_nested_field_descriptor), stream));
-  CUDF_CUDA_TRY(
-    cudf::detail::memcpy_async(d_indices.data(), h_indices.data(), sizeof(int), stream));
-  return {std::move(d_schema), std::move(d_indices)};
+  return d_schema;
+}
+
+inline std::unique_ptr<cudf::column> make_list_column_with_parent_nulls(
+  int num_rows,
+  std::unique_ptr<cudf::column> offsets_col,
+  std::unique_ptr<cudf::column> child_col,
+  field_location const* parent_locs,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto [list_mask, list_null_count] =
+    make_null_mask_from_parent_locations(parent_locs, num_rows, stream, mr);
+  return cudf::make_lists_column(
+    num_rows, std::move(offsets_col), std::move(child_col), list_null_count, std::move(list_mask));
 }
 
 }  // namespace
@@ -642,14 +650,12 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                                  num_rows,
                                                                  child_schema_idx,
                                                                  schema,
-                                                                 num_fields,
                                                                  ctx,
                                                                  d_row_force_null,
                                                                  d_error,
                                                                  stream,
                                                                  mr,
                                                                  top_row_indices,
-                                                                 depth,
                                                                  propagate_invalid_enum_rows));
       continue;
     }
@@ -777,15 +783,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     }
   }
 
-  rmm::device_uvector<bool> struct_valid(num_rows, stream, scratch_mr);
-  thrust::transform(
-    rmm::exec_policy_nosync(stream, scratch_mr),
-    thrust::make_counting_iterator<cudf::size_type>(0),
-    thrust::make_counting_iterator<cudf::size_type>(num_rows),
-    struct_valid.data(),
-    [plocs = d_parent_locs.data()] __device__(auto row) { return plocs[row].offset >= 0; });
   auto [struct_mask, struct_null_count] =
-    make_null_mask_from_valid(struct_valid, num_rows, stream, mr);
+    make_null_mask_from_parent_locations(d_parent_locs.data(), num_rows, stream, mr);
   return cudf::make_structs_column(
     num_rows, std::move(struct_children), struct_null_count, std::move(struct_mask), stream, mr);
 }
@@ -799,14 +798,12 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int num_parent_rows,
   int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
-  [[maybe_unused]] int num_fields,
   schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
-  [[maybe_unused]] int depth,
   bool propagate_invalid_enum_rows)
 {
   CUDF_EXPECTS(schema[child_schema_idx].is_repeated,
@@ -817,8 +814,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<repeated_field_info> d_rep_info(num_parent_rows, stream, scratch_mr);
-  auto [d_rep_schema, d_rep_indices] =
-    make_single_repeated_schema(child_schema_idx, schema, stream, scratch_mr);
+  auto d_repeated_field =
+    make_single_repeated_field_schema(child_schema_idx, schema, stream, scratch_mr);
 
   launch_count_repeated_in_nested(message_data,
                                   message_data_size,
@@ -826,11 +823,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                   base_offset,
                                   parent_locs,
                                   num_parent_rows,
-                                  d_rep_schema.data(),
-                                  1,
+                                  d_repeated_field.data(),
                                   d_rep_info.data(),
-                                  1,
-                                  d_rep_indices.data(),
                                   d_error.data(),
                                   stream);
 
@@ -857,13 +851,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                       rmm::device_buffer{},
                                                       0);
     auto child_col   = make_empty_column_safe(elem_type, stream, mr);
-    auto [list_mask, list_null_count] =
-      make_null_mask_from_parent_locations(parent_locs, num_parent_rows, stream, mr);
-    return cudf::make_lists_column(num_parent_rows,
-                                   std::move(offsets_col),
-                                   std::move(child_col),
-                                   list_null_count,
-                                   std::move(list_mask));
+    return make_list_column_with_parent_nulls(
+      num_parent_rows, std::move(offsets_col), std::move(child_col), parent_locs, stream, mr);
   }
 
   auto list_offsets =
@@ -876,9 +865,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                  base_offset,
                                  parent_locs,
                                  num_parent_rows,
-                                 d_rep_schema.data(),
+                                 d_repeated_field.data(),
                                  list_offsets.data(),
-                                 d_rep_indices.data(),
                                  d_occurrences.data(),
                                  d_error.data(),
                                  stream);
@@ -998,13 +986,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                     list_offsets.release(),
                                                     rmm::device_buffer{},
                                                     0);
-  auto [list_mask, list_null_count] =
-    make_null_mask_from_parent_locations(parent_locs, num_parent_rows, stream, mr);
-  return cudf::make_lists_column(num_parent_rows,
-                                 std::move(offsets_col),
-                                 std::move(child_values),
-                                 list_null_count,
-                                 std::move(list_mask));
+  return make_list_column_with_parent_nulls(
+    num_parent_rows, std::move(offsets_col), std::move(child_values), parent_locs, stream, mr);
 }
 
 }  // namespace spark_rapids_jni::protobuf::detail
