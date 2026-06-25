@@ -57,6 +57,24 @@ inline rmm::device_uvector<int32_t> make_list_offsets_from_counts(
   return offsets;
 }
 
+inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent_locations(
+  field_location const* parent_locs,
+  int num_rows,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(num_rows >= 0,
+               "make_null_mask_from_parent_locations: row count must be non-negative");
+  auto [mask, null_count] = cudf::detail::valid_if(
+    thrust::make_counting_iterator<cudf::size_type>(0),
+    thrust::make_counting_iterator<cudf::size_type>(num_rows),
+    [parent_locs] __device__(cudf::size_type row) { return parent_locs[row].offset >= 0; },
+    stream,
+    mr);
+  if (null_count == 0) { mask = rmm::device_buffer{}; }
+  return {std::move(mask), null_count};
+}
+
 inline std::pair<rmm::device_uvector<device_nested_field_descriptor>, rmm::device_uvector<int>>
 make_single_repeated_schema(int child_schema_idx,
                             std::vector<nested_field_descriptor> const& schema,
@@ -839,8 +857,13 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                       rmm::device_buffer{},
                                                       0);
     auto child_col   = make_empty_column_safe(elem_type, stream, mr);
-    return cudf::make_lists_column(
-      num_parent_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
+    auto [list_mask, list_null_count] =
+      make_null_mask_from_parent_locations(parent_locs, num_parent_rows, stream, mr);
+    return cudf::make_lists_column(num_parent_rows,
+                                   std::move(offsets_col),
+                                   std::move(child_col),
+                                   list_null_count,
+                                   std::move(list_mask));
   }
 
   auto list_offsets =
@@ -975,8 +998,13 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                     list_offsets.release(),
                                                     rmm::device_buffer{},
                                                     0);
-  return cudf::make_lists_column(
-    num_parent_rows, std::move(offsets_col), std::move(child_values), 0, rmm::device_buffer{});
+  auto [list_mask, list_null_count] =
+    make_null_mask_from_parent_locations(parent_locs, num_parent_rows, stream, mr);
+  return cudf::make_lists_column(num_parent_rows,
+                                 std::move(offsets_col),
+                                 std::move(child_values),
+                                 list_null_count,
+                                 std::move(list_mask));
 }
 
 }  // namespace spark_rapids_jni::protobuf::detail

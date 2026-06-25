@@ -2867,6 +2867,7 @@ public class ProtobufTest {
          ColumnVector idsOffsets = idsOffsetsView.copyToColumnVector();
          HostColumnVector hostOuter = actual.copyToHost();
          HostColumnVector hostInner = inner.copyToHost();
+         HostColumnVector hostIds = ids.copyToHost();
          HostColumnVector hostIdsOffsets = idsOffsets.copyToHost()) {
       assertEquals(2, actual.getRowCount());
       assertEquals(0, actual.getNullCount(), "Missing nested parent should not null outer rows");
@@ -2874,9 +2875,64 @@ public class ProtobufTest {
       assertFalse(hostOuter.isNull(1), "Absent nested parent should keep row 1 valid");
       assertFalse(hostInner.isNull(0), "Present nested message should stay valid");
       assertTrue(hostInner.isNull(1), "Absent nested parent should remain null");
+      assertFalse(hostIds.isNull(0), "Present nested message should produce a valid repeated list");
+      assertTrue(hostIds.isNull(1), "Absent nested parent should produce a null repeated list");
       assertEquals(0, hostIdsOffsets.getInt(0));
       assertEquals(0, hostIdsOffsets.getInt(1));
       assertEquals(0, hostIdsOffsets.getInt(2));
+    }
+  }
+
+  @Test
+  void testNestedRepeatedScalarNullWhenImmediateParentAbsent() {
+    // message Inner { repeated int32 ids = 1 [packed=true]; }
+    // message Middle { Inner inner = 1; }
+    // message Outer { Middle middle = 1; }
+    byte[] packedIds = concatBytes(encodeVarint(7), encodeVarint(8));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(packedIds.length)), box(packedIds));
+    Byte[] middleWithInner = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+    Byte[] middleWithoutInner = new Byte[] {};
+    Byte[][] rows = new Byte[][] {
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithInner)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithoutInner))
+    };
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRUCT).down()
+                         .addField(1, DType.INT32).repeated()
+                     .up()
+                 .up()
+                 .build(),
+             false);
+         ColumnVector middle = actual.getChildColumnView(0).copyToColumnVector();
+         ColumnVector innerStruct = middle.getChildColumnView(0).copyToColumnVector();
+         ColumnView ids = innerStruct.getChildColumnView(0);
+         ColumnView idsOffsetsView = ids.getListOffsetsView();
+         ColumnVector idsOffsets = idsOffsetsView.copyToColumnVector();
+         ColumnView idValues = ids.getChildColumnView(0);
+         HostColumnVector hostMiddle = middle.copyToHost();
+         HostColumnVector hostInner = innerStruct.copyToHost();
+         HostColumnVector hostIds = ids.copyToHost();
+         HostColumnVector hostIdsOffsets = idsOffsets.copyToHost();
+         HostColumnVector hostIdValues = idValues.copyToHost()) {
+      assertEquals(0, actual.getNullCount(), "Both rows have a present middle message");
+      assertEquals(0, middle.getNullCount(), "Middle should be present for both rows");
+      assertFalse(hostMiddle.isNull(0));
+      assertFalse(hostMiddle.isNull(1));
+      assertFalse(hostInner.isNull(0), "Inner should be present for row 0");
+      assertTrue(hostInner.isNull(1), "Inner should be null when the immediate parent is absent");
+      assertFalse(hostIds.isNull(0), "Present inner should produce a valid repeated list");
+      assertTrue(hostIds.isNull(1), "Missing immediate parent should produce a null repeated list");
+      assertEquals(0, hostIdsOffsets.getInt(0));
+      assertEquals(2, hostIdsOffsets.getInt(1));
+      assertEquals(2, hostIdsOffsets.getInt(2));
+      assertEquals(7, hostIdValues.getInt(0));
+      assertEquals(8, hostIdValues.getInt(1));
     }
   }
 
