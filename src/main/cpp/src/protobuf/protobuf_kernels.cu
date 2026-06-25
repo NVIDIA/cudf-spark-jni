@@ -616,10 +616,12 @@ CUDF_KERNEL void count_repeated_in_nested_kernel(uint8_t const* message_data,
   auto row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= num_rows) return;
 
-  for (int ri = 0; ri < num_repeated; ri++) {
-    repeated_info[flat_index(
-      static_cast<size_t>(row), static_cast<size_t>(num_repeated), static_cast<size_t>(ri))] = {0};
+  if (num_repeated != 1) {
+    set_error_once(error_flag, protobuf_error::SCHEMA_TOO_LARGE);
+    return;
   }
+
+  repeated_info[static_cast<size_t>(row)] = {0};
 
   auto const& parent_loc = parent_locs[row];
   if (parent_loc.offset < 0) return;
@@ -629,40 +631,40 @@ CUDF_KERNEL void count_repeated_in_nested_kernel(uint8_t const* message_data,
   int64_t const msg_end_off   = msg_start_off + parent_loc.length;
   if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) { return; }
 
-  if (num_repeated > MAX_REPEATED_FIELDS_PER_KERNEL) {
-    set_error_once(error_flag, protobuf_error::SCHEMA_TOO_LARGE);
-    return;
-  }
-
   uint8_t const* const msg_start = message_data + msg_start_off;
   uint8_t const* const msg_end   = msg_start + parent_loc.length;
 
-  field_descriptor fd[MAX_REPEATED_FIELDS_PER_KERNEL];
-  for (int ri = 0; ri < num_repeated; ri++) {
-    int si = repeated_indices[ri];
-    fd[ri] = {schema[si].field_number, schema[si].wire_type, true};
-  }
+  int const schema_idx         = repeated_indices[0];
+  field_descriptor repeated_fd = {
+    schema[schema_idx].field_number, schema[schema_idx].wire_type, true};
 
-  auto lookup_by_fn = [&fd, num_repeated](int fn) {
-    for (int ri = 0; ri < num_repeated; ri++) {
-      if (fd[ri].field_number == fn) return ri;
-    }
-    return -1;
+  auto lookup_by_fn = [repeated_fd](int field_number) {
+    return repeated_fd.field_number == field_number ? 0 : -1;
   };
-  auto is_repeated_field      = []([[maybe_unused]] int ri) { return true; };
-  auto get_expected_wire_type = [&](int ri) { return fd[ri].expected_wire_type; };
+  auto is_repeated_field      = []([[maybe_unused]] int field_idx) { return true; };
+  auto get_expected_wire_type = [repeated_fd]([[maybe_unused]] int field_idx) {
+    return repeated_fd.expected_wire_type;
+  };
 
-  auto on_repeated_count =
-    [&](int ri, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
-      auto& info        = repeated_info[flat_index(
-        static_cast<size_t>(row), static_cast<size_t>(num_repeated), static_cast<size_t>(ri))];
-      auto count_action = [&info]([[maybe_unused]] int32_t, [[maybe_unused]] int32_t) {
-        info.count++;
-        return true;
-      };
-      return walk_repeated_element(
-        cur, me, mb, wt, get_expected_wire_type(ri), error_flag, count_action);
+  auto on_repeated_count = [&](int field_idx,
+                               uint8_t const* current,
+                               uint8_t const* message_end,
+                               uint8_t const* message_base,
+                               int wire_type) {
+    auto& info        = repeated_info[flat_index(
+      static_cast<size_t>(row), static_cast<size_t>(num_repeated), static_cast<size_t>(field_idx))];
+    auto count_action = [&info]([[maybe_unused]] int32_t, [[maybe_unused]] int32_t) {
+      info.count++;
+      return true;
     };
+    return walk_repeated_element(current,
+                                 message_end,
+                                 message_base,
+                                 wire_type,
+                                 get_expected_wire_type(field_idx),
+                                 error_flag,
+                                 count_action);
+  };
 
   scan_message_field_locations(msg_start,
                                msg_end,
@@ -707,28 +709,41 @@ CUDF_KERNEL void scan_repeated_in_nested_kernel(uint8_t const* message_data,
   uint8_t const* const msg_start = message_data + msg_start_off;
   uint8_t const* const msg_end   = msg_start + parent_loc.length;
 
-  int const schema_idx  = repeated_indices[0];
-  field_descriptor fd[] = {{schema[schema_idx].field_number, schema[schema_idx].wire_type, true}};
+  int const schema_idx         = repeated_indices[0];
+  field_descriptor repeated_fd = {
+    schema[schema_idx].field_number, schema[schema_idx].wire_type, true};
 
-  auto lookup_by_fn           = [&fd](int fn) { return fd[0].field_number == fn ? 0 : -1; };
-  auto is_repeated_field      = []([[maybe_unused]] int) { return true; };
-  auto get_expected_wire_type = [&](int) { return fd[0].expected_wire_type; };
+  auto lookup_by_fn = [repeated_fd](int field_number) {
+    return repeated_fd.field_number == field_number ? 0 : -1;
+  };
+  auto is_repeated_field      = []([[maybe_unused]] int field_idx) { return true; };
+  auto get_expected_wire_type = [repeated_fd]([[maybe_unused]] int field_idx) {
+    return repeated_fd.expected_wire_type;
+  };
 
-  auto const row_i32 = static_cast<int32_t>(row);
-  auto on_repeated_scan =
-    [&](int f, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
-      auto scan_action = [&](int32_t off, int32_t len) {
-        if (write_idx >= write_end) {
-          set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
-          return false;
-        }
-        occurrences[write_idx] = {row_i32, off, len};
-        write_idx++;
-        return true;
-      };
-      return walk_repeated_element(
-        cur, me, mb, wt, get_expected_wire_type(f), error_flag, scan_action);
+  auto const row_i32    = static_cast<int32_t>(row);
+  auto on_repeated_scan = [&](int field_idx,
+                              uint8_t const* current,
+                              uint8_t const* message_end,
+                              uint8_t const* message_base,
+                              int wire_type) {
+    auto scan_action = [&](int32_t off, int32_t len) {
+      if (write_idx >= write_end) {
+        set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+        return false;
+      }
+      occurrences[write_idx] = {row_i32, off, len};
+      write_idx++;
+      return true;
     };
+    return walk_repeated_element(current,
+                                 message_end,
+                                 message_base,
+                                 wire_type,
+                                 get_expected_wire_type(field_idx),
+                                 error_flag,
+                                 scan_action);
+  };
 
   scan_message_field_locations(msg_start,
                                msg_end,

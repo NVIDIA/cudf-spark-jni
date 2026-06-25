@@ -20,8 +20,15 @@
 #include <cudf/lists/detail/lists_column_factories.hpp>
 #include <cudf/strings/detail/strings_column_factories.cuh>
 
+#include <thrust/fill.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/reduce.h>
+#include <thrust/scan.h>
+#include <thrust/transform.h>
+
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -853,15 +860,22 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                  d_error.data(),
                                  stream);
 
-  rmm::device_uvector<int32_t> d_top_row_indices(total_count, stream, scratch_mr);
-  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
-                    d_occurrences.begin(),
-                    d_occurrences.end(),
-                    d_top_row_indices.begin(),
-                    [top_row_indices] __device__(repeated_occurrence const& occ) {
-                      return top_row_indices != nullptr ? top_row_indices[occ.row_idx]
-                                                        : occ.row_idx;
-                    });
+  std::unique_ptr<rmm::device_uvector<int32_t>> d_top_row_indices;
+  auto get_top_row_indices = [&]() -> int32_t const* {
+    if (d_top_row_indices == nullptr) {
+      d_top_row_indices =
+        std::make_unique<rmm::device_uvector<int32_t>>(total_count, stream, scratch_mr);
+      thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
+                        d_occurrences.begin(),
+                        d_occurrences.end(),
+                        d_top_row_indices->begin(),
+                        [top_row_indices] __device__(repeated_occurrence const& occ) {
+                          return top_row_indices != nullptr ? top_row_indices[occ.row_idx]
+                                                            : occ.row_idx;
+                        });
+    }
+    return d_top_row_indices->data();
+  };
 
   auto const blocks = static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   nested_repeated_location_provider loc_provider{
@@ -878,27 +892,32 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
     case cudf::type_id::FLOAT32:
     case cudf::type_id::FLOAT64: {
       auto empty_default = cudf::detail::make_pinned_vector_async<uint8_t>(0, stream);
-      child_values       = extract_typed_column(elem_type,
-                                          enc,
-                                          message_data,
-                                          loc_provider,
-                                          total_count,
-                                          blocks,
-                                          THREADS_PER_BLOCK,
-                                          false,
-                                          0,
-                                          0.0,
-                                          false,
-                                          empty_default,
-                                          child_schema_idx,
-                                          ctx.enum_valid_values,
-                                          ctx.enum_names,
-                                          d_row_force_null,
-                                          d_error,
-                                          stream,
-                                          mr,
-                                          d_top_row_indices.data(),
-                                          propagate_invalid_enum_rows);
+      bool const is_numeric_enum =
+        elem_type.id() == cudf::type_id::INT32 &&
+        child_schema_idx < static_cast<int>(ctx.enum_valid_values.size()) &&
+        !ctx.enum_valid_values[child_schema_idx].empty();
+      child_values = extract_typed_column(
+        elem_type,
+        enc,
+        message_data,
+        loc_provider,
+        total_count,
+        blocks,
+        THREADS_PER_BLOCK,
+        false,
+        0,
+        0.0,
+        false,
+        empty_default,
+        child_schema_idx,
+        ctx.enum_valid_values,
+        ctx.enum_names,
+        d_row_force_null,
+        d_error,
+        stream,
+        mr,
+        is_numeric_enum && propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
+        propagate_invalid_enum_rows);
       break;
     }
     case cudf::type_id::STRING:
@@ -917,16 +936,17 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                              d_error.data(),
                                                              false,
                                                              0);
-        child_values = build_enum_string_column(out,
-                                                valid,
-                                                ctx.enum_valid_values[child_schema_idx],
-                                                ctx.enum_names[child_schema_idx],
-                                                d_row_force_null,
-                                                total_count,
-                                                stream,
-                                                mr,
-                                                d_top_row_indices.data(),
-                                                propagate_invalid_enum_rows);
+        child_values =
+          build_enum_string_column(out,
+                                   valid,
+                                   ctx.enum_valid_values[child_schema_idx],
+                                   ctx.enum_names[child_schema_idx],
+                                   d_row_force_null,
+                                   total_count,
+                                   stream,
+                                   mr,
+                                   propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
+                                   propagate_invalid_enum_rows);
       } else {
         auto valid_fn      = [] __device__(cudf::size_type) { return true; };
         auto empty_default = cudf::detail::make_pinned_vector_async<uint8_t>(0, stream);
