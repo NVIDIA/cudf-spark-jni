@@ -18,8 +18,31 @@
 # This special Java executable is specified to the "jvm" configuration of the
 # the surefire plugin to intercept forking the processes for tests. Then
 # the tests will run with the compute-sanitizer tool.
-exec compute-sanitizer --tool memcheck \
+set -o pipefail
+
+marker=$(mktemp "./sanitizer_log_marker.XXXXXX")
+trap 'rm -f "$marker"' EXIT
+
+compute-sanitizer --tool memcheck \
     --launch-timeout 600 \
     --error-exitcode -2 \
     --log-file "./sanitizer_for_pid_%p.log" \
     java "$@"
+status=$?
+
+if [[ $status -ne 0 ]]; then
+    echo "compute-sanitizer failed with exit code $status." >&2
+
+    found_logs=false
+    while IFS= read -r sanitizer_log; do
+        found_logs=true
+        echo "===== $sanitizer_log =====" >&2
+        cat "$sanitizer_log" >&2
+    done < <(find . -maxdepth 1 -type f -name 'sanitizer_for_pid_*.log' -newer "$marker" | sort)
+
+    if [[ $found_logs == false ]]; then
+        echo "No sanitizer_for_pid_*.log files were created for this fork." >&2
+    fi
+fi
+
+exit $status
