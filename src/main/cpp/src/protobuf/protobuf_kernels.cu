@@ -581,9 +581,9 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
   auto get_expected_wire_type = [&](int f) { return field_descs[f].expected_wire_type; };
   auto validate_repeated =
     [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
-      // Values come from the dedicated nested repeated path; here we only validate the occurrence
-      // so strict/permissive errors surface.
       auto const expected_wire_type = get_expected_wire_type(f);
+      // Values come from the dedicated nested repeated path; here we only validate compatible
+      // occurrences so malformed payloads surface while wrong-wire occurrences remain unknown.
       if (!repeated_wire_type_matches(wt, expected_wire_type)) { return true; }
       auto noop = []([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) { return true; };
       return walk_repeated_element(
