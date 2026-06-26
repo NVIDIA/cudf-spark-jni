@@ -21,6 +21,8 @@ import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.NativeDepsLoader;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -31,15 +33,16 @@ public class VariantUtils {
     NativeDepsLoader.loadNativeDeps();
   }
 
+  private static final List<DType> SUPPORTED_TYPES = Arrays.asList(
+      DType.STRING, DType.INT8, DType.INT16, DType.INT32, DType.INT64);
+
   private VariantUtils() {}
 
   private static void validateTargetType(DType targetType) {
     Objects.requireNonNull(targetType, "targetType");
-    if (!targetType.equals(DType.STRING) && !targetType.equals(DType.INT8) &&
-        !targetType.equals(DType.INT16) && !targetType.equals(DType.INT32) &&
-        !targetType.equals(DType.INT64)) {
+    if (!SUPPORTED_TYPES.contains(targetType)) {
       throw new IllegalArgumentException("unsupported Variant target type: " + targetType +
-          "; supported types are STRING, INT8, INT16, INT32, and INT64");
+          "; supported types are " + SUPPORTED_TYPES);
     }
   }
 
@@ -63,6 +66,7 @@ public class VariantUtils {
    * {@link DType#INT64}.
    */
   public static ColumnVector castVariantValue(ColumnView valueBytes, DType targetType) {
+    Objects.requireNonNull(valueBytes, "valueBytes");
     validateTargetType(targetType);
     return new ColumnVector(castVariantValue(
         valueBytes.getNativeView(), targetType.getTypeId().getNativeId()));
@@ -81,17 +85,6 @@ public class VariantUtils {
         variantStruct.getNativeView(), path, targetType.getTypeId().getNativeId()));
   }
 
-  /**
-   * Returns true when this JNI library was built against cuDF with Variant extraction APIs.
-   */
-  public static boolean isAvailable() {
-    try {
-      return isAvailableNative();
-    } catch (UnsatisfiedLinkError e) {
-      return false;
-    }
-  }
-
   private static native long getVariantFieldValue(long variantStructHandle, String path);
 
   private static native long castVariantValue(long valueBytesHandle, int cudfTypeId);
@@ -99,5 +92,4 @@ public class VariantUtils {
   private static native long extractVariantField(
       long variantStructHandle, String path, int cudfTypeId);
 
-  private static native boolean isAvailableNative();
 }

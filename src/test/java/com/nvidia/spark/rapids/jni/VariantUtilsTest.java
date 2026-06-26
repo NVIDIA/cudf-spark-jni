@@ -32,7 +32,6 @@ import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class VariantUtilsTest {
   private static final ListType BINARY_TYPE =
@@ -93,9 +92,13 @@ public class VariantUtilsTest {
         variant(m3, v3));
   }
 
-  @Test
-  void isAvailable() {
-    assertTrue(VariantUtils.isAvailable());
+  private static ColumnVector makeExactWidthIntVariantColumn() {
+    List<Byte> metadata = bytes(0x01, 0x02, 0x00, 0x01, 0x02, 'b', 'l');
+    List<Byte> value = bytes(
+        0x02, 0x02, 0x00, 0x01, 0x00, 0x02, 0x0b,
+        0x0c, 0x2a,
+        0x18, 0x15, 0x81, 0xe9, 0x7d, 0xf4, 0x10, 0x22, 0x11);
+    return ColumnVector.fromStructs(VARIANT_TYPE, variant(metadata, value));
   }
 
   @Test
@@ -141,6 +144,24 @@ public class VariantUtilsTest {
          ColumnVector result = VariantUtils.extractVariantField(
              variant, "$.species.population", DType.INT16);
          ColumnVector expected = ColumnVector.fromBoxedShorts((short) 6789)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void extractInt8Field() {
+    try (ColumnVector variant = makeExactWidthIntVariantColumn();
+         ColumnVector result = VariantUtils.extractVariantField(variant, "b", DType.INT8);
+         ColumnVector expected = ColumnVector.fromBoxedBytes((byte) 42)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void extractInt64Field() {
+    try (ColumnVector variant = makeExactWidthIntVariantColumn();
+         ColumnVector result = VariantUtils.extractVariantField(variant, "l", DType.INT64);
+         ColumnVector expected = ColumnVector.fromBoxedLongs(1234567890123456789L)) {
       assertColumnsAreEqual(expected, result);
     }
   }
@@ -205,8 +226,12 @@ public class VariantUtilsTest {
   }
 
   @Test
-  void nullTargetTypeThrows() {
+  void nullCastArgumentsThrow() {
     assertThrows(NullPointerException.class, () -> VariantUtils.castVariantValue(null, null));
+    assertThrows(NullPointerException.class,
+        () -> VariantUtils.castVariantValue(null, DType.INT32));
+    assertThrows(NullPointerException.class,
+        () -> VariantUtils.castVariantValue(null, DType.FLOAT64));
   }
 
   @Test
