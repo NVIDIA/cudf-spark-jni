@@ -1229,7 +1229,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                  schema,
                                                  num_fields,
                                                  schema_ctx,
-                                                 {d_row_force_null, d_error, false},
+                                                 {&d_row_force_null, &d_error, false},
                                                  0,
                                                  stream,
                                                  mr);

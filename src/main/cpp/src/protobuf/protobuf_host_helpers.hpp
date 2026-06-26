@@ -74,8 +74,8 @@ struct nested_parent_view {
 };
 
 struct protobuf_decode_state {
-  rmm::device_uvector<bool>& row_force_null;
-  rmm::device_uvector<protobuf_error>& error;
+  rmm::device_uvector<bool>* row_force_null;
+  rmm::device_uvector<protobuf_error>* error;
   bool propagate_invalid_enum_rows;
 };
 

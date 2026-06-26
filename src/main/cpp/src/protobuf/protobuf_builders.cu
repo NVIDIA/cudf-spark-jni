@@ -48,6 +48,8 @@ inline rmm::device_uvector<int32_t> make_list_offsets_from_counts(
   CUDF_EXPECTS(total_count >= 0, "make_list_offsets_from_counts: total count must be non-negative");
   CUDF_EXPECTS(counts.size() == static_cast<size_t>(num_rows),
                "make_list_offsets_from_counts: counts size must match row count");
+  CUDF_EXPECTS(num_rows > 0 || total_count == 0,
+               "make_list_offsets_from_counts: empty input cannot have repeated elements");
 
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
   if (num_rows > 0) {
@@ -83,6 +85,13 @@ inline void validate_nested_parent_view(nested_parent_view parent, char const* c
                std::string{caller} + ": parent locations size must match row count");
   CUDF_EXPECTS(parent.locations != nullptr || parent.num_rows == 0,
                std::string{caller} + ": parent locations must be non-null for non-empty input");
+}
+
+inline void validate_protobuf_decode_state(protobuf_decode_state state, char const* caller)
+{
+  CUDF_EXPECTS(state.row_force_null != nullptr,
+               std::string{caller} + ": row-force-null buffer must be non-null");
+  CUDF_EXPECTS(state.error != nullptr, std::string{caller} + ": error buffer must be non-null");
 }
 
 inline rmm::device_uvector<device_nested_field_descriptor> make_single_repeated_field_schema(
@@ -566,10 +575,11 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   CUDF_EXPECTS(depth < MAX_NESTING_DEPTH,
                "Nested protobuf struct depth exceeds supported decode recursion limit");
   validate_nested_parent_view(parent, "build_nested_struct_column");
+  validate_protobuf_decode_state(state, "build_nested_struct_column");
   // row_force_null comes from the caller; empty means "don't track", otherwise it must be
   // row-aligned since the scan/extract kernels index it by row.
-  CUDF_EXPECTS(state.row_force_null.is_empty() ||
-                 state.row_force_null.size() == static_cast<size_t>(parent.num_rows),
+  CUDF_EXPECTS(state.row_force_null->is_empty() ||
+                 state.row_force_null->size() == static_cast<size_t>(parent.num_rows),
                "build_nested_struct_column: row-force-null buffer must be empty or row-sized");
 
   if (parent.num_rows == 0) {
@@ -618,8 +628,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     d_child_field_descs.data(),
     num_child_fields,
     d_child_locations.data(),
-    state.error.data(),
-    !state.row_force_null.is_empty() ? state.row_force_null.data() : nullptr,
+    state.error->data(),
+    !state.row_force_null->is_empty() ? state.row_force_null->data() : nullptr,
     parent.top_row_indices,
     stream);
 
@@ -631,9 +641,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     nullptr,
     0,
     parent.locations,
-    !state.row_force_null.is_empty() ? state.row_force_null.data() : nullptr,
+    !state.row_force_null->is_empty() ? state.row_force_null->data() : nullptr,
     parent.top_row_indices,
-    state.error.data(),
+    state.error->data(),
     stream);
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
@@ -680,8 +690,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                        child_schema_idx,
                                                        ctx.enum_valid_values,
                                                        ctx.enum_names,
-                                                       state.row_force_null,
-                                                       state.error,
+                                                       *state.row_force_null,
+                                                       *state.error,
                                                        stream,
                                                        mr,
                                                        parent.top_row_indices,
@@ -701,7 +711,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                      parent.num_rows,
                                                      out.data(),
                                                      valid.data(),
-                                                     state.error.data(),
+                                                     state.error->data(),
                                                      has_def,
                                                      ctx.default_ints[child_schema_idx]);
           struct_children.push_back(
@@ -709,7 +719,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                      valid,
                                      ctx.enum_valid_values[child_schema_idx],
                                      ctx.enum_names[child_schema_idx],
-                                     state.row_force_null,
+                                     *state.row_force_null,
                                      parent.num_rows,
                                      stream,
                                      mr,
@@ -728,7 +738,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                      valid_fn,
                                                      has_def,
                                                      ctx.default_strings[child_schema_idx],
-                                                     state.error,
+                                                     *state.error,
                                                      stream,
                                                      mr));
         }
@@ -744,7 +754,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                    num_child_fields,
                                                    d_gc_parent_locs.data(),
                                                    parent.num_rows,
-                                                   state.error.data(),
+                                                   state.error->data(),
                                                    stream);
         struct_children.push_back(build_nested_struct_column(input,
                                                              {d_gc_parent_locs.data(),
@@ -790,6 +800,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   rmm::device_async_resource_ref mr)
 {
   validate_nested_parent_view(parent, "build_repeated_child_list_column");
+  validate_protobuf_decode_state(state, "build_repeated_child_list_column");
   CUDF_EXPECTS(schema[child_schema_idx].is_repeated,
                "nested repeated child builder requires a repeated child schema");
   auto const elem_type = cudf::data_type{schema[child_schema_idx].output_type};
@@ -809,7 +820,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                   parent.num_rows,
                                   d_repeated_field.data(),
                                   d_rep_info.data(),
-                                  state.error.data(),
+                                  state.error->data(),
                                   stream);
 
   rmm::device_uvector<int32_t> d_rep_counts(parent.num_rows, stream, scratch_mr);
@@ -852,7 +863,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                  d_repeated_field.data(),
                                  list_offsets.data(),
                                  d_occurrences.data(),
-                                 state.error.data(),
+                                 state.error->data(),
                                  stream);
 
   std::unique_ptr<rmm::device_uvector<int32_t>> d_top_row_indices;
@@ -908,8 +919,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
         child_schema_idx,
         ctx.enum_valid_values,
         ctx.enum_names,
-        state.row_force_null,
-        state.error,
+        *state.row_force_null,
+        *state.error,
         stream,
         mr,
         is_numeric_enum && state.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
@@ -929,7 +940,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                              total_count,
                                                              out.data(),
                                                              valid.data(),
-                                                             state.error.data(),
+                                                             state.error->data(),
                                                              false,
                                                              0);
         child_values = build_enum_string_column(
@@ -937,7 +948,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
           valid,
           ctx.enum_valid_values[child_schema_idx],
           ctx.enum_names[child_schema_idx],
-          state.row_force_null,
+          *state.row_force_null,
           total_count,
           stream,
           mr,
@@ -955,7 +966,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                                                    valid_fn,
                                                    false,
                                                    empty_default,
-                                                   state.error,
+                                                   *state.error,
                                                    stream,
                                                    mr);
       }
