@@ -29,6 +29,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -52,6 +53,30 @@ struct schema_context_view {
   std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings;
   std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names;
+};
+
+// ============================================================================
+// Nested decode view bundles
+// ============================================================================
+
+struct protobuf_input_view {
+  uint8_t const* message_data;
+  cudf::size_type message_data_size;
+  cudf::size_type const* row_offsets;
+  cudf::size_type base_offset;
+};
+
+struct nested_parent_view {
+  field_location const* locations;
+  std::size_t location_count;
+  int num_rows;
+  int32_t const* top_row_indices;
+};
+
+struct protobuf_decode_state {
+  rmm::device_uvector<bool>& row_force_null;
+  rmm::device_uvector<protobuf_error>& error;
+  bool propagate_invalid_enum_rows;
 };
 
 // ============================================================================
@@ -308,40 +333,26 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_nested_struct_column(
-  uint8_t const* message_data,
-  cudf::size_type message_data_size,
-  cudf::size_type const* list_offsets,
-  cudf::size_type base_offset,
-  rmm::device_uvector<field_location> const& d_parent_locs,
+  protobuf_input_view input,
+  nested_parent_view parent,
   std::vector<int> const& child_field_indices,
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
   schema_context_view ctx,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error,
-  int num_rows,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices,
+  protobuf_decode_state state,
   int depth,
-  bool propagate_invalid_enum_rows = true);
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_repeated_child_list_column(
-  uint8_t const* message_data,
-  cudf::size_type message_data_size,
-  cudf::size_type const* row_offsets,
-  cudf::size_type base_offset,
-  field_location const* parent_locs,
-  int num_parent_rows,
+  protobuf_input_view input,
+  nested_parent_view parent,
   int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
   schema_context_view ctx,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error,
+  protobuf_decode_state state,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices,
-  bool propagate_invalid_enum_rows = true);
+  rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::column_view const& binary_input,
