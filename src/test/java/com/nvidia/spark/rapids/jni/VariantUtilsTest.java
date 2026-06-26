@@ -205,6 +205,11 @@ public class VariantUtilsTest {
   }
 
   @Test
+  void nullTargetTypeThrows() {
+    assertThrows(NullPointerException.class, () -> VariantUtils.castVariantValue(null, null));
+  }
+
+  @Test
   void parentStructNullIsPreserved() {
     List<Byte> metadata = bytes(0x01, 0x01, 0x00, 0x01, 'x');
     List<Byte> value = bytes(0x02, 0x01, 0x00, 0x00, 0x05, 0x14, 0x07, 0x00, 0x00, 0x00);

@@ -35,8 +35,9 @@ public class VariantUtils {
 
   private static void validateTargetType(DType targetType) {
     Objects.requireNonNull(targetType, "targetType");
-    if (targetType != DType.STRING && targetType != DType.INT8 && targetType != DType.INT16 &&
-        targetType != DType.INT32 && targetType != DType.INT64) {
+    if (!targetType.equals(DType.STRING) && !targetType.equals(DType.INT8) &&
+        !targetType.equals(DType.INT16) && !targetType.equals(DType.INT32) &&
+        !targetType.equals(DType.INT64)) {
       throw new IllegalArgumentException("unsupported Variant target type: " + targetType +
           "; supported types are STRING, INT8, INT16, INT32, and INT64");
     }
@@ -52,6 +53,7 @@ public class VariantUtils {
    * @return LIST&lt;UINT8&gt; column of raw encoded Variant values
    */
   public static ColumnVector getVariantFieldValue(ColumnView variantStruct, String path) {
+    Objects.requireNonNull(path, "path");
     return new ColumnVector(getVariantFieldValue(variantStruct.getNativeView(), path));
   }
 
@@ -73,6 +75,7 @@ public class VariantUtils {
    */
   public static ColumnVector extractVariantField(
       ColumnView variantStruct, String path, DType targetType) {
+    Objects.requireNonNull(path, "path");
     validateTargetType(targetType);
     return new ColumnVector(extractVariantField(
         variantStruct.getNativeView(), path, targetType.getTypeId().getNativeId()));
