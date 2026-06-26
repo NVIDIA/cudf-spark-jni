@@ -221,6 +221,14 @@ public class VariantUtilsTest {
   }
 
   @Test
+  void nullVariantStructThrows() {
+    assertThrows(NullPointerException.class,
+        () -> VariantUtils.getVariantFieldValue(null, "x"));
+    assertThrows(NullPointerException.class,
+        () -> VariantUtils.extractVariantField(null, "x", DType.INT32));
+  }
+
+  @Test
   void unsupportedTargetTypeThrows() {
     try (ColumnVector variant = makeXyzVariantColumn();
          ColumnVector valueBytes = VariantUtils.getVariantFieldValue(variant, "x")) {

@@ -56,6 +56,7 @@ public class VariantUtils {
    * @return LIST&lt;UINT8&gt; column of raw encoded Variant values
    */
   public static ColumnVector getVariantFieldValue(ColumnView variantStruct, String path) {
+    Objects.requireNonNull(variantStruct, "variantStruct");
     Objects.requireNonNull(path, "path");
     return new ColumnVector(getVariantFieldValue(variantStruct.getNativeView(), path));
   }
@@ -79,6 +80,7 @@ public class VariantUtils {
    */
   public static ColumnVector extractVariantField(
       ColumnView variantStruct, String path, DType targetType) {
+    Objects.requireNonNull(variantStruct, "variantStruct");
     Objects.requireNonNull(path, "path");
     validateTargetType(targetType);
     return new ColumnVector(extractVariantField(
