@@ -80,4 +80,10 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_VariantUtils_extractVar
   JNI_CATCH(env, 0);
 }
 
+JNIEXPORT jboolean JNICALL Java_com_nvidia_spark_rapids_jni_VariantUtils_isAvailableNative(JNIEnv*,
+                                                                                           jclass)
+{
+  return JNI_TRUE;
+}
+
 }  // extern "C"

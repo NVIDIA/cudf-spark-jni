@@ -32,6 +32,7 @@ import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class VariantUtilsTest {
   private static final ListType BINARY_TYPE =
@@ -90,6 +91,11 @@ public class VariantUtilsTest {
         variant(m1, v1),
         variant(m2, v2),
         variant(m3, v3));
+  }
+
+  @Test
+  void isAvailable() {
+    assertTrue(VariantUtils.isAvailable());
   }
 
   private static ColumnVector makeExactWidthIntVariantColumn() {

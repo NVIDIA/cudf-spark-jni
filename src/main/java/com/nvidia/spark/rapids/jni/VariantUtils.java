@@ -85,6 +85,17 @@ public class VariantUtils {
         variantStruct.getNativeView(), path, targetType.getTypeId().getNativeId()));
   }
 
+  /**
+   * Returns true when the loaded JNI library exposes the Variant extraction entry points.
+   */
+  public static boolean isAvailable() {
+    try {
+      return isAvailableNative();
+    } catch (UnsatisfiedLinkError e) {
+      return false;
+    }
+  }
+
   private static native long getVariantFieldValue(long variantStructHandle, String path);
 
   private static native long castVariantValue(long valueBytesHandle, int cudfTypeId);
@@ -92,4 +103,5 @@ public class VariantUtils {
   private static native long extractVariantField(
       long variantStructHandle, String path, int cudfTypeId);
 
+  private static native boolean isAvailableNative();
 }
