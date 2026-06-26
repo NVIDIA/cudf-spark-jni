@@ -37,7 +37,7 @@
 using column                   = cudf::column;
 using column_device_view       = cudf::column_device_view;
 using column_view              = cudf::column_view;
-using lists_column_device_view = cudf::detail::lists_column_device_view;
+using lists_column_device_view = cudf::lists_column_device_view;
 using size_type                = cudf::size_type;
 using struct_view              = cudf::struct_view;
 using table_view               = cudf::table_view;
@@ -91,7 +91,7 @@ auto convert_timestamp_tz(column_view const& input,
 
   // get the DST rules
   auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::detail::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -205,7 +205,7 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
 
   // get DST rules
   auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::detail::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             input_seconds.size(),

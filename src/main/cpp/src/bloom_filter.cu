@@ -254,7 +254,7 @@ struct bloom_filter_same {
   /// V2 uses [0..3]: version, num_hashes, seed, num_longs.
   int32_t raw_header[4];
   int header_field_count;
-  cudf::detail::lists_column_device_view ldv;
+  cudf::lists_column_device_view ldv;
   cudf::size_type stride;
 
   bool __device__ operator()(cudf::size_type i)

@@ -126,9 +126,9 @@ class murmur_device_row_hasher {
         if (curr_col.type().id() == cudf::type_id::STRUCT) {
           if (curr_col.num_child_columns() == 0) { return _seed; }
           // Non-empty structs are assumed to be decomposed and contain only one child
-          curr_col = cudf::detail::structs_column_device_view(curr_col).get_sliced_child(0);
+          curr_col = cudf::structs_column_device_view(curr_col).get_sliced_child(0);
         } else if (curr_col.type().id() == cudf::type_id::LIST) {
-          curr_col = cudf::detail::lists_column_device_view(curr_col).get_sliced_child();
+          curr_col = cudf::lists_column_device_view(curr_col).get_sliced_child();
         }
       }
 

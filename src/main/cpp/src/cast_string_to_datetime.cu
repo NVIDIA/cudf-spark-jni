@@ -722,10 +722,10 @@ struct parse_timestamp_string_fn {
   cudf::column_device_view tz_name_to_index_map;
   // Fixed offset transitions in the timezone table
   // Column type is LIST<STRUCT<utcInstant: int64, tzInstant: int64, utcOffset: int32>>.
-  cudf::detail::lists_column_device_view fixed_transitions;
+  cudf::lists_column_device_view fixed_transitions;
   // DST rules in the timezone table
   // column type is LIST<INT>, if it's DST, 12 integers defines two rules
-  cudf::detail::lists_column_device_view dst_rules;
+  cudf::lists_column_device_view dst_rules;
 
   // outputs
   // parsed result types: not supported, invalid, success
@@ -905,11 +905,11 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
 
   // get the fixed transitions
   auto const ft_cdv_ptr        = cudf::column_device_view::create(tz_info_table.column(0), stream);
-  auto const fixed_transitions = cudf::detail::lists_column_device_view{*ft_cdv_ptr};
+  auto const fixed_transitions = cudf::lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
   auto const dst_cdv_ptr = cudf::column_device_view::create(tz_info_table.column(1), stream);
-  auto const dst_rules   = cudf::detail::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   thrust::for_each_n(
     rmm::exec_policy_nosync(stream),
