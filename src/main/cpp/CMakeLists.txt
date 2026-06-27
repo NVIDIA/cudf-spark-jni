@@ -131,10 +131,16 @@ else()
   message(FATAL_ERROR "JDK with JNI not found, please check your settings.")
 endif()
 
-# cudf
+# cudf. GoogleTest is only needed by the JNI's own gtest binaries, so keep it under BUILD_TESTS.
 if(BUILD_TESTS)
   include(${rapids-cmake-dir}/cpm/gtest.cmake)
   rapids_cpm_gtest(BUILD_STATIC)
+endif()
+
+# Benchmarks link cudf::cudftestutil (cudf's "testing" component; the headers they use are
+# gtest-free), so request that component when either tests or benchmarks are built. The JNI test
+# binaries below stay gated on BUILD_TESTS, so a bench-only build pays for neither them nor gtest.
+if(BUILD_TESTS OR BUILD_BENCHMARKS)
   rapids_find_package(cudf REQUIRED COMPONENTS testing)
 else()
   rapids_find_package(cudf REQUIRED)
