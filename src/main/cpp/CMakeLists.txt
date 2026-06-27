@@ -99,6 +99,23 @@ rapids_find_package(CUDAToolkit REQUIRED)
 # Set a default build type if none was specified
 rapids_cmake_build_type("Release")
 
+set(SPARK_RAPIDS_JNI_STRICT_CXX_WARNING_FLAGS
+    -Wshadow
+    -Wnon-virtual-dtor
+    -Woverloaded-virtual
+)
+set(SPARK_RAPIDS_JNI_STRICT_CUDA_WARNING_FLAGS
+    -Xcompiler=-Wshadow,-Wnon-virtual-dtor,-Woverloaded-virtual
+)
+
+function(spark_rapids_jni_add_strict_warning_flags target_name)
+  target_compile_options(
+    ${target_name}
+    PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${SPARK_RAPIDS_JNI_STRICT_CXX_WARNING_FLAGS}>"
+            "$<$<COMPILE_LANGUAGE:CUDA>:${SPARK_RAPIDS_JNI_STRICT_CUDA_WARNING_FLAGS}>"
+  )
+endfunction()
+
 # ##################################################################################################
 # * dependencies ----------------------------------------------------------------------------------
 
@@ -309,6 +326,7 @@ target_compile_options(
   spark_rapids_jni PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_FLAGS}>"
                            "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>"
 )
+spark_rapids_jni_add_strict_warning_flags(spark_rapids_jni)
 
 # Specify include paths for the current target and dependents
 target_include_directories(
@@ -354,6 +372,7 @@ set_target_properties(spark_rapids_jni PROPERTIES OUTPUT_NAME "cudf")
 
 add_library(cudfjnistub SHARED src/emptyfile.cpp)
 set_target_properties(cudfjnistub PROPERTIES OUTPUT_NAME "cudfjni")
+spark_rapids_jni_add_strict_warning_flags(cudfjnistub)
 target_link_libraries(cudfjnistub -Wl,--no-as-needed $<TARGET_FILE:spark_rapids_jni> -Wl,--as-needed)
 add_dependencies(cudfjnistub spark_rapids_jni)
 
@@ -379,6 +398,7 @@ target_include_directories(
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 
+spark_rapids_jni_add_strict_warning_flags(nvmljni)
 target_link_libraries(nvmljni nvidia-ml)
 
 # ##################################################################################################
@@ -411,6 +431,7 @@ if(USE_GDS)
     spark_rapids_jni
     CUDA::cuFile_static
   )
+  spark_rapids_jni_add_strict_warning_flags(cufilejni)
   rapids_cuda_set_runtime(cufilejni USE_STATIC ON)
 endif()
 

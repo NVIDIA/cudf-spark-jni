@@ -59,6 +59,8 @@ target_include_directories(
           "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
 )
 
+spark_rapids_jni_add_strict_warning_flags(profilerjni)
+
 find_library(CUPTI_LIBRARY_PATH cupti_static PATHS
   "/usr/local/cuda/lib64"
   "/usr/local/cuda/extras/CUPTI/lib64"
@@ -93,6 +95,8 @@ target_include_directories(
   "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
   "${SPARK_RAPIDS_JNI_GENERATED_INCLUDE_DIR}"
 )
+
+spark_rapids_jni_add_strict_warning_flags(spark_rapids_profile_converter)
 
 target_link_libraries(spark_rapids_profile_converter
   "${CUPTI_LIBRARY_PATH}"
