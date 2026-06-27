@@ -35,7 +35,6 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
-#include <cuda/std/limits>
 #include <cuda/std/type_traits>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -181,9 +180,19 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
   int32_t data_offset = 0;
   auto loc            = loc_provider.get(idx, data_offset);
 
+  // For BOOL8 (uint8_t), protobuf spec says any non-zero varint is true.
+  // A raw static_cast<uint8_t> would silently truncate values >= 256 to 0.
+  auto const write_value = [](OutputType* dst, uint64_t val) {
+    if constexpr (cuda::std::is_same_v<OutputType, uint8_t>) {
+      *dst = static_cast<uint8_t>(val != 0 ? 1 : 0);
+    } else {
+      *dst = static_cast<OutputType>(val);
+    }
+  };
+
   if (loc.offset < 0) {
     if (has_default) {
-      write_varint_value(&out[idx], static_cast<uint64_t>(default_value));
+      write_value(&out[idx], static_cast<uint64_t>(default_value));
       if (valid) valid[idx] = true;
     } else {
       if (valid) valid[idx] = false;
@@ -203,7 +212,7 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
   }
 
   if constexpr (ZigZag) { v = (v >> 1) ^ (-(v & 1)); }
-  write_varint_value(&out[idx], v);
+  write_value(&out[idx], v);
   if (valid) valid[idx] = true;
 }
 
@@ -290,9 +299,17 @@ CUDF_KERNEL void extract_varint_batched_kernel(uint8_t const* message_data,
   auto loc         = locations[row * num_loc_fields + desc.loc_field_idx];
   auto* out        = static_cast<OutputType*>(desc.output);
 
+  auto const write_value = [](OutputType* dst, uint64_t val) {
+    if constexpr (cuda::std::is_same_v<OutputType, uint8_t>) {
+      *dst = static_cast<uint8_t>(val != 0 ? 1 : 0);
+    } else {
+      *dst = static_cast<OutputType>(val);
+    }
+  };
+
   if (loc.offset < 0) {
     if (desc.has_default) {
-      write_varint_value(&out[row], static_cast<uint64_t>(desc.default_int));
+      write_value(&out[row], static_cast<uint64_t>(desc.default_int));
       desc.valid[row] = true;
     } else {
       desc.valid[row] = false;
@@ -312,7 +329,7 @@ CUDF_KERNEL void extract_varint_batched_kernel(uint8_t const* message_data,
     return;
   }
   if constexpr (ZigZag) { v = (v >> 1) ^ (-(v & 1)); }
-  write_varint_value(&out[row], v);
+  write_value(&out[row], v);
   desc.valid[row] = true;
 }
 
@@ -450,20 +467,92 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
 
+void launch_scan_repeated_message_children(uint8_t const* message_data,
+                                           cudf::size_type message_data_size,
+                                           cudf::size_type const* msg_row_offsets,
+                                           field_location const* msg_locs,
+                                           int num_occurrences,
+                                           field_descriptor const* child_descs,
+                                           int num_child_fields,
+                                           field_location* child_locs,
+                                           protobuf_error* error_flag,
+                                           int const* child_lookup,
+                                           int child_lookup_size,
+                                           rmm::cuda_stream_view stream);
+
+void launch_count_repeated_in_nested(uint8_t const* message_data,
+                                     cudf::size_type message_data_size,
+                                     cudf::size_type const* row_offsets,
+                                     cudf::size_type base_offset,
+                                     field_location const* parent_locs,
+                                     int num_rows,
+                                     device_nested_field_descriptor const* schema,
+                                     int num_fields,
+                                     repeated_field_info* repeated_info,
+                                     int num_repeated,
+                                     int const* repeated_indices,
+                                     protobuf_error* error_flag,
+                                     rmm::cuda_stream_view stream);
+
+void launch_scan_repeated_in_nested(uint8_t const* message_data,
+                                    cudf::size_type message_data_size,
+                                    cudf::size_type const* row_offsets,
+                                    cudf::size_type base_offset,
+                                    field_location const* parent_locs,
+                                    int num_rows,
+                                    device_nested_field_descriptor const* schema,
+                                    int32_t const* occ_prefix_sums,
+                                    int const* repeated_indices,
+                                    repeated_occurrence* occurrences,
+                                    protobuf_error* error_flag,
+                                    rmm::cuda_stream_view stream);
+
+void launch_compute_nested_struct_locations(field_location const* child_locs,
+                                            field_location const* msg_locs,
+                                            cudf::size_type const* msg_row_offsets,
+                                            int child_idx,
+                                            int num_child_fields,
+                                            field_location* nested_locs,
+                                            cudf::size_type* nested_row_offsets,
+                                            int total_count,
+                                            protobuf_error* error_flag,
+                                            rmm::cuda_stream_view stream);
+
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
                                                 field_location const* child_locs,
                                                 int child_idx,
                                                 int num_child_fields,
-                                                field_location* gc_parent_locs,
+                                                field_location* gc_parent_abs,
                                                 int num_rows,
                                                 protobuf_error* error_flag,
                                                 rmm::cuda_stream_view stream);
+
+void launch_compute_virtual_parents_for_nested_repeated(repeated_occurrence const* occurrences,
+                                                        cudf::size_type const* row_list_offsets,
+                                                        field_location const* parent_locations,
+                                                        cudf::size_type* virtual_row_offsets,
+                                                        field_location* virtual_parent_locs,
+                                                        int total_count,
+                                                        protobuf_error* error_flag,
+                                                        rmm::cuda_stream_view stream);
+
+void launch_compute_msg_locations_from_occurrences(repeated_occurrence const* occurrences,
+                                                   cudf::size_type const* list_offsets,
+                                                   cudf::size_type base_offset,
+                                                   field_location* msg_locs,
+                                                   cudf::size_type* msg_row_offsets,
+                                                   int total_count,
+                                                   protobuf_error* error_flag,
+                                                   rmm::cuda_stream_view stream);
 
 // ============================================================================
 // Host-side template helpers that launch CUDA kernels
 // ============================================================================
 
-// Build a row-aligned null mask from `valid[row]` boolean flags.
+// Build a row-aligned null mask from `valid[row]` boolean flags. `num_rows` is the logical row
+// count and must be <= `valid.size()` — this matters because some callers pad `valid` to
+// `max(1, num_rows)` to avoid a 0-sized device_uvector, and feeding that padded size into
+// `valid_if` would produce a 1-bit mask for a 0-row column.
 template <typename T>
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   rmm::device_uvector<T> const& valid,
@@ -471,7 +560,6 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  CUDF_EXPECTS(num_rows >= 0, "num_rows must be non-negative");
   CUDF_EXPECTS(valid.size() >= static_cast<size_t>(num_rows),
                "valid buffer smaller than requested null mask");
   auto begin = thrust::make_counting_iterator<cudf::size_type>(0);
@@ -490,7 +578,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_column(cudf::data_type dt
                                                               rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<T> out(num_rows, stream, mr);
-  rmm::device_uvector<bool> valid(num_rows, stream, mr);
+  rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
   if (num_rows == 0) {
     return std::make_unique<cudf::column>(dt, 0, out.release(), rmm::device_buffer{}, 0);
   }
