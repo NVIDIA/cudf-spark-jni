@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.jni;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
+import ai.rapids.cudf.HostColumnVectorCore;
 import ai.rapids.cudf.JSONOptions;
 
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -38,9 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *  - the unmapped-{@code valueType} guard of the dispatch switch.
  */
 public class FromJsonToRawMapArrayTest {
-  // Column schema for the array-valued result: LIST<STRUCT<key:STRING, value:LIST<STRING>>>.
+  // Column schema for the array-valued result: LIST<STRUCT<key:STRING, value:LIST<STRING>>>. The
+  // struct and its key child are non-nullable (the kernel builds them with no null mask); only the
+  // value list (null inner list) and its elements (null element) carry nulls.
   private static final HostColumnVector.StructType STRUCT_TYPE =
-      new HostColumnVector.StructType(true,
+      new HostColumnVector.StructType(false,
           new HostColumnVector.BasicType(false, DType.STRING),                             // key
           new HostColumnVector.ListType(true, new HostColumnVector.BasicType(true,
               DType.STRING)));                                                             // value
@@ -61,6 +65,18 @@ public class FromJsonToRawMapArrayTest {
     return new HostColumnVector.StructData(key, values);
   }
 
+  // The array-valued result is LIST<STRUCT<key, value>>; the kernel builds the struct and its key
+  // child with no null mask. Assert that invariant directly -- assertColumnsAreEqual runs with
+  // nullability checking off, so it would not catch a stray key or struct validity mask.
+  private static void assertKeyAndStructNonNullable(ColumnVector result) {
+    try (HostColumnVector host = result.copyToHost()) {
+      HostColumnVectorCore structChild = host.getChildColumnView(0);
+      HostColumnVectorCore keyChild = structChild.getChildColumnView(0);
+      assertFalse(structChild.hasValidityVector(), "struct child must be non-nullable");
+      assertFalse(keyChild.hasValidityVector(), "map key column must be non-nullable");
+    }
+  }
+
   // ARRAY_OF_STRING: a single object whose one key maps to a two-element string array. The engine
   // copies the elements verbatim with their surrounding quotes stripped, so {"k":["a","b"]} yields
   // one non-null row holding the pair (k -> ["a", "b"]).
@@ -73,6 +89,7 @@ public class FromJsonToRawMapArrayTest {
              JSONUtils.MapValueType.ARRAY_OF_STRING);
          ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0)) {
       assertColumnsAreEqual(expected, result);
+      assertKeyAndStructNonNullable(result);
     }
   }
 
@@ -90,6 +107,7 @@ public class FromJsonToRawMapArrayTest {
              JSONUtils.MapValueType.ARRAY_OF_STRING);
          ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0, row1)) {
       assertColumnsAreEqual(expected, result);
+      assertKeyAndStructNonNullable(result);
     }
   }
 
