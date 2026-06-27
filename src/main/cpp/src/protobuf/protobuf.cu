@@ -449,6 +449,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     h_base_offset.data(), list_offsets, sizeof(cudf::size_type), stream));
   stream.synchronize();
   cudf::size_type base_offset = h_base_offset[0];
+  auto const input =
+    protobuf_input_view{message_data, message_data_size, list_offsets, base_offset};
+  auto const schema_ctx = schema_context_view{
+    default_ints, default_floats, default_bools, default_strings, enum_valid_values, enum_names};
 
   // Scratch allocations consumed inside this function go through the current device resource;
   // only buffers that flow into the returned column should use the caller-supplied `mr`.
@@ -1217,24 +1221,18 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     // Keep row-force-null tracking for nested required-field failures, but do not let invalid
     // nested enum values null the top-level row.
-    auto nested_col = build_nested_struct_column(
-      message_data,
-      message_data_size,
-      list_offsets,
-      base_offset,
-      d_parent_locs,
-      child_field_indices,
-      schema,
-      num_fields,
-      {default_ints, default_floats, default_bools, default_strings, enum_valid_values, enum_names},
-      d_row_force_null,
-      d_error,
-      num_rows,
-      stream,
-      mr,
-      nullptr,
-      0,
-      false);
+    auto const parent =
+      nested_parent_view{d_parent_locs.data(), d_parent_locs.size(), num_rows, nullptr};
+    auto nested_col = build_nested_struct_column(input,
+                                                 parent,
+                                                 child_field_indices,
+                                                 schema,
+                                                 num_fields,
+                                                 schema_ctx,
+                                                 {&d_row_force_null, &d_error, false},
+                                                 0,
+                                                 stream,
+                                                 mr);
     propagate_nulls_to_descendants(*nested_col, stream, mr);
     column_map[parent_schema_idx] = std::move(nested_col);
   }

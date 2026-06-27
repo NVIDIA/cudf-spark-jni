@@ -450,6 +450,29 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
 
+void launch_count_repeated_in_nested(uint8_t const* message_data,
+                                     cudf::size_type message_data_size,
+                                     cudf::size_type const* row_offsets,
+                                     cudf::size_type base_offset,
+                                     field_location const* parent_locs,
+                                     int num_rows,
+                                     device_nested_field_descriptor const* repeated_field,
+                                     repeated_field_info* repeated_info,
+                                     protobuf_error* error_flag,
+                                     rmm::cuda_stream_view stream);
+
+void launch_scan_repeated_in_nested(uint8_t const* message_data,
+                                    cudf::size_type message_data_size,
+                                    cudf::size_type const* row_offsets,
+                                    cudf::size_type base_offset,
+                                    field_location const* parent_locs,
+                                    int num_rows,
+                                    device_nested_field_descriptor const* repeated_field,
+                                    int32_t const* occ_prefix_sums,
+                                    repeated_occurrence* occurrences,
+                                    protobuf_error* error_flag,
+                                    rmm::cuda_stream_view stream);
+
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
                                                 field_location const* child_locs,
                                                 int child_idx,
