@@ -162,11 +162,41 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMap
     cudf::jni::auto_set_device(env);
     auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
     return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::from_json_to_raw_map(cudf::strings_column_view{*input_cv},
-                                             normalize_single_quotes,
-                                             allow_leading_zeros,
-                                             allow_nonnumeric_numbers,
-                                             allow_unquoted_control)
+      spark_rapids_jni::from_json_to_raw_map(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
+        .release());
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMapArrayFromJsonString(
+  JNIEnv* env,
+  jclass,
+  jlong j_input,
+  jboolean normalize_single_quotes,
+  jboolean allow_leading_zeros,
+  jboolean allow_nonnumeric_numbers,
+  jboolean allow_unquoted_control)
+{
+  JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
+
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
+    return cudf::jni::ptr_as_jlong(
+      spark_rapids_jni::from_json_to_raw_map_array_values(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
         .release());
   }
   JNI_CATCH(env, 0);
