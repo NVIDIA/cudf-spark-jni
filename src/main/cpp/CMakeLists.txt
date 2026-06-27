@@ -222,6 +222,7 @@ add_library(
   src/JoinPrimitivesJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
+  src/PageablePoolJni.cpp
   src/ParseURIJni.cpp
   src/ProtobufJni.cpp
   src/RegexRewriteUtilsJni.cpp
