@@ -2893,7 +2893,7 @@ public class ProtobufTest {
     // message Outer { Inner inner = 1; }
     Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{})),
-        new Byte[] {}
+        new Byte[]{}
     };
 
     StructType innerType = new StructType(
@@ -2924,7 +2924,7 @@ public class ProtobufTest {
     Byte[] inner = concat(
         box(tag(1, WT_LEN)), encodeBytes(packedIds));
     Byte[] middleWithInner = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
-    Byte[] middleWithoutInner = new Byte[] {};
+    Byte[] middleWithoutInner = new Byte[]{};
     Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(middleWithInner)),
         concat(box(tag(1, WT_LEN)), encodeMessage(middleWithoutInner))
