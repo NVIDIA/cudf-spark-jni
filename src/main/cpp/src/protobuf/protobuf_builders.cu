@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -72,24 +73,11 @@ inline void validate_protobuf_decode_context(protobuf_decode_runtime_context con
   CUDF_EXPECTS(context.row_force_null != nullptr,
                std::string{caller} + ": row-force-null buffer must be non-null");
   CUDF_EXPECTS(context.error != nullptr, std::string{caller} + ": error buffer must be non-null");
+  CUDF_EXPECTS(context.error->size() == 1,
+               std::string{caller} + ": error buffer must contain exactly one element");
   CUDF_EXPECTS(context.row_force_null->is_empty() ||
                  context.row_force_null->size() == static_cast<size_t>(num_rows),
                std::string{caller} + ": row-force-null buffer must be empty or row-sized");
-}
-
-inline rmm::device_uvector<device_nested_field_descriptor> make_single_repeated_field_schema(
-  int child_schema_idx,
-  std::vector<nested_field_descriptor> const& schema,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
-{
-  auto h_schema = cudf::detail::make_pinned_vector_async<device_nested_field_descriptor>(1, stream);
-  h_schema[0]   = device_nested_field_descriptor{schema[child_schema_idx]};
-
-  rmm::device_uvector<device_nested_field_descriptor> d_schema(1, stream, mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    d_schema.data(), h_schema.data(), sizeof(device_nested_field_descriptor), stream));
-  return d_schema;
 }
 
 inline std::unique_ptr<cudf::column> make_list_column_with_parent_nulls(
@@ -104,6 +92,107 @@ inline std::unique_ptr<cudf::column> make_list_column_with_parent_nulls(
     make_null_mask_from_parent_locations(parent_locs, num_rows, stream, mr);
   return cudf::make_lists_column(
     num_rows, std::move(offsets_col), std::move(child_col), list_null_count, std::move(list_mask));
+}
+
+template <typename LocationProvider, typename ValidityFn, typename TopRowIndexProvider>
+std::unique_ptr<cudf::column> build_protobuf_field_values_column(
+  protobuf_input_view input,
+  nested_field_descriptor const& field,
+  int schema_idx,
+  int num_values,
+  LocationProvider const& loc_provider,
+  ValidityFn validity_fn,
+  bool has_default,
+  schema_context_view ctx,
+  protobuf_decode_runtime_context context,
+  TopRowIndexProvider get_top_row_indices,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(num_values > 0, "build_protobuf_field_values_column: value count must be positive");
+  auto const value_type = cudf::data_type{field.output_type};
+  auto const encoding   = static_cast<int>(field.encoding);
+  auto const blocks = static_cast<int>((num_values + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+
+  switch (value_type.id()) {
+    case cudf::type_id::BOOL8:
+    case cudf::type_id::INT32:
+    case cudf::type_id::UINT32:
+    case cudf::type_id::INT64:
+    case cudf::type_id::UINT64:
+    case cudf::type_id::FLOAT32:
+    case cudf::type_id::FLOAT64: {
+      bool const is_numeric_enum = value_type.id() == cudf::type_id::INT32 &&
+                                   schema_idx < static_cast<int>(ctx.enum_valid_values.size()) &&
+                                   !ctx.enum_valid_values[schema_idx].empty();
+      return extract_typed_column(
+        value_type,
+        encoding,
+        input.message_data,
+        loc_provider,
+        num_values,
+        blocks,
+        THREADS_PER_BLOCK,
+        has_default,
+        ctx.default_ints[schema_idx],
+        ctx.default_floats[schema_idx],
+        ctx.default_bools[schema_idx],
+        ctx.default_strings[schema_idx],
+        schema_idx,
+        ctx.enum_valid_values,
+        ctx.enum_names,
+        *context.row_force_null,
+        *context.error,
+        stream,
+        mr,
+        is_numeric_enum && context.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
+        context.propagate_invalid_enum_rows);
+    }
+    case cudf::type_id::STRING:
+    case cudf::type_id::LIST: {
+      bool const is_enum_string =
+        value_type.id() == cudf::type_id::STRING && field.encoding == proto_encoding::ENUM_STRING;
+      if (is_enum_string) {
+        auto const scratch_mr = cudf::get_current_device_resource_ref();
+        rmm::device_uvector<int32_t> values(num_values, stream, scratch_mr);
+        rmm::device_uvector<bool> valid(num_values, stream, scratch_mr);
+        extract_varint_kernel<int32_t, false, LocationProvider>
+          <<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(input.message_data,
+                                                             loc_provider,
+                                                             num_values,
+                                                             values.data(),
+                                                             valid.data(),
+                                                             context.error->data(),
+                                                             has_default,
+                                                             ctx.default_ints[schema_idx]);
+        return build_enum_string_column(
+          values,
+          valid,
+          ctx.enum_valid_values[schema_idx],
+          ctx.enum_names[schema_idx],
+          *context.row_force_null,
+          num_values,
+          stream,
+          mr,
+          context.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
+          context.propagate_invalid_enum_rows);
+      }
+      return extract_and_build_string_or_bytes_column(value_type.id() == cudf::type_id::LIST,
+                                                      input.message_data,
+                                                      num_values,
+                                                      loc_provider,
+                                                      loc_provider,
+                                                      validity_fn,
+                                                      has_default,
+                                                      ctx.default_strings[schema_idx],
+                                                      *context.error,
+                                                      stream,
+                                                      mr);
+    }
+    default:
+      CUDF_FAIL("Protobuf decode: unsupported nested child output type id=" +
+                std::to_string(static_cast<int>(value_type.id())));
+  }
 }
 
 }  // namespace
@@ -562,9 +651,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
       schema, child_field_indices, num_fields, stream, mr);
   }
 
-  auto const threads   = THREADS_PER_BLOCK;
-  auto const blocks    = static_cast<int>((input.num_rows + threads - 1u) / threads);
   int num_child_fields = static_cast<int>(child_field_indices.size());
+  std::vector<int> repeated_child_positions;
+  repeated_child_positions.reserve(num_child_fields);
 
   // Stage child field descriptors through pinned memory so the H2D stays stream-async.
   // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
@@ -575,6 +664,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     h_child_field_descs[i].field_number       = schema[child_idx].field_number;
     h_child_field_descs[i].expected_wire_type = static_cast<int>(schema[child_idx].wire_type);
     h_child_field_descs[i].is_repeated        = schema[child_idx].is_repeated;
+    if (schema[child_idx].is_repeated) { repeated_child_positions.push_back(i); }
   }
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
@@ -590,9 +680,10 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   auto const child_location_count = static_cast<size_t>(input.num_rows) * num_child_fields;
   rmm::device_uvector<field_location> d_child_locations(
     std::max(child_location_count, size_t{1}), stream, scratch_mr);
-  // Scan over every child descriptor (including repeated ones) so STRICT-mode wire-type
-  // validation still runs on repeated occurrences. Repeated child slots in d_child_locations
-  // are reserved for a dedicated nested repeated count/scan path.
+  rmm::device_uvector<repeated_field_info> d_repeated_info(
+    repeated_child_positions.empty() ? 0 : child_location_count, stream, scratch_mr);
+  // Repeated counts are collected in the same pass as singleton locations so each nested
+  // message is parsed only once before LIST offsets are built.
   launch_scan_nested_message_fields(
     input.message_data,
     input.message_data_size,
@@ -603,6 +694,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     d_child_field_descs.data(),
     num_child_fields,
     d_child_locations.data(),
+    d_repeated_info.data(),
     context.error->data(),
     !context.row_force_null->is_empty() ? context.row_force_null->data() : nullptr,
     parent.top_row_indices,
@@ -621,17 +713,80 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     context.error->data(),
     stream);
 
+  std::vector<std::optional<repeated_field_work>> repeated_work(num_child_fields);
+  auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
+  h_scan_descs.reserve(repeated_child_positions.size());
+  for (auto const ci : repeated_child_positions) {
+    auto const child_schema_idx = child_field_indices[ci];
+    auto counts_begin           = thrust::make_transform_iterator(
+      thrust::make_counting_iterator<int>(0),
+      extract_strided_count{d_repeated_info.data(), ci, num_child_fields});
+    repeated_work[ci].emplace(
+      child_schema_idx,
+      make_list_offsets_from_counts(counts_begin,
+                                    input.num_rows,
+                                    "Repeated nested-field total element count exceeds 2^31-1",
+                                    stream,
+                                    mr,
+                                    scratch_mr));
+
+    auto& work = *repeated_work[ci];
+    if (work.total_count > 0) {
+      work.occurrences = std::make_unique<rmm::device_uvector<repeated_occurrence>>(
+        work.total_count, stream, scratch_mr);
+      h_scan_descs.push_back({schema[child_schema_idx].field_number,
+                              static_cast<int>(schema[child_schema_idx].wire_type),
+                              work.offsets.data(),
+                              work.occurrences->data()});
+    }
+  }
+
+  if (!h_scan_descs.empty()) {
+    rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
+      h_scan_descs.size(), stream, scratch_mr);
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
+                                             h_scan_descs.data(),
+                                             h_scan_descs.size() * sizeof(repeated_field_scan_desc),
+                                             stream));
+
+    auto h_fn_to_scan =
+      build_field_lookup_table(h_scan_descs.data(), static_cast<int>(h_scan_descs.size()), stream);
+    rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
+    int fn_to_scan_size = 0;
+    if (!h_fn_to_scan.empty()) {
+      d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
+      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+        d_fn_to_scan.data(), h_fn_to_scan.data(), h_fn_to_scan.size() * sizeof(int), stream));
+      fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
+    }
+
+    launch_scan_all_repeated_occurrences_in_nested(
+      input.message_data,
+      input.message_data_size,
+      input.row_offsets,
+      input.base_offset,
+      parent.locations,
+      d_scan_descs.data(),
+      static_cast<int>(d_scan_descs.size()),
+      context.error->data(),
+      fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
+      fn_to_scan_size,
+      input.num_rows,
+      stream);
+  }
+
   std::vector<std::unique_ptr<cudf::column>> struct_children;
   for (int ci = 0; ci < num_child_fields; ci++) {
     int child_schema_idx = child_field_indices[ci];
     auto const dt        = cudf::data_type{schema[child_schema_idx].output_type};
-    auto const enc       = static_cast<int>(schema[child_schema_idx].encoding);
     bool has_def         = schema[child_schema_idx].has_default_value;
     bool is_repeated     = schema[child_schema_idx].is_repeated;
 
     if (is_repeated) {
+      CUDF_EXPECTS(repeated_work[ci].has_value(),
+                   "Protobuf decode internal error: missing nested repeated-field work");
       struct_children.push_back(build_repeated_child_list_column(
-        input, parent, child_schema_idx, schema, ctx, context, stream, mr));
+        input, parent, schema, ctx, context, std::move(repeated_work[ci].value()), stream, mr));
       continue;
     }
 
@@ -642,114 +797,50 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                           ci,
                                           num_child_fields};
 
-    switch (dt.id()) {
-      case cudf::type_id::BOOL8:
-      case cudf::type_id::INT32:
-      case cudf::type_id::UINT32:
-      case cudf::type_id::INT64:
-      case cudf::type_id::UINT64:
-      case cudf::type_id::FLOAT32:
-      case cudf::type_id::FLOAT64: {
-        struct_children.push_back(extract_typed_column(dt,
-                                                       enc,
-                                                       input.message_data,
-                                                       loc_provider,
-                                                       input.num_rows,
-                                                       blocks,
-                                                       threads,
-                                                       has_def,
-                                                       ctx.default_ints[child_schema_idx],
-                                                       ctx.default_floats[child_schema_idx],
-                                                       ctx.default_bools[child_schema_idx],
-                                                       ctx.default_strings[child_schema_idx],
-                                                       child_schema_idx,
-                                                       ctx.enum_valid_values,
-                                                       ctx.enum_names,
-                                                       *context.row_force_null,
-                                                       *context.error,
-                                                       stream,
-                                                       mr,
-                                                       parent.top_row_indices,
-                                                       context.propagate_invalid_enum_rows));
-        break;
-      }
-      case cudf::type_id::STRING:
-      case cudf::type_id::LIST: {  // bytes represented as LIST<UINT8>
-        bool const is_enum_string =
-          dt.id() == cudf::type_id::STRING && enc == encoding_value(proto_encoding::ENUM_STRING);
-        if (is_enum_string) {
-          rmm::device_uvector<int32_t> out(input.num_rows, stream, mr);
-          rmm::device_uvector<bool> valid(input.num_rows, stream, mr);
-          extract_varint_kernel<int32_t, false, nested_location_provider>
-            <<<blocks, threads, 0, stream.value()>>>(input.message_data,
-                                                     loc_provider,
-                                                     input.num_rows,
-                                                     out.data(),
-                                                     valid.data(),
-                                                     context.error->data(),
-                                                     has_def,
-                                                     ctx.default_ints[child_schema_idx]);
-          struct_children.push_back(
-            build_enum_string_column(out,
-                                     valid,
-                                     ctx.enum_valid_values[child_schema_idx],
-                                     ctx.enum_names[child_schema_idx],
-                                     *context.row_force_null,
-                                     input.num_rows,
-                                     stream,
-                                     mr,
-                                     parent.top_row_indices,
-                                     context.propagate_invalid_enum_rows));
-        } else {
-          auto valid_fn = [loc_provider, has_def] __device__(cudf::size_type row) {
-            return has_def || loc_provider.valid(row);
-          };
-          struct_children.push_back(
-            extract_and_build_string_or_bytes_column(dt.id() == cudf::type_id::LIST,
-                                                     input.message_data,
-                                                     input.num_rows,
-                                                     loc_provider,
-                                                     loc_provider,
-                                                     valid_fn,
-                                                     has_def,
-                                                     ctx.default_strings[child_schema_idx],
-                                                     *context.error,
-                                                     stream,
-                                                     mr));
-        }
-        break;
-      }
-      case cudf::type_id::STRUCT: {
-        // Recursive linear child lookup is fine for realistic schemas; precompute if it gets hot.
-        auto gc_indices = find_child_field_indices(schema, num_fields, child_schema_idx);
-        rmm::device_uvector<field_location> d_gc_parent_locs(input.num_rows, stream, scratch_mr);
-        launch_compute_grandchild_parent_locations(parent.locations,
-                                                   d_child_locations.data(),
-                                                   ci,
-                                                   num_child_fields,
-                                                   d_gc_parent_locs.data(),
-                                                   input.num_rows,
-                                                   context.error->data(),
-                                                   stream);
-        struct_children.push_back(build_nested_struct_column(
-          input,
-          {d_gc_parent_locs.data(), d_gc_parent_locs.size(), parent.top_row_indices},
-          gc_indices,
-          schema,
-          num_fields,
-          ctx,
-          context,
-          depth + 1,
-          stream,
-          mr));
-        break;
-      }
-      default:
-        // List the supported/deferred types above explicitly so a newly-introduced output type
-        // fails loudly here instead of silently decoding as all-null.
-        CUDF_FAIL("Protobuf decode: unsupported nested child output type id=" +
-                  std::to_string(static_cast<int>(dt.id())));
+    if (dt.id() == cudf::type_id::STRUCT) {
+      // Recursive linear child lookup is fine for realistic schemas; precompute if it gets hot.
+      auto gc_indices = find_child_field_indices(schema, num_fields, child_schema_idx);
+      rmm::device_uvector<field_location> d_gc_parent_locs(input.num_rows, stream, scratch_mr);
+      launch_compute_grandchild_parent_locations(parent.locations,
+                                                 d_child_locations.data(),
+                                                 ci,
+                                                 num_child_fields,
+                                                 d_gc_parent_locs.data(),
+                                                 input.num_rows,
+                                                 context.error->data(),
+                                                 stream);
+      struct_children.push_back(build_nested_struct_column(
+        input,
+        {d_gc_parent_locs.data(), d_gc_parent_locs.size(), parent.top_row_indices},
+        gc_indices,
+        schema,
+        num_fields,
+        ctx,
+        context,
+        depth + 1,
+        stream,
+        mr));
+      continue;
     }
+
+    auto valid_fn = [loc_provider, has_def] __device__(cudf::size_type row) {
+      return has_def || loc_provider.valid(row);
+    };
+    auto get_top_row_indices = [top_row_indices = parent.top_row_indices]() {
+      return top_row_indices;
+    };
+    struct_children.push_back(build_protobuf_field_values_column(input,
+                                                                 schema[child_schema_idx],
+                                                                 child_schema_idx,
+                                                                 input.num_rows,
+                                                                 loc_provider,
+                                                                 valid_fn,
+                                                                 has_def,
+                                                                 ctx,
+                                                                 context,
+                                                                 get_top_row_indices,
+                                                                 stream,
+                                                                 mr));
   }
 
   auto [struct_mask, struct_null_count] =
@@ -765,52 +856,33 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 std::unique_ptr<cudf::column> build_repeated_child_list_column(
   protobuf_input_view input,
   nested_parent_view parent,
-  int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
   schema_context_view ctx,
   protobuf_decode_runtime_context context,
+  repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
   validate_nested_parent_view(input, parent, __func__);
   validate_protobuf_decode_context(context, input.num_rows, __func__);
+  auto const child_schema_idx = work.schema_idx;
+  CUDF_EXPECTS(child_schema_idx >= 0 && child_schema_idx < static_cast<int>(schema.size()),
+               "Protobuf decode internal error: nested repeated schema index is out of bounds");
   CUDF_EXPECTS(schema[child_schema_idx].is_repeated,
                "nested repeated child builder requires a repeated child schema");
   auto const elem_type = cudf::data_type{schema[child_schema_idx].output_type};
   CUDF_EXPECTS(elem_type.id() != cudf::type_id::STRUCT,
                "Protobuf decode: nested repeated MessageType is not yet supported");
 
-  auto const scratch_mr = cudf::get_current_device_resource_ref();
-  rmm::device_uvector<repeated_field_info> d_rep_info(input.num_rows, stream, scratch_mr);
-  auto d_repeated_field =
-    make_single_repeated_field_schema(child_schema_idx, schema, stream, scratch_mr);
-
-  launch_count_repeated_in_nested(input.message_data,
-                                  input.message_data_size,
-                                  input.row_offsets,
-                                  input.base_offset,
-                                  parent.locations,
-                                  input.num_rows,
-                                  d_repeated_field.data(),
-                                  d_rep_info.data(),
-                                  context.error->data(),
-                                  stream);
-
-  auto counts_begin = thrust::make_transform_iterator(
-    d_rep_info.begin(),
-    [] __device__(repeated_field_info const& info) -> int32_t { return info.count; });
-  auto offsets_result =
-    make_list_offsets_from_counts(counts_begin,
-                                  input.num_rows,
-                                  "Repeated nested-field total element count exceeds 2^31-1",
-                                  stream,
-                                  mr);
-  auto const total_count = offsets_result.total_count;
+  CUDF_EXPECTS(work.offsets.size() == static_cast<size_t>(input.num_rows) + 1,
+               "Protobuf decode internal error: nested repeated offsets size mismatch");
+  auto const scratch_mr  = cudf::get_current_device_resource_ref();
+  auto const total_count = work.total_count;
 
   if (total_count == 0) {
     auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                                       input.num_rows + 1,
-                                                      offsets_result.offsets.release(),
+                                                      work.offsets.release(),
                                                       rmm::device_buffer{},
                                                       0);
     auto child_col   = make_empty_column_safe(elem_type, stream, mr);
@@ -818,20 +890,12 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
       input.num_rows, std::move(offsets_col), std::move(child_col), parent.locations, stream, mr);
   }
 
-  auto list_offsets = std::move(offsets_result.offsets);
-
-  rmm::device_uvector<repeated_occurrence> d_occurrences(total_count, stream, scratch_mr);
-  launch_scan_repeated_in_nested(input.message_data,
-                                 input.message_data_size,
-                                 input.row_offsets,
-                                 input.base_offset,
-                                 parent.locations,
-                                 input.num_rows,
-                                 d_repeated_field.data(),
-                                 list_offsets.data(),
-                                 d_occurrences.data(),
-                                 context.error->data(),
-                                 stream);
+  CUDF_EXPECTS(work.occurrences != nullptr,
+               "Protobuf decode internal error: missing nested repeated occurrences");
+  CUDF_EXPECTS(work.occurrences->size() == static_cast<size_t>(total_count),
+               "Protobuf decode internal error: nested repeated occurrences size mismatch");
+  auto list_offsets   = std::move(work.offsets);
+  auto& d_occurrences = *work.occurrences;
 
   std::unique_ptr<rmm::device_uvector<int32_t>> d_top_row_indices;
   auto const* top_row_indices = parent.top_row_indices;
@@ -851,98 +915,21 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
     return d_top_row_indices->data();
   };
 
-  auto const blocks = static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   nested_repeated_location_provider loc_provider{
     input.row_offsets, input.base_offset, parent.locations, d_occurrences.data()};
-
-  std::unique_ptr<cudf::column> child_values;
-  auto const enc = static_cast<int>(schema[child_schema_idx].encoding);
-  switch (elem_type.id()) {
-    case cudf::type_id::BOOL8:
-    case cudf::type_id::INT32:
-    case cudf::type_id::UINT32:
-    case cudf::type_id::INT64:
-    case cudf::type_id::UINT64:
-    case cudf::type_id::FLOAT32:
-    case cudf::type_id::FLOAT64: {
-      auto empty_default = cudf::detail::make_pinned_vector_async<uint8_t>(0, stream);
-      bool const is_numeric_enum =
-        elem_type.id() == cudf::type_id::INT32 &&
-        child_schema_idx < static_cast<int>(ctx.enum_valid_values.size()) &&
-        !ctx.enum_valid_values[child_schema_idx].empty();
-      child_values = extract_typed_column(
-        elem_type,
-        enc,
-        input.message_data,
-        loc_provider,
-        total_count,
-        blocks,
-        THREADS_PER_BLOCK,
-        false,
-        0,
-        0.0,
-        false,
-        empty_default,
-        child_schema_idx,
-        ctx.enum_valid_values,
-        ctx.enum_names,
-        *context.row_force_null,
-        *context.error,
-        stream,
-        mr,
-        is_numeric_enum && context.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
-        context.propagate_invalid_enum_rows);
-      break;
-    }
-    case cudf::type_id::STRING:
-    case cudf::type_id::LIST: {
-      bool const is_enum_string = elem_type.id() == cudf::type_id::STRING &&
-                                  schema[child_schema_idx].encoding == proto_encoding::ENUM_STRING;
-      if (is_enum_string) {
-        rmm::device_uvector<int32_t> out(total_count, stream, scratch_mr);
-        rmm::device_uvector<bool> valid(total_count, stream, scratch_mr);
-        extract_varint_kernel<int32_t, false, nested_repeated_location_provider>
-          <<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(input.message_data,
-                                                             loc_provider,
-                                                             total_count,
-                                                             out.data(),
-                                                             valid.data(),
-                                                             context.error->data(),
-                                                             false,
-                                                             0);
-        child_values = build_enum_string_column(
-          out,
-          valid,
-          ctx.enum_valid_values[child_schema_idx],
-          ctx.enum_names[child_schema_idx],
-          *context.row_force_null,
-          total_count,
-          stream,
-          mr,
-          context.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr,
-          context.propagate_invalid_enum_rows);
-      } else {
-        auto valid_fn      = [] __device__(cudf::size_type) { return true; };
-        auto empty_default = cudf::detail::make_pinned_vector_async<uint8_t>(0, stream);
-        child_values =
-          extract_and_build_string_or_bytes_column(elem_type.id() == cudf::type_id::LIST,
-                                                   input.message_data,
-                                                   total_count,
-                                                   loc_provider,
-                                                   loc_provider,
-                                                   valid_fn,
-                                                   false,
-                                                   empty_default,
-                                                   *context.error,
-                                                   stream,
-                                                   mr);
-      }
-      break;
-    }
-    default:
-      CUDF_FAIL("Protobuf decode internal error: unsupported nested repeated child type id=" +
-                std::to_string(static_cast<int>(elem_type.id())));
-  }
+  auto valid_fn     = [] __device__(cudf::size_type) { return true; };
+  auto child_values = build_protobuf_field_values_column(input,
+                                                         schema[child_schema_idx],
+                                                         child_schema_idx,
+                                                         total_count,
+                                                         loc_provider,
+                                                         valid_fn,
+                                                         false,
+                                                         ctx,
+                                                         context,
+                                                         get_top_row_indices,
+                                                         stream,
+                                                         mr);
 
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                                     input.num_rows + 1,

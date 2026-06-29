@@ -92,29 +92,51 @@ struct list_offsets_from_counts_result {
   rmm::device_uvector<int32_t> offsets;
 };
 
+// Offsets become LIST output storage; occurrences remain scratch used by value extraction.
+struct repeated_field_work {
+  int schema_idx;
+  int32_t total_count;
+  rmm::device_uvector<int32_t> offsets;
+  std::unique_ptr<rmm::device_uvector<repeated_occurrence>> occurrences;
+
+  repeated_field_work(int schema_index, list_offsets_from_counts_result offsets_result)
+    : schema_idx(schema_index),
+      total_count(offsets_result.total_count),
+      offsets(std::move(offsets_result.offsets))
+  {
+  }
+};
+
 template <typename CountIterator>
 inline list_offsets_from_counts_result make_list_offsets_from_counts(
   CountIterator counts_begin,
   int num_rows,
   char const* overflow_error,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+  rmm::device_async_resource_ref output_mr,
+  rmm::device_async_resource_ref scratch_mr)
 {
   CUDF_EXPECTS(num_rows >= 0, "make_list_offsets_from_counts: row count must be non-negative");
-  auto const counts_end = counts_begin + num_rows;
-  auto const total_count_64 =
-    thrust::reduce(rmm::exec_policy_nosync(stream, mr), counts_begin, counts_end, int64_t{0});
+  auto const counts_end     = counts_begin + num_rows;
+  auto const total_count_64 = thrust::reduce(
+    rmm::exec_policy_nosync(stream, scratch_mr), counts_begin, counts_end, int64_t{0});
+  CUDF_EXPECTS(total_count_64 >= 0,
+               "make_list_offsets_from_counts: total count must be non-negative");
   CUDF_EXPECTS(total_count_64 <= std::numeric_limits<int32_t>::max(), overflow_error);
   auto const total_count = static_cast<int32_t>(total_count_64);
   CUDF_EXPECTS(num_rows > 0 || total_count == 0,
                "make_list_offsets_from_counts: empty input cannot have repeated elements");
 
-  rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
+  rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, output_mr);
   if (num_rows > 0) {
-    thrust::exclusive_scan(
-      rmm::exec_policy_nosync(stream, mr), counts_begin, counts_end, offsets.begin(), int32_t{0});
+    thrust::exclusive_scan(rmm::exec_policy_nosync(stream, scratch_mr),
+                           counts_begin,
+                           counts_end,
+                           offsets.begin(),
+                           int32_t{0});
   }
-  thrust::fill_n(rmm::exec_policy_nosync(stream, mr), offsets.data() + num_rows, 1, total_count);
+  thrust::fill_n(
+    rmm::exec_policy_nosync(stream, scratch_mr), offsets.data() + num_rows, 1, total_count);
   return {total_count, std::move(offsets)};
 }
 
@@ -380,10 +402,10 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 std::unique_ptr<cudf::column> build_repeated_child_list_column(
   protobuf_input_view input,
   nested_parent_view parent,
-  int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
   schema_context_view ctx,
   protobuf_decode_runtime_context context,
+  repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 

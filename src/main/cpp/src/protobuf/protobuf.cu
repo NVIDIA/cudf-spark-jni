@@ -144,26 +144,6 @@ void propagate_nulls_to_descendants(cudf::column& col,
   }
 }
 
-// Per-field bookkeeping for the three-phase top-level repeated pipeline:
-// `offsets` is the prefix-sum row offsets (size num_rows+1) computed in Phase A; it both
-// seeds the Phase B scan kernel's per-row write index and flows directly into the output
-// LIST column built in Phase C, so it must be allocated against the caller's `mr`.
-// `occurrences` stores the (offset,length,row_idx) tuples produced by Phase B for Phase C
-// builders to consume.
-struct repeated_field_work {
-  int schema_idx;
-  int32_t total_count{0};
-  rmm::device_uvector<int32_t> offsets;
-  std::unique_ptr<rmm::device_uvector<repeated_occurrence>> occurrences;
-
-  repeated_field_work(int si, list_offsets_from_counts_result offsets_result)
-    : schema_idx(si),
-      total_count(offsets_result.total_count),
-      offsets(std::move(offsets_result.offsets))
-  {
-  }
-};
-
 }  // namespace
 
 std::unique_ptr<cudf::column> make_null_column_with_schema(
@@ -940,7 +920,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                       num_rows,
                                       "Top-level repeated field total element count exceeds 2^31-1",
                                       stream,
-                                      mr));
+                                      mr,
+                                      scratch_mr));
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.

@@ -2817,6 +2817,38 @@ public class ProtobufTest {
   }
 
   @Test
+  void testPackedRepeatedDoubleInsideNestedMessage() {
+    // message Inner { repeated double values = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    Byte[] inner0 = concat(
+        box(tag(1, WT_LEN)), encodeBytes(concatBytes(encodeDouble(1.5), encodeDouble(-2.25))));
+    Byte[] inner1 = concat(
+        box(tag(1, WT_LEN)), encodeBytes(encodeDouble(3.75)));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner0)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner1))
+    };
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.FLOAT64)),
+             Arrays.asList(1.5, -2.25),
+             Arrays.asList(3.75));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedValues);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.FLOAT64).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
   void testNestedRepeatedEnumAsString() {
     // message Inner { repeated Priority priority = 1 [packed=true]; }
     // message Outer { Inner inner = 1; }
@@ -3402,6 +3434,25 @@ public class ProtobufTest {
       assertEquals(DType.STRUCT, result.getChildColumnView(1).getType());
       assertEquals(1, result.getChildColumnView(1).getNumChildren());
       assertEquals(DType.INT32, result.getChildColumnView(1).getChildColumnView(0).getType());
+    }
+  }
+
+  @Test
+  void testZeroRowNestedRepeatedScalarShape() {
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32).repeated()
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{}).build();
+         ColumnVector result = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      ColumnView nested = result.getChildColumnView(0);
+      ColumnView values = nested.getChildColumnView(0);
+      assertEquals(0, result.getRowCount());
+      assertEquals(DType.STRUCT, nested.getType());
+      assertEquals(DType.LIST, values.getType());
+      assertEquals(DType.INT32, values.getChildColumnView(0).getType());
     }
   }
 
