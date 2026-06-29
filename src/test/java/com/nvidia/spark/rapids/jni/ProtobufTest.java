@@ -36,6 +36,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collections;
 
 /**
  * Tests for the Protobuf GPU decoder.
@@ -162,6 +163,10 @@ public class ProtobufTest {
         assertEquals(expected[i], hostOffsets.getInt(i), "Unexpected list offset at " + i);
       }
     }
+  }
+
+  private static StructData struct(Object... values) {
+    return new StructData(values);
   }
 
   // ============================================================================
@@ -2891,7 +2896,12 @@ public class ProtobufTest {
         new Byte[] {}
     };
 
+    StructType innerType = new StructType(
+        true, new ListType(true, new BasicType(true, DType.INT32)));
     try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedInner = ColumnVector.fromStructs(
+             innerType, struct(Collections.emptyList()), null);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2899,21 +2909,9 @@ public class ProtobufTest {
                      .addField(1, DType.INT32).repeated()
                  .up()
                  .build(),
-             false);
-         ColumnVector inner = actual.getChildColumnView(0).copyToColumnVector();
-         ColumnView ids = inner.getChildColumnView(0);
-         HostColumnVector hostOuter = actual.copyToHost();
-         HostColumnVector hostInner = inner.copyToHost();
-         HostColumnVector hostIds = ids.copyToHost()) {
-      assertEquals(2, actual.getRowCount());
-      assertEquals(0, actual.getNullCount(), "Missing nested parent should not null outer rows");
-      assertFalse(hostOuter.isNull(0), "Present nested message should keep row 0 valid");
-      assertFalse(hostOuter.isNull(1), "Absent nested parent should keep row 1 valid");
-      assertFalse(hostInner.isNull(0), "Present nested message should stay valid");
-      assertTrue(hostInner.isNull(1), "Absent nested parent should remain null");
-      assertFalse(hostIds.isNull(0), "Present nested message should produce a valid repeated list");
-      assertTrue(hostIds.isNull(1), "Absent nested parent should produce a null repeated list");
-      assertListOffsets(ids, 0, 0, 0);
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+      assertListOffsets(actual.getChildColumnView(0).getChildColumnView(0), 0, 0, 0);
     }
   }
 
@@ -2932,7 +2930,13 @@ public class ProtobufTest {
         concat(box(tag(1, WT_LEN)), encodeMessage(middleWithoutInner))
     };
 
+    StructType innerType = new StructType(
+        true, new ListType(true, new BasicType(true, DType.INT32)));
     try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedInner = ColumnVector.fromStructs(
+             innerType, struct(Arrays.asList(7, 8)), null);
+         ColumnVector expectedMiddle = ColumnVector.makeStruct(expectedInner);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedMiddle);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2942,26 +2946,10 @@ public class ProtobufTest {
                      .up()
                  .up()
                  .build(),
-             false);
-         ColumnVector middle = actual.getChildColumnView(0).copyToColumnVector();
-         ColumnVector innerStruct = middle.getChildColumnView(0).copyToColumnVector();
-         ColumnView ids = innerStruct.getChildColumnView(0);
-         ColumnView idValues = ids.getChildColumnView(0);
-         HostColumnVector hostMiddle = middle.copyToHost();
-         HostColumnVector hostInner = innerStruct.copyToHost();
-         HostColumnVector hostIds = ids.copyToHost();
-         HostColumnVector hostIdValues = idValues.copyToHost()) {
-      assertEquals(0, actual.getNullCount(), "Both rows have a present middle message");
-      assertEquals(0, middle.getNullCount(), "Middle should be present for both rows");
-      assertFalse(hostMiddle.isNull(0));
-      assertFalse(hostMiddle.isNull(1));
-      assertFalse(hostInner.isNull(0), "Inner should be present for row 0");
-      assertTrue(hostInner.isNull(1), "Inner should be null when the immediate parent is absent");
-      assertFalse(hostIds.isNull(0), "Present inner should produce a valid repeated list");
-      assertTrue(hostIds.isNull(1), "Missing immediate parent should produce a null repeated list");
-      assertListOffsets(ids, 0, 2, 2);
-      assertEquals(7, hostIdValues.getInt(0));
-      assertEquals(8, hostIdValues.getInt(1));
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+      assertListOffsets(
+          actual.getChildColumnView(0).getChildColumnView(0).getChildColumnView(0), 0, 2, 2);
     }
   }
 
@@ -3021,6 +3009,18 @@ public class ProtobufTest {
     };
 
     try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedNames = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("alpha", "beta"),
+             Collections.emptyList());
+         ColumnVector expectedPayloads = ColumnVector.fromLists(
+             new ListType(true, new ListType(true, new BasicType(true, DType.UINT8))),
+             Arrays.asList(
+                 Arrays.asList((byte) 0x01, (byte) 0x02),
+                 Collections.singletonList((byte) 0x03)),
+             Collections.emptyList());
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedNames, expectedPayloads);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -3029,28 +3029,8 @@ public class ProtobufTest {
                      .addField(2, DType.LIST).repeated()
                  .up()
                  .build(),
-             false);
-         ColumnVector innerStruct = actual.getChildColumnView(0).copyToColumnVector();
-         ColumnView namesList = innerStruct.getChildColumnView(0);
-         ColumnView names = namesList.getChildColumnView(0);
-         ColumnView payloadList = innerStruct.getChildColumnView(1);
-         ColumnView payloads = payloadList.getChildColumnView(0);
-         ColumnView payloadBytes = payloads.getChildColumnView(0);
-         HostColumnVector hostInner = innerStruct.copyToHost();
-         HostColumnVector hostNames = names.copyToHost();
-         HostColumnVector hostPayloadBytes = payloadBytes.copyToHost()) {
-      assertEquals(2, actual.getRowCount());
-      assertEquals(0, innerStruct.getNullCount(), "Both nested messages should be present");
-      assertFalse(hostInner.isNull(0));
-      assertFalse(hostInner.isNull(1));
-      assertListOffsets(namesList, 0, 2, 2);
-      assertEquals("alpha", hostNames.getJavaString(0));
-      assertEquals("beta", hostNames.getJavaString(1));
-      assertListOffsets(payloadList, 0, 2, 2);
-      assertListOffsets(payloads, 0, p0.length, p0.length + p1.length);
-      assertEquals((byte) 0x01, hostPayloadBytes.getByte(0));
-      assertEquals((byte) 0x02, hostPayloadBytes.getByte(1));
-      assertEquals((byte) 0x03, hostPayloadBytes.getByte(2));
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
     }
   }
 

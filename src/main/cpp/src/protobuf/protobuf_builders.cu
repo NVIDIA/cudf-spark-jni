@@ -30,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <string>
 #include <utility>
 
@@ -55,10 +56,12 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent
   return {std::move(mask), null_count};
 }
 
-inline void validate_nested_parent_view(protobuf_input_view input,
-                                        nested_parent_view parent,
-                                        char const* caller)
+inline void validate_nested_parent_view(
+  protobuf_input_view input,
+  nested_parent_view parent,
+  std::source_location const& location = std::source_location::current())
 {
+  auto const caller = location.function_name();
   CUDF_EXPECTS(input.num_rows >= 0, std::string{caller} + ": row count must be non-negative");
   CUDF_EXPECTS(parent.location_count == static_cast<std::size_t>(input.num_rows),
                std::string{caller} + ": parent locations size must match row count");
@@ -66,10 +69,12 @@ inline void validate_nested_parent_view(protobuf_input_view input,
                std::string{caller} + ": parent locations must be non-null for non-empty input");
 }
 
-inline void validate_protobuf_decode_context(protobuf_decode_runtime_context context,
-                                             int num_rows,
-                                             char const* caller)
+inline void validate_protobuf_decode_context(
+  protobuf_decode_runtime_context context,
+  int num_rows,
+  std::source_location const& location = std::source_location::current())
 {
+  auto const caller = location.function_name();
   CUDF_EXPECTS(context.row_force_null != nullptr,
                std::string{caller} + ": row-force-null buffer must be non-null");
   CUDF_EXPECTS(context.error != nullptr, std::string{caller} + ": error buffer must be non-null");
@@ -643,8 +648,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 {
   CUDF_EXPECTS(depth < MAX_NESTING_DEPTH,
                "Nested protobuf struct depth exceeds supported decode recursion limit");
-  validate_nested_parent_view(input, parent, __func__);
-  validate_protobuf_decode_context(context, input.num_rows, __func__);
+  validate_nested_parent_view(input, parent);
+  validate_protobuf_decode_context(context, input.num_rows);
 
   if (input.num_rows == 0) {
     return make_empty_struct_column_from_children(
@@ -863,8 +868,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  validate_nested_parent_view(input, parent, __func__);
-  validate_protobuf_decode_context(context, input.num_rows, __func__);
+  validate_nested_parent_view(input, parent);
+  validate_protobuf_decode_context(context, input.num_rows);
   auto const child_schema_idx = work.schema_idx;
   CUDF_EXPECTS(child_schema_idx >= 0 && child_schema_idx < static_cast<int>(schema.size()),
                "Protobuf decode internal error: nested repeated schema index is out of bounds");
