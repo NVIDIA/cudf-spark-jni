@@ -35,7 +35,6 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
-#include <cuda/std/array>
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
 
@@ -256,40 +255,6 @@ constexpr int32_t MS_PER_MINUTE = 60 * MS_PER_SECOND;
 constexpr int32_t MS_PER_HOUR   = 60 * MS_PER_MINUTE;
 constexpr int64_t MS_PER_DAY    = 24LL * MS_PER_HOUR;
 
-// Cumulative days before each month (non-leap). Index 0 = Jan.
-// __device__ storage is required because days_in_month / days_before_month index
-// this with non-compile-time values, which addresses elements at runtime.
-__device__ constexpr cuda::std::array<int32_t, 12> DAYS_BEFORE_MONTH = {
-  0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
-
-__device__ static bool is_leap_year(int32_t year)
-{
-  return (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
-}
-
-__device__ static int32_t days_in_month(int32_t month, int32_t year)
-{
-  int32_t d =
-    (month < 11) ? (DAYS_BEFORE_MONTH[month + 1] - DAYS_BEFORE_MONTH[month]) : 31;  // December
-  if (month == 1 && is_leap_year(year)) { d++; }
-  return d;
-}
-
-__device__ static int32_t days_before_month(int32_t month, int32_t year)
-{
-  int32_t d = DAYS_BEFORE_MONTH[month];
-  if (month > 1 && is_leap_year(year)) { d++; }
-  return d;
-}
-
-// Days from epoch (1970-01-01) to Jan 1 of the given year.
-__device__ static int64_t days_from_epoch_to_year(int32_t year)
-{
-  int32_t y = year - 1;
-  // Gregorian calendar days from epoch
-  return 365LL * (year - 1970) + (y / 4 - 492) - (y / 100 - 19) + (y / 400 - 4);
-}
-
 // DST rule mode constants representing the same four rule categories as SimpleTimeZone
 enum dst_rule_mode : int32_t {
   DOM_MODE          = 0,
@@ -313,11 +278,11 @@ enum dst_time_mode : int32_t { WALL_TIME = 0, STANDARD_TIME = 1, UTC_TIME = 2 };
 __device__ static int32_t compute_rule_day(
   int32_t rule_mode, int32_t rule_day, int32_t rule_dow, int32_t year, int32_t month)
 {
-  int32_t month_len = days_in_month(month, year);
+  int32_t month_len = spark_rapids_jni::date_time_utils::days_in_month(year, month + 1);
 
   // Compute day-of-week of the 1st of the month
   int64_t first_of_month_epoch_days =
-    days_from_epoch_to_year(year) + days_before_month(month, year);
+    spark_rapids_jni::date_time_utils::to_epoch_day(year, month + 1, 1);
   int64_t dow_raw = ((first_of_month_epoch_days + 4) % 7);
   if (dow_raw < 0) dow_raw += 7;
   int32_t first_dow = static_cast<int32_t>(dow_raw) + 1;  // 1=Sun..7=Sat
@@ -393,7 +358,7 @@ __device__ static int64_t compute_transition_utc_ms(int32_t year,
 {
   int32_t actual_day = compute_rule_day(rule_mode, rule_day, rule_dow, year, rule_month);
   int64_t epoch_days =
-    days_from_epoch_to_year(year) + days_before_month(rule_month, year) + (actual_day - 1);
+    spark_rapids_jni::date_time_utils::to_epoch_day(year, rule_month + 1, actual_day);
   int64_t utc_ms = epoch_days * MS_PER_DAY + rule_time;
 
   // Convert from the specified time mode to UTC
@@ -411,21 +376,14 @@ __device__ static int64_t compute_transition_utc_ms(int32_t year,
   return utc_ms;
 }
 
-// Lightweight year extraction from epoch millis (no month/day computation).
+// Extract the local calendar year from epoch millis.
 __device__ static int32_t millis_to_year(int64_t epoch_ms)
 {
-  int64_t day_count =
-    (epoch_ms >= 0) ? epoch_ms / MS_PER_DAY : (epoch_ms - MS_PER_DAY + 1) / MS_PER_DAY;
-  int64_t days_since_1 = day_count + 719468;
-  int32_t era =
-    static_cast<int32_t>((days_since_1 >= 0 ? days_since_1 : days_since_1 - 146096) / 146097);
-  int32_t doe   = static_cast<int32_t>(days_since_1 - static_cast<int64_t>(era) * 146097);
-  int32_t yoe   = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  int32_t year  = yoe + era * 400;
-  int32_t doy   = doe - (365 * yoe + yoe / 4 - yoe / 100 + yoe / 400);
-  int32_t mp    = (5 * doy + 2) / 153;
-  int32_t month = mp < 10 ? mp + 2 : mp - 10;
-  if (month <= 1) { year++; }
+  auto const epoch_day = spark_rapids_jni::integer_utils::floor_div(epoch_ms, MS_PER_DAY);
+  int year;
+  int month;
+  int day;
+  spark_rapids_jni::date_time_utils::to_date(static_cast<int32_t>(epoch_day), year, month, day);
   return year;
 }
 
