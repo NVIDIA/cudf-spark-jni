@@ -248,8 +248,8 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
 // ORC timezone uses java.util.TimeZone rules, which is different from java.time.ZoneId rules.
 
 // ---- Calendar helpers for DST computation on GPU ----
-// Ported from java.util.SimpleTimeZone.getOffset logic. Keep the rule-mode math aligned with
-// SimpleTimeZone's normalized calendar behavior; tests cover all rule modes.
+// Consistent with java.util.SimpleTimeZone rule semantics and normalized calendar behavior;
+// tests cover all rule modes.
 
 constexpr int32_t MS_PER_SECOND = 1000;
 constexpr int32_t MS_PER_MINUTE = 60 * MS_PER_SECOND;
