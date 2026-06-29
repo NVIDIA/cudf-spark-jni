@@ -106,10 +106,10 @@ std::unique_ptr<cudf::column> convert_timestamp_to_utc(
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
- * @brief DST rule parameters extracted from java.util.SimpleTimeZone.
+ * @brief Recurring DST rule parameters derived from JVM timezone APIs.
  *
  * Used by the GPU kernel to compute timezone offsets for timestamps beyond
- * the historical transition table, implementing SimpleTimeZone.getOffset() on GPU.
+ * the historical transition table, using SimpleTimeZone-compatible rule semantics on GPU.
  *
  * Mode values for start_mode/end_mode:
  *   0 = DOM_MODE: exact day of month
@@ -142,7 +142,7 @@ struct dst_rule {
  * @brief Convert between ORC writer timezone and reader timezone.
  *
  * Uses historical transition table for dates within the table range, and
- * DST rules (from SimpleTimeZone) for dates beyond the table.
+ * recurring DST rules derived from JVM timezone APIs for dates beyond the table.
  *
  * @param input The input timestamp column in microseconds.
  * @param base_offset_us Fixed microsecond offset to apply before timezone conversion.

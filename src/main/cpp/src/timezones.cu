@@ -290,7 +290,7 @@ __device__ static int64_t days_from_epoch_to_year(int32_t year)
   return 365LL * (year - 1970) + (y / 4 - 492) - (y / 100 - 19) + (y / 400 - 4);
 }
 
-// DST rule mode constants (same as SimpleTimeZone)
+// DST rule mode constants representing the same four rule categories as SimpleTimeZone
 enum dst_rule_mode : int32_t {
   DOM_MODE          = 0,
   DOW_IN_MONTH_MODE = 1,
@@ -304,7 +304,7 @@ enum dst_time_mode : int32_t { WALL_TIME = 0, STANDARD_TIME = 1, UTC_TIME = 2 };
 /**
  * @brief Compute the day-of-month when a DST rule triggers for the given year and month.
  *
- * Implements the same logic as SimpleTimeZone's rule decoding:
+ * Handles the four rule categories supported by SimpleTimeZone:
  * - DOM_MODE: exact day of month
  * - DOW_IN_MONTH_MODE: nth occurrence of dayOfWeek (negative = from end)
  * - DOW_GE_DOM_MODE: first dayOfWeek on or after the given day
@@ -432,7 +432,7 @@ __device__ static int32_t millis_to_year(int64_t epoch_ms)
 /**
  * @brief Compute the total UTC offset (raw + DST) for a UTC timestamp using DST rules.
  *
- * This is the GPU equivalent of java.util.SimpleTimeZone.getOffset(long).
+ * Computes an offset consistent with java.util.SimpleTimeZone rule semantics on GPU.
  * It computes the DST start and end transitions for the year containing the
  * timestamp, then checks if the timestamp falls within the DST window.
  *
@@ -445,7 +445,8 @@ __device__ static int32_t compute_dst_offset(int64_t utc_ms,
 {
   if (!rule.has_dst) { return raw_offset_ms; }
 
-  // Use raw offset only to avoid circular DST-year computation; this matches SimpleTimeZone.
+  // Use raw offset only to avoid circular DST-year computation, consistent with
+  // SimpleTimeZone's documented offset semantics.
   int32_t year = millis_to_year(utc_ms + raw_offset_ms);
 
   // Compute DST-on and DST-off transitions in UTC for this year
