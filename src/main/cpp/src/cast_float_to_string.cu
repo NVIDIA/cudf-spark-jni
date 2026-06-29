@@ -31,7 +31,7 @@ namespace spark_rapids_jni {
 namespace detail {
 namespace {
 
-template <typename FloatType>
+template <typename FloatType, bool json_string>
 struct float_to_string_fn {
   cudf::column_device_view d_floats;
   cudf::size_type* d_sizes;
@@ -40,18 +40,16 @@ struct float_to_string_fn {
 
   __device__ cudf::size_type compute_output_size(cudf::size_type idx) const
   {
-    auto const value        = d_floats.element<FloatType>(idx);
-    bool constexpr is_float = cuda::std::is_same_v<FloatType, float>;
+    auto const value = d_floats.element<FloatType>(idx);
     return static_cast<cudf::size_type>(
-      ftos_converter::compute_ftos_size(static_cast<double>(value), is_float));
+      ftos_converter::compute_ftos_size<FloatType, json_string>(value));
   }
 
   __device__ void float_to_string(cudf::size_type idx) const
   {
-    auto const value        = d_floats.element<FloatType>(idx);
-    bool constexpr is_float = cuda::std::is_same_v<FloatType, float>;
-    auto const output       = d_chars + d_offsets[idx];
-    ftos_converter::float_to_string(static_cast<double>(value), is_float, output);
+    auto const value  = d_floats.element<FloatType>(idx);
+    auto const output = d_chars + d_offsets[idx];
+    ftos_converter::float_to_string<FloatType, json_string>(value, output);
   }
 
   __device__ void operator()(cudf::size_type idx) const
@@ -73,6 +71,7 @@ struct float_to_string_fn {
  *
  * The template function declaration ensures only float types are allowed.
  */
+template <bool json_string>
 struct dispatch_float_to_string_fn {
   template <typename FloatType, CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& floats,
@@ -85,7 +84,7 @@ struct dispatch_float_to_string_fn {
     auto const input_ptr = cudf::column_device_view::create(floats, stream);
 
     auto [offsets, chars] = cudf::strings::detail::make_strings_children(
-      float_to_string_fn<FloatType>{*input_ptr}, strings_count, stream, mr);
+      float_to_string_fn<FloatType, json_string>{*input_ptr}, strings_count, stream, mr);
 
     return make_strings_column(strings_count,
                                std::move(offsets),
@@ -108,10 +107,14 @@ struct dispatch_float_to_string_fn {
 
 // This will convert all float column types into a strings column.
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
+                                              bool json_string,
                                               rmm::cuda_stream_view stream,
                                               rmm::device_async_resource_ref mr)
 {
-  return type_dispatcher(floats.type(), dispatch_float_to_string_fn{}, floats, stream, mr);
+  return json_string
+           ? type_dispatcher(floats.type(), dispatch_float_to_string_fn<true>{}, floats, stream, mr)
+           : type_dispatcher(
+               floats.type(), dispatch_float_to_string_fn<false>{}, floats, stream, mr);
 }
 
 }  // namespace detail
@@ -121,8 +124,16 @@ std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
                                               rmm::cuda_stream_view stream,
                                               rmm::device_async_resource_ref mr)
 {
+  return float_to_string(floats, false, stream, mr);
+}
+
+std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
+                                              bool json_string,
+                                              rmm::cuda_stream_view stream,
+                                              rmm::device_async_resource_ref mr)
+{
   SRJ_FUNC_RANGE();
-  return detail::float_to_string(floats, stream, mr);
+  return detail::float_to_string(floats, json_string, stream, mr);
 }
 
 }  // namespace spark_rapids_jni

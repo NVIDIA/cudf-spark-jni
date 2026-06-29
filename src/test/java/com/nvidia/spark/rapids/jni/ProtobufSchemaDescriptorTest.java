@@ -188,7 +188,7 @@ public class ProtobufSchemaDescriptorTest {
     assertArrayEquals(viaExplicitParent.depthLevels, viaDownUp.depthLevels);
     assertArrayEquals(viaExplicitParent.fieldNumbers, viaDownUp.fieldNumbers);
     assertArrayEquals(viaExplicitParent.outputTypeIds, viaDownUp.outputTypeIds);
-    // Spot-check the derived flat indices directly.
+    // Check the derived flat indices directly.
     assertArrayEquals(new int[]{-1, 0, 0, 2, 2, 4, 0}, viaDownUp.parentIndices);
     assertArrayEquals(new int[]{0, 1, 1, 2, 2, 3, 1}, viaDownUp.depthLevels);
   }
@@ -211,8 +211,8 @@ public class ProtobufSchemaDescriptorTest {
     ProtobufSchemaDescriptor original = new ProtobufSchemaDescriptorBuilder()
         .addField(1, DType.STRING)
             .enumMetadata(new int[]{0, 1}, new byte[][]{"A".getBytes(), "B".getBytes()})
-            .defaultString("def".getBytes())
-            .defaultInt(7)  // non-zero numeric default to exercise scalar round-trip
+            .defaultValue("def".getBytes())
+            .defaultValue(7)  // non-zero numeric default to exercise scalar round-trip
         .build();
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();

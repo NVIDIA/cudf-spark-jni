@@ -21,6 +21,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
@@ -35,6 +36,25 @@
 namespace spark_rapids_jni::protobuf::detail {
 
 // ============================================================================
+// Schema-context bundle
+// ============================================================================
+
+/**
+ * View of the per-decode default-value and enum metadata. Reduces parameter pressure on the
+ * recursive nested/repeated builders, which all consume the same six host vectors. Holds
+ * non-owning references and is cheap to copy, so it is passed by value; the referenced vectors
+ * must outlive every call that takes the view.
+ */
+struct schema_context_view {
+  std::vector<int64_t> const& default_ints;
+  std::vector<double> const& default_floats;
+  std::vector<bool> const& default_bools;
+  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings;
+  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values;
+  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names;
+};
+
+// ============================================================================
 // Field number lookup table helpers
 // ============================================================================
 
@@ -45,31 +65,41 @@ namespace spark_rapids_jni::protobuf::detail {
  * @return Empty vector if the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
-inline std::vector<int> build_lookup_table(FieldNumberFn get_field_number, int num_entries)
+inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field_number,
+                                                         int num_entries,
+                                                         rmm::cuda_stream_view stream)
 {
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
     max_fn = std::max(max_fn, get_field_number(i));
   }
-  if (max_fn > FIELD_LOOKUP_TABLE_MAX) { return {}; }
-  std::vector<int> table(max_fn + 1, -1);
+  if (max_fn > FIELD_LOOKUP_TABLE_MAX) {
+    return cudf::detail::make_pinned_vector_async<int>(0, stream);
+  }
+  auto table = cudf::detail::make_pinned_vector_async<int>(max_fn + 1, stream);
+  std::fill(table.begin(), table.end(), -1);
   for (int i = 0; i < num_entries; i++) {
     table[get_field_number(i)] = i;
   }
   return table;
 }
 
-inline std::vector<int> build_index_lookup_table(nested_field_descriptor const* schema,
-                                                 int const* field_indices,
-                                                 int num_indices)
+inline cudf::detail::host_vector<int> build_index_lookup_table(
+  nested_field_descriptor const* schema,
+  int const* field_indices,
+  int num_indices,
+  rmm::cuda_stream_view stream)
 {
-  return build_lookup_table([&](int i) { return schema[field_indices[i]].field_number; },
-                            num_indices);
+  return build_lookup_table(
+    [&](int i) { return schema[field_indices[i]].field_number; }, num_indices, stream);
 }
 
-inline std::vector<int> build_field_lookup_table(field_descriptor const* descs, int num_fields)
+template <typename FieldDesc>
+inline cudf::detail::host_vector<int> build_field_lookup_table(FieldDesc const* descs,
+                                                               int num_fields,
+                                                               rmm::cuda_stream_view stream)
 {
-  return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields);
+  return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
 /**
@@ -115,16 +145,26 @@ inline cudf::type_id get_output_type_id(FieldT const& field)
   }
 }
 
+// Forward declaration for the mutual recursion with make_empty_struct_column_from_children.
 template <typename SchemaT>
 std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
   SchemaT const& schema,
   int parent_idx,
   int num_fields,
   rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+// Build an empty (0-row) STRUCT column from an explicit child-index list, recursing into
+// STRUCT children and wrapping repeated fields in an empty LIST. Shared by both the
+// parent-indexed entry point and build_nested_struct_column's zero-row fast path.
+template <typename SchemaT>
+std::unique_ptr<cudf::column> make_empty_struct_column_from_children(
+  SchemaT const& schema,
+  std::vector<int> const& child_indices,
+  int num_fields,
+  rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto child_indices = find_child_field_indices(schema, num_fields, parent_idx);
-
   std::vector<std::unique_ptr<cudf::column>> children;
   for (int child_idx : child_indices) {
     auto child_type = cudf::data_type{get_output_type_id(schema[child_idx])};
@@ -146,6 +186,18 @@ std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
   return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
 }
 
+template <typename SchemaT>
+std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
+  SchemaT const& schema,
+  int parent_idx,
+  int num_fields,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto child_indices = find_child_field_indices(schema, num_fields, parent_idx);
+  return make_empty_struct_column_from_children(schema, child_indices, num_fields, stream, mr);
+}
+
 void maybe_check_required_fields(field_location const* locations,
                                  std::vector<int> const& field_indices,
                                  std::vector<nested_field_descriptor> const& schema,
@@ -155,7 +207,7 @@ void maybe_check_required_fields(field_location const* locations,
                                  field_location const* parent_locs,
                                  bool* row_force_null,
                                  int32_t const* top_row_indices,
-                                 int* error_flag,
+                                 protobuf_error* error_flag,
                                  rmm::cuda_stream_view stream);
 
 void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
@@ -183,6 +235,17 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr);
 
+// Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
+// in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce
+// but with `num_rows` all-null rows.
+std::unique_ptr<cudf::column> make_null_column_with_schema(
+  std::vector<nested_field_descriptor> const& schema,
+  int schema_idx,
+  int num_fields,
+  cudf::size_type num_rows,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
 std::unique_ptr<cudf::column> make_null_list_column_with_child(
   std::unique_ptr<cudf::column> child_col,
   cudf::size_type num_rows,
@@ -198,8 +261,8 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices = nullptr,
-  bool propagate_invalid_rows    = true);
+  int32_t const* top_row_indices   = nullptr,
+  bool propagate_invalid_enum_rows = true);
 
 // Wrap offsets + child into a LIST column, propagating the input's null mask. Note: when
 // `binary_input` has no nulls, `mr` is effectively unused — only the with-nulls path
@@ -226,7 +289,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -240,7 +303,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   int total_count,
   int num_rows,
   bool is_bytes,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -253,20 +316,15 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   std::vector<int> const& child_field_indices,
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
-  std::vector<int64_t> const& default_ints,
-  std::vector<double> const& default_floats,
-  std::vector<bool> const& default_bools,
-  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings,
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
+  schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows = true);
+  bool propagate_invalid_enum_rows = true);
 
 std::unique_ptr<cudf::column> build_repeated_child_list_column(
   uint8_t const* message_data,
@@ -278,19 +336,14 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   int child_schema_idx,
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
-  std::vector<int64_t> const& default_ints,
-  std::vector<double> const& default_floats,
-  std::vector<bool> const& default_bools,
-  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings,
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
+  schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices,
   int depth,
-  bool propagate_invalid_rows = true);
+  bool propagate_invalid_enum_rows = true);
 
 std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::column_view const& binary_input,
@@ -304,15 +357,10 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   int num_rows,
   std::vector<device_nested_field_descriptor> const& h_device_schema,
   std::vector<int> const& child_field_indices,
-  std::vector<int64_t> const& default_ints,
-  std::vector<double> const& default_floats,
-  std::vector<bool> const& default_bools,
-  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings,
   std::vector<nested_field_descriptor> const& schema,
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
+  schema_context_view ctx,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error_top,
+  rmm::device_uvector<protobuf_error>& d_error_top,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 

@@ -53,19 +53,11 @@
       "git_url" : "https://github.com/fmtlib/fmt.git",
       "version" : "11.0.2"
     },
-    "jitify" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "35a5b2d772691b7d1a3e739308f90d84c2c3d7ec",
-      "git_url" : "https://github.com/NVIDIA/jitify.git",
-      "version" : "2.0.0"
-    },
     "kvikio" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "e4ad3a0f9a2bbfb6b2c13df5a237c35f182ad60e",
+      "git_tag" : "5baea4603ee31a5c489ec15e55dbf1f43c8618ef",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
@@ -97,18 +89,10 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a66679d671694a1cd9b3965fbc9eccdd44efa2e4",
+      "git_tag" : "a3aad1004714e81fc88cd3267db2368d82daceb0",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
-    },
-    "roaring" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "1a2c980f90e533ce79c7610bd2eae5df5a177aff",
-      "git_url" : "https://github.com/RoaringBitmap/CRoaring.git",
-      "version" : "4.3.11"
     },
     "spdlog" : 
     {

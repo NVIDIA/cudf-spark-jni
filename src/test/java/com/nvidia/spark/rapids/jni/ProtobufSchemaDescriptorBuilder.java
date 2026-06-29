@@ -81,6 +81,9 @@ public final class ProtobufSchemaDescriptorBuilder {
 
   private final List<Field> fields = new ArrayList<>();
   // Indices of the fields we have descended into via down(); the top is the current parent.
+  // A Deque is required rather than a single "current parent" pointer because parent() allows
+  // arbitrary (non-ancestor) parent indices, so up() cannot recover the enclosing context by
+  // walking fields.get(currentParent).parentIndex.
   private final Deque<Integer> parentStack = new ArrayDeque<>();
 
   /**
@@ -91,13 +94,9 @@ public final class ProtobufSchemaDescriptorBuilder {
     Field f = new Field();
     f.fieldNumber = fieldNumber;
     f.outputTypeId = outputType.getTypeId().getNativeId();
-    if (!parentStack.isEmpty()) {
-      int parentIndex = parentStack.peek();
-      f.parentIndex = parentIndex;
-      f.depth = fields.get(parentIndex).depth + 1;
-    }
     fields.add(f);
-    return this;
+    if (parentStack.isEmpty()) return this;
+    return parent(parentStack.peek());
   }
 
   /**
@@ -168,28 +167,28 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  public ProtobufSchemaDescriptorBuilder defaultInt(long value) {
+  public ProtobufSchemaDescriptorBuilder defaultValue(long value) {
     Field f = current();
     f.hasDefaultValue = true;
     f.defaultInt = value;
     return this;
   }
 
-  public ProtobufSchemaDescriptorBuilder defaultFloat(double value) {
+  public ProtobufSchemaDescriptorBuilder defaultValue(double value) {
     Field f = current();
     f.hasDefaultValue = true;
     f.defaultFloat = value;
     return this;
   }
 
-  public ProtobufSchemaDescriptorBuilder defaultBool(boolean value) {
+  public ProtobufSchemaDescriptorBuilder defaultValue(boolean value) {
     Field f = current();
     f.hasDefaultValue = true;
     f.defaultBool = value;
     return this;
   }
 
-  public ProtobufSchemaDescriptorBuilder defaultString(byte[] value) {
+  public ProtobufSchemaDescriptorBuilder defaultValue(byte[] value) {
     Field f = current();
     f.hasDefaultValue = true;
     f.defaultString = value;
