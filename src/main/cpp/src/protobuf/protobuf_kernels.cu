@@ -200,6 +200,8 @@ CUDF_KERNEL void scan_all_fields_kernel(
 // Shared device functions for repeated field processing
 // ============================================================================
 
+enum class wire_type_mismatch_policy { report_error, skip };
+
 /**
  * Visit each occurrence of a repeated field (packed or unpacked) and invoke `f` for it.
  *
@@ -210,18 +212,21 @@ CUDF_KERNEL void scan_all_fields_kernel(
  */
 template <typename F>
   requires std::is_invocable_r_v<bool, F, int32_t /*elem_offset*/, int32_t /*elem_len*/>
-__device__ bool walk_repeated_element(uint8_t const* cur,
-                                      uint8_t const* msg_end,
-                                      uint8_t const* msg_base,
-                                      int wt,
-                                      int expected_wt,
-                                      protobuf_error* error_flag,
-                                      F&& f)
+__device__ bool walk_repeated_element(
+  uint8_t const* cur,
+  uint8_t const* msg_end,
+  uint8_t const* msg_base,
+  int wt,
+  int expected_wt,
+  protobuf_error* error_flag,
+  F&& f,
+  wire_type_mismatch_policy mismatch_policy = wire_type_mismatch_policy::report_error)
 {
   bool is_packed = (wt == wire_type_value(proto_wire_type::LEN) &&
                     expected_wt != wire_type_value(proto_wire_type::LEN));
 
   if (!is_packed && wt != expected_wt) {
+    if (mismatch_policy == wire_type_mismatch_policy::skip) { return true; }
     set_error_once(error_flag, protobuf_error::WIRE_TYPE);
     return false;
   }
@@ -294,13 +299,6 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     if (!f(abs_offset, data_length)) return false;
   }
   return true;
-}
-
-__device__ bool repeated_wire_type_matches(int wire_type, int expected_wire_type)
-{
-  return wire_type == expected_wire_type ||
-         (wire_type == wire_type_value(proto_wire_type::LEN) &&
-          expected_wire_type != wire_type_value(proto_wire_type::LEN));
 }
 
 // ============================================================================
@@ -582,12 +580,15 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(uint8_t const* message_data,
   auto validate_repeated =
     [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
       auto const expected_wire_type = get_expected_wire_type(f);
-      // Values come from the dedicated nested repeated path; here we only validate compatible
-      // occurrences so malformed payloads surface while wrong-wire occurrences remain unknown.
-      if (!repeated_wire_type_matches(wt, expected_wire_type)) { return true; }
       auto noop = []([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) { return true; };
-      return walk_repeated_element(
-        cur, msg_end, msg_base, wt, expected_wire_type, error_flag, noop);
+      return walk_repeated_element(cur,
+                                   msg_end,
+                                   msg_base,
+                                   wt,
+                                   expected_wire_type,
+                                   error_flag,
+                                   noop,
+                                   wire_type_mismatch_policy::skip);
     };
 
   if (!scan_message_field_locations(nested_start,
@@ -608,6 +609,65 @@ make_repeated_field_descriptor(device_nested_field_descriptor const& schema_fiel
   return field_descriptor{.field_number       = schema_field.field_number,
                           .expected_wire_type = schema_field.wire_type,
                           .is_repeated        = true};
+}
+
+template <typename ElementAction>
+__device__ bool scan_repeated_in_nested_parent(uint8_t const* message_data,
+                                               cudf::size_type message_data_size,
+                                               cudf::size_type const* row_offsets,
+                                               cudf::size_type base_offset,
+                                               field_location const* parent_locs,
+                                               int row,
+                                               device_nested_field_descriptor const* repeated_field,
+                                               protobuf_error* error_flag,
+                                               ElementAction element_action)
+{
+  auto const& parent_loc = parent_locs[row];
+  if (parent_loc.offset < 0) { return true; }
+
+  int64_t const row_off       = static_cast<int64_t>(row_offsets[row]) - base_offset;
+  int64_t const msg_start_off = row_off + parent_loc.offset;
+  int64_t const msg_end_off   = msg_start_off + parent_loc.length;
+  if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) {
+    return false;
+  }
+
+  uint8_t const* const msg_start = message_data + msg_start_off;
+  uint8_t const* const msg_end   = msg_start + parent_loc.length;
+
+  auto const repeated_fd = make_repeated_field_descriptor(repeated_field[0]);
+
+  auto lookup_by_fn = [repeated_fd](int field_number) {
+    return repeated_fd.field_number == field_number ? 0 : -1;
+  };
+  auto is_repeated_field      = []([[maybe_unused]] int field_idx) { return true; };
+  auto get_expected_wire_type = [repeated_fd]([[maybe_unused]] int field_idx) {
+    return repeated_fd.expected_wire_type;
+  };
+
+  auto on_repeated = [&]([[maybe_unused]] int field_idx,
+                         uint8_t const* current,
+                         uint8_t const* message_end,
+                         uint8_t const* message_base,
+                         int wire_type) {
+    return walk_repeated_element(current,
+                                 message_end,
+                                 message_base,
+                                 wire_type,
+                                 repeated_fd.expected_wire_type,
+                                 error_flag,
+                                 element_action,
+                                 wire_type_mismatch_policy::skip);
+  };
+
+  return scan_message_field_locations(msg_start,
+                                      msg_end,
+                                      /*out=*/nullptr,
+                                      error_flag,
+                                      lookup_by_fn,
+                                      is_repeated_field,
+                                      get_expected_wire_type,
+                                      on_repeated);
 }
 
 /**
@@ -633,57 +693,21 @@ CUDF_KERNEL void count_repeated_in_nested_kernel(
 
   repeated_info[static_cast<size_t>(row)] = {0};
 
-  auto const& parent_loc = parent_locs[row];
-  if (parent_loc.offset < 0) return;
-
-  int64_t const row_off       = static_cast<int64_t>(row_offsets[row]) - base_offset;
-  int64_t const msg_start_off = row_off + parent_loc.offset;
-  int64_t const msg_end_off   = msg_start_off + parent_loc.length;
-  if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) { return; }
-
-  uint8_t const* const msg_start = message_data + msg_start_off;
-  uint8_t const* const msg_end   = msg_start + parent_loc.length;
-
-  auto const repeated_fd = make_repeated_field_descriptor(repeated_field[0]);
-
-  auto lookup_by_fn = [repeated_fd](int field_number) {
-    return repeated_fd.field_number == field_number ? 0 : -1;
-  };
-  auto is_repeated_field      = []([[maybe_unused]] int field_idx) { return true; };
-  auto get_expected_wire_type = [repeated_fd]([[maybe_unused]] int field_idx) {
-    return repeated_fd.expected_wire_type;
+  auto& info        = repeated_info[static_cast<size_t>(row)];
+  auto count_action = [&info]([[maybe_unused]] int32_t, [[maybe_unused]] int32_t) {
+    info.count++;
+    return true;
   };
 
-  auto on_repeated_count = [&]([[maybe_unused]] int field_idx,
-                               uint8_t const* current,
-                               uint8_t const* message_end,
-                               uint8_t const* message_base,
-                               int wire_type) {
-    if (!repeated_wire_type_matches(wire_type, repeated_fd.expected_wire_type)) { return true; }
-    auto& info        = repeated_info[static_cast<size_t>(row)];
-    auto count_action = [&info]([[maybe_unused]] int32_t, [[maybe_unused]] int32_t) {
-      info.count++;
-      return true;
-    };
-    return walk_repeated_element(current,
-                                 message_end,
-                                 message_base,
-                                 wire_type,
-                                 repeated_fd.expected_wire_type,
-                                 error_flag,
-                                 count_action);
-  };
-
-  if (!scan_message_field_locations(msg_start,
-                                    msg_end,
-                                    /*out=*/nullptr,
-                                    error_flag,
-                                    lookup_by_fn,
-                                    is_repeated_field,
-                                    get_expected_wire_type,
-                                    on_repeated_count)) {
-    return;
-  }
+  [[maybe_unused]] auto const parsed = scan_repeated_in_nested_parent(message_data,
+                                                                      message_data_size,
+                                                                      row_offsets,
+                                                                      base_offset,
+                                                                      parent_locs,
+                                                                      row,
+                                                                      repeated_field,
+                                                                      error_flag,
+                                                                      count_action);
 }
 
 CUDF_KERNEL void scan_repeated_in_nested_kernel(
@@ -711,57 +735,26 @@ CUDF_KERNEL void scan_repeated_in_nested_kernel(
     return;
   }
 
-  int64_t const row_off       = static_cast<int64_t>(row_offsets[row]) - base_offset;
-  int64_t const msg_start_off = row_off + parent_loc.offset;
-  int64_t const msg_end_off   = msg_start_off + parent_loc.length;
-  if (!check_message_bounds(msg_start_off, msg_end_off, message_data_size, error_flag)) { return; }
-
-  uint8_t const* const msg_start = message_data + msg_start_off;
-  uint8_t const* const msg_end   = msg_start + parent_loc.length;
-
-  auto const repeated_fd = make_repeated_field_descriptor(repeated_field[0]);
-
-  auto lookup_by_fn = [repeated_fd](int field_number) {
-    return repeated_fd.field_number == field_number ? 0 : -1;
-  };
-  auto is_repeated_field      = []([[maybe_unused]] int field_idx) { return true; };
-  auto get_expected_wire_type = [repeated_fd]([[maybe_unused]] int field_idx) {
-    return repeated_fd.expected_wire_type;
+  auto const row_i32 = static_cast<int32_t>(row);
+  auto scan_action   = [&](int32_t off, int32_t len) {
+    if (write_idx >= write_end) {
+      set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+      return false;
+    }
+    occurrences[write_idx] = {row_i32, off, len};
+    write_idx++;
+    return true;
   };
 
-  auto const row_i32    = static_cast<int32_t>(row);
-  auto on_repeated_scan = [&]([[maybe_unused]] int field_idx,
-                              uint8_t const* current,
-                              uint8_t const* message_end,
-                              uint8_t const* message_base,
-                              int wire_type) {
-    if (!repeated_wire_type_matches(wire_type, repeated_fd.expected_wire_type)) { return true; }
-    auto scan_action = [&](int32_t off, int32_t len) {
-      if (write_idx >= write_end) {
-        set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
-        return false;
-      }
-      occurrences[write_idx] = {row_i32, off, len};
-      write_idx++;
-      return true;
-    };
-    return walk_repeated_element(current,
-                                 message_end,
-                                 message_base,
-                                 wire_type,
-                                 repeated_fd.expected_wire_type,
-                                 error_flag,
-                                 scan_action);
-  };
-
-  if (!scan_message_field_locations(msg_start,
-                                    msg_end,
-                                    /*out=*/nullptr,
-                                    error_flag,
-                                    lookup_by_fn,
-                                    is_repeated_field,
-                                    get_expected_wire_type,
-                                    on_repeated_scan)) {
+  if (!scan_repeated_in_nested_parent(message_data,
+                                      message_data_size,
+                                      row_offsets,
+                                      base_offset,
+                                      parent_locs,
+                                      row,
+                                      repeated_field,
+                                      error_flag,
+                                      scan_action)) {
     return;
   }
 

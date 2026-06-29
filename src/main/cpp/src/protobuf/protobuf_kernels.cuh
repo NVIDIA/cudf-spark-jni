@@ -909,14 +909,11 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
 template <typename T>
 inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   cudf::column_view const& binary_input,
-  uint8_t const* message_data,
-  cudf::size_type const* list_offsets,
-  cudf::size_type base_offset,
+  protobuf_input_view input,
   device_nested_field_descriptor const& field_desc,
   rmm::device_uvector<int32_t> d_field_offsets,
   rmm::device_uvector<repeated_occurrence>& d_occurrences,
   int total_count,
-  int num_rows,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
@@ -937,29 +934,30 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   constexpr bool is_floating_point = std::is_same_v<T, float> || std::is_same_v<T, double>;
   bool use_fixed_kernel = is_floating_point || (encoding == encoding_value(proto_encoding::FIXED));
 
-  repeated_location_provider loc_provider{list_offsets, base_offset, d_occurrences.data()};
+  repeated_location_provider loc_provider{
+    input.row_offsets, input.base_offset, d_occurrences.data()};
   if (use_fixed_kernel) {
     if constexpr (sizeof(T) == 4) {
       extract_fixed_kernel<T, wire_type_value(proto_wire_type::I32BIT), repeated_location_provider>
         <<<blocks, threads, 0, stream.value()>>>(
-          message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+          input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
     } else {
       extract_fixed_kernel<T, wire_type_value(proto_wire_type::I64BIT), repeated_location_provider>
         <<<blocks, threads, 0, stream.value()>>>(
-          message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+          input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
     }
   } else if (zigzag) {
     extract_varint_kernel<T, true, repeated_location_provider>
       <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+        input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
   } else {
     extract_varint_kernel<T, false, repeated_location_provider>
       <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+        input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
   }
 
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                    num_rows + 1,
+                                                    input.num_rows + 1,
                                                     d_field_offsets.release(),
                                                     rmm::device_buffer{},
                                                     0);
@@ -968,7 +966,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
 
   if (input_null_count > 0) {
     auto null_mask = cudf::copy_bitmask(binary_input, stream, mr);
-    return cudf::make_lists_column(num_rows,
+    return cudf::make_lists_column(input.num_rows,
                                    std::move(offsets_col),
                                    std::move(child_col),
                                    input_null_count,
@@ -976,7 +974,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   }
 
   return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
+    input.num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
 }
 
 // ============================================================================

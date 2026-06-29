@@ -1600,9 +1600,9 @@ public class ProtobufTest {
     byte[] r0Bools = new byte[]{0x01, 0x00};
     Byte[] row0 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(42)),
-        box(tag(2, WT_LEN)), box(encodeVarint(r0IntVarints.length)), box(r0IntVarints),
-        box(tag(3, WT_LEN)), box(encodeVarint(r0Doubles.length)), box(r0Doubles),
-        box(tag(4, WT_LEN)), box(encodeVarint(r0Bools.length)), box(r0Bools));
+        box(tag(2, WT_LEN)), encodeBytes(r0IntVarints),
+        box(tag(3, WT_LEN)), encodeBytes(r0Doubles),
+        box(tag(4, WT_LEN)), encodeBytes(r0Bools));
 
     // --- Row 1: 15 negative ints => 150 bytes packed (length varint is 2 bytes: 0x96 0x01) ---
     java.io.ByteArrayOutputStream buf1 = new java.io.ByteArrayOutputStream();
@@ -1615,15 +1615,15 @@ public class ProtobufTest {
     byte[] r1Bools = new byte[]{0x01};
     Byte[] row1 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(7)),
-        box(tag(2, WT_LEN)), box(encodeVarint(r1IntVarints.length)), box(r1IntVarints),
-        box(tag(3, WT_LEN)), box(encodeVarint(r1Doubles.length)), box(r1Doubles),
-        box(tag(4, WT_LEN)), box(encodeVarint(r1Bools.length)), box(r1Bools));
+        box(tag(2, WT_LEN)), encodeBytes(r1IntVarints),
+        box(tag(3, WT_LEN)), encodeBytes(r1Doubles),
+        box(tag(4, WT_LEN)), encodeBytes(r1Bools));
 
     // --- Row 2: no int_values, no bool_values ---
     byte[] r2Doubles = encodeDouble(5.0);
     Byte[] row2 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(0)),
-        box(tag(3, WT_LEN)), box(encodeVarint(r2Doubles.length)), box(r2Doubles));
+        box(tag(3, WT_LEN)), encodeBytes(r2Doubles));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1, row2}).build()) {
       try (ColumnVector result = Protobuf.decodeToStruct(
@@ -2007,8 +2007,8 @@ public class ProtobufTest {
     // enum Color { RED=0; GREEN=1; BLUE=2; }
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(1)));  // GREEN
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
+    byte[][][] enumNames = new byte[][][]{
+        new byte[][]{
             "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
@@ -2032,8 +2032,8 @@ public class ProtobufTest {
     // Unknown enum value should null the entire struct row (PERMISSIVE behavior).
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
+    byte[][][] enumNames = new byte[][][]{
+        new byte[][]{
             "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
@@ -2058,8 +2058,8 @@ public class ProtobufTest {
     Byte[] row1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));  // unknown
     Byte[] row2 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(2)));    // BLUE
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
+    byte[][][] enumNames = new byte[][][]{
+        new byte[][]{
             "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
@@ -2231,8 +2231,8 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(2)),   // BLUE
         box(tag(1, WT_VARINT)), box(encodeVarint(1)));  // GREEN
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
+    byte[][][] enumNames = new byte[][][]{
+        new byte[][]{
             "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
             "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
@@ -2270,8 +2270,7 @@ public class ProtobufTest {
     byte[] packedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
     Byte[] row = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(packedData.length)),
-        box(packedData));
+        encodeBytes(packedData));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
       assertThrows(RuntimeException.class, () -> {
@@ -2291,8 +2290,7 @@ public class ProtobufTest {
     byte[] packedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
     Byte[] row = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(packedData.length)),
-        box(packedData));
+        encodeBytes(packedData));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
       assertThrows(RuntimeException.class, () -> {
@@ -2316,8 +2314,7 @@ public class ProtobufTest {
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(badPackedData.length)),
-        box(badPackedData));
+        encodeBytes(badPackedData));
     Byte[] row1 = concat(
         box(tag(1, WT_32BIT)), box(encodeFixed32(42)),
         box(tag(1, WT_32BIT)), box(encodeFixed32(99)));
@@ -2344,8 +2341,7 @@ public class ProtobufTest {
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(badPackedData.length)),
-        box(badPackedData));
+        encodeBytes(badPackedData));
     Byte[] row1 = concat(
         box(tag(1, WT_64BIT)), box(encodeFixed64(7L)),
         box(tag(1, WT_64BIT)), box(encodeFixed64(11L)));
@@ -2458,7 +2454,7 @@ public class ProtobufTest {
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(10)),
         box(tag(1, WT_VARINT)), box(encodeVarint(20)),
-        box(tag(1, WT_LEN)), box(encodeVarint(packedContent.length)), box(packedContent));
+        box(tag(1, WT_LEN)), encodeBytes(packedContent));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
          ColumnVector result = Protobuf.decodeToStruct(
@@ -2799,7 +2795,7 @@ public class ProtobufTest {
     // message Outer { Inner inner = 1; }
     byte[] packedIds = concatBytes(encodeVarint(10), encodeVarint(20), encodeVarint(30));
     Byte[] inner = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(packedIds.length)), box(packedIds));
+        box(tag(1, WT_LEN)), encodeBytes(packedIds));
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
@@ -2827,9 +2823,9 @@ public class ProtobufTest {
     // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
     byte[] packedPriorities = concatBytes(encodeVarint(0), encodeVarint(2), encodeVarint(1));
     Byte[] inner = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(packedPriorities.length)), box(packedPriorities));
+        box(tag(1, WT_LEN)), encodeBytes(packedPriorities));
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
-    byte[][] enumNames = new byte[][] {
+    byte[][] enumNames = new byte[][]{
         "UNKNOWN".getBytes(StandardCharsets.UTF_8),
         "FOO".getBytes(StandardCharsets.UTF_8),
         "BAR".getBytes(StandardCharsets.UTF_8)
@@ -2858,7 +2854,7 @@ public class ProtobufTest {
   void testNestedRepeatedScalarEmptyAndAbsentParent() {
     // message Inner { repeated int32 ids = 1 [packed=true]; }
     // message Outer { Inner inner = 1; }
-    Byte[][] rows = new Byte[][] {
+    Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{})),
         new Byte[] {}
     };
@@ -2896,10 +2892,10 @@ public class ProtobufTest {
     // message Outer { Middle middle = 1; }
     byte[] packedIds = concatBytes(encodeVarint(7), encodeVarint(8));
     Byte[] inner = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(packedIds.length)), box(packedIds));
+        box(tag(1, WT_LEN)), encodeBytes(packedIds));
     Byte[] middleWithInner = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
     Byte[] middleWithoutInner = new Byte[] {};
-    Byte[][] rows = new Byte[][] {
+    Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(middleWithInner)),
         concat(box(tag(1, WT_LEN)), encodeMessage(middleWithoutInner))
     };
@@ -2944,20 +2940,25 @@ public class ProtobufTest {
     // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
     byte[] validPriorities = concatBytes(encodeVarint(1), encodeVarint(2));
     byte[] invalidPriorities = concatBytes(encodeVarint(1), encodeVarint(999));
-    Byte[][] rows = new Byte[][] {
+    Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(concat(
-            box(tag(1, WT_LEN)), box(encodeVarint(validPriorities.length)), box(validPriorities)))),
+            box(tag(1, WT_LEN)), encodeBytes(validPriorities)))),
         concat(box(tag(1, WT_LEN)), encodeMessage(concat(
-            box(tag(1, WT_LEN)), box(encodeVarint(invalidPriorities.length)),
-            box(invalidPriorities))))
+            box(tag(1, WT_LEN)), encodeBytes(invalidPriorities))))
     };
-    byte[][] enumNames = new byte[][] {
+    byte[][] enumNames = new byte[][]{
         "UNKNOWN".getBytes(StandardCharsets.UTF_8),
         "FOO".getBytes(StandardCharsets.UTF_8),
         "BAR".getBytes(StandardCharsets.UTF_8)
     };
 
     try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedPriorities = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("FOO", "BAR"),
+             Arrays.asList("FOO", null));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2966,25 +2967,8 @@ public class ProtobufTest {
                          .enumMetadata(new int[]{0, 1, 2}, enumNames)
                  .up()
                  .build(),
-             false);
-         ColumnVector inner = actual.getChildColumnView(0).copyToColumnVector();
-         ColumnView priorities = inner.getChildColumnView(0);
-         ColumnView priorityValues = priorities.getChildColumnView(0);
-         HostColumnVector hostOuter = actual.copyToHost();
-         HostColumnVector hostInner = inner.copyToHost();
-         HostColumnVector hostPriorityValues = priorityValues.copyToHost()) {
-      assertEquals(0, actual.getNullCount(),
-          "Invalid nested repeated enum should not null outer rows");
-      assertFalse(hostOuter.isNull(0));
-      assertFalse(hostOuter.isNull(1));
-      assertEquals(0, inner.getNullCount(), "Nested struct rows should stay present");
-      assertFalse(hostInner.isNull(0));
-      assertFalse(hostInner.isNull(1));
-      assertListOffsets(priorities, 0, 2, 4);
-      assertEquals("FOO", hostPriorityValues.getJavaString(0));
-      assertEquals("BAR", hostPriorityValues.getJavaString(1));
-      assertEquals("FOO", hostPriorityValues.getJavaString(2));
-      assertTrue(hostPriorityValues.isNull(3), "Unknown repeated enum element should be null");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
     }
   }
 
@@ -2999,7 +2983,7 @@ public class ProtobufTest {
         box(tag(1, WT_LEN)), encodeString("beta"),
         box(tag(2, WT_LEN)), encodeBytes(p0),
         box(tag(2, WT_LEN)), encodeBytes(p1));
-    Byte[][] rows = new Byte[][] {
+    Byte[][] rows = new Byte[][]{
         concat(box(tag(1, WT_LEN)), encodeMessage(inner)),
         concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{}))
     };
@@ -3482,10 +3466,10 @@ public class ProtobufTest {
     byte[] s2 = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
     byte[] s3 = "foo".getBytes(java.nio.charset.StandardCharsets.UTF_8);
     Byte[] row0 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(s1.length)), box(s1),
-        box(tag(1, WT_LEN)), box(encodeVarint(s2.length)), box(s2));
+        box(tag(1, WT_LEN)), encodeBytes(s1),
+        box(tag(1, WT_LEN)), encodeBytes(s2));
     Byte[] row1 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(s3.length)), box(s3));
+        box(tag(1, WT_LEN)), encodeBytes(s3));
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
          ColumnVector result = Protobuf.decodeToStruct(
              input.getColumn(0),
@@ -3517,10 +3501,10 @@ public class ProtobufTest {
     byte[] b2 = new byte[]{0x7f, (byte) 0xff};
     byte[] b3 = new byte[]{0x10};
     Byte[] row0 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(b1.length)), box(b1),
-        box(tag(1, WT_LEN)), box(encodeVarint(b2.length)), box(b2));
+        box(tag(1, WT_LEN)), encodeBytes(b1),
+        box(tag(1, WT_LEN)), encodeBytes(b2));
     Byte[] row1 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(b3.length)), box(b3));
+        box(tag(1, WT_LEN)), encodeBytes(b3));
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
          ColumnVector result = Protobuf.decodeToStruct(
              input.getColumn(0),
