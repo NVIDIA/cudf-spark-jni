@@ -571,23 +571,24 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
 constexpr int32_t MAX_SMEM_TRANSITIONS  = 512;
 constexpr int32_t CONVERT_TZ_BLOCK_SIZE = 256;
 
-__global__ void convert_timezones_kernel(cudf::timestamp_us const* __restrict__ input,
-                                         cudf::bitmask_type const* __restrict__ null_mask,
-                                         cudf::timestamp_us* __restrict__ output,
-                                         cudf::size_type num_rows,
-                                         int64_t base_offset_us,
-                                         int64_t const* __restrict__ g_writer_trans,
-                                         int32_t const* __restrict__ g_writer_offsets,
-                                         int32_t writer_trans_count,
-                                         int32_t writer_initial_offset,
-                                         int32_t writer_raw_offset,
-                                         spark_rapids_jni::dst_rule writer_dst,
-                                         int64_t const* __restrict__ g_reader_trans,
-                                         int32_t const* __restrict__ g_reader_offsets,
-                                         int32_t reader_trans_count,
-                                         int32_t reader_initial_offset,
-                                         int32_t reader_raw_offset,
-                                         spark_rapids_jni::dst_rule reader_dst)
+CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
+  convert_timezones_kernel(cudf::timestamp_us const* __restrict__ input,
+                           cudf::bitmask_type const* __restrict__ null_mask,
+                           cudf::timestamp_us* __restrict__ output,
+                           cudf::size_type num_rows,
+                           int64_t base_offset_us,
+                           int64_t const* __restrict__ g_writer_trans,
+                           int32_t const* __restrict__ g_writer_offsets,
+                           int32_t writer_trans_count,
+                           int32_t writer_initial_offset,
+                           int32_t writer_raw_offset,
+                           spark_rapids_jni::dst_rule writer_dst,
+                           int64_t const* __restrict__ g_reader_trans,
+                           int32_t const* __restrict__ g_reader_offsets,
+                           int32_t reader_trans_count,
+                           int32_t reader_initial_offset,
+                           int32_t reader_raw_offset,
+                           spark_rapids_jni::dst_rule reader_dst)
 {
   // Shared memory layout: writer transitions, writer offsets, reader transitions, reader offsets
   extern __shared__ char smem[];
