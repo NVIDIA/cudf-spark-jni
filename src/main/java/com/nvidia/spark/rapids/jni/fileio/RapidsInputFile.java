@@ -30,6 +30,8 @@ import java.util.OptionalLong;
  * The implementation of this interface should be thread-safe.
  */
 public interface RapidsInputFile {
+  int DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE = 8 * 1024 * 1024;
+
   /**
    * Get the path of this input file.
    * @return the file path string
@@ -72,22 +74,26 @@ public interface RapidsInputFile {
     if (copyRanges.isEmpty()) {
       return;
     }
-    long outputLength = output.getLength();
-    for (CopyRange copyRange : copyRanges) {
-      Objects.requireNonNull(copyRange, "copyRange can't be null");
-      long end = copyRange.getOutputOffset() + copyRange.getLength();
-      if (end < 0 || end > outputLength) {
-        throw new IllegalArgumentException(
-            "Output buffer length " + outputLength + " is smaller than requested end " + end);
-      }
-    }
+    readVectoredUsingCopyBuffer(
+        this, output, copyRanges, DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE);
+  }
 
-    try (SeekableInputStream input = open()) {
-      for (CopyRange copyRange : copyRanges) {
-        input.seek(copyRange.getInputOffset());
-        output.copyFromStream(copyRange.getOutputOffset(), input, copyRange.getLength());
-      }
-    }
+  /**
+   * Reads data from {@code inputFile} into {@code output} using a reusable copy buffer.
+   *
+   * @param inputFile the file to read from
+   * @param output the destination buffer
+   * @param copyRanges input ranges and output offsets
+   * @param copyBufferSize size of the reusable copy buffer in bytes
+   * @throws IOException if an I/O error occurs during reading
+   */
+  static void readVectoredUsingCopyBuffer(
+      RapidsInputFile inputFile,
+      HostMemoryBuffer output,
+      List<CopyRange> copyRanges,
+      int copyBufferSize) throws IOException {
+    RapidsInputFileUtils.readVectoredUsingCopyBuffer(
+        inputFile, output, copyRanges, copyBufferSize);
   }
 
   /**
