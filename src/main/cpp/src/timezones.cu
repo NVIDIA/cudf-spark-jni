@@ -35,6 +35,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/launch>
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
 
@@ -719,24 +720,29 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
 
   int32_t num_blocks = (input.size() + CONVERT_TZ_BLOCK_SIZE - 1) / CONVERT_TZ_BLOCK_SIZE;
 
-  convert_timezones_kernel<<<num_blocks, CONVERT_TZ_BLOCK_SIZE, smem_bytes, stream.value()>>>(
-    input.begin<cudf::timestamp_us>(),
-    input.null_mask(),
-    results->mutable_view().begin<cudf::timestamp_us>(),
-    input.size(),
-    base_offset_us,
-    writer_trans_ptr,
-    writer_offsets_ptr,
-    writer_trans_count,
-    writer_initial_offset,
-    writer_raw_offset,
-    writer_dst,
-    reader_trans_ptr,
-    reader_offsets_ptr,
-    reader_trans_count,
-    reader_initial_offset,
-    reader_raw_offset,
-    reader_dst);
+  auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
+                                               cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
+                                               cuda::dynamic_shared_memory<char[]>(smem_bytes));
+  cuda::launch(stream.value(),
+               launch_config,
+               convert_timezones_kernel,
+               input.begin<cudf::timestamp_us>(),
+               input.null_mask(),
+               results->mutable_view().begin<cudf::timestamp_us>(),
+               input.size(),
+               base_offset_us,
+               writer_trans_ptr,
+               writer_offsets_ptr,
+               writer_trans_count,
+               writer_initial_offset,
+               writer_raw_offset,
+               writer_dst,
+               reader_trans_ptr,
+               reader_offsets_ptr,
+               reader_trans_count,
+               reader_initial_offset,
+               reader_raw_offset,
+               reader_dst);
   CUDF_CHECK_CUDA(stream.value());
 
   return results;
