@@ -22,6 +22,10 @@ import java.io.InputStream;
 /**
  * An {@code Inputstream} that offers random access interface.
  *
+ * <p>Implementations of {@link #read(byte[], int, int)} must not return 0 when {@code len} is
+ * positive. They must either block until at least one byte is available, return -1 at end of
+ * stream, or throw an {@link IOException}.
+ *
  */
 public abstract class SeekableInputStream extends InputStream {
   /**

@@ -69,10 +69,9 @@ public class RapidsInputFileTest {
   public void readVectoredThrowsIOExceptionOnZeroProgressRead() throws IOException {
     RapidsInputFile inputFile = new ZeroProgressInputFile(FILE_DATA.length);
     try (HostMemoryBuffer output = HostMemoryBuffer.allocate(3)) {
-      IOException e = assertThrows(IOException.class,
+      assertThrows(IOException.class,
           () -> inputFile.readVectored(output,
               Collections.singletonList(new RapidsInputFile.CopyRange(0, 3, 0))));
-      assertEquals(IOException.class, e.getClass());
     }
   }
 
