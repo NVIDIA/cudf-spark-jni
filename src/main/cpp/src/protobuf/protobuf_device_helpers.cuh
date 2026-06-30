@@ -59,11 +59,11 @@ __device__ inline bool read_varint(uint8_t const* cur,
   return false;
 }
 
-__device__ inline void set_error_once(int* error_flag, int error_code)
+__device__ inline void set_error_once(protobuf_error* error_flag, protobuf_error error)
 {
-  int expected = 0;
-  cuda::atomic_ref<int, cuda::thread_scope_device> ref(*error_flag);
-  ref.compare_exchange_strong(expected, error_code, cuda::memory_order_relaxed);
+  auto expected = protobuf_error::NONE;
+  cuda::atomic_ref<protobuf_error, cuda::thread_scope_device> ref(*error_flag);
+  ref.compare_exchange_strong(expected, error, cuda::memory_order_relaxed);
 }
 
 // Store a decoded varint into an output slot. BOOL8 (uint8_t) follows protobuf's
@@ -78,7 +78,9 @@ __device__ __forceinline__ void write_varint_value(T* dst, uint64_t val)
   }
 }
 
-void set_error_once_async(int* error_flag, int error_code, rmm::cuda_stream_view stream);
+void set_error_once_async(protobuf_error* error_flag,
+                          protobuf_error error,
+                          rmm::cuda_stream_view stream);
 
 __device__ inline int get_wire_type_size(int wt, uint8_t const* cur, uint8_t const* end)
 {
@@ -233,10 +235,10 @@ template <std::integral T = int32_t>
 __device__ inline bool check_message_bounds(T start,
                                             T end_pos,
                                             cudf::size_type total_size,
-                                            int* error_flag)
+                                            protobuf_error* error_flag)
 {
   if (start < 0 || end_pos < start || end_pos > total_size) {
-    set_error_once(error_flag, ERR_BOUNDS);
+    set_error_once(error_flag, protobuf_error::BOUNDS);
     return false;
   }
   return true;
@@ -250,19 +252,19 @@ struct proto_tag {
 __device__ inline bool decode_tag(uint8_t const*& cur,
                                   uint8_t const* end,
                                   proto_tag& tag,
-                                  int* error_flag)
+                                  protobuf_error* error_flag)
 {
   uint64_t key;
   int key_bytes;
   if (!read_varint(cur, end, key, key_bytes)) {
-    set_error_once(error_flag, ERR_VARINT);
+    set_error_once(error_flag, protobuf_error::VARINT);
     return false;
   }
 
   cur += key_bytes;
   uint64_t fn = key >> 3;
   if (fn == 0 || fn > static_cast<uint64_t>(MAX_FIELD_NUMBER)) {
-    set_error_once(error_flag, ERR_FIELD_NUMBER);
+    set_error_once(error_flag, protobuf_error::FIELD_NUMBER);
     return false;
   }
   tag.field_number = static_cast<int>(fn);

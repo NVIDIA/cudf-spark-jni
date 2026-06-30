@@ -384,7 +384,7 @@ class hive_device_row_hasher {
           if (top.get_idx_to_process() == curr_col.num_child_columns()) {
             if (--stack_size > 0) { col_stack[stack_size - 1].update_cur_hash(top.get_hash()); }
           } else {
-            auto const structcv = cudf::detail::structs_column_device_view(curr_col);
+            auto const structcv = cudf::structs_column_device_view(curr_col);
             while (top.get_idx_to_process() < curr_col.num_child_columns()) {
               auto idx             = top.get_and_inc_idx_to_process();
               auto const child_col = structcv.get_sliced_child(idx);
@@ -403,7 +403,7 @@ class hive_device_row_hasher {
         } else if (curr_col.type().id() == cudf::type_id::LIST) {
           // Get the child column of the list column
           cudf::column_device_view child_col =
-            cudf::detail::lists_column_device_view(curr_col).get_sliced_child();
+            cudf::lists_column_device_view(curr_col).get_sliced_child();
           // If the child column is of primitive type, directly compute the hash value of the list
           if (child_col.type().id() != cudf::type_id::LIST &&
               child_col.type().id() != cudf::type_id::STRUCT) {

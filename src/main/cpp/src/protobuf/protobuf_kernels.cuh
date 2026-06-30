@@ -35,6 +35,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/limits>
 #include <cuda/std/type_traits>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -93,16 +94,34 @@ struct nested_location_provider {
   int field_idx;
   int num_fields;
 
-  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  // Rebase child offsets from the parent message to the row for recursive STRUCT decode.
+  __device__ inline field_location get_rebased_child_location(int thread_idx,
+                                                              protobuf_error* error_flag) const
   {
     auto ploc = parent_locations[thread_idx];
     auto cloc = child_locations[flat_index(thread_idx, num_fields, field_idx)];
-    if (ploc.offset >= 0 && cloc.offset >= 0) {
-      data_offset = row_offsets[thread_idx] - base_offset + ploc.offset + cloc.offset;
-    } else {
-      cloc.offset = -1;
+    if (ploc.offset < 0 || cloc.offset < 0) { return {-1, 0}; }
+
+    auto const offset = static_cast<int64_t>(ploc.offset) + cloc.offset;
+    if (offset > cuda::std::numeric_limits<int32_t>::max()) {
+      if (error_flag != nullptr) { set_error_once(error_flag, protobuf_error::OVERFLOW); }
+      return {-1, 0};
     }
-    return cloc;
+    return {static_cast<int32_t>(offset), cloc.length};
+  }
+
+  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  {
+    auto child_parent_loc = get_rebased_child_location(thread_idx, nullptr);
+    if (child_parent_loc.offset < 0) { return child_parent_loc; }
+
+    data_offset = row_offsets[thread_idx] - base_offset + child_parent_loc.offset;
+    return child_locations[flat_index(thread_idx, num_fields, field_idx)];
+  }
+
+  __device__ inline bool valid(int thread_idx) const
+  {
+    return get_rebased_child_location(thread_idx, nullptr).offset >= 0;
   }
 };
 
@@ -152,7 +171,7 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
                                        int total_items,
                                        OutputType* out,
                                        bool* valid,
-                                       int* error_flag,
+                                       protobuf_error* error_flag,
                                        bool has_default      = false,
                                        int64_t default_value = 0)
 {
@@ -178,7 +197,7 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
   uint64_t v;
   int n;
   if (!read_varint(cur, cur_end, v, n)) {
-    set_error_once(error_flag, ERR_VARINT);
+    set_error_once(error_flag, protobuf_error::VARINT);
     if (valid) valid[idx] = false;
     return;
   }
@@ -194,7 +213,7 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
                                       int total_items,
                                       OutputType* out,
                                       bool* valid,
-                                      int* error_flag,
+                                      protobuf_error* error_flag,
                                       bool has_default         = false,
                                       OutputType default_value = OutputType{})
 {
@@ -219,7 +238,7 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
 
   if constexpr (WT == wire_type_value(proto_wire_type::I32BIT)) {
     if (loc.length < 4) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       if (valid) valid[idx] = false;
       return;
     }
@@ -227,7 +246,7 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
     memcpy(&value, &raw, sizeof(value));
   } else {
     if (loc.length < 8) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       if (valid) valid[idx] = false;
       return;
     }
@@ -261,7 +280,7 @@ CUDF_KERNEL void extract_varint_batched_kernel(uint8_t const* message_data,
                                                batched_scalar_desc const* descs,
                                                int num_descs,
                                                int num_rows,
-                                               int* error_flag)
+                                               protobuf_error* error_flag)
 {
   int row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   int fi  = static_cast<int>(blockIdx.y);
@@ -288,7 +307,7 @@ CUDF_KERNEL void extract_varint_batched_kernel(uint8_t const* message_data,
   uint64_t v;
   int n;
   if (!read_varint(cur, end, v, n)) {
-    set_error_once(error_flag, ERR_VARINT);
+    set_error_once(error_flag, protobuf_error::VARINT);
     desc.valid[row] = false;
     return;
   }
@@ -306,7 +325,7 @@ CUDF_KERNEL void extract_fixed_batched_kernel(uint8_t const* message_data,
                                               batched_scalar_desc const* descs,
                                               int num_descs,
                                               int num_rows,
-                                              int* error_flag)
+                                              protobuf_error* error_flag)
 {
   int row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   int fi  = static_cast<int>(blockIdx.y);
@@ -336,7 +355,7 @@ CUDF_KERNEL void extract_fixed_batched_kernel(uint8_t const* message_data,
 
   if constexpr (WT == wire_type_value(proto_wire_type::I32BIT)) {
     if (loc.length < 4) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       desc.valid[row] = false;
       return;
     }
@@ -344,7 +363,7 @@ CUDF_KERNEL void extract_fixed_batched_kernel(uint8_t const* message_data,
     memcpy(&value, &raw, sizeof(value));
   } else {
     if (loc.length < 8) {
-      set_error_once(error_flag, ERR_FIXED_LEN);
+      set_error_once(error_flag, protobuf_error::FIXED_LEN);
       desc.valid[row] = false;
       return;
     }
@@ -393,7 +412,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   field_location* nested_locations,
                                   int num_nested_fields,
                                   int const* nested_field_indices,
-                                  int* error_flag,
+                                  protobuf_error* error_flag,
                                   int const* fn_to_rep_idx,
                                   int fn_to_rep_size,
                                   int const* fn_to_nested_idx,
@@ -404,7 +423,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
 void launch_scan_all_repeated_occurrences(cudf::column_device_view const& d_in,
                                           repeated_field_scan_desc const* scan_descs,
                                           int num_scan_fields,
-                                          int* error_flag,
+                                          protobuf_error* error_flag,
                                           int const* fn_to_desc_idx,
                                           int fn_to_desc_size,
                                           int num_rows,
@@ -426,19 +445,25 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        field_descriptor const* field_descs,
                                        int num_fields,
                                        field_location* output_locations,
-                                       int* error_flag,
+                                       protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
+
+void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
+                                                field_location const* child_locs,
+                                                int child_idx,
+                                                int num_child_fields,
+                                                field_location* gc_parent_locs,
+                                                int num_rows,
+                                                protobuf_error* error_flag,
+                                                rmm::cuda_stream_view stream);
 
 // ============================================================================
 // Host-side template helpers that launch CUDA kernels
 // ============================================================================
 
-// Build a row-aligned null mask from `valid[row]` boolean flags. The caller must ensure
-// `valid.size() >= num_rows`. If a caller pads `valid` to keep a device_uvector non-empty,
-// it must pass the logical `num_rows` separately so the mask matches the row count rather
-// than the backing buffer length.
+// Build a row-aligned null mask from `valid[row]` boolean flags.
 template <typename T>
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   rmm::device_uvector<T> const& valid,
@@ -465,7 +490,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_column(cudf::data_type dt
                                                               rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<T> out(num_rows, stream, mr);
-  rmm::device_uvector<bool> valid((num_rows > 0 ? num_rows : 1), stream, mr);
+  rmm::device_uvector<bool> valid(num_rows, stream, mr);
   if (num_rows == 0) {
     return std::make_unique<cudf::column>(dt, 0, out.release(), rmm::device_buffer{}, 0);
   }
@@ -486,7 +511,7 @@ inline void extract_integer_into_buffers(uint8_t const* message_data,
                                          bool enable_zigzag,
                                          T* out_ptr,
                                          bool* valid_ptr,
-                                         int* error_ptr,
+                                         protobuf_error* error_ptr,
                                          rmm::cuda_stream_view stream)
 {
   if (enable_zigzag && encoding == encoding_value(proto_encoding::ZIGZAG)) {
@@ -536,19 +561,20 @@ inline void extract_integer_into_buffers(uint8_t const* message_data,
 }
 
 template <typename T, typename LocationProvider>
-std::unique_ptr<cudf::column> extract_and_build_integer_column(cudf::data_type dt,
-                                                               uint8_t const* message_data,
-                                                               LocationProvider const& loc_provider,
-                                                               int num_rows,
-                                                               int blocks,
-                                                               int threads,
-                                                               rmm::device_uvector<int>& d_error,
-                                                               bool has_default,
-                                                               int64_t default_value,
-                                                               int encoding,
-                                                               bool enable_zigzag,
-                                                               rmm::cuda_stream_view stream,
-                                                               rmm::device_async_resource_ref mr)
+std::unique_ptr<cudf::column> extract_and_build_integer_column(
+  cudf::data_type dt,
+  uint8_t const* message_data,
+  LocationProvider const& loc_provider,
+  int num_rows,
+  int blocks,
+  int threads,
+  rmm::device_uvector<protobuf_error>& d_error,
+  bool has_default,
+  int64_t default_value,
+  int encoding,
+  bool enable_zigzag,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
 {
   return extract_and_build_scalar_column<T>(
     dt,
@@ -593,7 +619,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   ValidityFn validity_fn,
   bool has_default,
   cudf::detail::host_vector<uint8_t> const& default_bytes,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -672,7 +698,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   }
 
   rmm::device_uvector<bool> valid(num_rows, stream, mr);
-  thrust::transform(rmm::exec_policy_nosync(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, mr),
                     thrust::make_counting_iterator<cudf::size_type>(0),
                     thrust::make_counting_iterator<cudf::size_type>(num_rows),
                     valid.data(),
@@ -711,11 +737,11 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
   std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
   rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices = nullptr,
-  bool propagate_invalid_rows    = true)
+  int32_t const* top_row_indices   = nullptr,
+  bool propagate_invalid_enum_rows = true)
 {
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
@@ -765,7 +791,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                            d_row_force_null,
                                            num_items,
                                            top_row_indices,
-                                           propagate_invalid_rows,
+                                           propagate_invalid_enum_rows,
                                            stream);
         }
       }
@@ -868,7 +894,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   rmm::device_uvector<repeated_occurrence>& d_occurrences,
   int total_count,
   int num_rows,
-  rmm::device_uvector<int>& d_error,
+  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -940,7 +966,7 @@ void launch_scan_all_fields(cudf::column_device_view const& d_in,
                             int const* field_lookup,
                             int field_lookup_size,
                             field_location* locations,
-                            int* error_flag,
+                            protobuf_error* error_flag,
                             bool* row_has_invalid_data,
                             int num_rows,
                             rmm::cuda_stream_view stream);
