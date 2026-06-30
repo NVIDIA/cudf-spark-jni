@@ -39,19 +39,42 @@ final class RapidsInputFileUtils {
 
     byte[] copyBuffer = new byte[getCopyBufferAllocationSize(copyRanges, copyBufferSize)];
     try (SeekableInputStream input = inputFile.open()) {
-      for (RapidsInputFile.CopyRange copyRange : copyRanges) {
-        if (input.getPos() != copyRange.getInputOffset()) {
-          input.seek(copyRange.getInputOffset());
-        }
-        long outputOffset = copyRange.getOutputOffset();
-        long bytesLeft = copyRange.getLength();
-        while (bytesLeft > 0) {
-          int readLength = (int) Math.min(bytesLeft, copyBuffer.length);
-          readFully(input, copyBuffer, readLength);
-          output.setBytes(outputOffset, copyBuffer, 0, readLength);
-          outputOffset += readLength;
-          bytesLeft -= readLength;
-        }
+      readVectored(input, output, copyRanges, copyBuffer);
+    }
+  }
+
+  static void readVectoredUsingCopyBuffer(
+      RapidsInputFile inputFile,
+      HostMemoryBuffer output,
+      List<RapidsInputFile.CopyRange> copyRanges,
+      byte[] copyBuffer) throws IOException {
+    validateReadVectoredArgs(inputFile, output, copyRanges, copyBuffer);
+    if (copyRanges.isEmpty()) {
+      return;
+    }
+
+    try (SeekableInputStream input = inputFile.open()) {
+      readVectored(input, output, copyRanges, copyBuffer);
+    }
+  }
+
+  private static void readVectored(
+      SeekableInputStream input,
+      HostMemoryBuffer output,
+      List<RapidsInputFile.CopyRange> copyRanges,
+      byte[] copyBuffer) throws IOException {
+    for (RapidsInputFile.CopyRange copyRange : copyRanges) {
+      if (input.getPos() != copyRange.getInputOffset()) {
+        input.seek(copyRange.getInputOffset());
+      }
+      long outputOffset = copyRange.getOutputOffset();
+      long bytesLeft = copyRange.getLength();
+      while (bytesLeft > 0) {
+        int readLength = (int) Math.min(bytesLeft, copyBuffer.length);
+        readFully(input, copyBuffer, readLength);
+        output.setBytes(outputOffset, copyBuffer, 0, readLength);
+        outputOffset += readLength;
+        bytesLeft -= readLength;
       }
     }
   }
@@ -62,11 +85,32 @@ final class RapidsInputFileUtils {
       List<RapidsInputFile.CopyRange> copyRanges,
       int copyBufferSize) {
     Objects.requireNonNull(inputFile, "inputFile can't be null");
-    Objects.requireNonNull(output, "output can't be null");
-    Objects.requireNonNull(copyRanges, "copyRanges can't be null");
     if (copyBufferSize <= 0) {
       throw new IllegalArgumentException("copyBufferSize must be positive");
     }
+    validateReadVectoredArgs(inputFile, output, copyRanges);
+  }
+
+  private static void validateReadVectoredArgs(
+      RapidsInputFile inputFile,
+      HostMemoryBuffer output,
+      List<RapidsInputFile.CopyRange> copyRanges,
+      byte[] copyBuffer) {
+    Objects.requireNonNull(inputFile, "inputFile can't be null");
+    Objects.requireNonNull(copyBuffer, "copyBuffer can't be null");
+    if (copyBuffer.length == 0) {
+      throw new IllegalArgumentException("copyBuffer must not be empty");
+    }
+    validateReadVectoredArgs(inputFile, output, copyRanges);
+  }
+
+  private static void validateReadVectoredArgs(
+      RapidsInputFile inputFile,
+      HostMemoryBuffer output,
+      List<RapidsInputFile.CopyRange> copyRanges) {
+    Objects.requireNonNull(inputFile, "inputFile can't be null");
+    Objects.requireNonNull(output, "output can't be null");
+    Objects.requireNonNull(copyRanges, "copyRanges can't be null");
 
     long outputLength = output.getLength();
     for (RapidsInputFile.CopyRange copyRange : copyRanges) {

@@ -79,12 +79,14 @@ public interface RapidsInputFile {
   }
 
   /**
-   * Reads data from {@code inputFile} into {@code output} using a reusable copy buffer.
+   * Reads data from {@code inputFile} into {@code output} using an allocated copy buffer.
+   * Callers that perform repeated reads should use the {@code byte[]} overload to reuse a buffer
+   * across calls.
    *
    * @param inputFile the file to read from
    * @param output the destination buffer
    * @param copyRanges input ranges and output offsets
-   * @param copyBufferSize size of the reusable copy buffer in bytes
+   * @param copyBufferSize size of the allocated copy buffer in bytes
    * @throws IOException if an I/O error occurs during reading
    */
   static void readVectoredUsingCopyBuffer(
@@ -94,6 +96,23 @@ public interface RapidsInputFile {
       int copyBufferSize) throws IOException {
     RapidsInputFileUtils.readVectoredUsingCopyBuffer(
         inputFile, output, copyRanges, copyBufferSize);
+  }
+
+  /**
+   * Reads data from {@code inputFile} into {@code output} using a caller-supplied copy buffer.
+   *
+   * @param inputFile the file to read from
+   * @param output the destination buffer
+   * @param copyRanges input ranges and output offsets
+   * @param copyBuffer reusable copy buffer
+   * @throws IOException if an I/O error occurs during reading
+   */
+  static void readVectoredUsingCopyBuffer(
+      RapidsInputFile inputFile,
+      HostMemoryBuffer output,
+      List<CopyRange> copyRanges,
+      byte[] copyBuffer) throws IOException {
+    RapidsInputFileUtils.readVectoredUsingCopyBuffer(inputFile, output, copyRanges, copyBuffer);
   }
 
   /**
