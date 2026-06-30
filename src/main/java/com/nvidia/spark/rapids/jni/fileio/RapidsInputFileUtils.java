@@ -85,6 +85,9 @@ final class RapidsInputFileUtils {
     long maxRangeLength = 0;
     for (RapidsInputFile.CopyRange copyRange : copyRanges) {
       maxRangeLength = Math.max(maxRangeLength, copyRange.getLength());
+      if (maxRangeLength >= copyBufferSize) {
+        return copyBufferSize;
+      }
     }
     return (int) Math.min(copyBufferSize, maxRangeLength);
   }
