@@ -74,28 +74,8 @@ public interface RapidsInputFile {
     if (copyRanges.isEmpty()) {
       return;
     }
-    readVectoredUsingCopyBuffer(
-        this, output, copyRanges, DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE);
-  }
-
-  /**
-   * Reads data from {@code inputFile} into {@code output} using an allocated copy buffer.
-   * Callers that perform repeated reads should use the {@code byte[]} overload to reuse a buffer
-   * across calls.
-   *
-   * @param inputFile the file to read from
-   * @param output the destination buffer
-   * @param copyRanges input ranges and output offsets
-   * @param copyBufferSize size of the allocated copy buffer in bytes
-   * @throws IOException if an I/O error occurs during reading
-   */
-  static void readVectoredUsingCopyBuffer(
-      RapidsInputFile inputFile,
-      HostMemoryBuffer output,
-      List<CopyRange> copyRanges,
-      int copyBufferSize) throws IOException {
     RapidsInputFileUtils.readVectoredUsingCopyBuffer(
-        inputFile, output, copyRanges, copyBufferSize);
+        this, output, copyRanges, DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE);
   }
 
   /**

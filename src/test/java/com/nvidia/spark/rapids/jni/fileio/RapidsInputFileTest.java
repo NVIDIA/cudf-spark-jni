@@ -44,18 +44,6 @@ public class RapidsInputFileTest {
   }
 
   @Test
-  public void readVectoredUsingConfiguredCopyBuffer() throws IOException {
-    TestRapidsInputFile inputFile = new TestRapidsInputFile(FILE_DATA);
-    try (HostMemoryBuffer output = HostMemoryBuffer.allocate(12)) {
-      RapidsInputFile.readVectoredUsingCopyBuffer(inputFile, output, Arrays.asList(
-          new RapidsInputFile.CopyRange(0, 6, 0),
-          new RapidsInputFile.CopyRange(8, 6, 6)), 4);
-      assertArrayEquals("abcdefijklmn".getBytes(StandardCharsets.UTF_8), readBytes(output));
-    }
-    assertEquals(1, inputFile.getOpenCount());
-  }
-
-  @Test
   public void readVectoredUsingCallerSuppliedCopyBuffer() throws IOException {
     TestRapidsInputFile inputFile = new TestRapidsInputFile(FILE_DATA);
     byte[] copyBuffer = new byte[4];
