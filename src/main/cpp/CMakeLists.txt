@@ -143,8 +143,7 @@ if(BUILD_TESTS)
 endif()
 
 # Benchmarks link cudf::cudftestutil (cudf's "testing" component; the headers they use are
-# gtest-free), so request that component when either tests or benchmarks are built. The JNI test
-# binaries below stay gated on BUILD_TESTS, so a bench-only build pays for neither them nor gtest.
+# gtest-free), so request that component when either tests or benchmarks are built.
 if(BUILD_TESTS OR BUILD_BENCHMARKS)
   rapids_find_package(cudf REQUIRED COMPONENTS testing)
 else()
