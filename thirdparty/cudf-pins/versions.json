@@ -66,9 +66,9 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "c57ddd8672b8ddf29e2db5dc444df311afcda5aa",
+      "git_tag" : "a579fbf5d192e85b6249935e117de7d02a6dc4e9",
       "git_url" : "https://github.com/apache/arrow-nanoarrow.git",
-      "version" : "0.7.0"
+      "version" : "0.8.0"
     },
     "nvtx3" : 
     {
@@ -89,7 +89,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a3aad1004714e81fc88cd3267db2368d82daceb0",
+      "git_tag" : "9319cb40bb50672f0a6beb43f387a63e1a6fb4bf",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
