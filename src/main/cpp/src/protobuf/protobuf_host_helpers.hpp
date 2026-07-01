@@ -31,9 +31,31 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace spark_rapids_jni::protobuf::detail {
+
+// ============================================================================
+// Enum-as-string lookup tables
+// ============================================================================
+
+/**
+ * Device-side lookup tables for an enum-as-string field. `make_enum_string_lookup_tables`
+ * builds them; the per-decode cache (`enum_string_lookup_cache`) keeps them alive across
+ * call sites so deeply-nested decoders don't rebuild and re-upload the same metadata.
+ */
+struct enum_string_lookup_tables {
+  rmm::device_uvector<int32_t> d_valid_enums;
+  rmm::device_uvector<int32_t> d_name_offsets;
+  rmm::device_uvector<uint8_t> d_name_chars;
+};
+
+// Map keyed by schema field index. unordered_map is chosen because element references stay
+// stable across insertions (only erase invalidates), so callers can hold `auto const&` into
+// it during recursion.
+using enum_string_lookup_cache = std::unordered_map<int, enum_string_lookup_tables>;
 
 // ============================================================================
 // Schema-context bundle
@@ -42,8 +64,8 @@ namespace spark_rapids_jni::protobuf::detail {
 /**
  * View of the per-decode default-value and enum metadata. Reduces parameter pressure on the
  * recursive nested/repeated builders, which all consume the same six host vectors. Holds
- * non-owning references and is cheap to copy, so it is passed by value; the referenced vectors
- * must outlive every call that takes the view.
+ * non-owning references and an optional enum lookup cache pointer, and is cheap to copy. The
+ * referenced objects must outlive every call that takes the view.
  */
 struct schema_context_view {
   std::vector<int64_t> const& default_ints;
@@ -52,6 +74,7 @@ struct schema_context_view {
   std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings;
   std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names;
+  enum_string_lookup_cache* enum_lookup_cache = nullptr;
 };
 
 // ============================================================================
@@ -351,7 +374,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::size_type message_data_size,
   cudf::size_type const* list_offsets,
   cudf::size_type base_offset,
-  rmm::device_uvector<int32_t> const& d_field_counts,
+  rmm::device_uvector<int32_t> d_field_offsets,
   rmm::device_uvector<repeated_occurrence>& d_occurrences,
   int total_count,
   int num_rows,

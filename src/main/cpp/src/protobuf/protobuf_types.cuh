@@ -28,6 +28,17 @@ constexpr int MAX_VARINT_BYTES = 10;
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
 
+// Threshold for using a direct-mapped lookup table for field_number -> field_index.
+// Field numbers above this threshold fall back to linear search.
+constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
+
+// Maximum number of top-level repeated fields the combined occurrence-scan kernel can process
+// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
+// array on the stack; raising the limit pushes the array into local memory, which would otherwise
+// cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
+// error surface depends on the schema, not on which fields happen to have data in a given batch.
+constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
+
 enum class protobuf_error : int {
   NONE = 0,
   BOUNDS,
@@ -43,39 +54,26 @@ enum class protobuf_error : int {
   REPEATED_COUNT_MISMATCH,
 };
 
-// Threshold for using a direct-mapped lookup table for field_number -> field_index.
-// Field numbers above this threshold fall back to linear search.
-constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
-
-// Maximum number of top-level repeated fields the combined occurrence-scan kernel can process
-// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
-// array on the stack; raising the limit pushes the array into local memory, which would otherwise
-// cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
-// error surface depends on the schema, not on which fields happen to have data in a given batch.
-constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
-
-inline std::string error_message(protobuf_error error)
+inline std::string error_name(protobuf_error error)
 {
   switch (error) {
     using enum protobuf_error;
-    case NONE: return "Protobuf decode error: none";
-    case BOUNDS: return "Protobuf decode error: message data out of bounds";
-    case VARINT: return "Protobuf decode error: invalid or truncated varint";
-    case FIELD_NUMBER: return "Protobuf decode error: invalid field number";
-    case WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
-    case OVERFLOW: return "Protobuf decode error: length-delimited field overflows message";
-    case FIELD_SIZE: return "Protobuf decode error: invalid field size";
-    case SKIP: return "Protobuf decode error: unable to skip unknown field";
-    case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
-    case REQUIRED: return "Protobuf decode error: missing required field";
+    case NONE: return "none";
+    case BOUNDS: return "message data out of bounds";
+    case VARINT: return "invalid or truncated varint";
+    case FIELD_NUMBER: return "invalid field number";
+    case WIRE_TYPE: return "unexpected wire type";
+    case OVERFLOW: return "length-delimited field overflows message";
+    case FIELD_SIZE: return "invalid field size";
+    case SKIP: return "unable to skip unknown field";
+    case FIXED_LEN: return "invalid fixed-width or packed field length";
+    case REQUIRED: return "missing required field";
     case SCHEMA_TOO_LARGE:
-      return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
-             "kernel (" +
+      return "schema exceeds maximum supported repeated fields per kernel (" +
              std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
-    case REPEATED_COUNT_MISMATCH:
-      return "Protobuf decode error: repeated-field count/scan mismatch";
+    case REPEATED_COUNT_MISMATCH: return "repeated-field count/scan mismatch";
   }
-  return "Protobuf decode error: unknown error";
+  return "unknown error";
 }
 
 /**
