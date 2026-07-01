@@ -133,3 +133,6 @@ ConfigureTest(CONV
 
 ConfigureTest(MULTIPLY
     multiply.cpp)
+
+ConfigureTest(PAGEABLE_POOL
+    pageable_pool.cpp)
