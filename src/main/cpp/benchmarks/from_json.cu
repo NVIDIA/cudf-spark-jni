@@ -280,13 +280,21 @@ struct map_of_array_row_fn {
 // elements (mask #2) / values, i.e. null inner lists (mask #1), at a fixed cadence. `mismatch_pct`
 // injects scalar (non-array, non-null) values to exercise the bad-record nullification path. The
 // column is built entirely on the GPU, so large row counts stay cheap.
+// Tunable inputs for `generate_map_of_array_input` (designated-initializer friendly so callers set
+// only the fields they need): each `*_pct` is a fraction in [0,1] mapped to a "1 in stride" cadence
+// (0 disables); `key_name_len` <= 0 keeps the default "col" names, > 0 uses keys of exactly that
+// many characters.
+struct map_of_array_options {
+  double element_null_pct = 0.0;
+  double value_null_pct   = 0.0;
+  double mismatch_pct     = 0.0;
+  int key_name_len        = 0;
+};
+
 std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
                                                           int keys_per_row,
                                                           int array_len,
-                                                          double element_null_pct = 0.0,
-                                                          double value_null_pct   = 0.0,
-                                                          double mismatch_pct     = 0.0,
-                                                          int key_name_len        = 0)
+                                                          map_of_array_options options = {})
 {
   // Convert a fraction in [0,1] to a deterministic "1 in stride" cadence; 0 disables.
   auto const to_stride = [](double pct) {
@@ -295,10 +303,10 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
 
   map_of_array_row_fn fn{.keys_per_row        = static_cast<cudf::size_type>(keys_per_row),
                          .array_len           = static_cast<cudf::size_type>(array_len),
-                         .value_null_stride   = to_stride(value_null_pct),
-                         .element_null_stride = to_stride(element_null_pct),
-                         .mismatch_stride     = to_stride(mismatch_pct),
-                         .key_len             = static_cast<cudf::size_type>(key_name_len)};
+                         .value_null_stride   = to_stride(options.value_null_pct),
+                         .element_null_stride = to_stride(options.element_null_pct),
+                         .mismatch_stride     = to_stride(options.mismatch_pct),
+                         .key_len             = static_cast<cudf::size_type>(options.key_name_len)};
 
   auto const stream    = cudf::get_default_stream();
   auto const row_count = static_cast<cudf::size_type>(num_rows);
@@ -347,7 +355,7 @@ void BM_from_json_to_raw_map(nvbench::state& state)
   auto const json_strings = generate_input(size_bytes, make_all_string_column_types(num_keys));
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.add_global_memory_reads<nvbench::int8_t>(size_bytes);
+  state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
       cudf::strings_column_view{json_strings->view()}, benchmark_parse_options());
@@ -365,7 +373,7 @@ void BM_from_json_to_raw_map_value_width(nvbench::state& state)
     size_bytes, make_all_string_column_types(num_keys), {.value_width = value_width});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.add_global_memory_reads<nvbench::int8_t>(size_bytes);
+  state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
       cudf::strings_column_view{json_strings->view()}, benchmark_parse_options());
@@ -383,7 +391,7 @@ void BM_from_json_to_raw_map_null_density(nvbench::state& state)
     generate_input(size_bytes, make_all_string_column_types(num_keys), {.null_pct = null_pct});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.add_global_memory_reads<nvbench::int8_t>(size_bytes);
+  state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
       cudf::strings_column_view{json_strings->view()}, benchmark_parse_options());
@@ -399,7 +407,7 @@ void BM_from_json_to_raw_map_micro_size(nvbench::state& state)
   auto const json_strings = generate_input(size_bytes, make_all_string_column_types(num_keys));
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.add_global_memory_reads<nvbench::int8_t>(size_bytes);
+  state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
       cudf::strings_column_view{json_strings->view()}, benchmark_parse_options());
@@ -442,7 +450,7 @@ void BM_from_json_to_raw_map_key_name_len(nvbench::state& state)
     size_bytes, make_all_string_column_types(num_keys), {.key_name_len = key_name_len});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.add_global_memory_reads<nvbench::int8_t>(size_bytes);
+  state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
       cudf::strings_column_view{json_strings->view()}, benchmark_parse_options());
@@ -481,7 +489,10 @@ void BM_from_json_to_raw_map_array_values_null_density(nvbench::state& state)
   constexpr int keys_per_row     = 5;
 
   auto const json_strings = generate_map_of_array_input(
-    num_rows, keys_per_row, array_len, element_null_pct, value_null_pct);
+    num_rows,
+    keys_per_row,
+    array_len,
+    {.element_null_pct = element_null_pct, .value_null_pct = value_null_pct});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -516,13 +527,8 @@ void BM_from_json_to_raw_map_array_values_key_name_len(nvbench::state& state)
   constexpr int array_len        = 3;
   constexpr int keys_per_row     = 5;
 
-  auto const json_strings = generate_map_of_array_input(num_rows,
-                                                        keys_per_row,
-                                                        array_len,
-                                                        /*element_null_pct=*/0.0,
-                                                        /*value_null_pct=*/0.0,
-                                                        /*mismatch_pct=*/0.0,
-                                                        key_name_len);
+  auto const json_strings =
+    generate_map_of_array_input(num_rows, keys_per_row, array_len, {.key_name_len = key_name_len});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -543,12 +549,8 @@ void BM_from_json_to_raw_map_array_values_type_mismatch(nvbench::state& state)
   constexpr int array_len        = 3;
   constexpr int keys_per_row     = 5;
 
-  auto const json_strings = generate_map_of_array_input(num_rows,
-                                                        keys_per_row,
-                                                        array_len,
-                                                        /*element_null_pct=*/0.0,
-                                                        /*value_null_pct=*/0.0,
-                                                        mismatch_pct);
+  auto const json_strings =
+    generate_map_of_array_input(num_rows, keys_per_row, array_len, {.mismatch_pct = mismatch_pct});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
