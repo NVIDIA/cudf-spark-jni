@@ -150,7 +150,7 @@ CUDF_KERNEL void scan_all_fields_kernel(
   bool* row_has_invalid_data)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
-  cudf::detail::lists_column_device_view in{d_in};
+  cudf::lists_column_device_view in{d_in};
   if (row >= in.size()) return;
 
   auto mark_row_error = [&]() {
@@ -314,7 +314,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
                                               int fn_to_nested_size)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
-  cudf::detail::lists_column_device_view in{d_in};
+  cudf::lists_column_device_view in{d_in};
   if (row >= in.size()) return;
 
   // Initialize repeated counts to 0
@@ -425,7 +425,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
                                                       int fn_to_desc_size)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
-  cudf::detail::lists_column_device_view in{d_in};
+  cudf::lists_column_device_view in{d_in};
   if (row >= in.size()) return;
 
   if (in.nullable() && in.is_null(row)) return;
