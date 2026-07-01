@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,10 @@ import java.io.InputStream;
 
 /**
  * An {@code Inputstream} that offers random access interface.
+ *
+ * <p>Implementations of {@link #read(byte[], int, int)} must not return 0 when {@code len} is
+ * positive. They must either block until at least one byte is available, return -1 at end of
+ * stream, or throw an {@link IOException}.
  *
  */
 public abstract class SeekableInputStream extends InputStream {
