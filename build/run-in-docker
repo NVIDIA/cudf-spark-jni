@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (c) 2022-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,9 +47,10 @@ fi
 DOCKER_RUN_EXTRA_ARGS=${DOCKER_RUN_EXTRA_ARGS:-""}
 LOCAL_CCACHE_DIR=${LOCAL_CCACHE_DIR:-"$HOME/.ccache"}
 LOCAL_MAVEN_REPO=${LOCAL_MAVEN_REPO:-"$HOME/.m2/repository"}
+LOCAL_LIBCUDF_KERNEL_CACHE_DIR=${LOCAL_LIBCUDF_KERNEL_CACHE_DIR:-${LIBCUDF_KERNEL_CACHE_PATH:-"$HOME/.libcudf"}}
 
 # ensure directories exist
-mkdir -p "$LOCAL_CCACHE_DIR" "$LOCAL_MAVEN_REPO"
+mkdir -p "$LOCAL_CCACHE_DIR" "$LOCAL_MAVEN_REPO" "$LOCAL_LIBCUDF_KERNEL_CACHE_DIR"
 
 echo "Building docker image for CICD environment..."
 JNI_DOCKER_CICD_IMAGE="spark-rapids-jni-build:${CUDA_VERSION}-rockylinux${OS_RELEASE}"
@@ -107,6 +108,7 @@ RW_SRC=(
   "$WORKDIR"
   "$LOCAL_CCACHE_DIR"
   "$LOCAL_MAVEN_REPO"
+  "$LOCAL_LIBCUDF_KERNEL_CACHE_DIR"
 )
 for (( i=0; i<${#RW_SRC[@]}; i++)); do
   MNT_ARGS+=(--mount "type=bind,src=${RW_SRC[$i]},dst=${RW_SRC[$i]}")
@@ -122,6 +124,7 @@ $DOCKER_CMD run $DOCKER_GPU_OPTS $DOCKER_RUN_EXTRA_ARGS -u $(id -u):$(id -g) --r
   -e CMAKE_CXX_LINKER_LAUNCHER="ccache" \
   -e CMAKE_GENERATOR \
   -e CUDA_VISIBLE_DEVICES \
+  -e LIBCUDF_KERNEL_CACHE_PATH="$LOCAL_LIBCUDF_KERNEL_CACHE_DIR" \
   -e PARALLEL_LEVEL \
   -e VERBOSE \
   -e TZ=${TZ} \
