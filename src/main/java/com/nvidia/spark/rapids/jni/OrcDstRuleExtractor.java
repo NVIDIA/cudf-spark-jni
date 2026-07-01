@@ -53,9 +53,9 @@ final class OrcDstRuleExtractor {
   private static final int[] DST_RULE_VALIDATION_YEARS = {2060, 2400, 9997};
 
   /**
-   * Recurring DST rule for a single zone, encoded in the same shape that
-   * {@link java.util.SimpleTimeZone} stores internally and that the GPU side
-   * consumes. {@code month} is 0-based (Calendar.JANUARY=0), {@code dayOfWeek}
+   * Recurring DST rule for a single zone, containing the fields needed to represent
+   * the same rule categories as {@link java.util.SimpleTimeZone} and consumed by the
+   * GPU side. {@code month} is 0-based (Calendar.JANUARY=0), {@code dayOfWeek}
    * follows Calendar's 1=Sun..7=Sat convention, and {@code dstSavings} /
    * {@code time} are in milliseconds.
    *
@@ -64,8 +64,8 @@ final class OrcDstRuleExtractor {
    * the time-of-day basis — see the {@code TIME_MODE_*} constants.
    */
   static final class DstRule {
-    // Day-rule modes for {start,end}Mode — matches SimpleTimeZone's internal
-    // encoding so the GPU side can consume the values directly.
+    // Day-rule modes for {start,end}Mode. This encoding represents the same four rule
+    // categories as SimpleTimeZone, numbered 0..3 for the GPU side.
     static final int MODE_DOM          = 0;
     static final int MODE_DOW_IN_MONTH = 1;
     static final int MODE_DOW_GE_DOM   = 2;
