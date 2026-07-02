@@ -542,7 +542,7 @@ __device__ cuda::std::pair<string_view, bool> find_query_part(string_view haysta
   return {{}, false};
 }
 
-uri_parts __device__ validate_uri(const char* str,
+uri_parts __device__ validate_uri(char const* str,
                                   int len,
                                   cuda::std::optional<column_device_view const> query_match,
                                   size_type row_idx)
@@ -555,7 +555,7 @@ uri_parts __device__ validate_uri(const char* str,
   int slash    = -1;
   int hash     = -1;
   int question = -1;
-  for (const char* c = str;
+  for (char const* c = str;
        c - str < len && (col == -1 || slash == -1 || hash == -1 || question == -1);
        ++c) {
     switch (*c) {
@@ -679,7 +679,7 @@ uri_parts __device__ validate_uri(const char* str,
         ret.valid |= (1 << static_cast<int>(URI_chunks::AUTHORITY));
 
         // Inspect the authority for userinfo, host, and port
-        const char* auth   = ret.authority.data();
+        char const* auth   = ret.authority.data();
         auto auth_size     = ret.authority.size_bytes();
         int amp            = -1;
         int closingbracket = -1;

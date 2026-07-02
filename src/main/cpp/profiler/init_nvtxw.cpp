@@ -35,10 +35,10 @@
 
 namespace spark_rapids_jni::profiler {
 
-bool create_nvtxw_stream(const nvtxwInterfaceCore_t* nvtxwInterface,
-                         const nvtxwSessionHandle_t& session,
-                         const std::string& name,
-                         const std::string& domain,
+bool create_nvtxw_stream(nvtxwInterfaceCore_t const* nvtxwInterface,
+                         nvtxwSessionHandle_t const& session,
+                         std::string const& name,
+                         std::string const& domain,
                          nvtxwStreamHandle_t& stream)
 {
   nvtxwResultCode_t result           = NVTXW3_RESULT_SUCCESS;
@@ -64,12 +64,12 @@ bool create_nvtxw_stream(const nvtxwInterfaceCore_t* nvtxwInterface,
 
 /// outName: basename of output nsys-rep, without .nsys-rep extension
 int initialize_nvtxw(std::ifstream& in,
-                     const std::string& outPath,
+                     std::string const& outPath,
                      void*& nvtxwModuleHandle,
                      nvtxwInterfaceCore_t*& nvtxwInterface,
                      nvtxwSessionHandle_t& session,
                      nvtxwStreamHandle_t& stream,
-                     const std::optional<std::filesystem::path>& nvtxw_backend_path)
+                     std::optional<std::filesystem::path> const& nvtxw_backend_path)
 {
   nvtxwResultCode_t result = NVTXW3_RESULT_SUCCESS;
   int errorCode            = 0;
@@ -79,14 +79,14 @@ int initialize_nvtxw(std::ifstream& in,
   std::string sessionName = p.stem().string();
 
   // initialize
-  static const char soNameDefault[] = "libNvtxwBackend.so";
-  const char* soName                = soNameDefault;
+  static char const soNameDefault[] = "libNvtxwBackend.so";
+  char const* soName                = soNameDefault;
   // First check if a path was provided via command line option
   if (nvtxw_backend_path) {
     soName = nvtxw_backend_path->c_str();
   } else {
     // Otherwise, check the environment variable
-    const char* backend_env = getenv("NVTXW_BACKEND");
+    char const* backend_env = getenv("NVTXW_BACKEND");
     if (backend_env) { soName = backend_env; }
   }
   nvtxwGetInterface_t getInterfaceFunc = nullptr;
@@ -110,7 +110,7 @@ int initialize_nvtxw(std::ifstream& in,
     return 1;
   }
 
-  const void* interfaceVoid;
+  void const* interfaceVoid;
   result = getInterfaceFunc(NVTXW3_INTERFACE_ID_CORE_V1, &interfaceVoid);
   if (result != NVTXW3_RESULT_SUCCESS) {
     fprintf(stderr, "getInterfaceFunc failed with code %d\n", (int)result);
