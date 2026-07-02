@@ -386,7 +386,7 @@ TEST_F(FromJsonTest, RawMapOpt_StressInvariantsWithBadRows)
     std::string obj = "{";
     for (int k = 0; k < num_keys; ++k) {
       if (k > 0) { obj += ","; }
-      obj += std::format(R"("key{}":"r{}k{}")", k, r, k);
+      obj += std::format(R"("key{0}":"r{1}k{0}")", k, r);
     }
     obj += "}";
     rows.push_back(std::move(obj));
