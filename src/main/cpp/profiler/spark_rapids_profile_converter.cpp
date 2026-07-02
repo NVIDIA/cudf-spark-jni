@@ -557,7 +557,7 @@ std::string memcpy_to_string(spark_rapids_jni::profiler::MemcpyActivity const* m
   return oss.str();
 }
 
-const char* memcpy_to_color(spark_rapids_jni::profiler::MemcpyActivity const* m)
+char const* memcpy_to_color(spark_rapids_jni::profiler::MemcpyActivity const* m)
 {
   switch (m->copy_kind()) {
     case spark_rapids_jni::profiler::MemcpyKind_HtoD:

@@ -69,7 +69,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
 
     for (int i = 0; i < size; i++) {
       path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[i]);
-      const char* name_str                   = names[i].get();
+      char const* name_str                   = names[i].get();
       jlong index                            = indexes[i];
       instructions.emplace_back(instruction_type, name_str, index);
     }
@@ -125,7 +125,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
       path.reserve(path_size);
       for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
         path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[j]);
-        const char* name_str                   = names[j].get();
+        char const* name_str                   = names[j].get();
         jlong index                            = indexes[j];
         path.emplace_back(instruction_type, name_str, index);
       }

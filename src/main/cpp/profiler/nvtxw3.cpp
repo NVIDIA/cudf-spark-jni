@@ -49,7 +49,7 @@
 /* Path string helpers -- implement here to avoid dependencies */
 
 #if defined(_WIN32)
-static const char pathSep = '\\';
+static char const pathSep = '\\';
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
 static const char pathDelimiter = ';';
 #endif
@@ -59,7 +59,7 @@ static const size_t initialPathBufSize = MAX_PATH; /* Grows if not big enough */
 #define NVTXW3_DLLFUNC    GetProcAddress
 #define NVTXW3_DLLCLOSE   FreeLibrary
 #else
-static const char pathSep = '/';
+static char const pathSep = '/';
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
 static const char pathDelimiter = ':';
 #endif
@@ -141,7 +141,7 @@ static void StripLeadingSlashes(char* path)
 /* Take pointers to string buffer begin/end.  End must equal begin + strlen(begin),
  *  or NULL, in which case it will be set to begin + strlen(begin).
  *  Returns pointer to heap-allocated copy of input, must be freed with free(). */
-static char* AssignHeapString(char* lhs, const char* rhs)
+static char* AssignHeapString(char* lhs, char const* rhs)
 {
   size_t lenWithNull;
 
@@ -153,7 +153,7 @@ static char* AssignHeapString(char* lhs, const char* rhs)
   return lhs;
 }
 
-static char* AssignHeapStringFromRange(char* lhs, const char* rhsBegin, const char* rhsEnd)
+static char* AssignHeapStringFromRange(char* lhs, char const* rhsBegin, char const* rhsEnd)
 {
   size_t lenWithoutNull;
 
@@ -169,9 +169,9 @@ static char* AssignHeapStringFromRange(char* lhs, const char* rhsBegin, const ch
 /* Take pointers to string buffer begin/end.  End must equal begin + strlen(begin),
  *  or NULL, in which case it will be set to begin + strlen(begin).
  *  Returns pointer to heap-allocated copy of input, must be freed with free(). */
-static char* MakeHeapString(const char* str) { return AssignHeapString(NULL, str); }
+static char* MakeHeapString(char const* str) { return AssignHeapString(NULL, str); }
 
-static char* MakeHeapStringFromRange(const char* strBegin, const char* strEnd)
+static char* MakeHeapStringFromRange(char const* strBegin, char const* strEnd)
 {
   return AssignHeapStringFromRange(NULL, strBegin, strEnd);
 }
@@ -188,7 +188,7 @@ static char* MakeHeapStringWithNativeSlashes(const char* str)
  *  reallocating the heap memory for lhs if necessary.  Returns pointer to result
  *  HeapString, which may or may not be the same pointer passed in as lhs.
  *  HeapString must be freed with free(). */
-static char* AppendToHeapString(char* lhs, const char* rhs)
+static char* AppendToHeapString(char* lhs, char const* rhs)
 {
   size_t lenLhs, lenRhs;
   lenLhs = strlen(lhs);
@@ -206,7 +206,7 @@ static char* AppendToHeapString(char* lhs, const char* rhs)
  *  lhs is null or empty and rhs is not, then the result is a path separator
  *  followed by rhs.  Returns pointer to result HeapString, which may or may not
  *  be the same pointer passed in as lhs.  HeapString must be freed with free(). */
-static char* AppendToHeapStringWithSep(char* lhs, const char* rhs)
+static char* AppendToHeapStringWithSep(char* lhs, char const* rhs)
 {
   size_t lenLhs, lenRhs;
   lenLhs = strlen(lhs);
@@ -223,15 +223,15 @@ static char* AppendToHeapStringWithSep(char* lhs, const char* rhs)
  *  relativePath must be a valid relative path (not empty, not just slashes).
  *  Returns pointer to result HeapString, which may or may not be the same
  *  pointer passed in as lhs.  HeapString must be freed with free(). */
-static char* AppendToPathHeapString(char* dir, const char* relativePath)
+static char* AppendToPathHeapString(char* dir, char const* relativePath)
 {
-  const char* relPathAfterLeadingSlashes;
+  char const* relPathAfterLeadingSlashes;
   relPathAfterLeadingSlashes = AfterLeadingSlashesConst(relativePath);
   StripTrailingSlashes(dir);
   return AppendToHeapStringWithSep(dir, relPathAfterLeadingSlashes);
 }
 
-static char* LoadFileIntoHeapString(const char* filename)
+static char* LoadFileIntoHeapString(char const* filename)
 {
   FILE* f;
   char* buf;
@@ -281,7 +281,7 @@ static int HasSlashes(const char* cur)
   return 0;
 }
 
-static int HasTrailingSlash(const char* str)
+static int HasTrailingSlash(char const* str)
 {
   size_t len = strlen(str);
   if (len == 0) return 0;
@@ -318,7 +318,7 @@ static char* GetCurrentWorkingDir()
 /* Take pointer to string buffer of possibly-relative path, and returns
  *  equivalent absolute path.  Input path must not be empty.
  *  Returns pointer to heap-allocated string, must be freed with free(). */
-static char* AbsolutePath(const char* path)
+static char* AbsolutePath(char const* path)
 {
 #if defined(_WIN32)
   size_t size;
@@ -390,7 +390,7 @@ static char* ToParentDir(char* path)
  *  NULL, empty string, or root directory, NULL is returned to indicate there
  *  is no parent directory, so return value must be NULL-checked.
  *  Returns pointer to heap-allocated string, must be freed with free(). */
-static char* ParentDir(const char* path)
+static char* ParentDir(char const* path)
 {
   char* buf;
 
@@ -407,7 +407,7 @@ static char* ParentDir(const char* path)
   }
 }
 
-static int PathExists(const char* path)
+static int PathExists(char const* path)
 {
 #if defined(_WIN32)
   DWORD result = GetFileAttributesA(path);
@@ -461,7 +461,7 @@ static char* GetCurrentProcessPath()
     size_t size = initialPathBufSize;
     ssize_t bytesReadSigned;
     size_t bytesRead;
-    const char* linkName = "/proc/self/exe";
+    char const* linkName = "/proc/self/exe";
     buf                  = NULL;
     while (1) {
       buf             = (char*)realloc(buf, size);
@@ -483,10 +483,10 @@ static char* GetCurrentProcessPath()
 static char* GetCurrentProcessDir() { return ToParentDir(GetCurrentProcessPath()); }
 
 static int KVPConsumerForSimplify(void* state,
-                                  const char* readKeyBegin,
-                                  const char* readKeyEnd,
-                                  const char* readValBegin,
-                                  const char* readValEnd)
+                                  char const* readKeyBegin,
+                                  char const* readKeyEnd,
+                                  char const* readValBegin,
+                                  char const* readValEnd)
 {
   char* curWrite = *(char**)state;
   size_t size;
@@ -535,16 +535,16 @@ typedef struct GetInitModeState_t {
 } GetInitModeState_t;
 
 static int KVPConsumerForGetInitMode(void* statePtr,
-                                     const char* keyBegin,
-                                     const char* keyEnd,
-                                     const char* valBegin,
-                                     const char* valEnd)
+                                     char const* keyBegin,
+                                     char const* keyEnd,
+                                     char const* valBegin,
+                                     char const* valEnd)
 {
   GetInitModeState_t* state       = (GetInitModeState_t*)statePtr;
-  const char* const keyMode       = "InitMode";
-  const char* const keyModeString = "InitModeString";
-  const size_t keyModeLen         = strlen(keyMode);
-  const size_t keyModeStringLen   = strlen(keyModeString);
+  char const* const keyMode       = "InitMode";
+  char const* const keyModeString = "InitModeString";
+  size_t const keyModeLen         = strlen(keyMode);
+  size_t const keyModeStringLen   = strlen(keyModeString);
   size_t keyLen;
 
   keyLen = keyEnd - keyBegin;
@@ -574,7 +574,7 @@ static int KVPConsumerForGetInitMode(void* statePtr,
 /* Returns zero for success, and writes out params mode and modeString (the latter
  *  is a HeapString).  If mode is not detected, or if the mode requires a modeString
  *  and modeString is not detected, return non-zero error code. */
-static int GetInitModeFromConfig(const char* config, int* mode, char** modeString)
+static int GetInitModeFromConfig(char const* config, int* mode, char** modeString)
 {
   GetInitModeState_t state = {0};
 
@@ -602,8 +602,8 @@ static int GetInitModeFromConfig(const char* config, int* mode, char** modeStrin
 /* Backend loader helpers */
 
 static nvtxwResultCode_t InitLibraryFilename(
-  const char* filename,                  /* required */
-  const char* configString,              /* optional */
+  char const* filename,                  /* required */
+  char const* configString,              /* optional */
   nvtxwGetInterface_t* getInterfaceFunc, /* already null-checked */
   void** moduleHandle)                   /* optional */
 {
@@ -649,7 +649,7 @@ static nvtxwResultCode_t InitLibraryFilename(
 }
 
 static nvtxwResultCode_t InitSearchDefault(
-  const char* configString,              /* optional */
+  char const* configString,              /* optional */
   nvtxwGetInterface_t* getInterfaceFunc, /* already null-checked */
   void** moduleHandle)                   /* optional */
 {
@@ -677,8 +677,8 @@ static nvtxwResultCode_t InitSearchDefault(
 }
 
 static nvtxwResultCode_t InitLibraryDirectory(
-  const char* directory,                 /* required */
-  const char* configString,              /* optional */
+  char const* directory,                 /* required */
+  char const* configString,              /* optional */
   nvtxwGetInterface_t* getInterfaceFunc, /* already null-checked */
   void** moduleHandle)                   /* optional */
 {
@@ -695,7 +695,7 @@ static nvtxwResultCode_t InitLibraryDirectory(
   return result;
 }
 
-static nvtxwResultCode_t InitConfigString(const char* config,
+static nvtxwResultCode_t InitConfigString(char const* config,
                                           nvtxwGetInterface_t* getInterfaceFunc,
                                           void** moduleHandle)
 {
@@ -729,11 +729,11 @@ static nvtxwResultCode_t InitConfigString(const char* config,
   return result;
 }
 
-static nvtxwResultCode_t InitConfigEnvVar(const char* configEnvVarName,
+static nvtxwResultCode_t InitConfigEnvVar(char const* configEnvVarName,
                                           nvtxwGetInterface_t* getInterfaceFunc,
                                           void** moduleHandle)
 {
-  const char* config;
+  char const* config;
 
   if (!configEnvVarName) return NVTXW3_RESULT_INVALID_ARGUMENT;
 
@@ -743,7 +743,7 @@ static nvtxwResultCode_t InitConfigEnvVar(const char* configEnvVarName,
   return InitConfigString(config, getInterfaceFunc, moduleHandle);
 }
 
-static nvtxwResultCode_t InitConfigFilename(const char* configFilename,
+static nvtxwResultCode_t InitConfigFilename(char const* configFilename,
                                             nvtxwGetInterface_t* getInterfaceFunc,
                                             void** moduleHandle)
 {
@@ -760,7 +760,7 @@ static nvtxwResultCode_t InitConfigFilename(const char* configFilename,
   return result;
 }
 
-static nvtxwResultCode_t InitConfigDirectory(const char* configDirectory,
+static nvtxwResultCode_t InitConfigDirectory(char const* configDirectory,
                                              nvtxwGetInterface_t* getInterfaceFunc,
                                              void** moduleHandle)
 {

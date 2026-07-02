@@ -37,18 +37,18 @@ static constexpr uint64_t cuptiOverheadId     = 0xffffff07;
 static constexpr uint64_t nvtxRangeStartEndId = 0xffffff08;
 };  // namespace PayloadSchemaId
 
-const nvtxPayloadSchemaAttr_t* GetNameSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetNameSchemaAttr();
 
 struct nvtxRangeEvent {
   uint64_t time_start;
   uint64_t time_stop;
-  const char* name;
+  char const* name;
   uint32_t process_id;
   uint32_t thread_id;
   uint32_t color;
 };
-const nvtxPayloadSchemaAttr_t* GetNvtxRangePushPopSchemaAttr();
-const nvtxPayloadSchemaAttr_t* GetNvtxRangeStartEndSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetNvtxRangePushPopSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetNvtxRangeStartEndSchemaAttr();
 struct cuptiApiEvent {
   uint64_t time_start;
   uint64_t time_stop;
@@ -59,7 +59,7 @@ struct cuptiApiEvent {
   uint32_t correlation_id;
   uint32_t return_value;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiApiSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiApiSchemaAttr();
 struct cuptiDevice {
   uint64_t global_memory_bandwidth;
   uint64_t global_memory_size;
@@ -87,9 +87,9 @@ struct cuptiDevice {
   uint32_t compute_capability_minor;
   uint32_t id;
   uint32_t ecc_enabled;
-  const char* name;
+  char const* name;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiDeviceSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiDeviceSchemaAttr();
 struct cuptiKernelEvent {
   uint64_t time_start;
   uint64_t time_stop;
@@ -99,7 +99,7 @@ struct cuptiKernelEvent {
   uint64_t submitted;
   uint64_t graph_node_id;
   uint64_t local_memory_total_v2;
-  const char* name;
+  char const* name;
   uint32_t device_id;
   uint32_t context_id;
   uint32_t stream_id;
@@ -134,7 +134,7 @@ struct cuptiKernelEvent {
   uint8_t shmem_limit_config;
   uint8_t channel_type;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiKernelSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiKernelSchemaAttr();
 
 struct cuptiMemcpyEvent {
   uint64_t time_start;
@@ -154,7 +154,7 @@ struct cuptiMemcpyEvent {
   uint8_t src_kind;
   uint8_t dst_kind;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiMemcpySchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiMemcpySchemaAttr();
 
 struct cuptiMemsetEvent {
   uint64_t time_start;
@@ -173,7 +173,7 @@ struct cuptiMemsetEvent {
   uint8_t mem_kind;
   uint8_t flags;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiMemsetSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiMemsetSchemaAttr();
 struct cuptiOverheadEvent {
   uint64_t time_start;
   uint64_t time_stop;
@@ -181,6 +181,6 @@ struct cuptiOverheadEvent {
   uint32_t thread_id;
   uint8_t overhead_kind;
 };
-const nvtxPayloadSchemaAttr_t* GetCuptiOverheadSchemaAttr();
+nvtxPayloadSchemaAttr_t const* GetCuptiOverheadSchemaAttr();
 
 }  // namespace NvidiaNvtxw
