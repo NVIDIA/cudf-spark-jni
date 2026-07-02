@@ -445,10 +445,24 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        field_descriptor const* field_descs,
                                        int num_fields,
                                        field_location* output_locations,
+                                       repeated_field_info* repeated_info,
                                        protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
+
+void launch_scan_all_repeated_occurrences_in_nested(uint8_t const* message_data,
+                                                    cudf::size_type message_data_size,
+                                                    cudf::size_type const* row_offsets,
+                                                    cudf::size_type base_offset,
+                                                    field_location const* parent_locs,
+                                                    repeated_field_scan_desc const* scan_descs,
+                                                    int num_scan_fields,
+                                                    protobuf_error* error_flag,
+                                                    int const* fn_to_desc_idx,
+                                                    int fn_to_desc_size,
+                                                    int num_rows,
+                                                    rmm::cuda_stream_view stream);
 
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
                                                 field_location const* child_locs,
@@ -609,13 +623,12 @@ struct extract_strided_count {
   }
 };
 
-template <typename LengthProvider, typename CopyProvider, typename ValidityFn>
+template <typename LocationProvider, typename ValidityFn>
 inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   bool as_bytes,
   uint8_t const* message_data,
   int num_rows,
-  LengthProvider const& length_provider,
-  CopyProvider const& copy_provider,
+  LocationProvider const& loc_provider,
   ValidityFn validity_fn,
   bool has_default,
   cudf::detail::host_vector<uint8_t> const& default_bytes,
@@ -633,8 +646,8 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   rmm::device_uvector<int32_t> lengths(num_rows, stream, mr);
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
-  extract_lengths_kernel<LengthProvider><<<blocks, threads, 0, stream.value()>>>(
-    length_provider, num_rows, lengths.data(), has_default, def_len);
+  extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.value()>>>(
+    loc_provider, num_rows, lengths.data(), has_default, def_len);
 
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
@@ -648,10 +661,10 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto src_iter = cudf::detail::make_counting_transform_iterator(
       0,
       cuda::proclaim_return_type<void const*>(
-        [message_data, copy_provider, has_default, default_ptr, def_len] __device__(
+        [message_data, loc_provider, has_default, default_ptr, def_len] __device__(
           int idx) -> void const* {
           int32_t data_offset = 0;
-          auto loc            = copy_provider.get(idx, data_offset);
+          auto loc            = loc_provider.get(idx, data_offset);
           if (loc.offset < 0) {
             return (has_default && def_len > 0) ? static_cast<void const*>(default_ptr) : nullptr;
           }
@@ -664,9 +677,9 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto size_iter = cudf::detail::make_counting_transform_iterator(
       0,
       cuda::proclaim_return_type<size_t>(
-        [copy_provider, has_default, def_len] __device__(int idx) -> size_t {
+        [loc_provider, has_default, def_len] __device__(int idx) -> size_t {
           int32_t data_offset = 0;
-          auto loc            = copy_provider.get(idx, data_offset);
+          auto loc            = loc_provider.get(idx, data_offset);
           if (loc.offset < 0) {
             return (has_default && def_len > 0) ? static_cast<size_t>(def_len) : 0;
           }
@@ -736,12 +749,10 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
   int schema_idx,
   std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error,
+  protobuf_decode_runtime_context decode_ctx,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices   = nullptr,
-  bool propagate_invalid_enum_rows = true)
+  int32_t const* top_row_indices = nullptr)
 {
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
@@ -756,7 +767,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_val);
         },
@@ -780,7 +791,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                               true,
                                                               out.data(),
                                                               valid.data(),
-                                                              d_error.data(),
+                                                              decode_ctx.error->data(),
                                                               stream);
       if (schema_idx < static_cast<int>(enum_valid_values.size())) {
         auto const& valid_enums = enum_valid_values[schema_idx];
@@ -788,10 +799,10 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
           validate_enum_and_propagate_rows(out,
                                            valid,
                                            valid_enums,
-                                           d_row_force_null,
+                                           *decode_ctx.row_force_null,
                                            num_items,
                                            top_row_indices,
-                                           propagate_invalid_enum_rows,
+                                           decode_ctx.propagate_invalid_enum_rows,
                                            stream);
         }
       }
@@ -806,7 +817,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         num_items,
                                                         blocks,
                                                         threads_per_block,
-                                                        d_error,
+                                                        *decode_ctx.error,
                                                         has_default,
                                                         default_int,
                                                         encoding,
@@ -820,7 +831,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                        num_items,
                                                        blocks,
                                                        threads_per_block,
-                                                       d_error,
+                                                       *decode_ctx.error,
                                                        has_default,
                                                        default_int,
                                                        encoding,
@@ -834,7 +845,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         num_items,
                                                         blocks,
                                                         threads_per_block,
-                                                        d_error,
+                                                        *decode_ctx.error,
                                                         has_default,
                                                         default_int,
                                                         encoding,
@@ -853,7 +864,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_float_val);
         },
@@ -872,7 +883,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_double);
         },
@@ -886,14 +897,11 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
 template <typename T>
 inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   cudf::column_view const& binary_input,
-  uint8_t const* message_data,
-  cudf::size_type const* list_offsets,
-  cudf::size_type base_offset,
+  protobuf_input_view input,
   device_nested_field_descriptor const& field_desc,
   rmm::device_uvector<int32_t> d_field_offsets,
   rmm::device_uvector<repeated_occurrence>& d_occurrences,
   int total_count,
-  int num_rows,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
@@ -914,29 +922,30 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   constexpr bool is_floating_point = std::is_same_v<T, float> || std::is_same_v<T, double>;
   bool use_fixed_kernel = is_floating_point || (encoding == encoding_value(proto_encoding::FIXED));
 
-  repeated_location_provider loc_provider{list_offsets, base_offset, d_occurrences.data()};
+  repeated_location_provider loc_provider{
+    input.row_offsets, input.base_offset, d_occurrences.data()};
   if (use_fixed_kernel) {
     if constexpr (sizeof(T) == 4) {
       extract_fixed_kernel<T, wire_type_value(proto_wire_type::I32BIT), repeated_location_provider>
         <<<blocks, threads, 0, stream.value()>>>(
-          message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+          input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
     } else {
       extract_fixed_kernel<T, wire_type_value(proto_wire_type::I64BIT), repeated_location_provider>
         <<<blocks, threads, 0, stream.value()>>>(
-          message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+          input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
     }
   } else if (zigzag) {
     extract_varint_kernel<T, true, repeated_location_provider>
       <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+        input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
   } else {
     extract_varint_kernel<T, false, repeated_location_provider>
       <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
+        input.message_data, loc_provider, total_count, values.data(), nullptr, d_error.data());
   }
 
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                    num_rows + 1,
+                                                    input.num_rows + 1,
                                                     d_field_offsets.release(),
                                                     rmm::device_buffer{},
                                                     0);
@@ -945,7 +954,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
 
   if (input_null_count > 0) {
     auto null_mask = cudf::copy_bitmask(binary_input, stream, mr);
-    return cudf::make_lists_column(num_rows,
+    return cudf::make_lists_column(input.num_rows,
                                    std::move(offsets_col),
                                    std::move(child_col),
                                    input_null_count,
@@ -953,7 +962,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   }
 
   return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
+    input.num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
 }
 
 // ============================================================================

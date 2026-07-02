@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -153,7 +153,7 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
   // Because the input is a table we know that they all have the same length.
   auto num_rows = tbl.num_rows();
 
-  const cudf::size_type max_bytes_allowed = std::numeric_limits<cudf::size_type>::max();
+  cudf::size_type const max_bytes_allowed = std::numeric_limits<cudf::size_type>::max();
 
   int64_t total_output_size = static_cast<int64_t>(num_rows) * data_type_size * num_columns;
   CUDF_EXPECTS(total_output_size <= max_bytes_allowed, "Input is too large to process");
