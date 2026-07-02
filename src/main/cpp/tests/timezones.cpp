@@ -482,7 +482,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
     /*reader_raw_offset=*/0,
     reader_dst,
     cudf::get_default_stream(),
-    rmm::mr::get_current_device_resource_ref());
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
@@ -602,7 +602,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesSameDstZoneIsIdentity)
     /*reader_raw_offset=*/0,
     rule,
     cudf::get_default_stream(),
-    rmm::mr::get_current_device_resource_ref());
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }

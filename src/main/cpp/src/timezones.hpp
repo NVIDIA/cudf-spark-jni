@@ -160,7 +160,7 @@ struct dst_rule {
  * @param mr Device memory resource.
  * @return timestamps rebased between writer and reader timezones.
  */
-std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
+[[nodiscard]] std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   int64_t base_offset_us,
   cudf::table_view const* writer_tz_info_table,
@@ -194,7 +194,7 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
  * @param mr Device memory resource.
  * @return timestamps rebased between writer and reader timezones.
  */
-std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
+[[nodiscard]] std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   cudf::table_view const* writer_tz_info_table,
   int32_t writer_raw_offset,
