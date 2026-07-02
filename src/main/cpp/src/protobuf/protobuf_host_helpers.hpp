@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -111,21 +112,21 @@ template <typename CountIterator>
 inline list_offsets_from_counts_result make_list_offsets_from_counts(
   CountIterator counts_begin,
   int num_rows,
-  char const* overflow_error,
+  char const* count_context,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref output_mr,
   rmm::device_async_resource_ref scratch_mr)
 {
-  CUDF_EXPECTS(num_rows >= 0, "make_list_offsets_from_counts: row count must be non-negative");
+  CUDF_EXPECTS(num_rows >= 0, std::string{__func__} + ": row count must be non-negative");
   auto const counts_end     = counts_begin + num_rows;
   auto const total_count_64 = thrust::reduce(
     rmm::exec_policy_nosync(stream, scratch_mr), counts_begin, counts_end, int64_t{0});
-  CUDF_EXPECTS(total_count_64 >= 0,
-               "make_list_offsets_from_counts: total count must be non-negative");
-  CUDF_EXPECTS(total_count_64 <= std::numeric_limits<int32_t>::max(), overflow_error);
+  CUDF_EXPECTS(total_count_64 >= 0, std::string{__func__} + ": total count must be non-negative");
+  CUDF_EXPECTS(total_count_64 <= std::numeric_limits<int32_t>::max(),
+               std::string{count_context} + " total element count exceeds 2^31-1");
   auto const total_count = static_cast<int32_t>(total_count_64);
   CUDF_EXPECTS(num_rows > 0 || total_count == 0,
-               "make_list_offsets_from_counts: empty input cannot have repeated elements");
+               std::string{__func__} + ": empty input cannot have repeated elements");
 
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, output_mr);
   if (num_rows > 0) {
@@ -343,12 +344,11 @@ std::unique_ptr<cudf::column> build_enum_string_column(
   rmm::device_uvector<bool>& valid,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
-  rmm::device_uvector<bool>& d_row_force_null,
+  protobuf_decode_runtime_context decode_ctx,
   int num_rows,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices   = nullptr,
-  bool propagate_invalid_enum_rows = true);
+  int32_t const* top_row_indices = nullptr);
 
 // Wrap offsets + child into a LIST column, propagating the input's null mask. Note: when
 // `binary_input` has no nulls, `mr` is effectively unused — only the with-nulls path
@@ -371,8 +371,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   int total_count,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error,
+  protobuf_decode_runtime_context decode_ctx,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -393,8 +392,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   std::vector<int> const& child_field_indices,
   std::vector<nested_field_descriptor> const& schema,
   int num_fields,
-  schema_context_view ctx,
-  protobuf_decode_runtime_context context,
+  schema_context_view schema_ctx,
+  protobuf_decode_runtime_context decode_ctx,
   int depth,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
@@ -403,8 +402,8 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
   protobuf_input_view input,
   nested_parent_view parent,
   std::vector<nested_field_descriptor> const& schema,
-  schema_context_view ctx,
-  protobuf_decode_runtime_context context,
+  schema_context_view schema_ctx,
+  protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);

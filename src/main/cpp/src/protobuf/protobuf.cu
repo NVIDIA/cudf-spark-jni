@@ -485,6 +485,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     CUDF_CUDA_TRY(
       cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.value()));
   }
+  auto const decode_ctx = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
 
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
@@ -792,8 +793,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                       schema_idx,
                                                       enum_valid_values,
                                                       enum_names,
-                                                      d_row_force_null,
-                                                      d_error,
+                                                      decode_ctx,
                                                       stream,
                                                       mr);
       }
@@ -840,14 +840,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                          "Protobuf decode error: missing or mismatched enum metadata for "
                          "enum-as-string field");
             column_map[schema_idx] = build_enum_string_column(
-              out, valid, valid_enums, enum_name_bytes, d_row_force_null, num_rows, stream, mr);
+              out, valid, valid_enums, enum_name_bytes, decode_ctx, num_rows, stream, mr);
           } else {
             // Regular protobuf STRING (length-delimited)
             bool has_def_str    = has_def;
             auto const& def_str = field_meta.default_string;
-            top_level_location_provider len_provider{
-              list_offsets, base_offset, d_locations.data(), i, num_scalar};
-            top_level_location_provider copy_provider{
+            top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
             auto valid_fn = [locs = d_locations.data(), i, num_scalar, has_def_str] __device__(
                               cudf::size_type row) {
@@ -856,8 +854,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             column_map[schema_idx] = extract_and_build_string_or_bytes_column(false,
                                                                               message_data,
                                                                               num_rows,
-                                                                              len_provider,
-                                                                              copy_provider,
+                                                                              loc_provider,
                                                                               valid_fn,
                                                                               has_def_str,
                                                                               def_str,
@@ -871,9 +868,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           // bytes (BinaryType) represented as LIST<UINT8>
           bool has_def_bytes    = has_def;
           auto const& def_bytes = field_meta.default_string;
-          top_level_location_provider len_provider{
-            list_offsets, base_offset, d_locations.data(), i, num_scalar};
-          top_level_location_provider copy_provider{
+          top_level_location_provider loc_provider{
             list_offsets, base_offset, d_locations.data(), i, num_scalar};
           auto valid_fn = [locs = d_locations.data(), i, num_scalar, has_def_bytes] __device__(
                             cudf::size_type row) {
@@ -882,8 +877,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           column_map[schema_idx] = extract_and_build_string_or_bytes_column(true,
                                                                             message_data,
                                                                             num_rows,
-                                                                            len_provider,
-                                                                            copy_provider,
+                                                                            loc_provider,
                                                                             valid_fn,
                                                                             has_def_bytes,
                                                                             def_bytes,
@@ -916,12 +910,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         extract_strided_count{d_repeated_info.data(), ri, num_repeated});
       rep_work.emplace_back(
         schema_idx,
-        make_list_offsets_from_counts(counts_begin,
-                                      num_rows,
-                                      "Top-level repeated field total element count exceeds 2^31-1",
-                                      stream,
-                                      mr,
-                                      scratch_mr));
+        make_list_offsets_from_counts(
+          counts_begin, num_rows, "Top-level repeated field", stream, mr, scratch_mr));
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
@@ -1104,8 +1094,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                                                        total_count,
                                                                        field_meta.enum_valid_values,
                                                                        field_meta.enum_names,
-                                                                       d_row_force_null,
-                                                                       d_error,
+                                                                       decode_ctx,
                                                                        stream,
                                                                        mr);
           } else {
@@ -1144,6 +1133,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Process nested struct fields after top-level repeated fields so malformed repeated
   // occurrences can still mark their rows before nested columns are assembled.
+  auto nested_decode_ctx                        = decode_ctx;
+  nested_decode_ctx.propagate_invalid_enum_rows = false;
   for (int ni = 0; ni < num_nested; ni++) {
     int parent_schema_idx = nested_field_indices[ni];
     // find_child_field_indices is a full linear pass over the schema per nested struct, so this
@@ -1164,7 +1155,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                  schema,
                                  num_fields,
                                  schema_ctx,
-                                 {&d_row_force_null, &d_error, false},
+                                 nested_decode_ctx,
                                  0,
                                  stream,
                                  mr);

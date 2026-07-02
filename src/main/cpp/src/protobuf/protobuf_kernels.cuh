@@ -623,13 +623,12 @@ struct extract_strided_count {
   }
 };
 
-template <typename LengthProvider, typename CopyProvider, typename ValidityFn>
+template <typename LocationProvider, typename ValidityFn>
 inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   bool as_bytes,
   uint8_t const* message_data,
   int num_rows,
-  LengthProvider const& length_provider,
-  CopyProvider const& copy_provider,
+  LocationProvider const& loc_provider,
   ValidityFn validity_fn,
   bool has_default,
   cudf::detail::host_vector<uint8_t> const& default_bytes,
@@ -647,8 +646,8 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   rmm::device_uvector<int32_t> lengths(num_rows, stream, mr);
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
-  extract_lengths_kernel<LengthProvider><<<blocks, threads, 0, stream.value()>>>(
-    length_provider, num_rows, lengths.data(), has_default, def_len);
+  extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.value()>>>(
+    loc_provider, num_rows, lengths.data(), has_default, def_len);
 
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
@@ -662,10 +661,10 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto src_iter = cudf::detail::make_counting_transform_iterator(
       0,
       cuda::proclaim_return_type<void const*>(
-        [message_data, copy_provider, has_default, default_ptr, def_len] __device__(
+        [message_data, loc_provider, has_default, default_ptr, def_len] __device__(
           int idx) -> void const* {
           int32_t data_offset = 0;
-          auto loc            = copy_provider.get(idx, data_offset);
+          auto loc            = loc_provider.get(idx, data_offset);
           if (loc.offset < 0) {
             return (has_default && def_len > 0) ? static_cast<void const*>(default_ptr) : nullptr;
           }
@@ -678,9 +677,9 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto size_iter = cudf::detail::make_counting_transform_iterator(
       0,
       cuda::proclaim_return_type<size_t>(
-        [copy_provider, has_default, def_len] __device__(int idx) -> size_t {
+        [loc_provider, has_default, def_len] __device__(int idx) -> size_t {
           int32_t data_offset = 0;
-          auto loc            = copy_provider.get(idx, data_offset);
+          auto loc            = loc_provider.get(idx, data_offset);
           if (loc.offset < 0) {
             return (has_default && def_len > 0) ? static_cast<size_t>(def_len) : 0;
           }
@@ -750,12 +749,10 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
   int schema_idx,
   std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error,
+  protobuf_decode_runtime_context decode_ctx,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
-  int32_t const* top_row_indices   = nullptr,
-  bool propagate_invalid_enum_rows = true)
+  int32_t const* top_row_indices = nullptr)
 {
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
@@ -770,7 +767,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_val);
         },
@@ -794,7 +791,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                               true,
                                                               out.data(),
                                                               valid.data(),
-                                                              d_error.data(),
+                                                              decode_ctx.error->data(),
                                                               stream);
       if (schema_idx < static_cast<int>(enum_valid_values.size())) {
         auto const& valid_enums = enum_valid_values[schema_idx];
@@ -802,10 +799,10 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
           validate_enum_and_propagate_rows(out,
                                            valid,
                                            valid_enums,
-                                           d_row_force_null,
+                                           *decode_ctx.row_force_null,
                                            num_items,
                                            top_row_indices,
-                                           propagate_invalid_enum_rows,
+                                           decode_ctx.propagate_invalid_enum_rows,
                                            stream);
         }
       }
@@ -820,7 +817,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         num_items,
                                                         blocks,
                                                         threads_per_block,
-                                                        d_error,
+                                                        *decode_ctx.error,
                                                         has_default,
                                                         default_int,
                                                         encoding,
@@ -834,7 +831,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                        num_items,
                                                        blocks,
                                                        threads_per_block,
-                                                       d_error,
+                                                       *decode_ctx.error,
                                                        has_default,
                                                        default_int,
                                                        encoding,
@@ -848,7 +845,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         num_items,
                                                         blocks,
                                                         threads_per_block,
-                                                        d_error,
+                                                        *decode_ctx.error,
                                                         has_default,
                                                         default_int,
                                                         encoding,
@@ -867,7 +864,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_float_val);
         },
@@ -886,7 +883,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                                num_items,
                                                                out_ptr,
                                                                valid_ptr,
-                                                               d_error.data(),
+                                                               decode_ctx.error->data(),
                                                                has_default,
                                                                def_double);
         },
