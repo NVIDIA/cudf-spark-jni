@@ -23,6 +23,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
@@ -268,6 +269,21 @@ enum dst_rule_mode : int32_t {
 enum dst_time_mode : int32_t { WALL_TIME = 0, STANDARD_TIME = 1, UTC_TIME = 2 };
 
 /**
+ * @brief Day-of-week (1=Sun..7=Sat) for the given epoch day.
+ */
+__device__ static int32_t day_of_week_1_sun(int64_t epoch_days)
+{
+  int64_t raw = (epoch_days + 4) % 7;
+  if (raw < 0) { raw += 7; }
+  return static_cast<int32_t>(raw) + 1;
+}
+
+__host__ __device__ constexpr size_t align_up(size_t value, size_t alignment)
+{
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+/**
  * @brief Compute the day-of-month when a DST rule triggers for the given year and month.
  *
  * Handles the four rule categories supported by SimpleTimeZone:
@@ -284,9 +300,7 @@ __device__ static int32_t compute_rule_day(
   // Compute day-of-week of the 1st of the month
   int64_t first_of_month_epoch_days =
     spark_rapids_jni::date_time_utils::to_epoch_day(year, month + 1, 1);
-  int64_t dow_raw = ((first_of_month_epoch_days + 4) % 7);
-  if (dow_raw < 0) dow_raw += 7;
-  int32_t first_dow = static_cast<int32_t>(dow_raw) + 1;  // 1=Sun..7=Sat
+  int32_t first_dow = day_of_week_1_sun(first_of_month_epoch_days);
 
   switch (rule_mode) {
     case DOM_MODE: return rule_day;
@@ -309,9 +323,7 @@ __device__ static int32_t compute_rule_day(
     case DOW_GE_DOM_MODE: {
       // First rule_dow on or after rule_day
       int64_t target_epoch = first_of_month_epoch_days + (rule_day - 1);
-      int64_t target_raw   = ((target_epoch + 4) % 7);
-      if (target_raw < 0) target_raw += 7;
-      int32_t target_dow = static_cast<int32_t>(target_raw) + 1;
+      int32_t target_dow = day_of_week_1_sun(target_epoch);
       int32_t diff       = rule_dow - target_dow;
       if (diff < 0) diff += 7;
       return rule_day + diff;
@@ -320,9 +332,7 @@ __device__ static int32_t compute_rule_day(
     case DOW_LE_DOM_MODE: {
       // Last rule_dow on or before rule_day
       int64_t target_epoch = first_of_month_epoch_days + (rule_day - 1);
-      int64_t target_raw   = ((target_epoch + 4) % 7);
-      if (target_raw < 0) target_raw += 7;
-      int32_t target_dow = static_cast<int32_t>(target_raw) + 1;
+      int32_t target_dow = day_of_week_1_sun(target_epoch);
       int32_t diff       = target_dow - rule_dow;
       if (diff < 0) diff += 7;
       return rule_day - diff;
@@ -602,11 +612,6 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   int64_t* s_reader_trans   = nullptr;
   int32_t* s_reader_offsets = nullptr;
 
-  auto align_up = [](char* p, size_t alignment) -> char* {
-    auto addr = reinterpret_cast<uintptr_t>(p);
-    return reinterpret_cast<char*>((addr + alignment - 1) & ~(alignment - 1));
-  };
-
   char* ptr = smem;
   if (writer_fits && writer_trans_count > 0) {
     s_writer_trans = reinterpret_cast<int64_t*>(ptr);
@@ -615,7 +620,8 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
     ptr += writer_trans_count * sizeof(int32_t);
   }
   if (reader_fits && reader_trans_count > 0) {
-    ptr            = align_up(ptr, alignof(int64_t));
+    ptr = reinterpret_cast<char*>(
+      align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
     s_reader_trans = reinterpret_cast<int64_t*>(ptr);
     ptr += reader_trans_count * sizeof(int64_t);
     s_reader_offsets = reinterpret_cast<int32_t*>(ptr);
@@ -714,11 +720,11 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   }
   if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
     // Alignment padding between writer offsets (int32_t) and reader transitions (int64_t)
-    smem_bytes = (smem_bytes + alignof(int64_t) - 1) & ~(alignof(int64_t) - 1);
+    smem_bytes = align_up(smem_bytes, alignof(int64_t));
     smem_bytes += reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
   }
 
-  int32_t num_blocks = (input.size() + CONVERT_TZ_BLOCK_SIZE - 1) / CONVERT_TZ_BLOCK_SIZE;
+  int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
