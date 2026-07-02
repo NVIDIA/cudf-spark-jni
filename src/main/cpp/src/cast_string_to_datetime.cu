@@ -491,7 +491,7 @@ __device__ int64_t to_epoch_seconds(int year, int month, int day, int hour, int 
 __device__ bool is_valid_digits(int segment, int digits)
 {
   // A Long is able to represent a timestamp within [+-]200 thousand years
-  int const maxDigitsYear = 6;
+  const int maxDigitsYear = 6;
 
   // Check the validity of the digits based on the segment
   return (segment == 6) || (segment == 0 && digits >= 4 && digits <= maxDigitsYear) ||

@@ -887,7 +887,7 @@ struct dec128_remainder {
     // The output scale of remainder is technically the scale of the divisor (b_scale)
     // But since we want an output scale of rem_scale, we have to do the following:
     // First, we have to shift the divisor to the desired rem_scale
-    int const d_shift_exp = rem_scale - b_scale;
+    const int d_shift_exp = rem_scale - b_scale;
     // Then, we have to shift the dividend to compute integer divide
     // We use the formula from dec128_divider
     // Start with: quot_scale - (a_scale - b_scale)

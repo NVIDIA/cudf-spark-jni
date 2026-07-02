@@ -210,7 +210,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_toIntegersW
     auto const valid_rows     = strings::matches_re(input_view, *validity_regex);
     auto const int_col        = [&] {
       auto const prepped_table = strings::extract(input_view, *validity_regex);
-      strings_column_view const prepped_view{prepped_table->get_column(0)};
+      const strings_column_view prepped_view{prepped_table->get_column(0)};
       switch (base) {
         case 10: {
           return strings::to_integers(prepped_view, res_data_type);

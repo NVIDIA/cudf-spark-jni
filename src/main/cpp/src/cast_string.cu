@@ -165,7 +165,7 @@ process_value(bool first_value, T current_val, T const new_digit, bool adding)
 template <typename T>
 CUDF_KERNEL void string_to_integer_kernel(T* out,
                                           bitmask_type* validity,
-                                          char const* const chars,
+                                          const char* const chars,
                                           size_type const* offsets,
                                           bitmask_type const* incoming_null_mask,
                                           size_type num_rows,
@@ -253,7 +253,7 @@ CUDF_KERNEL void string_to_integer_kernel(T* out,
 
 template <typename T>
 __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_exponent(
-  char const* chars, int const len, bool strip)
+  const char* chars, const int len, bool strip)
 {
   T exponent_val         = 0;
   int i                  = 0;
@@ -276,7 +276,7 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
   };
 
   auto validate_char = [&decimal_location, &exponent_positive, &strip](
-                         processing_state const state, char const chr, int chr_idx) {
+                         processing_state const state, const char chr, int chr_idx) {
     switch (state) {
       case ST_TRAILING_WHITESPACE:
         if (!is_whitespace(chr)) { return ST_INVALID; }
@@ -396,7 +396,7 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
 template <typename T>
 CUDF_KERNEL void string_to_decimal_kernel(T* out,
                                           bitmask_type* validity,
-                                          char const* const chars,
+                                          const char* const chars,
                                           size_type const* offsets,
                                           bitmask_type const* incoming_null_mask,
                                           size_type num_rows,
@@ -422,7 +422,7 @@ CUDF_KERNEL void string_to_decimal_kernel(T* out,
   // If it is the index of a digit, that digit is after the decimal point.
 
   // turn into std::count_if
-  auto count_significant_digits = [](char const* str, int len, int num_digits) {
+  auto count_significant_digits = [](const char* str, int len, int num_digits) {
     int count        = 0;
     int digits_found = 0;
     for (int i = 0; i < len && digits_found < num_digits; ++i) {

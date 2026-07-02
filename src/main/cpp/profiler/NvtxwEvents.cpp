@@ -27,11 +27,11 @@ namespace NvidiaNvtxw {
   {(flags), (type), (name), nullptr, 0, 0, nullptr, nullptr}
 
 // The C string containing the event's name must be provided in a special way.
-static nvtxPayloadSchemaEntry_t const nameSchema[] = {PAYLOAD_ENTRY_SIMPLE(
+static const nvtxPayloadSchemaEntry_t nameSchema[] = {PAYLOAD_ENTRY_SIMPLE(
   NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE | NVTX_PAYLOAD_ENTRY_FLAG_ARRAY_ZERO_TERMINATED,
   NVTX_PAYLOAD_ENTRY_TYPE_CSTRING,
   "name")};
-static nvtxPayloadSchemaAttr_t const nameSchemaAttr{
+static const nvtxPayloadSchemaAttr_t nameSchemaAttr{
   /*.fieldMask = */
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_FLAGS |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
@@ -55,7 +55,7 @@ static nvtxPayloadSchemaAttr_t const nameSchemaAttr{
   /*.extension = */
   nullptr};
 
-static nvtxPayloadSchemaEntry_t const nvtxRangeSchema[] = {
+static const nvtxPayloadSchemaEntry_t nvtxRangeSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -70,7 +70,7 @@ static nvtxPayloadSchemaEntry_t const nvtxRangeSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_COLOR_ARGB, "color"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "push_pop")};
 // TimeBase = Relative
-static nvtxPayloadSchemaAttr_t const nvtxRangePushPopSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t nvtxRangePushPopSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -84,7 +84,7 @@ static nvtxPayloadSchemaAttr_t const nvtxRangePushPopSchemaAttr = {
   NvidiaNvtxw::PayloadSchemaId::nvtxRangePushPopId,
   nullptr};
 // TimeBase = Relative
-static nvtxPayloadSchemaAttr_t const nvtxRangeStartEndSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t nvtxRangeStartEndSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -98,7 +98,7 @@ static nvtxPayloadSchemaAttr_t const nvtxRangeStartEndSchemaAttr = {
   NvidiaNvtxw::PayloadSchemaId::nvtxRangeStartEndId,
   nullptr};
 
-static nvtxPayloadSchemaEntry_t const cuptiApiSchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiApiSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -111,7 +111,7 @@ static nvtxPayloadSchemaEntry_t const cuptiApiSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_TID_UINT32, "thread_id"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT32, "correlation_id"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT32, "return_value")};
-static nvtxPayloadSchemaAttr_t const cuptiApiSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiApiSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -124,7 +124,7 @@ static nvtxPayloadSchemaAttr_t const cuptiApiSchemaAttr = {
   0,
   NvidiaNvtxw::PayloadSchemaId::cuptiApiId,
   nullptr};
-static nvtxPayloadSchemaEntry_t const cuptiDeviceSchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiDeviceSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT64, "global_memory_bandwidth"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT64, "global_memory_size"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT32, "constant_memory_size"),
@@ -154,7 +154,7 @@ static nvtxPayloadSchemaEntry_t const cuptiDeviceSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE | NVTX_PAYLOAD_ENTRY_FLAG_POINTER,
                        NVTX_PAYLOAD_ENTRY_TYPE_CSTRING,
                        "name")};
-static nvtxPayloadSchemaAttr_t const cuptiDeviceSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiDeviceSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -167,7 +167,7 @@ static nvtxPayloadSchemaAttr_t const cuptiDeviceSchemaAttr = {
   0,
   NvidiaNvtxw::PayloadSchemaId::cuptiDeviceId,
   nullptr};
-static nvtxPayloadSchemaEntry_t const cuptiKernelSchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiKernelSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -216,7 +216,7 @@ static nvtxPayloadSchemaEntry_t const cuptiKernelSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "shared_memory_carveout_requested"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "shmem_limit_config"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "channel_type")};
-static nvtxPayloadSchemaAttr_t const cuptiKernelSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiKernelSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -229,7 +229,7 @@ static nvtxPayloadSchemaAttr_t const cuptiKernelSchemaAttr = {
   0,
   NvidiaNvtxw::PayloadSchemaId::cuptiKernelId,
   nullptr};
-static nvtxPayloadSchemaEntry_t const cuptiMemcpySchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiMemcpySchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -250,7 +250,7 @@ static nvtxPayloadSchemaEntry_t const cuptiMemcpySchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "copy_kind"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "src_kind"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "dst_kind")};
-static nvtxPayloadSchemaAttr_t const cuptiMemcpySchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiMemcpySchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -263,7 +263,7 @@ static nvtxPayloadSchemaAttr_t const cuptiMemcpySchemaAttr = {
   0,
   NvidiaNvtxw::PayloadSchemaId::cuptiMemcpyId,
   nullptr};
-static nvtxPayloadSchemaEntry_t const cuptiMemsetSchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiMemsetSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -283,7 +283,7 @@ static nvtxPayloadSchemaEntry_t const cuptiMemsetSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "channel_type"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "mem_kind"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "flags")};
-static nvtxPayloadSchemaAttr_t const cuptiMemsetSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiMemsetSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -296,7 +296,7 @@ static nvtxPayloadSchemaAttr_t const cuptiMemsetSchemaAttr = {
   0,
   NvidiaNvtxw::PayloadSchemaId::cuptiMemsetId,
   nullptr};
-static nvtxPayloadSchemaEntry_t const cuptiOverheadSchema[] = {
+static const nvtxPayloadSchemaEntry_t cuptiOverheadSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(NVTX_PAYLOAD_ENTRY_FLAG_RANGE_BEGIN | NVTX_PAYLOAD_ENTRY_FLAG_EVENT_MESSAGE,
                        NVTX_PAYLOAD_ENTRY_TYPE_UINT64,
                        "time_start"),
@@ -307,7 +307,7 @@ static nvtxPayloadSchemaEntry_t const cuptiOverheadSchema[] = {
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_TID_UINT32, "thread_id"),
   PAYLOAD_ENTRY_SIMPLE(0, NVTX_PAYLOAD_ENTRY_TYPE_UINT8, "overhead_kind"),
 };
-static nvtxPayloadSchemaAttr_t const cuptiOverheadSchemaAttr = {
+static const nvtxPayloadSchemaAttr_t cuptiOverheadSchemaAttr = {
   NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NAME | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_TYPE |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_ENTRIES | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_NUM_ENTRIES |
     NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_STATIC_SIZE | NVTX_PAYLOAD_SCHEMA_ATTR_FIELD_SCHEMA_ID,
@@ -323,18 +323,18 @@ static nvtxPayloadSchemaAttr_t const cuptiOverheadSchemaAttr = {
 #undef PAYLOAD_ENTRY_SIMPLE
 
 const nvtxPayloadSchemaAttr_t* GetNameSchemaAttr() { return &nameSchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetNvtxRangePushPopSchemaAttr()
+const nvtxPayloadSchemaAttr_t* GetNvtxRangePushPopSchemaAttr()
 {
   return &nvtxRangePushPopSchemaAttr;
 }
-nvtxPayloadSchemaAttr_t const* GetNvtxRangeStartEndSchemaAttr()
+const nvtxPayloadSchemaAttr_t* GetNvtxRangeStartEndSchemaAttr()
 {
   return &nvtxRangeStartEndSchemaAttr;
 }
-nvtxPayloadSchemaAttr_t const* GetCuptiApiSchemaAttr() { return &cuptiApiSchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetCuptiDeviceSchemaAttr() { return &cuptiDeviceSchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetCuptiKernelSchemaAttr() { return &cuptiKernelSchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetCuptiMemcpySchemaAttr() { return &cuptiMemcpySchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetCuptiMemsetSchemaAttr() { return &cuptiMemsetSchemaAttr; }
-nvtxPayloadSchemaAttr_t const* GetCuptiOverheadSchemaAttr() { return &cuptiOverheadSchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiApiSchemaAttr() { return &cuptiApiSchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiDeviceSchemaAttr() { return &cuptiDeviceSchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiKernelSchemaAttr() { return &cuptiKernelSchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiMemcpySchemaAttr() { return &cuptiMemcpySchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiMemsetSchemaAttr() { return &cuptiMemsetSchemaAttr; }
+const nvtxPayloadSchemaAttr_t* GetCuptiOverheadSchemaAttr() { return &cuptiOverheadSchemaAttr; }
 }  // namespace NvidiaNvtxw

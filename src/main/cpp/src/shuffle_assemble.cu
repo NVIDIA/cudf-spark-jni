@@ -953,7 +953,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   std::transform(buffer_slices.begin(),
                  buffer_slices.end(),
                  h_dst_buffers.begin(),
-                 [](buffer_slice const& slice) { return slice.data; });
+                 [](const buffer_slice& slice) { return slice.data; });
   auto dst_buffers = cudf::detail::make_device_uvector_async(h_dst_buffers, stream, temp_mr);
 
   // compute:

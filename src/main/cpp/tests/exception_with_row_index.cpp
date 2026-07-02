@@ -32,7 +32,7 @@ TEST_F(ErrorAtRowTests, unary)
   try {
     spark_rapids_jni::throw_row_error_if_any(input, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (spark_rapids_jni::exception_with_row_index const& e) {
+  } catch (const spark_rapids_jni::exception_with_row_index& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 
@@ -49,7 +49,7 @@ TEST_F(ErrorAtRowTests, binary)
   try {
     spark_rapids_jni::throw_row_error_if_any(input1, input2, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (spark_rapids_jni::exception_with_row_index const& e) {
+  } catch (const spark_rapids_jni::exception_with_row_index& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 
@@ -68,7 +68,7 @@ TEST_F(ErrorAtRowTests, ternary)
     spark_rapids_jni::throw_row_error_if_any(
       input1, input2, input3, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (spark_rapids_jni::exception_with_row_index const& e) {
+  } catch (const spark_rapids_jni::exception_with_row_index& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 

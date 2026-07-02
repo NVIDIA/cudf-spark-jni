@@ -28,18 +28,18 @@
 
 namespace spark_rapids_jni::profiler {
 
-bool create_nvtxw_stream(nvtxwInterfaceCore_t const* nvtxwInterface,
-                         nvtxwSessionHandle_t const& session,
-                         std::string const& name,
-                         std::string const& domain,
+bool create_nvtxw_stream(const nvtxwInterfaceCore_t* nvtxwInterface,
+                         const nvtxwSessionHandle_t& session,
+                         const std::string& name,
+                         const std::string& domain,
                          nvtxwStreamHandle_t& stream);
 
 int initialize_nvtxw(std::ifstream& in,
-                     std::string const& outPath,
+                     const std::string& outPath,
                      void*& nvtxwModuleHandle,
                      nvtxwInterfaceCore_t*& nvtxwInterface,
                      nvtxwSessionHandle_t& session,
                      nvtxwStreamHandle_t& stream,
-                     std::optional<std::filesystem::path> const& nvtxw_backend_path = std::nullopt);
+                     const std::optional<std::filesystem::path>& nvtxw_backend_path = std::nullopt);
 
 }  // namespace spark_rapids_jni::profiler

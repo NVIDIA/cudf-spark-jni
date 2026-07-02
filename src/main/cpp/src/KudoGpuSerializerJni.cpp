@@ -30,7 +30,7 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_splitAndSerializeToDevic
     cudf::jni::auto_set_device(env);
 
     auto table = reinterpret_cast<cudf::table_view const*>(j_table_view);
-    cudf::jni::native_jintArray const n_splits(env, j_splits);
+    const cudf::jni::native_jintArray n_splits(env, j_splits);
     std::vector<cudf::size_type> splits = n_splits.to_vector<int>();
 
     auto [split_result, split_meta] = spark_rapids_jni::shuffle_split(

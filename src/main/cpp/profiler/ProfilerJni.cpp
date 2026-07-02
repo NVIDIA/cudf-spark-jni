@@ -314,7 +314,7 @@ void domain_runtime_callback(CUpti_CallbackId callback_id, CUpti_CallbackData co
 void CUPTIAPI callback_handler(void*,
                                CUpti_CallbackDomain domain,
                                CUpti_CallbackId callback_id,
-                               void const* callback_data_ptr)
+                               const void* callback_data_ptr)
 {
   auto rc = cuptiGetLastError();
   if (rc != CUPTI_SUCCESS && !State->has_cupti_callback_errored) {

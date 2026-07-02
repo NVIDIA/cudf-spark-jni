@@ -295,7 +295,7 @@ class string_to_float {
                              bitmask_type* validity,
                              int32_t* ansi_except,
                              size_type* valid_count,
-                             char const* const chars,
+                             const char* const chars,
                              size_type const* offsets,
                              uint64_t const* const ipow,
                              bitmask_type const* incoming_null_mask,
@@ -805,7 +805,7 @@ class string_to_float {
   bitmask_type* _validity;
   int32_t* _ansi_except;
   size_type* _valid_count;
-  char const* const _chars;
+  const char* const _chars;
   size_type const _warp_id;
   size_type const _row;
   size_type const _warp_lane;
@@ -829,7 +829,7 @@ CUDF_KERNEL void string_to_float_kernel(T* out,
                                         bitmask_type* validity,
                                         int32_t* ansi_except,
                                         size_type* valid_count,
-                                        char const* const chars,
+                                        const char* const chars,
                                         size_type const* offsets,
                                         bitmask_type const* incoming_null_mask,
                                         size_type const num_rows)

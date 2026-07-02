@@ -45,7 +45,7 @@ namespace jni {
 std::string unicode_to_lower(std::string const& input)
 {
   std::mbstate_t to_wc_state = std::mbstate_t();
-  char const* mbstr          = input.data();
+  const char* mbstr          = input.data();
   // get the size of the wide character result
   std::size_t wide_size   = std::mbsrtowcs(nullptr, &mbstr, 0, &to_wc_state);
   auto const invalid_size = std::numeric_limits<std::size_t>::max();
@@ -63,7 +63,7 @@ std::string unicode_to_lower(std::string const& input)
   }
   // Get the multi-byte result size
   std::mbstate_t from_wc_state = std::mbstate_t();
-  wchar_t const* wcstr         = wide.data();
+  const wchar_t* wcstr         = wide.data();
   std::size_t mb_size          = std::wcsrtombs(nullptr, &wcstr, 0, &from_wc_state);
   if (mb_size == invalid_size) {
     throw std::invalid_argument("unsupported wide character sequence");
@@ -173,7 +173,7 @@ class column_pruner {
 
  private:
   std::string get_name(parquet::format::SchemaElement& elem,
-                       bool const normalize_case = false) const
+                       const bool normalize_case = false) const
   {
     return normalize_case ? unicode_to_lower(elem.name) : elem.name;
   }

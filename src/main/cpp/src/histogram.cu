@@ -92,9 +92,9 @@ struct fill_percentile_fn {
 
     // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
     // `upper_part` which may lead to output with different round-off error.
-    double const volatile lower_part =
+    volatile double const lower_part =
       (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
-    double const volatile higher_part =
+    volatile double const higher_part =
       (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
     output[idx] = lower_part + higher_part;
   }

@@ -319,14 +319,14 @@ struct fixed_width_row_offset_functor {
  * @param output_nm array of pointers to the output null masks
  * @param input_data pointing to the incoming row data
  */
-CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
-                                                      size_type const num_columns,
-                                                      size_type const row_size,
-                                                      size_type const* input_offset_in_row,
-                                                      size_type const* num_bytes,
+CUDF_KERNEL void copy_from_rows_fixed_width_optimized(const size_type num_rows,
+                                                      const size_type num_columns,
+                                                      const size_type row_size,
+                                                      const size_type* input_offset_in_row,
+                                                      const size_type* num_bytes,
                                                       int8_t** output_data,
                                                       bitmask_type** output_nm,
-                                                      int8_t const* input_data)
+                                                      const int8_t* input_data)
 {
   // We are going to copy the data in two passes.
   // The first pass copies a chunk of data into shared memory.
@@ -402,17 +402,17 @@ CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
           }
           case 2: {
             int16_t* short_col_output   = reinterpret_cast<int16_t*>(col_output);
-            short_col_output[row_index] = *reinterpret_cast<int16_t const*>(col_tmp);
+            short_col_output[row_index] = *reinterpret_cast<const int16_t*>(col_tmp);
             break;
           }
           case 4: {
             int32_t* int_col_output   = reinterpret_cast<int32_t*>(col_output);
-            int_col_output[row_index] = *reinterpret_cast<int32_t const*>(col_tmp);
+            int_col_output[row_index] = *reinterpret_cast<const int32_t*>(col_tmp);
             break;
           }
           case 8: {
             int64_t* long_col_output   = reinterpret_cast<int64_t*>(col_output);
-            long_col_output[row_index] = *reinterpret_cast<int64_t const*>(col_tmp);
+            long_col_output[row_index] = *reinterpret_cast<const int64_t*>(col_tmp);
             break;
           }
           default: {
@@ -438,14 +438,14 @@ CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
   }
 }
 
-CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
-                                                    size_type const num_rows,
-                                                    size_type const num_columns,
-                                                    size_type const row_size,
-                                                    size_type const* output_offset_in_row,
-                                                    size_type const* num_bytes,
-                                                    int8_t const** input_data,
-                                                    bitmask_type const** input_nm,
+CUDF_KERNEL void copy_to_rows_fixed_width_optimized(const size_type start_row,
+                                                    const size_type num_rows,
+                                                    const size_type num_columns,
+                                                    const size_type row_size,
+                                                    const size_type* output_offset_in_row,
+                                                    const size_type* num_bytes,
+                                                    const int8_t** input_data,
+                                                    const bitmask_type** input_nm,
                                                     int8_t* output_data)
 {
   // We are going to copy the data in two passes.
@@ -492,24 +492,24 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
            col_index += col_index_stride) {
         size_type col_size      = num_bytes[col_index];
         int8_t* col_tmp         = &(row_tmp[output_offset_in_row[col_index]]);
-        int8_t const* col_input = input_data[col_index];
+        const int8_t* col_input = input_data[col_index];
         switch (col_size) {
           case 1: {
             *col_tmp = col_input[row_index];
             break;
           }
           case 2: {
-            int16_t const* short_col_input       = reinterpret_cast<int16_t const*>(col_input);
+            const int16_t* short_col_input       = reinterpret_cast<const int16_t*>(col_input);
             *reinterpret_cast<int16_t*>(col_tmp) = short_col_input[row_index];
             break;
           }
           case 4: {
-            int32_t const* int_col_input         = reinterpret_cast<int32_t const*>(col_input);
+            const int32_t* int_col_input         = reinterpret_cast<const int32_t*>(col_input);
             *reinterpret_cast<int32_t*>(col_tmp) = int_col_input[row_index];
             break;
           }
           case 8: {
-            int64_t const* long_col_input        = reinterpret_cast<int64_t const*>(col_input);
+            const int64_t* long_col_input        = reinterpret_cast<const int64_t*>(col_input);
             *reinterpret_cast<int64_t*>(col_tmp) = long_col_input[row_index];
             break;
           }
@@ -588,13 +588,13 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
  *
  */
 template <int block_size, typename RowOffsetFunctor>
-__launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_rows,
-                                                            size_type const num_columns,
-                                                            size_type const shmem_used_per_tile,
-                                                            device_span<tile_info const> tile_infos,
-                                                            int8_t const** input_data,
-                                                            size_type const* col_sizes,
-                                                            size_type const* col_offsets,
+__launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(const size_type num_rows,
+                                                            const size_type num_columns,
+                                                            const size_type shmem_used_per_tile,
+                                                            device_span<const tile_info> tile_infos,
+                                                            const int8_t** input_data,
+                                                            const size_type* col_sizes,
+                                                            const size_type* col_offsets,
                                                             RowOffsetFunctor row_offsets,
                                                             size_type const* batch_row_boundaries,
                                                             int8_t** output_data)
@@ -659,17 +659,17 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_
       // copy the element from global memory
       switch (col_size) {
         case 2: {
-          int16_t const* short_col_input = reinterpret_cast<int16_t const*>(input_src);
+          const int16_t* short_col_input = reinterpret_cast<const int16_t*>(input_src);
           *reinterpret_cast<int16_t*>(&shared_data[shared_offset]) = *short_col_input;
           break;
         }
         case 4: {
-          int32_t const* int_col_input = reinterpret_cast<int32_t const*>(input_src);
+          const int32_t* int_col_input = reinterpret_cast<const int32_t*>(input_src);
           *reinterpret_cast<int32_t*>(&shared_data[shared_offset]) = *int_col_input;
           break;
         }
         case 8: {
-          int64_t const* long_col_input = reinterpret_cast<int64_t const*>(input_src);
+          const int64_t* long_col_input = reinterpret_cast<const int64_t*>(input_src);
           *reinterpret_cast<int64_t*>(&shared_data[shared_offset]) = *long_col_input;
           break;
         }
@@ -724,15 +724,15 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_validity_to_rows(size_type const num_rows,
-                             size_type const num_columns,
-                             size_type const shmem_used_per_tile,
+  void copy_validity_to_rows(const size_type num_rows,
+                             const size_type num_columns,
+                             const size_type shmem_used_per_tile,
                              RowOffsetFunctor row_offsets,
                              size_type const* batch_row_boundaries,
                              int8_t** output_data,
-                             size_type const validity_offset,
-                             device_span<tile_info const> tile_infos,
-                             bitmask_type const** input_nm)
+                             const size_type validity_offset,
+                             device_span<const tile_info> tile_infos,
+                             const bitmask_type** input_nm)
 {
   extern __shared__ int8_t shared_data[];
 
@@ -909,16 +909,16 @@ __launch_bounds__(block_size) CUDF_KERNEL
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_from_rows(size_type const num_rows,
-                      size_type const num_columns,
-                      size_type const shmem_used_per_tile,
+  void copy_from_rows(const size_type num_rows,
+                      const size_type num_columns,
+                      const size_type shmem_used_per_tile,
                       RowOffsetFunctor row_offsets,
                       size_type const* batch_row_boundaries,
                       int8_t** output_data,
-                      size_type const* col_sizes,
-                      size_type const* col_offsets,
-                      device_span<tile_info const> tile_infos,
-                      int8_t const* input_data)
+                      const size_type* col_sizes,
+                      const size_type* col_offsets,
+                      device_span<const tile_info> tile_infos,
+                      const int8_t* input_data)
 {
   // We are going to copy the data in two passes.
   // The first pass copies a chunk of data into shared memory.
@@ -1019,15 +1019,15 @@ __launch_bounds__(block_size) CUDF_KERNEL
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_validity_from_rows(size_type const num_rows,
-                               size_type const num_columns,
-                               size_type const shmem_used_per_tile,
+  void copy_validity_from_rows(const size_type num_rows,
+                               const size_type num_columns,
+                               const size_type shmem_used_per_tile,
                                RowOffsetFunctor row_offsets,
                                size_type const* batch_row_boundaries,
                                bitmask_type** output_nm,
-                               size_type const validity_offset,
-                               device_span<tile_info const> tile_infos,
-                               int8_t const* input_data)
+                               const size_type validity_offset,
+                               device_span<const tile_info> tile_infos,
+                               const int8_t* input_data)
 {
   extern __shared__ int8_t shared[];
 
@@ -1199,9 +1199,9 @@ __launch_bounds__(block_size) CUDF_KERNEL
  * @param [out] threads the size of the threads for the kernel
  * @return the size in bytes of shared memory needed for each block.
  */
-static int calc_fixed_width_kernel_dims(size_type const num_columns,
-                                        size_type const num_rows,
-                                        size_type const size_per_row,
+static int calc_fixed_width_kernel_dims(const size_type num_columns,
+                                        const size_type num_rows,
+                                        const size_type size_per_row,
                                         dim3& blocks,
                                         dim3& threads)
 {
@@ -1253,16 +1253,16 @@ static int calc_fixed_width_kernel_dims(size_type const num_columns,
  * into this function are common between runs and should be calculated once.
  */
 static std::unique_ptr<column> fixed_width_convert_to_rows(
-  size_type const start_row,
-  size_type const num_rows,
-  size_type const num_columns,
-  size_type const size_per_row,
+  const size_type start_row,
+  const size_type num_rows,
+  const size_type num_columns,
+  const size_type size_per_row,
   rmm::device_uvector<size_type>& column_start,
   rmm::device_uvector<size_type>& column_size,
-  rmm::device_uvector<int8_t const*>& input_data,
-  rmm::device_uvector<bitmask_type const*>& input_nm,
-  scalar const& zero,
-  scalar const& scalar_size_per_row,
+  rmm::device_uvector<const int8_t*>& input_data,
+  rmm::device_uvector<const bitmask_type*>& input_nm,
+  const scalar& zero,
+  const scalar& scalar_size_per_row,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -2187,7 +2187,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
   auto const num_rows = tbl.num_rows();
 
   // Get the pointers to the input columnar data ready
-  std::vector<int8_t const*> input_data;
+  std::vector<const int8_t*> input_data;
   std::vector<bitmask_type const*> input_nm;
   for (size_type column_number = 0; column_number < num_columns; column_number++) {
     column_view cv = tbl.column(column_number);
