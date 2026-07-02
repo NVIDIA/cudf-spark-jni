@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ namespace {
 typedef enum { FI_TRAP, FI_ASSERT, FI_RETURN_VALUE } FaultInjectionType;
 
 typedef struct {
-  volatile uint32_t initialized;
+  uint32_t volatile initialized;
   CUpti_SubscriberHandle subscriber;
 
   std::string configFilePath = std::string();
@@ -81,7 +81,7 @@ void CUPTIAPI faultInjectionCallbackHandler(void* userdata,
                                             CUpti_CallbackId cbid,
                                             void* cbInfo);
 
-const std::string configFilePathEnv = "FAULT_INJECTOR_CONFIG_PATH";
+std::string const configFilePathEnv = "FAULT_INJECTOR_CONFIG_PATH";
 CUptiResult cuptiInitialize(void);
 void readFaultInjectorConfig(void);
 void traceConfig(boost::property_tree::ptree const& pTree);
@@ -94,7 +94,7 @@ void globalControlInit(void)
   globalControl.subscriber      = 0;
   globalControl.terminateThread = 0;
   spdlog::trace("checking environment {}", configFilePathEnv);
-  const char* configFilePath = std::getenv(configFilePathEnv.c_str());
+  char const* configFilePath = std::getenv(configFilePathEnv.c_str());
   spdlog::debug("{} is {}", configFilePathEnv, configFilePath);
   if (configFilePath) {
     globalControl.configFilePath = std::string(configFilePath);
@@ -145,7 +145,7 @@ __global__ static void faultInjectorKernelTrap(void) { asm("trap;"); }
 
 boost::optional<boost::property_tree::ptree&> lookupConfig(
   boost::optional<boost::property_tree::ptree&> domainConfigs,
-  const char* key,
+  char const* key,
   CUpti_CallbackId cbid)
 {
   boost::optional<boost::property_tree::ptree&> faultConfig =
@@ -160,7 +160,7 @@ void CUPTIAPI faultInjectionCallbackHandler(void*,
                                             CUpti_CallbackId cbid,
                                             void* cbdata)
 {
-  const std::string faultInjectorKernelPrefix = std::string("faultInjectorKernel");
+  std::string const faultInjectorKernelPrefix = std::string("faultInjectorKernel");
 
   CUpti_CallbackData* cbInfo = static_cast<CUpti_CallbackData*>(cbdata);
 
@@ -243,22 +243,22 @@ void CUPTIAPI faultInjectionCallbackHandler(void*,
 
   // numeric value of FaultInjectionType: 0 (PTX trap), 1 (device assert), 2
   // (return code)
-  const std::string injectionTypeKey        = "injectionType";
-  const std::string substituteReturnCodeKey = "substituteReturnCode";
-  const std::string percentKey              = "percent";
-  const std::string interceptionCountKey    = "interceptionCount";
+  std::string const injectionTypeKey        = "injectionType";
+  std::string const substituteReturnCodeKey = "substituteReturnCode";
+  std::string const percentKey              = "percent";
+  std::string const interceptionCountKey    = "interceptionCount";
 
-  const int injectionType = (*matchedFaultConfig)
+  int const injectionType = (*matchedFaultConfig)
                               .get_optional<int>(injectionTypeKey)
                               .value_or(static_cast<int>(FI_RETURN_VALUE));
 
-  const int substituteReturnCode = (*matchedFaultConfig)
+  int const substituteReturnCode = (*matchedFaultConfig)
                                      .get_optional<int>(substituteReturnCodeKey)
                                      .value_or(static_cast<int>(CUDA_SUCCESS));
 
-  const int injectionProbability = (*matchedFaultConfig).get_optional<int>(percentKey).value_or(0);
+  int const injectionProbability = (*matchedFaultConfig).get_optional<int>(percentKey).value_or(0);
 
-  const int interceptionCount =
+  int const interceptionCount =
     (*matchedFaultConfig).get_optional<int>(interceptionCountKey).value_or(INT_MAX);
 
   spdlog::trace(
@@ -285,8 +285,8 @@ void CUPTIAPI faultInjectionCallbackHandler(void*,
 
   if (injectionProbability < 100) {
     if (injectionProbability <= 0) { return; }
-    const int rand10000     = std::rand() % 10000;
-    const int skipThreshold = injectionProbability * 10000 / 100;
+    int const rand10000     = std::rand() % 10000;
+    int const skipThreshold = injectionProbability * 10000 / 100;
     spdlog::trace("rand1000={} skipThreshold={}", rand10000, skipThreshold);
     if (rand10000 >= skipThreshold) { return; }
     spdlog::debug(
@@ -313,7 +313,7 @@ void CUPTIAPI faultInjectionCallbackHandler(void*,
     spdlog::debug("updating interception count {}: before locking", interceptionCount);
     // TODO the lock is too coarse-grained.
     PTHREAD_CALL(pthread_rwlock_wrlock(&globalControl.configLock));
-    const int interceptionCount = (*matchedFaultConfig).get<int>("interceptionCount");
+    int const interceptionCount = (*matchedFaultConfig).get<int>("interceptionCount");
     (*matchedFaultConfig).put("interceptionCount", interceptionCount - 1);
     PTHREAD_CALL(pthread_rwlock_unlock(&globalControl.configLock));
   }
@@ -361,41 +361,41 @@ void readFaultInjectorConfig(void)
 
   // to retrieve and the numeric value of spdlog:level::level_enum
   // https://github.com/gabime/spdlog/blob/d546201f127c306ec8a0082d57562a05a049af77/include/spdlog/common.h#L198-L204
-  const std::string logLevelKey = "logLevel";
+  std::string const logLevelKey = "logLevel";
 
   // A Boolean flag as to whether to watch for config file modifications
   // and apply changes after initial boot config.
   // Currently only file-based config is supported,
   // TODO add a socket for remote config
   //
-  const std::string dynamicConfigKey = "dynamic";
+  std::string const dynamicConfigKey = "dynamic";
 
   // An unsigned int to seed the random number generator to deterministically
   // recreate a fault sequence
   //
-  const std::string seedKey = "seed";
+  std::string const seedKey = "seed";
 
   // To retrieve a map of driver/runtime fault configs
   //   "functionName" -> fault config
   //   "CUPT callback id" -> fault config
   //   "*" -> fault config
-  const std::string driverFaultsKey  = "cudaDriverFaults";
-  const std::string runtimeFaultsKey = "cudaRuntimeFaults";
+  std::string const driverFaultsKey  = "cudaDriverFaults";
+  std::string const runtimeFaultsKey = "cudaRuntimeFaults";
 
   PTHREAD_CALL(pthread_rwlock_wrlock(&globalControl.configLock));
   try {
     boost::property_tree::read_json(jsonStream, globalControl.configRoot);
-    const int logLevel = globalControl.configRoot.get_optional<int>(logLevelKey).value_or(0);
+    int const logLevel = globalControl.configRoot.get_optional<int>(logLevelKey).value_or(0);
 
     globalControl.dynamic =
       globalControl.configRoot.get_optional<bool>(dynamicConfigKey).value_or(false);
 
-    const unsigned seed =
+    unsigned const seed =
       globalControl.configRoot.get_optional<unsigned>(seedKey).value_or(std::time(0));
     spdlog::info("Seeding std::srand with {}", seed);
     std::srand(seed);
 
-    const spdlog::level::level_enum logLevelEnum = static_cast<spdlog::level::level_enum>(logLevel);
+    spdlog::level::level_enum const logLevelEnum = static_cast<spdlog::level::level_enum>(logLevel);
     spdlog::info("changed log level to {}", logLevel);
     spdlog::set_level(logLevelEnum);
     traceConfig(globalControl.configRoot);
@@ -433,13 +433,13 @@ int eventCheck(int fd)
 void* dynamicReconfig(void*)
 {
   spdlog::debug("config watcher thread: inotify_init()");
-  const int inotifyFd = inotify_init();
+  int const inotifyFd = inotify_init();
   if (inotifyFd < 0) {
     spdlog::error("inotify_init() failed");
     return nullptr;
   }
   spdlog::debug("config watcher thread: inotify_add_watch {}", globalControl.configFilePath);
-  const int watchFd = inotify_add_watch(inotifyFd, globalControl.configFilePath.c_str(), IN_MODIFY);
+  int const watchFd = inotify_add_watch(inotifyFd, globalControl.configFilePath.c_str(), IN_MODIFY);
   if (watchFd < 0) {
     spdlog::error("config watcher thread: inotify_add_watch {} failed",
                   globalControl.configFilePath);
@@ -449,16 +449,16 @@ void* dynamicReconfig(void*)
   constexpr auto MAX_EVENTS = 1024;
   constexpr auto EVENT_SIZE = sizeof(struct inotify_event);
 
-  const auto configFilePathStr = std::string(globalControl.configFilePath);
-  const auto BUF_LEN           = MAX_EVENTS * (EVENT_SIZE + configFilePathStr.length());
+  auto const configFilePathStr = std::string(globalControl.configFilePath);
+  auto const BUF_LEN           = MAX_EVENTS * (EVENT_SIZE + configFilePathStr.length());
   char eventBuffer[BUF_LEN];
 
   while (!globalControl.terminateThread) {
     spdlog::trace("about to call eventCheck");
-    const int eventCheckRes = eventCheck(inotifyFd);
+    int const eventCheckRes = eventCheck(inotifyFd);
     spdlog::trace("eventCheck returned {}", eventCheckRes);
     if (eventCheckRes > 0) {
-      const int length = read(inotifyFd, eventBuffer, BUF_LEN);
+      int const length = read(inotifyFd, eventBuffer, BUF_LEN);
       spdlog::debug("config watcher thread: read {} bytes", length);
       if (length < EVENT_SIZE) { continue; }
       for (int i = 0; i < length;) {

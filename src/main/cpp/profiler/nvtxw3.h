@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2023, NVIDIA CORPORATION.
+ *  Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -163,7 +163,7 @@ typedef int32_t nvtxwInitMode_t;
  *  In C++, you can construct a string using std::string(keyBegin, keyEnd).
  *  Return zero to continue consuming key/value pairs, or non-zero to stop. */
 typedef int (*nvtxwKeyValuePairConsumer_t)(
-  void* state, const char* keyBegin, const char* keyEnd, const char* valBegin, const char* valEnd);
+  void* state, char const* keyBegin, char const* keyEnd, char const* valBegin, char const* valEnd);
 
 /* Parse config and call the consumer callback (see typedef above) on each
  *  valid key/value pair found in the config.  Inline implementation provided
@@ -171,22 +171,22 @@ typedef int (*nvtxwKeyValuePairConsumer_t)(
  *  having to include nvtxw3.c in their build.  Users of the NVTXW API may
  *  also find it useful to parse/modify a config before passing it to NVTXW. */
 NVTX_LINKONCE_DEFINE_FUNCTION
-void nvtxwConsumeConfigString(const char* config, nvtxwKeyValuePairConsumer_t consumer, void* state)
+void nvtxwConsumeConfigString(char const* config, nvtxwKeyValuePairConsumer_t consumer, void* state)
 {
-  const char* curRead          = config;
-  const char* const lineBreak  = "|\n\r";
-  const char* const whitespace = " \t\v"; /* Not including lineBreak characters */
+  char const* curRead          = config;
+  char const* const lineBreak  = "|\n\r";
+  char const* const whitespace = " \t\v"; /* Not including lineBreak characters */
   int consumerStopRequested    = 0;
 
   if (!config || !consumer) return;
 
   while (*curRead && !consumerStopRequested) {
-    const char* lineBegin;
-    const char* lineEnd;
-    const char* keyBegin;
-    const char* keyEnd;
-    const char* valBegin;
-    const char* valEnd;
+    char const* lineBegin;
+    char const* lineEnd;
+    char const* keyBegin;
+    char const* keyEnd;
+    char const* valBegin;
+    char const* valEnd;
 
     /* Read a line, trimming leading whitespace - get pointers to begin/end */
     lineBegin = curRead + strspn(curRead, whitespace);
@@ -238,7 +238,7 @@ void nvtxwConsumeConfigString(const char* config, nvtxwKeyValuePairConsumer_t co
 typedef int32_t nvtxwInterfaceId_t;
 
 typedef nvtxwResultCode_t (*nvtxwGetInterface_t)(nvtxwInterfaceId_t interfaceId,
-                                                 const void** iface);
+                                                 void const** iface);
 
 /* Initialize the NVTXW library by providing information on how to
  *  load the backend library that implements the NVTXW API.  `mode` must
@@ -258,7 +258,7 @@ typedef nvtxwResultCode_t (*nvtxwGetInterface_t)(nvtxwInterfaceId_t interfaceId,
  *  library when NVTXW3_RESULT_SUCCESS is returned.  This can be passed
  *  to nvtxwUnload to unload the backend library. */
 NVTXW3_DECLSPEC nvtxwResultCode_t nvtxwInitialize(nvtxwInitMode_t mode,
-                                                  const char* modeString,
+                                                  char const* modeString,
                                                   nvtxwGetInterface_t* getInterfaceFunc,
                                                   void** moduleHandle);
 
@@ -273,7 +273,7 @@ NVTXW3_DECLSPEC void nvtxwUnload(void* moduleHandle);
 
 /*----- Typedefs for function pointers backend implements -----*/
 
-typedef nvtxwResultCode_t (*nvtxwLoadImplementation_t)(const char* configString,
+typedef nvtxwResultCode_t (*nvtxwLoadImplementation_t)(char const* configString,
                                                        nvtxwGetInterface_t* getInterfaceFunc);
 
 typedef void (*nvtxwUnloadImplementation_t)();
@@ -300,7 +300,7 @@ typedef struct nvtxwSessionAttributes_v1 {
   /* Provide a name for the session.
    *  Tools may display this name, or use it to name a file or directory
    *  representing the session. */
-  const char* name;
+  char const* name;
 
   /* String containing configuration options for the session.
    *  Format is key=value, one per line, delimited by \n (line feed).
@@ -310,7 +310,7 @@ typedef struct nvtxwSessionAttributes_v1 {
    *  options not provided, and ignore any keys they do not support.
    *  See above for explanation of how config strings are provided.
    *  See tool-specific documentation for lists of supported keys. */
-  const char* configString;
+  char const* configString;
 } nvtxwSessionAttributes_t;
 
 /* Define whether event ordering in a stream is based on event scope */
@@ -383,7 +383,7 @@ typedef struct nvtxwStreamAttributes_v1 {
   /* Name of a stream, used for identification from other streams.
    *  Tools typically will not display stream names.  No two streams
    *  in the same session may have the same name. */
-  const char* name;
+  char const* name;
 
   /* Name of NVTX domain to use implicitly for all events written into
    *  this stream.  Since registered IDs are required to be unique within
@@ -399,7 +399,7 @@ typedef struct nvtxwStreamAttributes_v1 {
    *  occurs on a different thread.  Tools are expected to combine data
    *  from any domains registered with the same name, even between NVTXW
    *  and NVTX, when merging data acquired from both APIs. */
-  const char* nvtxDomainName;
+  char const* nvtxDomainName;
 
   /* The default scope for all events in the stream that don't specify
    *  any scope.  See comments below for nvtxwEventScopeAttributes_t.
@@ -409,7 +409,7 @@ typedef struct nvtxwStreamAttributes_v1 {
    *  "nvtxwStream[name]" referencing a different stream by its name
    *  (see above) to use its default scope is supported, as long as that
    *  stream was successfully opened (and may be already closed). */
-  const char* eventScopePath;
+  char const* eventScopePath;
 
   /* Information about event ordering inside the stream.  See comments
    *  for #defines above. */
@@ -441,7 +441,7 @@ typedef struct nvtxwEventScopeAttributes_v1 {
    *  child node of the scope, since multiple domains can assign
    *  events to the same scope, and tools should isolate events
    *  from separate domains. */
-  const char* path;
+  char const* path;
 
   /* Static event scope ID must be provided, unique within the domain,
      >= NVTX_EVENT_SCOPE_ID_STATIC_START, and
@@ -464,7 +464,7 @@ typedef struct nvtxwInterfaceCore_v1 {
    *  from one or more streams.  Takes a growable struct of session
    *  attributes (see nvtxwSessionAttributes_t). */
   nvtxwResultCode_t (*SessionBegin)(nvtxwSessionHandle_t* session,
-                                    const nvtxwSessionAttributes_t* attr);
+                                    nvtxwSessionAttributes_t const* attr);
 
   /* Notify the implementation that all trace data for the session
    *  has been provided, and the session may be destroyed.  Depending
@@ -483,7 +483,7 @@ typedef struct nvtxwInterfaceCore_v1 {
    *  stream are ordered. */
   nvtxwResultCode_t (*StreamOpen)(nvtxwStreamHandle_t* stream,
                                   nvtxwSessionHandle_t session,
-                                  const nvtxwStreamAttributes_t* attr);
+                                  nvtxwStreamAttributes_t const* attr);
 
   /* Destroy the stream object.  This is not expected to trigger a
    *  reaction in the implementation that no more events are coming;
@@ -496,7 +496,7 @@ typedef struct nvtxwInterfaceCore_v1 {
    *  >= NVTX_EVENT_SCOPE_ID_STATIC_START, and
    *  <  NVTX_EVENT_SCOPE_ID_DYNAMIC_START */
   nvtxwResultCode_t (*EventScopeRegister)(nvtxwStreamHandle_t stream,
-                                          const nvtxwEventScopeAttributes_t* attr);
+                                          nvtxwEventScopeAttributes_t const* attr);
 
   /* Register a schema ID to represent a schema, which describes the
    *  binary layout of a payload.
@@ -504,21 +504,21 @@ typedef struct nvtxwInterfaceCore_v1 {
    *  >= NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START, and
    *  <  NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_DYNAMIC_START */
   nvtxwResultCode_t (*SchemaRegister)(nvtxwStreamHandle_t stream,
-                                      const nvtxPayloadSchemaAttr_t* attr);
+                                      nvtxPayloadSchemaAttr_t const* attr);
 
   /* Register a schema ID to represent an enum type, including the
   *  mapping between its values and their name strings.
   *  Static schema ID must be provided, unique within the domain,
      >= NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START, and
      <  NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_DYNAMIC_START */
-  nvtxwResultCode_t (*EnumRegister)(nvtxwStreamHandle_t stream, const nvtxPayloadEnumAttr_t* attr);
+  nvtxwResultCode_t (*EnumRegister)(nvtxwStreamHandle_t stream, nvtxPayloadEnumAttr_t const* attr);
 
   /* Write a batch of payloads into the stream representing one or more
    *  events.  A logical event with multiple payloads cannot be broken up
    *  across multiple calls to EventWrite.  The schema definitions for
    *  the payloads dictate how they are interpreted as events. */
   nvtxwResultCode_t (*EventWrite)(nvtxwStreamHandle_t stream,
-                                  const nvtxPayloadData_t* payloads,
+                                  nvtxPayloadData_t const* payloads,
                                   size_t payloadCount);
 
 } nvtxwInterfaceCore_t;
