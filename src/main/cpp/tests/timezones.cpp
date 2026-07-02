@@ -523,6 +523,34 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
 
+TEST_F(TimeZoneTest, ConvertOrcTimezonesUsesInitialOffsetBeforeFirstTransition)
+{
+  auto reader_trans   = int64_col({1'000'000'000'000'000L});
+  auto reader_offsets = int32_col({7'200'000});
+  auto reader_tv      = cudf::table_view({reader_trans, reader_offsets});
+  auto const rule     = make_us_dst_rule();
+
+  // July 15, 2030 is inside the recurring DST window, but it is before the first table entry.
+  // The historical initial offset must win over the fallback DST rule.
+  auto const input    = micros_col{1'910'304'000'000'000L};
+  auto const expected = micros_col{1'910'304'000'000'000L};
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/0,
+    /*writer_tz_info_table=*/nullptr,
+    /*writer_initial_offset=*/0,
+    /*writer_raw_offset=*/0,
+    spark_rapids_jni::dst_rule{},
+    &reader_tv,
+    /*reader_initial_offset=*/0,
+    /*reader_raw_offset=*/0,
+    rule,
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
 TEST_F(TimeZoneTest, ConvertOrcTimezonesDstRuleModes)
 {
   // Mode 0 = DOM: exact March 15 through exact October 15.
