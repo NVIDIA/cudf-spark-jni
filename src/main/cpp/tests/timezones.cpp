@@ -617,6 +617,31 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesDstRuleModes)
   }
 }
 
+TEST_F(TimeZoneTest, ConvertOrcTimezonesWallTimeTransitions)
+{
+  auto reader_dst = make_dst_rule(
+    /*start_mode=*/2, /*start_day=*/8, /*start_dow=*/1, /*end_mode=*/2, 1, 1);
+  reader_dst.start_time_mode = 0;          // WALL_TIME
+  reader_dst.end_time_mode   = 0;          // WALL_TIME
+  reader_dst.start_time      = 7'200'000;  // 02:00 wall
+  reader_dst.end_time        = 3'600'000;  // 01:00 wall
+
+  // In 2030, DST starts at 02:00 UTC on March 10. The ORC conversion's second offset lookup
+  // self-corrects within the resulting one-hour gap, so the observable shift starts at 03:00.
+  // DST ends at 00:00 UTC on October 6 because 01:00 wall time still includes the one-hour saving.
+  auto const input = micros_col{1'899'341'999'999'999L,
+                                1'899'342'000'000'000L,
+                                1'917'475'199'999'999L,
+                                1'917'475'200'000'000L};
+  auto const expected = micros_col{1'899'341'999'999'999L,
+                                   1'899'338'400'000'000L,
+                                   1'917'471'599'999'999L,
+                                   1'917'475'200'000'000L};
+  auto const actual = convert_utc_to_dst_reader(input, reader_dst);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
 // Converting a DST zone to itself must be the identity for every instant
 // (writer and reader offsets cancel), exercising the DST math on both the
 // standard (winter) and daylight (summer) branches.
