@@ -367,8 +367,10 @@ __device__ static int64_t compute_transition_utc_ms(int32_t year,
                                                     bool is_start_rule)
 {
   int32_t actual_day = compute_rule_day(side.mode, side.day, side.dow, year, side.month);
+  // Rule computation may normalize into an adjacent month. Anchor on the valid first day so
+  // to_epoch_day never receives a non-positive or otherwise out-of-range day-of-month.
   int64_t epoch_days =
-    spark_rapids_jni::date_time_utils::to_epoch_day(year, side.month + 1, actual_day);
+    spark_rapids_jni::date_time_utils::to_epoch_day(year, side.month + 1, 1) + actual_day - 1;
   int64_t utc_ms = epoch_days * MS_PER_DAY + side.time;
 
   // Convert from the specified time mode to UTC

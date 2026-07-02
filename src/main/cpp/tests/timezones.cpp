@@ -634,6 +634,16 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesDstRuleModes)
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
   }
 
+  // Mode 3 can normalize a computed non-positive day into the previous month.
+  {
+    auto const reader_dst = make_dst_rule(
+      /*start_mode=*/3, /*start_day=*/1, /*start_dow=*/1, /*end_mode=*/0, 15, 0);
+    auto const input    = micros_col{1'898'078'400'000'000L, 1'898'164'800'000'000L};
+    auto const expected = micros_col{1'898'078'400'000'000L, 1'898'161'200'000'000L};
+    auto const actual   = convert_utc_to_dst_reader(input, reader_dst);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
   // Mode 2 can normalize a computed day into the following month.
   {
     auto const reader_dst = make_dst_rule(
