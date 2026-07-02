@@ -632,7 +632,7 @@ struct node_ranges_fn {
   cudf::device_span<node_kind const> key_or_value;
 
   // Whether the extracted string values from json map will have the quote character.
-  static const bool include_quote_char{false};
+  static bool const include_quote_char{false};
 
   __device__ cuda::std::pair<SymbolOffsetT, SymbolOffsetT> operator()(cudf::size_type node_id) const
   {
