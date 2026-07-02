@@ -482,8 +482,6 @@ void BM_from_json_to_raw_map_array_values(nvbench::state& state)
 // each mask are profiled in isolation. Axis values are percentages; 0 disables that mask.
 void BM_from_json_to_raw_map_array_values_null_density(nvbench::state& state)
 {
-  auto const value_null_pct      = static_cast<double>(state.get_int64("value_null_pct")) / 100.0;
-  auto const element_null_pct    = static_cast<double>(state.get_int64("element_null_pct")) / 100.0;
   constexpr std::size_t num_rows = 1'000'000;
   constexpr int array_len        = 3;
   constexpr int keys_per_row     = 5;
@@ -492,7 +490,8 @@ void BM_from_json_to_raw_map_array_values_null_density(nvbench::state& state)
     num_rows,
     keys_per_row,
     array_len,
-    {.element_null_pct = element_null_pct, .value_null_pct = value_null_pct});
+    {.element_null_pct = static_cast<double>(state.get_int64("element_null_pct")) / 100.0,
+     .value_null_pct   = static_cast<double>(state.get_int64("value_null_pct")) / 100.0});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -522,13 +521,15 @@ void BM_from_json_to_raw_map_array_values_keys_per_row(nvbench::state& state)
 // Scenario: map-of-array vs key-name length (mirrors the scalar-path key_name_len sweep).
 void BM_from_json_to_raw_map_array_values_key_name_len(nvbench::state& state)
 {
-  auto const key_name_len        = static_cast<int>(state.get_int64("key_name_len"));
   constexpr std::size_t num_rows = 1'000'000;
   constexpr int array_len        = 3;
   constexpr int keys_per_row     = 5;
 
-  auto const json_strings =
-    generate_map_of_array_input(num_rows, keys_per_row, array_len, {.key_name_len = key_name_len});
+  auto const json_strings = generate_map_of_array_input(
+    num_rows,
+    keys_per_row,
+    array_len,
+    {.key_name_len = static_cast<int>(state.get_int64("key_name_len"))});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -544,13 +545,15 @@ void BM_from_json_to_raw_map_array_values_key_name_len(nvbench::state& state)
 // percentages of mismatched values.
 void BM_from_json_to_raw_map_array_values_type_mismatch(nvbench::state& state)
 {
-  auto const mismatch_pct        = static_cast<double>(state.get_int64("mismatch_pct")) / 100.0;
   constexpr std::size_t num_rows = 1'000'000;
   constexpr int array_len        = 3;
   constexpr int keys_per_row     = 5;
 
-  auto const json_strings =
-    generate_map_of_array_input(num_rows, keys_per_row, array_len, {.mismatch_pct = mismatch_pct});
+  auto const json_strings = generate_map_of_array_input(
+    num_rows,
+    keys_per_row,
+    array_len,
+    {.mismatch_pct = static_cast<double>(state.get_int64("mismatch_pct")) / 100.0});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));

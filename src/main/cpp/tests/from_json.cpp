@@ -44,13 +44,6 @@ struct FromJsonTest : public cudf::test::BaseFixture {};
 
 namespace {
 
-// Default leniency flags shared by all calls (typical defaults). Individual tests override only
-// where the case requires it.
-constexpr bool normalize_single_quotes  = false;
-constexpr bool allow_leading_zeros      = true;
-constexpr bool allow_nonnumeric_numbers = true;
-constexpr bool allow_unquoted_control   = false;
-
 // One (key, value) entry of a raw-map row, in the exact textual content the raw-map engine emits.
 // The value is stored WITHOUT surrounding quotes for a JSON string value, matching
 // `from_json_to_raw_map`'s `include_quote_char=false` extraction.
@@ -111,9 +104,14 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
 // Convenience: every row valid.
 std::vector<bool> all_valid(std::size_t n) { return std::vector<bool>(n, true); }
 
-// Default leniency options shared by all calls (built once from the flags above).
+// Default leniency options shared by all calls and the single source of truth for the defaults.
+// Individual tests override only the field a case exercises (designated initializers below).
 constexpr spark_rapids_jni::json_parse_options default_options{
-  normalize_single_quotes, allow_leading_zeros, allow_nonnumeric_numbers, allow_unquoted_control};
+  .normalize_single_quotes  = false,
+  .allow_leading_zeros      = true,
+  .allow_nonnumeric_numbers = true,
+  .allow_unquoted_control   = false,
+};
 
 // Thin wrapper to invoke the `Map[String,String]` engine-under-test with the shared default flags.
 std::unique_ptr<cudf::column> raw_map(cudf::strings_column_view const& input)
@@ -277,25 +275,22 @@ TEST_F(FromJsonTest, RawMapOpt_EmptyObjectRow)
 
 namespace {
 
-// Assert the column is LIST<STRUCT<STRING,STRING>> with `num_rows` rows. Returns true on success so
-// callers can guard child inspection.
-bool expect_raw_map_shape(cudf::column_view const& col, cudf::size_type num_rows)
+// Assert the column is LIST<STRUCT<STRING,STRING>> with `num_rows` rows. Uses fatal `ASSERT_*`, so
+// a mismatch returns from this function (guarding the subsequent child inspection); wrap calls in
+// `ASSERT_NO_FATAL_FAILURE(...)` so the caller stops too.
+void expect_raw_map_shape(cudf::column_view const& col, cudf::size_type num_rows)
 {
-  EXPECT_EQ(col.type().id(), cudf::type_id::LIST);
-  EXPECT_EQ(col.size(), num_rows);
-  if (col.type().id() != cudf::type_id::LIST || col.size() != num_rows) { return false; }
+  ASSERT_EQ(col.type().id(), cudf::type_id::LIST);
+  ASSERT_EQ(col.size(), num_rows);
 
   auto const lcv          = cudf::lists_column_view{col};
   auto const structs_view = lcv.child();
-  EXPECT_EQ(structs_view.type().id(), cudf::type_id::STRUCT);
-  if (structs_view.type().id() != cudf::type_id::STRUCT) { return false; }
-  EXPECT_EQ(structs_view.num_children(), 2);
-  if (structs_view.num_children() != 2) { return false; }
+  ASSERT_EQ(structs_view.type().id(), cudf::type_id::STRUCT);
+  ASSERT_EQ(structs_view.num_children(), 2);
 
   auto const scv = cudf::structs_column_view{structs_view};
   EXPECT_EQ(scv.child(0).type().id(), cudf::type_id::STRING);
   EXPECT_EQ(scv.child(1).type().id(), cudf::type_id::STRING);
-  return true;
 }
 
 }  // namespace
@@ -403,7 +398,7 @@ TEST_F(FromJsonTest, RawMapOpt_StressInvariantsWithBadRows)
   auto const input  = cudf::strings_column_view{input_col};
   auto const result = raw_map(input);
 
-  ASSERT_TRUE(expect_raw_map_shape(result->view(), num_rows));
+  ASSERT_NO_FATAL_FAILURE(expect_raw_map_shape(result->view(), num_rows));
   EXPECT_EQ(result->view().null_count(),
             static_cast<cudf::size_type>(null_rows.size() + bad_rows.size()));
 }
@@ -436,9 +431,9 @@ TEST_F(FromJsonTest, RawMapOpt_UnquotedControl)
 
   auto const result = spark_rapids_jni::from_json_to_raw_map(
     input,
-    spark_rapids_jni::json_parse_options{normalize_single_quotes,
-                                         allow_leading_zeros,
-                                         allow_nonnumeric_numbers,
+    spark_rapids_jni::json_parse_options{default_options.normalize_single_quotes,
+                                         default_options.allow_leading_zeros,
+                                         default_options.allow_nonnumeric_numbers,
                                          /*allow_unquoted_control=*/true});
 
   auto const expected = make_expected_raw_map({{{"k", "a\tb"}}}, all_valid(1));
@@ -789,9 +784,9 @@ TEST_F(FromJsonTest, RawMapArray_SingleQuoteNormalization)
   auto const result = spark_rapids_jni::from_json_to_raw_map_array_values(
     input,
     spark_rapids_jni::json_parse_options{/*normalize_single_quotes=*/true,
-                                         allow_leading_zeros,
-                                         allow_nonnumeric_numbers,
-                                         allow_unquoted_control});
+                                         default_options.allow_leading_zeros,
+                                         default_options.allow_nonnumeric_numbers,
+                                         default_options.allow_unquoted_control});
 
   auto const expected = make_expected_raw_map_array({{{"k", arr({"a", "b"})}}}, all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
@@ -805,10 +800,10 @@ TEST_F(FromJsonTest, RawMapArray_NumericLeniency)
 
   auto const result = spark_rapids_jni::from_json_to_raw_map_array_values(
     input,
-    spark_rapids_jni::json_parse_options{normalize_single_quotes,
+    spark_rapids_jni::json_parse_options{default_options.normalize_single_quotes,
                                          /*allow_leading_zeros=*/true,
                                          /*allow_nonnumeric_numbers=*/true,
-                                         allow_unquoted_control});
+                                         default_options.allow_unquoted_control});
 
   auto const expected =
     make_expected_raw_map_array({{{"k", arr({"007", "NaN", "Infinity"})}}}, all_valid(1));
@@ -960,9 +955,9 @@ TEST_F(FromJsonTest, RawMapArray_UnquotedControl)
 
   auto const result = spark_rapids_jni::from_json_to_raw_map_array_values(
     input,
-    spark_rapids_jni::json_parse_options{normalize_single_quotes,
-                                         allow_leading_zeros,
-                                         allow_nonnumeric_numbers,
+    spark_rapids_jni::json_parse_options{default_options.normalize_single_quotes,
+                                         default_options.allow_leading_zeros,
+                                         default_options.allow_nonnumeric_numbers,
                                          /*allow_unquoted_control=*/true});
 
   auto const expected = make_expected_raw_map_array({{{"k", arr({"a\tb"})}}}, all_valid(1));
