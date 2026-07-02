@@ -332,8 +332,8 @@ __device__ static int32_t compute_rule_day(
     case DOW_GE_DOM_MODE: {
       // First rule_dow on or after rule_day
       int64_t target_epoch = first_of_month_epoch_days + (rule_day - 1);
-      int32_t target_dow = day_of_week_1_sun(target_epoch);
-      int32_t diff       = rule_dow - target_dow;
+      int32_t target_dow   = day_of_week_1_sun(target_epoch);
+      int32_t diff         = rule_dow - target_dow;
       if (diff < 0) diff += 7;
       return rule_day + diff;
     }
@@ -341,8 +341,8 @@ __device__ static int32_t compute_rule_day(
     case DOW_LE_DOM_MODE: {
       // Last rule_dow on or before rule_day
       int64_t target_epoch = first_of_month_epoch_days + (rule_day - 1);
-      int32_t target_dow = day_of_week_1_sun(target_epoch);
-      int32_t diff       = target_dow - rule_dow;
+      int32_t target_dow   = day_of_week_1_sun(target_epoch);
+      int32_t diff         = target_dow - rule_dow;
       if (diff < 0) diff += 7;
       return rule_day - diff;
     }
@@ -426,12 +426,8 @@ __device__ static int32_t compute_dst_offset(int64_t utc_ms,
                              rule.start_time,
                              rule.start_time_mode,
                              rule.start_mode};
-  rule_side const end_rule{rule.end_month,
-                           rule.end_day,
-                           rule.end_dow,
-                           rule.end_time,
-                           rule.end_time_mode,
-                           rule.end_mode};
+  rule_side const end_rule{
+    rule.end_month, rule.end_day, rule.end_dow, rule.end_time, rule.end_time_mode, rule.end_mode};
   int64_t dst_start =
     compute_transition_utc_ms(year, start_rule, raw_offset_ms, rule.dst_savings, true);
   int64_t dst_end =
@@ -475,8 +471,7 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
 
   // upper_bound returns the first element strictly greater than time_ms, so
   // *iter > time_ms and the index we want is iter - 1.
-  auto const iter =
-    thrust::upper_bound(thrust::seq, side.trans_begin, side.trans_end, time_ms);
+  auto const iter = thrust::upper_bound(thrust::seq, side.trans_begin, side.trans_end, time_ms);
   if (iter == side.trans_end) {
     // Beyond the transition table -- use DST rule for future dates
     return compute_dst_offset(time_ms, side.raw_offset, side.dst);
@@ -510,11 +505,10 @@ __device__ static bool is_fixed_offset_tz(tz_side_info const& side)
  * - Fixed-offset reader (e.g. UTC): skip all reader lookups, use constant offset.
  * - Fixed-offset writer: skip writer lookups.
  */
-__device__ static cudf::timestamp_us convert_timestamp_between_timezones(
-  cudf::timestamp_us ts,
-  int64_t base_offset_us,
-  tz_side_info const& writer,
-  tz_side_info const& reader)
+__device__ static cudf::timestamp_us convert_timestamp_between_timezones(cudf::timestamp_us ts,
+                                                                         int64_t base_offset_us,
+                                                                         tz_side_info const& writer,
+                                                                         tz_side_info const& reader)
 {
   constexpr int64_t MICROS_PER_MILLI = 1000L;
 
@@ -599,8 +593,7 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
     ptr += writer_trans_count * sizeof(int32_t);
   }
   if (reader_fits && reader_trans_count > 0) {
-    ptr = reinterpret_cast<char*>(
-      align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
+    ptr = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
     s_reader_trans = reinterpret_cast<int64_t*>(ptr);
     ptr += reader_trans_count * sizeof(int64_t);
     s_reader_offsets = reinterpret_cast<int32_t*>(ptr);
@@ -638,20 +631,11 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
     if (null_mask && !cudf::bit_is_set(null_mask, idx)) { return; }
-    tz_side_info const writer{wt_begin,
-                              wt_end,
-                              wo_begin,
-                              writer_initial_offset,
-                              writer_raw_offset,
-                              writer_dst};
-    tz_side_info const reader{rt_begin,
-                              rt_end,
-                              ro_begin,
-                              reader_initial_offset,
-                              reader_raw_offset,
-                              reader_dst};
-    output[idx] =
-      convert_timestamp_between_timezones(input[idx], base_offset_us, writer, reader);
+    tz_side_info const writer{
+      wt_begin, wt_end, wo_begin, writer_initial_offset, writer_raw_offset, writer_dst};
+    tz_side_info const reader{
+      rt_begin, rt_end, ro_begin, reader_initial_offset, reader_raw_offset, reader_dst};
+    output[idx] = convert_timestamp_between_timezones(input[idx], base_offset_us, writer, reader);
   }
 }
 

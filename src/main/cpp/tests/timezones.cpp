@@ -506,19 +506,19 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
 
   auto const input    = micros_col{1894665600000000L, 1910304000000000L};
   auto const expected = micros_col{1894665600000000L, 1910300400000000L};
-  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
-    input,
-    /*base_offset_us=*/int64_t{0},
-    /*writer_tz_info_table=*/nullptr,
-    /*writer_initial_offset=*/0,
-    /*writer_raw_offset=*/0,
-    no_dst,
-    /*reader_tz_info_table=*/nullptr,
-    /*reader_initial_offset=*/0,
-    /*reader_raw_offset=*/0,
-    reader_dst,
-    cudf::get_default_stream(),
-    cudf::get_current_device_resource_ref());
+  auto const actual =
+    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
+                                                          /*base_offset_us=*/int64_t{0},
+                                                          /*writer_tz_info_table=*/nullptr,
+                                                          /*writer_initial_offset=*/0,
+                                                          /*writer_raw_offset=*/0,
+                                                          no_dst,
+                                                          /*reader_tz_info_table=*/nullptr,
+                                                          /*reader_initial_offset=*/0,
+                                                          /*reader_raw_offset=*/0,
+                                                          reader_dst,
+                                                          cudf::get_default_stream(),
+                                                          cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
@@ -534,19 +534,19 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesUsesInitialOffsetBeforeFirstTransition)
   // The historical initial offset must win over the fallback DST rule.
   auto const input    = micros_col{1'910'304'000'000'000L};
   auto const expected = micros_col{1'910'304'000'000'000L};
-  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
-    input,
-    /*base_offset_us=*/0,
-    /*writer_tz_info_table=*/nullptr,
-    /*writer_initial_offset=*/0,
-    /*writer_raw_offset=*/0,
-    spark_rapids_jni::dst_rule{},
-    &reader_tv,
-    /*reader_initial_offset=*/0,
-    /*reader_raw_offset=*/0,
-    rule,
-    cudf::get_default_stream(),
-    cudf::get_current_device_resource_ref());
+  auto const actual =
+    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
+                                                          /*base_offset_us=*/0,
+                                                          /*writer_tz_info_table=*/nullptr,
+                                                          /*writer_initial_offset=*/0,
+                                                          /*writer_raw_offset=*/0,
+                                                          spark_rapids_jni::dst_rule{},
+                                                          &reader_tv,
+                                                          /*reader_initial_offset=*/0,
+                                                          /*reader_raw_offset=*/0,
+                                                          rule,
+                                                          cudf::get_default_stream(),
+                                                          cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
@@ -667,14 +667,10 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesWallTimeTransitions)
   // In 2030, DST starts at 02:00 UTC on March 10. The ORC conversion's second offset lookup
   // self-corrects within the resulting one-hour gap, so the observable shift starts at 03:00.
   // DST ends at 00:00 UTC on October 6 because 01:00 wall time still includes the one-hour saving.
-  auto const input = micros_col{1'899'341'999'999'999L,
-                                1'899'342'000'000'000L,
-                                1'917'475'199'999'999L,
-                                1'917'475'200'000'000L};
-  auto const expected = micros_col{1'899'341'999'999'999L,
-                                   1'899'338'400'000'000L,
-                                   1'917'471'599'999'999L,
-                                   1'917'475'200'000'000L};
+  auto const input = micros_col{
+    1'899'341'999'999'999L, 1'899'342'000'000'000L, 1'917'475'199'999'999L, 1'917'475'200'000'000L};
+  auto const expected = micros_col{
+    1'899'341'999'999'999L, 1'899'338'400'000'000L, 1'917'471'599'999'999L, 1'917'475'200'000'000L};
   auto const actual = convert_utc_to_dst_reader(input, reader_dst);
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
@@ -689,19 +685,19 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesSameDstZoneIsIdentity)
 
   auto const input    = micros_col{1894665600000000L, 1910304000000000L};
   auto const expected = micros_col{1894665600000000L, 1910304000000000L};
-  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
-    input,
-    /*base_offset_us=*/int64_t{0},
-    /*writer_tz_info_table=*/nullptr,
-    /*writer_initial_offset=*/0,
-    /*writer_raw_offset=*/0,
-    rule,
-    /*reader_tz_info_table=*/nullptr,
-    /*reader_initial_offset=*/0,
-    /*reader_raw_offset=*/0,
-    rule,
-    cudf::get_default_stream(),
-    cudf::get_current_device_resource_ref());
+  auto const actual =
+    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
+                                                          /*base_offset_us=*/int64_t{0},
+                                                          /*writer_tz_info_table=*/nullptr,
+                                                          /*writer_initial_offset=*/0,
+                                                          /*writer_raw_offset=*/0,
+                                                          rule,
+                                                          /*reader_tz_info_table=*/nullptr,
+                                                          /*reader_initial_offset=*/0,
+                                                          /*reader_raw_offset=*/0,
+                                                          rule,
+                                                          cudf::get_default_stream(),
+                                                          cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
