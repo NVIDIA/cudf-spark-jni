@@ -20,13 +20,36 @@
 # the tests will run with the compute-sanitizer tool.
 log_token="${BASHPID:-$$}_${RANDOM}_${RANDOM}"
 log_basename="sanitizer_for_pid_${log_token}"
+sanitizer_pid=""
+forwarded_status=""
+
+forward_signal() {
+    local signal="$1"
+    local status_after_signal="$2"
+    forwarded_status="$status_after_signal"
+    if [[ -n "$sanitizer_pid" ]]; then
+        kill "-$signal" "$sanitizer_pid" 2>/dev/null || true
+    fi
+}
+
+trap 'forward_signal TERM 143' TERM
+trap 'forward_signal INT 130' INT
+trap 'forward_signal HUP 129' HUP
 
 compute-sanitizer --tool memcheck \
     --launch-timeout 600 \
     --error-exitcode -2 \
     --log-file "./${log_basename}_%p.log" \
-    java "$@"
+    java "$@" &
+sanitizer_pid=$!
+
+wait "$sanitizer_pid"
 status=$?
+if [[ -n "$forwarded_status" ]]; then
+    wait "$sanitizer_pid" 2>/dev/null || true
+    status="$forwarded_status"
+fi
+trap - TERM INT HUP
 
 if [[ $status -ne 0 ]]; then
     echo "compute-sanitizer failed with exit code $status." >&2
