@@ -549,6 +549,16 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
 constexpr int32_t MAX_SMEM_TRANSITIONS  = 512;
 constexpr int32_t CONVERT_TZ_BLOCK_SIZE = 256;
 
+void validate_timezone_table(cudf::table_view const* table)
+{
+  if (table == nullptr) { return; }
+
+  CUDF_EXPECTS(table->num_columns() == 2, "Timezone table must have exactly 2 columns");
+  CUDF_EXPECTS(table->column(0).type().id() == cudf::type_id::INT64 &&
+                 table->column(1).type().id() == cudf::type_id::INT32,
+               "Timezone table columns must be INT64 transitions and INT32 offsets");
+}
+
 CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   convert_timezones_kernel(cudf::timestamp_us const* __restrict__ input,
                            cudf::bitmask_type const* __restrict__ null_mask,
@@ -660,6 +670,9 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
 
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
                "Input column must be of type TIMESTAMP_MICROSECONDS");
+  validate_timezone_table(writer_tz_info_table);
+  validate_timezone_table(reader_tz_info_table);
+
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
                                              cudf::copy_bitmask(input, stream, mr),

@@ -457,6 +457,42 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(transition_expected, *transition_actual);
 }
 
+TEST_F(TimeZoneTest, ConvertOrcTimezonesRejectsInvalidTables)
+{
+  auto const input = micros_col{0L};
+  spark_rapids_jni::dst_rule no_dst{};
+
+  auto const transitions = int64_col({0L});
+  auto const offsets     = int32_col({0});
+  auto const one_column  = cudf::table_view({transitions});
+  auto const wrong_types = cudf::table_view({offsets, offsets});
+
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::convert_orc_writer_reader_timezones(
+                 input,
+                 /*base_offset_us=*/0,
+                 &one_column,
+                 /*writer_initial_offset=*/0,
+                 /*writer_raw_offset=*/0,
+                 no_dst,
+                 /*reader_tz_info_table=*/nullptr,
+                 /*reader_initial_offset=*/0,
+                 /*reader_raw_offset=*/0,
+                 no_dst)),
+               cudf::logic_error);
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::convert_orc_writer_reader_timezones(
+                 input,
+                 /*base_offset_us=*/0,
+                 /*writer_tz_info_table=*/nullptr,
+                 /*writer_initial_offset=*/0,
+                 /*writer_raw_offset=*/0,
+                 no_dst,
+                 &wrong_types,
+                 /*reader_initial_offset=*/0,
+                 /*reader_raw_offset=*/0,
+                 no_dst)),
+               cudf::logic_error);
+}
+
 // DST path with no transition table: every instant resolves through the DST
 // rule (compute_dst_offset). Writer is fixed UTC (offset 0), reader carries the
 // US rule on a raw offset of 0, so a winter instant (standard) is unchanged and
