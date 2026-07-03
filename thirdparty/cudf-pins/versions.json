@@ -102,6 +102,14 @@
       "git_url" : "https://github.com/gabime/spdlog.git",
       "version" : "1.14.1"
     },
+    "xxhash" : 
+    {
+      "always_download" : true,
+      "git_shallow" : false,
+      "git_tag" : "e626a72bc2321cd320e953a0ccf1584cad60f363",
+      "git_url" : "https://github.com/Cyan4973/xxHash.git",
+      "version" : "0.8.3"
+    },
     "zstd" : 
     {
       "always_download" : true,
