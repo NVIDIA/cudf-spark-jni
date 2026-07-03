@@ -54,26 +54,28 @@ enum class protobuf_error : int {
   REPEATED_COUNT_MISMATCH,
 };
 
-inline std::string error_name(protobuf_error error)
+inline std::string error_message(protobuf_error error)
 {
   switch (error) {
     using enum protobuf_error;
-    case NONE: return "none";
-    case BOUNDS: return "message data out of bounds";
-    case VARINT: return "invalid or truncated varint";
-    case FIELD_NUMBER: return "invalid field number";
-    case WIRE_TYPE: return "unexpected wire type";
-    case OVERFLOW: return "length-delimited field overflows message";
-    case FIELD_SIZE: return "invalid field size";
-    case SKIP: return "unable to skip unknown field";
-    case FIXED_LEN: return "invalid fixed-width or packed field length";
-    case REQUIRED: return "missing required field";
+    case NONE: return "Protobuf decode error: none";
+    case BOUNDS: return "Protobuf decode error: message data out of bounds";
+    case VARINT: return "Protobuf decode error: invalid or truncated varint";
+    case FIELD_NUMBER: return "Protobuf decode error: invalid field number";
+    case WIRE_TYPE: return "Protobuf decode error: unexpected wire type";
+    case OVERFLOW: return "Protobuf decode error: length-delimited field overflows message";
+    case FIELD_SIZE: return "Protobuf decode error: invalid field size";
+    case SKIP: return "Protobuf decode error: unable to skip unknown field";
+    case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
+    case REQUIRED: return "Protobuf decode error: missing required field";
     case SCHEMA_TOO_LARGE:
-      return "schema exceeds maximum supported repeated fields per kernel (" +
+      return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
+             "kernel (" +
              std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
-    case REPEATED_COUNT_MISMATCH: return "repeated-field count/scan mismatch";
+    case REPEATED_COUNT_MISMATCH:
+      return "Protobuf decode error: repeated-field count/scan mismatch";
   }
-  return "unknown error";
+  return "Protobuf decode error: unknown error";
 }
 
 /**
@@ -152,6 +154,43 @@ struct device_nested_field_descriptor {
       has_default_value(src.has_default_value)
   {
   }
+};
+
+struct device_schema_view {
+  device_nested_field_descriptor const* fields;
+  int depth;
+};
+
+struct repeated_field_count_view {
+  repeated_field_info* info;
+  int const* schema_indices;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
+struct nested_field_location_view {
+  field_location* locations;
+  int const* schema_indices;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
+struct field_scan_view {
+  field_descriptor const* descriptors;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+  field_location* locations;
+  repeated_field_info* repeated_info;
+};
+
+struct repeated_field_scan_view {
+  repeated_field_scan_desc const* descriptors;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
 };
 
 }  // namespace spark_rapids_jni::protobuf::detail

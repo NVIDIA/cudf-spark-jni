@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_splitAndSerializeToDevic
     cudf::jni::auto_set_device(env);
 
     auto table = reinterpret_cast<cudf::table_view const*>(j_table_view);
-    const cudf::jni::native_jintArray n_splits(env, j_splits);
+    cudf::jni::native_jintArray const n_splits(env, j_splits);
     std::vector<cudf::size_type> splits = n_splits.to_vector<int>();
 
     auto [split_result, split_meta] = spark_rapids_jni::shuffle_split(
@@ -112,10 +112,15 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_assembleFromDeviceRawNat
                                             cudf::get_default_stream(),
                                             cudf::get_current_device_resource_ref());
 
-    // Create buffer metadata
-    jlong buffer_size   = static_cast<jlong>(assemble_result.shared_buffer.size());
-    jlong buffer_handle = cudf::jni::release_as_jlong(
-      std::make_unique<rmm::device_buffer>(std::move(assemble_result.shared_buffer)));
+    // Create buffer metadata. The device DATA address must be captured and returned separately
+    // from the rmm::device_buffer* owner handle: Java wraps this allocation via
+    // DeviceMemoryBuffer.fromRmm(address, length, rmmBufferAddress), and any consumer of that
+    // buffer's address (e.g. spill) performs device memory operations on it.
+    auto shared_buffer =
+      std::make_unique<rmm::device_buffer>(std::move(assemble_result.shared_buffer));
+    jlong buffer_size    = static_cast<jlong>(shared_buffer->size());
+    jlong buffer_address = cudf::jni::ptr_as_jlong(shared_buffer->data());
+    jlong buffer_handle  = cudf::jni::release_as_jlong(std::move(shared_buffer));
 
     // Create column handles array
     cudf::jni::native_jlongArray column_handles(env, assemble_result.column_views.size());
@@ -126,10 +131,14 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_assembleFromDeviceRawNat
     // Create and return Java AssembleResult object
     jclass result_class =
       env->FindClass("com/nvidia/spark/rapids/jni/kudo/KudoGpuSerializer$AssembleResult");
-    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(JJ[J)V");
+    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(JJJ[J)V");
 
-    return env->NewObject(
-      result_class, constructor, buffer_handle, buffer_size, column_handles.get_jArray());
+    return env->NewObject(result_class,
+                          constructor,
+                          buffer_address,
+                          buffer_size,
+                          buffer_handle,
+                          column_handles.get_jArray());
   }
   JNI_CATCH(env, NULL);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -314,7 +314,7 @@ void domain_runtime_callback(CUpti_CallbackId callback_id, CUpti_CallbackData co
 void CUPTIAPI callback_handler(void*,
                                CUpti_CallbackDomain domain,
                                CUpti_CallbackId callback_id,
-                               const void* callback_data_ptr)
+                               void const* callback_data_ptr)
 {
   auto rc = cuptiGetLastError();
   if (rc != CUPTI_SUCCESS && !State->has_cupti_callback_errored) {

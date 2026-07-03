@@ -133,3 +133,6 @@ ConfigureTest(CONV
 
 ConfigureTest(MULTIPLY
     multiply.cpp)
+
+ConfigureTest(FROM_JSON
+    from_json.cpp)
