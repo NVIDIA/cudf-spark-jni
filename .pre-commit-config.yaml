@@ -40,6 +40,11 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
+      - id: forbid-deprecated-annotation
+        name: Forbid Java deprecation markers; comment unused APIs for later removal
+        entry: '(?i)@deprecated\b'
+        language: pygrep
+        types: [java]
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v20.1.8
     hooks:

@@ -169,11 +169,12 @@ public class JSONUtils {
    * @param opts The options for parsing JSON strings
    * @return A map column (i.e., a column of type {@code List<Struct<String,String>>}) in
    *         which the key-value pairs are extracted directly from the input json strings
-   * @deprecated Retained for backward compatibility. Use {@link #extractRawMapFromJsonString(ColumnView, JSONOptions, MapValueType)}
-   *             with {@link MapValueType#STRING}, or {@link MapValueType#ARRAY_OF_STRING} for the
-   *             array-valued variant that produces {@code List<Struct<String,List<String>>>}.
+   * This overload is retained temporarily for backward compatibility. Use
+   * {@link #extractRawMapFromJsonString(ColumnView, JSONOptions, MapValueType)} with
+   * {@link MapValueType#STRING}, or {@link MapValueType#ARRAY_OF_STRING} for the array-valued
+   * variant that produces {@code List<Struct<String,List<String>>>}; remove this overload after
+   * all callers migrate.
    */
-  @Deprecated
   public static ColumnVector extractRawMapFromJsonString(ColumnView input, JSONOptions opts) {
     return extractRawMapFromJsonString(input, opts, MapValueType.STRING);
   }

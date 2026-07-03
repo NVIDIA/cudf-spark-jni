@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,9 +32,9 @@ public class ParseURI {
    *
    * @param URIColumn The input strings column in which each row contains a URI.
    * @return A string column with protocol data extracted.
-   * @deprecated Use {@link #parseURIProtocol(ColumnView, boolean)} instead.
+   * This overload is retained temporarily. Use {@link #parseURIProtocol(ColumnView, boolean)}
+   * instead; remove this overload after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIProtocol(ColumnView uriColumn) {
     return parseURIProtocol(uriColumn, false);
   }
@@ -56,9 +56,9 @@ public class ParseURI {
    *
    * @param URIColumn The input strings column in which each row contains a URI.
    * @return A string column with host data extracted.
-   * @deprecated Use {@link #parseURIHost(ColumnView, boolean)} instead.
+   * This overload is retained temporarily. Use {@link #parseURIHost(ColumnView, boolean)} instead;
+   * remove this overload after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIHost(ColumnView uriColumn) {
     return parseURIHost(uriColumn, false);
   }
@@ -80,9 +80,9 @@ public class ParseURI {
    *
    * @param URIColumn The input strings column in which each row contains a URI.
    * @return A string column with query data extracted.
-   * @deprecated Use {@link #parseURIQuery(ColumnView, boolean)} instead.
+   * This overload is retained temporarily. Use {@link #parseURIQuery(ColumnView, boolean)}
+   * instead; remove this overload after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIQuery(ColumnView uriColumn) {
     return parseURIQuery(uriColumn, false);
   }
@@ -105,9 +105,10 @@ public class ParseURI {
    * @param URIColumn The input strings column in which each row contains a URI.
    * @param String The parameter to extract from the query.
    * @return A string column with query data extracted.
-   * @deprecated Use {@link #parseURIQueryWithLiteral(ColumnView, String, boolean)} instead.
+   * This overload is retained temporarily. Use
+   * {@link #parseURIQueryWithLiteral(ColumnView, String, boolean)} instead; remove this overload
+   * after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIQueryWithLiteral(ColumnView uriColumn, String query) {
     return parseURIQueryWithLiteral(uriColumn, query, false);
   }
@@ -131,9 +132,10 @@ public class ParseURI {
    * @param URIColumn The input strings column in which each row contains a URI.
    * @param String The parameter to extract from the query.
    * @return A string column with query data extracted.
-   * @deprecated Use {@link #parseURIQueryWithColumn(ColumnView, ColumnView, boolean)} instead.
+   * This overload is retained temporarily. Use
+   * {@link #parseURIQueryWithColumn(ColumnView, ColumnView, boolean)} instead; remove this overload
+   * after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIQueryWithColumn(ColumnView uriColumn, ColumnView queryColumn) {
     return parseURIQueryWithColumn(uriColumn, queryColumn, false);
   }
@@ -157,9 +159,9 @@ public class ParseURI {
    *
    * @param URIColumn The input strings column in which each row contains a URI.
    * @return A string column with the URI path extracted.
-   * @deprecated Use {@link #parseURIPath(ColumnView, boolean)} instead.
+   * This overload is retained temporarily. Use {@link #parseURIPath(ColumnView, boolean)} instead;
+   * remove this overload after all callers migrate.
    */
-  @Deprecated
   public static ColumnVector parseURIPath(ColumnView uriColumn) {
     return parseURIPath(uriColumn, false);
   }
