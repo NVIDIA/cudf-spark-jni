@@ -2206,6 +2206,54 @@ public class ProtobufTest {
   }
 
   @Test
+  void testEnumAsStringUnknownValueFailsInFailfastMode() {
+    Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));
+    byte[][] enumNames = new byte[][]{
+        "RED".getBytes(StandardCharsets.UTF_8),
+        "GREEN".getBytes(StandardCharsets.UTF_8),
+        "BLUE".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.STRING).enumMetadata(new int[]{0, 1, 2}, enumNames)
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testRequiredEnumAsStringUnknownValueReportsMissingRequired() {
+    Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));
+    byte[][] enumNames = new byte[][]{
+        "RED".getBytes(StandardCharsets.UTF_8),
+        "GREEN".getBytes(StandardCharsets.UTF_8),
+        "BLUE".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(
+          ai.rapids.cudf.CudfException.class,
+          () -> {
+            try (ColumnVector ignored = Protobuf.decodeToStruct(
+                input.getColumn(0),
+                new ProtobufSchemaDescriptorBuilder()
+                    .addField(1, DType.STRING).required()
+                        .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                    .build(),
+                true)) {
+            }
+          });
+      assertTrue(error.getMessage().contains("missing required field"));
+    }
+  }
+
+  @Test
   void testEnumAsStringMixedValidAndUnknown() {
     Byte[] row0 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(0)));    // RED
     Byte[] row1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));  // unknown
@@ -2276,6 +2324,26 @@ public class ProtobufTest {
   }
 
   @Test
+  void testEnumUnknownValueFailsInFailfastMode() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
+                .addField(2, DType.INT32)
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
   void testEnumMixedValidAndUnknown() {
     // Test multiple rows with mix of valid and unknown enum values
     // Rows with unknown enum values should have null struct (not just null field)
@@ -2302,6 +2370,49 @@ public class ProtobufTest {
   }
 
   @Test
+  void testTopLevelEnumAnyUnknownOccurrenceInvalidatesRow() {
+    Byte[] validThenUnknown = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] unknownThenValid = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(30)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
+        .addField(2, DType.INT32)
+        .build();
+    StructType outputType = new StructType(
+        true, new BasicType(true, DType.INT32), new BasicType(true, DType.INT32));
+
+    try (Table input = new Table.TestBuilder().column(validThenUnknown, unknownThenValid).build();
+         ColumnVector expected = ColumnVector.fromStructs(outputType, null, null);
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+        }
+      });
+    }
+
+    ProtobufSchemaDescriptor requiredSchema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32).required().enumValidValues(new int[]{0, 1, 2})
+        .addField(2, DType.INT32)
+        .build();
+    try (Table input = new Table.TestBuilder().column(validThenUnknown, unknownThenValid).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(
+          ai.rapids.cudf.CudfException.class,
+          () -> {
+            try (ColumnVector ignored = Protobuf.decodeToStruct(
+                input.getColumn(0), requiredSchema, true)) {
+            }
+          });
+      assertTrue(error.getMessage().contains("unknown enum value"));
+    }
+  }
+
+  @Test
   void testEnumWithOtherFields_NullsEntireRow() {
     // message Msg { Color color = 1; int32 count = 2; }
     // Test that unknown enum value nulls the ENTIRE struct row (not just the enum field)
@@ -2322,6 +2433,68 @@ public class ProtobufTest {
       // The entire struct row should be null
       assertEquals(1, actualStruct.getNullCount(), "Struct row should be null");
       assertTrue(hostStruct.isNull(0), "Row 0 should be null due to unknown enum");
+    }
+  }
+
+  @Test
+  void testRepeatedEnumUnknownValueReturnsNullRow() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32).repeated().enumValidValues(new int[]{0, 1, 2})
+                 .addField(2, DType.INT32)
+                 .build(),
+             false)) {
+      assertSingleNullStructRow(
+          actual, "Unknown top-level repeated enum should null the row in PERMISSIVE mode");
+    }
+  }
+
+  @Test
+  void testRepeatedEnumValidValues() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)), Arrays.asList(1, 2));
+         ColumnVector expected = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32).repeated().enumValidValues(new int[]{0, 1, 2})
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testRepeatedEnumUnknownValueFailsInFailfastMode() {
+    byte[] packedValues = concatBytes(encodeVarint(1), encodeVarint(999), encodeVarint(2));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeBytes(packedValues),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.INT32).repeated().enumValidValues(new int[]{0, 1, 2})
+                .addField(2, DType.INT32)
+                .build(),
+            true)) {
+        }
+      });
     }
   }
 
@@ -2357,7 +2530,7 @@ public class ProtobufTest {
   }
 
   @Test
-  void testRepeatedStructEnumInvalidKeepsSiblingFieldsVisible() {
+  void testRepeatedStructEnumInvalidKeepsSiblingFieldsVisibleInFailfastMode() {
     // enum Color { RED=0; GREEN=1; BLUE=2; }
     // message Item { Color color = 1; int32 count = 2; }
     // message Msg { repeated Item items = 1; }
@@ -2392,7 +2565,7 @@ public class ProtobufTest {
                  .addField(1, DType.INT32).parent(0).enumValidValues(new int[]{0, 1, 2})
                  .addField(2, DType.INT32).parent(0)
                  .build(),
-             false)) {
+             true)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
@@ -2411,7 +2584,7 @@ public class ProtobufTest {
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
                  .build(),
-             false)) {
+             true)) {
       // Struct row should be valid (not null), only the field is null
       assertEquals(0, actualStruct.getNullCount(), "Struct row should NOT be null for missing field");
       AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
@@ -2589,6 +2762,57 @@ public class ProtobufTest {
   }
 
   @Test
+  void testRepeatedEnumAsStringUnknownValueFailsInFailfastMode() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    byte[][] enumNames = new byte[][]{
+        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
+        "FOO".getBytes(StandardCharsets.UTF_8),
+        "BAR".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0),
+            new ProtobufSchemaDescriptorBuilder()
+                .addField(1, DType.STRING).repeated()
+                    .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                .build(),
+            true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testRepeatedEnumAsStringUnknownValueReturnsNullRow() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    byte[][] enumNames = new byte[][]{
+        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
+        "FOO".getBytes(StandardCharsets.UTF_8),
+        "BAR".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRING).repeated()
+                     .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                 .build(),
+             false)) {
+      assertSingleNullStructRow(
+          actual, "Unknown top-level repeated enum should null the row in PERMISSIVE mode");
+    }
+  }
+
+  @Test
   void testRepeatedMessageChildEnumAsString() {
     // message Item { optional Priority priority = 1; }
     // message Outer { repeated Item items = 1; }
@@ -2625,7 +2849,7 @@ public class ProtobufTest {
   }
 
   @Test
-  void testRepeatedMessageChildEnumAsStringInvalidKeepsRowValid() {
+  void testRepeatedMessageChildEnumAsStringInvalidKeepsRowValidInFailfastMode() {
     Byte[] item0 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(1)));    // FOO
     Byte[] item1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));  // invalid
     Byte[] row = concat(
@@ -2652,7 +2876,7 @@ public class ProtobufTest {
                  .addField(1, DType.STRUCT).repeated()
                  .addField(1, DType.STRING).parent(0).encoding(Protobuf.ENC_ENUM_STRING).enumMetadata(new int[]{0, 1, 2}, enumNames[1])
                  .build(),
-             false)) {
+             true)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
@@ -3362,7 +3586,7 @@ public class ProtobufTest {
   }
 
   @Test
-  void testNestedRepeatedEnumAsStringInvalidValueKeepsNestedRowVisible() {
+  void testNestedRepeatedEnumAsStringUnknownValueIsDroppedInBothModes() {
     // message Inner { repeated Priority priority = 1 [packed=true]; }
     // message Outer { Inner inner = 1; }
     // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
@@ -3384,10 +3608,10 @@ public class ProtobufTest {
          ColumnVector expectedPriorities = ColumnVector.fromLists(
              new ListType(true, new BasicType(true, DType.STRING)),
              Arrays.asList("FOO", "BAR"),
-             Arrays.asList("FOO", null));
+             Collections.singletonList("FOO"));
          ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
          ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
-         ColumnVector actual = Protobuf.decodeToStruct(
+         ColumnVector actualPermissive = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.STRUCT).down()
@@ -3395,7 +3619,42 @@ public class ProtobufTest {
                          .enumMetadata(new int[]{0, 1, 2}, enumNames)
                  .up()
                  .build(),
-             false)) {
+             false);
+         ColumnVector actualFailfast = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING).repeated()
+                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actualPermissive);
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actualFailfast);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedNumericEnumUnknownValueIsDropped() {
+    Byte[] inner = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)), Arrays.asList(1, 2));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedValues);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated().enumValidValues(new int[]{0, 1, 2})
+                 .up()
+                 .build(),
+             true)) {
       AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
     }
   }
@@ -3443,7 +3702,7 @@ public class ProtobufTest {
   }
 
   @Test
-  void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisible() {
+  void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisibleInFailfastMode() {
     // message Outer { int32 id = 1; Inner inner = 2; string name = 3; }
     // message Inner { enum Status { UNKNOWN=0; OK=1; BAD=2; } Status status = 1;
     //                 int32 count = 2; }
@@ -3484,8 +3743,116 @@ public class ProtobufTest {
                  .up()
                  .addField(3, DType.STRING)
                  .build(),
-             false)) {
+             true)) {
       AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedNumericEnumUnknownValueUsesExplicitDefaultInBothModes() {
+    Byte[] inner = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32).defaultValue(2)
+                .enumValidValues(new int[]{0, 1, 2})
+            .addField(2, DType.INT32)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedPriority = ColumnVector.fromBoxedInts(2);
+         ColumnVector expectedCount = ColumnVector.fromBoxedInts(20);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriority, expectedCount);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actualPermissive =
+             Protobuf.decodeToStruct(input.getColumn(0), schema, false);
+         ColumnVector actualFailfast = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actualPermissive);
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actualFailfast);
+    }
+  }
+
+  @Test
+  void testNestedEnumIgnoresUnknownOccurrencesWhenRecognizedValueExists() {
+    Byte[] validThenUnknown = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] unknownThenValid = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(30)));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(validThenUnknown)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(unknownThenValid))
+    };
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedDefaulted = ColumnVector.fromBoxedInts(1, 2);
+         ColumnVector expectedRequired = ColumnVector.fromBoxedInts(1, 2);
+         ColumnVector expectedCount = ColumnVector.fromBoxedInts(20, 30);
+         ColumnVector expectedInner =
+             ColumnVector.makeStruct(expectedDefaulted, expectedRequired, expectedCount);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).defaultValue(2)
+                         .enumValidValues(new int[]{0, 1, 2})
+                     .addField(2, DType.INT32).required()
+                         .enumValidValues(new int[]{0, 1, 2})
+                     .addField(3, DType.INT32)
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testRepeatedMessageChildEnumUnknownValueUsesExplicitDefault() {
+    Byte[] validItem = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(10)));
+    Byte[] invalidItem = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(validItem),
+        box(tag(1, WT_LEN)), encodeMessage(invalidItem));
+    byte[][] enumNames = new byte[][]{
+        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
+        "FOO".getBytes(StandardCharsets.UTF_8),
+        "BAR".getBytes(StandardCharsets.UTF_8)
+    };
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedItems = ColumnVector.fromLists(
+             new ListType(true,
+                 new StructType(true,
+                     new BasicType(true, DType.STRING),
+                     new BasicType(true, DType.INT32))),
+             Arrays.asList(struct("FOO", 10), struct("BAR", 20)));
+         ColumnVector expected = ColumnVector.makeStruct(expectedItems);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).repeated().down()
+                     .addField(1, DType.STRING).defaultValue(2)
+                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -3534,6 +3901,68 @@ public class ProtobufTest {
              false)) {
       assertSingleNullStructRow(actual,
           "Missing nested required field should null the outer row in PERMISSIVE mode");
+    }
+  }
+
+  @Test
+  void testRequiredNumericEnumInsideNestedMessageUnknownInvalidatesRoot() {
+    Byte[] inner = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(inner),
+        box(tag(2, WT_LEN)), encodeString("outside"));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32).required().enumValidValues(new int[]{0, 1, 2})
+            .addField(2, DType.INT32)
+        .up()
+        .addField(2, DType.STRING)
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
+      assertSingleNullStructRow(
+          actual, "Unknown nested required enum should null the root in PERMISSIVE mode");
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testRequiredEnumInsideRepeatedMessageUnknownInvalidatesRoot() {
+    Byte[] validItem = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(10)));
+    Byte[] invalidItem = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(validItem),
+        box(tag(1, WT_LEN)), encodeMessage(invalidItem));
+    byte[][] enumNames = new byte[][]{
+        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
+        "FOO".getBytes(StandardCharsets.UTF_8),
+        "BAR".getBytes(StandardCharsets.UTF_8)
+    };
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).repeated().down()
+            .addField(1, DType.STRING).required()
+                .enumMetadata(new int[]{0, 1, 2}, enumNames)
+            .addField(2, DType.INT32)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
+      assertSingleNullStructRow(
+          actual, "Unknown required enum in a repeated message should null the root");
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+        }
+      });
     }
   }
 

@@ -238,7 +238,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
-      validateEnumMetadata(i, encodings[i], enumValidValues[i], enumNames[i]);
+      validateEnumMetadata(i, encodings[i], enumValidValues[i], enumNames[i],
+          hasDefaultValue[i], defaultInts[i]);
     }
   }
 
@@ -337,7 +338,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   }
 
   private static void validateEnumMetadata(int index, int encoding,
-                                            int[] validValues, byte[][] names) {
+                                            int[] validValues, byte[][] names,
+                                            boolean hasDefault, long defaultValue) {
     if (encoding == Protobuf.ENC_ENUM_STRING &&
         (validValues == null || validValues.length == 0 ||
          names == null || names.length == 0)) {
@@ -358,6 +360,12 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
         throw new IllegalArgumentException(
             "enumNames[" + index + "].length (" + names.length + ") must equal " +
             "enumValidValues[" + index + "].length (" + validValues.length + ")");
+      }
+      if (hasDefault && validValues.length > 0 &&
+          (defaultValue < Integer.MIN_VALUE || defaultValue > Integer.MAX_VALUE ||
+           Arrays.binarySearch(validValues, (int) defaultValue) < 0)) {
+        throw new IllegalArgumentException(
+            "Enum default at index " + index + " must be present in enumValidValues");
       }
     } else if (names != null) {
       throw new IllegalArgumentException(

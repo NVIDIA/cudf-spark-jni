@@ -49,6 +49,7 @@ enum class protobuf_error : int {
   FIELD_SIZE,
   SKIP,
   FIXED_LEN,
+  INVALID_ENUM,
   REQUIRED,
   SCHEMA_TOO_LARGE,
   REPEATED_COUNT_MISMATCH,
@@ -67,6 +68,7 @@ inline std::string error_message(protobuf_error error)
     case FIELD_SIZE: return "Protobuf decode error: invalid field size";
     case SKIP: return "Protobuf decode error: unable to skip unknown field";
     case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
+    case INVALID_ENUM: return "Protobuf decode error: unknown enum value";
     case REQUIRED: return "Protobuf decode error: missing required field";
     case SCHEMA_TOO_LARGE:
       return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
@@ -91,9 +93,11 @@ struct field_location {
  * Field descriptor passed to the scanning kernel.
  */
 struct field_descriptor {
-  int field_number;        // Protobuf field number
-  int expected_wire_type;  // Expected wire type for this field
-  bool is_repeated;        // Repeated children are scanned via count/scan kernels
+  int field_number;                  // Protobuf field number
+  int expected_wire_type;            // Expected wire type for this field
+  bool is_repeated;                  // Repeated children use count/scan kernels
+  int32_t const* valid_enum_values;  // Sorted closed-enum values, or nullptr
+  int num_valid_enum_values;         // Size of valid_enum_values
 };
 
 /**
@@ -184,6 +188,7 @@ struct field_scan_view {
   int lookup_size;
   field_location* locations;
   repeated_field_info* repeated_info;
+  protobuf_error* deferred_enum_error;
 };
 
 struct repeated_field_scan_view {

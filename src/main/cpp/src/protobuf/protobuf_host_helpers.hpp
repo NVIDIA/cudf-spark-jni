@@ -75,6 +75,18 @@ struct schema_context_view {
   enum_string_lookup_cache* enum_lookup_cache = nullptr;
 };
 
+struct field_descriptor_bundle {
+  cudf::detail::host_vector<field_descriptor> host;
+  rmm::device_uvector<field_descriptor> device;
+  rmm::device_uvector<int32_t> enum_values;
+};
+
+field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
+                                               std::vector<nested_field_descriptor> const& schema,
+                                               schema_context_view schema_ctx,
+                                               rmm::cuda_stream_view stream,
+                                               rmm::device_async_resource_ref mr);
+
 // ============================================================================
 // Nested decode view bundles
 // ============================================================================
@@ -96,7 +108,9 @@ struct nested_parent_view {
 struct protobuf_decode_runtime_context {
   rmm::device_uvector<bool>* row_force_null;
   rmm::device_uvector<protobuf_error>* error;
-  bool propagate_invalid_enum_rows = true;
+  rmm::device_uvector<protobuf_error>* deferred_enum_error;
+  bool fail_on_errors;
+  bool invalidate_root_on_invalid_enum = true;
 };
 
 struct required_field_input_view {
@@ -315,21 +329,22 @@ void maybe_check_required_fields(required_field_input_view input,
                                  protobuf_decode_runtime_context decode_ctx,
                                  rmm::cuda_stream_view stream);
 
-void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
-                                          rmm::device_uvector<bool>& row_invalid,
-                                          int num_items,
-                                          int32_t const* top_row_indices,
-                                          bool propagate_to_rows,
-                                          rmm::cuda_stream_view stream);
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    int32_t const* valid_enums,
+                                    int num_valid_enums,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    int num_items,
+                                    int32_t const* top_row_indices,
+                                    rmm::cuda_stream_view stream);
 
-void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values,
-                                      rmm::device_uvector<bool>& valid,
-                                      cudf::detail::host_vector<int32_t> const& valid_enums,
-                                      rmm::device_uvector<bool>& row_invalid,
-                                      int num_items,
-                                      int32_t const* top_row_indices,
-                                      bool propagate_to_rows,
-                                      rmm::cuda_stream_view stream);
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    cudf::detail::host_vector<int32_t> const& valid_enums,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    int num_items,
+                                    int32_t const* top_row_indices,
+                                    rmm::cuda_stream_view stream);
 
 // ============================================================================
 // Forward declarations of builder/utility functions
@@ -379,30 +394,21 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-// `d_field_offsets` is the pre-built LIST row-offsets buffer (size num_rows + 1) from the
-// orchestrator (allocated against `mr`); each builder moves it into its output column.
 std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
-  int total_count,
-  cudf::detail::host_vector<int32_t> const& valid_enums,
-  std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
+  protobuf_field_meta_view field,
   protobuf_decode_runtime_context decode_ctx,
+  repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> build_repeated_string_column(
-  cudf::column_view const& binary_input,
-  protobuf_input_view input,
-  rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
-  int total_count,
-  bool is_bytes,
-  rmm::device_uvector<protobuf_error>& d_error,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view const& binary_input,
+                                                           protobuf_input_view input,
+                                                           protobuf_field_meta_view field,
+                                                           repeated_field_work work,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_nested_struct_column(
   protobuf_input_view input,

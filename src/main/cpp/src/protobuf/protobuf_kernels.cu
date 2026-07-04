@@ -50,6 +50,10 @@ __device__ inline void set_row_invalid(bool* rows, int32_t row)
   ref.store(true, cuda::memory_order_relaxed);
 }
 
+__device__ inline int enum_binary_search(int32_t const* valid_enum_values,
+                                         int num_valid_values,
+                                         int32_t val);
+
 /**
  * Scan one message's bytes [msg_base, msg_end) once, recording the last-one-wins location
  * (relative to msg_base) of every matching non-repeated field into `out[field_index]`.
@@ -65,6 +69,8 @@ __device__ inline void set_row_invalid(bool* rows, int32_t row)
  * `lookup_desc_idx(field_number) -> int` maps a wire field number to its descriptor index (or -1);
  * callers supply it so this helper stays agnostic to whether a lookup table is used. Descriptor
  * attribute access is also caller-supplied so hot paths can use compact descriptor forms directly.
+ * `should_record_singular` filters matched singular occurrences before they replace an earlier
+ * location, which lets proto2 enum scanners ignore unknown values.
  *
  * Matched repeated fields are delegated to `on_repeated(f, cur, msg_end, msg_base, wt)` (f is the
  * matched descriptor index) which returns false on error; the handler derives its own expected
@@ -78,6 +84,7 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
                                              auto&& lookup_desc_idx,
                                              auto&& is_repeated_field,
                                              auto&& get_expected_wire_type,
+                                             auto&& should_record_singular,
                                              auto&& on_repeated)
 {
   for (uint8_t const* cur = msg_base; cur < msg_end;) {
@@ -92,8 +99,8 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
         set_error_once(error_flag, protobuf_error::WIRE_TYPE);
         return false;
       } else {
-        // Record this field's location relative to the message start (last one wins).
         int const data_offset = static_cast<int>(cur - msg_base);
+        field_location location;
         if (wt == wire_type_value(proto_wire_type::LEN)) {
           // Length-delimited: skip past the length prefix and record (data offset, data length).
           uint64_t len;
@@ -112,7 +119,7 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
             set_error_once(error_flag, protobuf_error::OVERFLOW);
             return false;
           }
-          if (out != nullptr) { out[f] = {data_location, static_cast<int32_t>(len)}; }
+          location = {data_location, static_cast<int32_t>(len)};
         } else {
           // Fixed-width / varint: record the offset and the wire-type-derived size.
           int field_size = get_wire_type_size(wt, cur, msg_end);
@@ -120,7 +127,11 @@ __device__ bool scan_message_field_locations(uint8_t const* msg_base,
             set_error_once(error_flag, protobuf_error::FIELD_SIZE);
             return false;
           }
-          if (out != nullptr) { out[f] = {data_offset, field_size}; }
+          location = {data_offset, field_size};
+        }
+        if (out != nullptr && should_record_singular(f, cur, msg_end, location)) {
+          // Last recognized value wins; unknown proto2 enum occurrences are ignored.
+          out[f] = location;
         }
       }
     }
@@ -181,6 +192,31 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
   };
   auto is_repeated_field      = [&](int f) { return fields.descriptors[f].is_repeated; };
   auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].expected_wire_type; };
+  auto should_record_singular = [&](int f,
+                                    uint8_t const* value_start,
+                                    uint8_t const* value_end,
+                                    [[maybe_unused]] field_location location) {
+    auto const& descriptor = fields.descriptors[f];
+    if (descriptor.num_valid_enum_values == 0) return true;
+
+    uint64_t raw_value;
+    [[maybe_unused]] int value_size;
+    if (!read_varint(value_start, value_end, raw_value, value_size)) {
+      set_error_once(error_flag, protobuf_error::VARINT);
+      return false;
+    }
+    bool const recognized = enum_binary_search(descriptor.valid_enum_values,
+                                               descriptor.num_valid_enum_values,
+                                               static_cast<int32_t>(raw_value)) >= 0;
+    if (!recognized) {
+      if (row_has_invalid_data != nullptr) {
+        mark_row_error();
+      } else {
+        set_error_once(fields.deferred_enum_error, protobuf_error::INVALID_ENUM);
+      }
+    }
+    return recognized;
+  };
   // Top-level scalar descriptors are never repeated, so the repeated handler is unreachable.
   auto unreachable_repeated = [](int, uint8_t const*, uint8_t const*, uint8_t const*, int) {
     return true;
@@ -192,6 +228,7 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
                                     lookup_desc_idx,
                                     is_repeated_field,
                                     get_expected_wire_type,
+                                    should_record_singular,
                                     unreachable_repeated)) {
     mark_row_error();
   }
@@ -440,39 +477,41 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
 template <wire_type_mismatch_policy MismatchPolicy>
 __device__ bool scan_all_repeated_occurrences_in_message(uint8_t const* msg_base,
                                                          uint8_t const* msg_end,
-                                                         repeated_field_scan_desc const* scan_descs,
-                                                         int num_scan_fields,
+                                                         repeated_field_scan_view fields,
                                                          protobuf_error* error_flag,
-                                                         int const* fn_to_desc_idx,
-                                                         int fn_to_desc_size,
                                                          cudf::size_type row)
 {
   // Defense-in-depth: host-side validation enforces this cap, so the check is unreachable on a
   // correct config. Keep it in release builds because overrunning `write_idx` below is silent UB.
-  if (num_scan_fields > MAX_REPEATED_FIELDS_PER_KERNEL) {
+  if (fields.size > MAX_REPEATED_FIELDS_PER_KERNEL) {
     set_error_once(error_flag, protobuf_error::SCHEMA_TOO_LARGE);
     return false;
   }
 
   int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL];
-  for (int f = 0; f < num_scan_fields; f++) {
-    write_idx[f] = scan_descs[f].row_offsets[row];
+  for (int f = 0; f < fields.size; f++) {
+    write_idx[f] = fields.descriptors[f].row_offsets[row];
   }
 
   auto lookup_by_fn = [&](int fn) {
-    return lookup_field(fn, fn_to_desc_idx, fn_to_desc_size, num_scan_fields, [&](int f, int) {
-      return scan_descs[f].field_number == fn;
-    });
+    return lookup_field(
+      fn, fields.field_number_lookup, fields.lookup_size, fields.size, [&](int f, int) {
+        return fields.descriptors[f].field_number == fn;
+      });
   };
   auto is_repeated_field      = []([[maybe_unused]] int f) { return true; };
-  auto get_expected_wire_type = [&](int f) { return scan_descs[f].wire_type; };
+  auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].wire_type; };
+  auto always_record_singular = []([[maybe_unused]] int f,
+                                   [[maybe_unused]] uint8_t const* value_start,
+                                   [[maybe_unused]] uint8_t const* value_end,
+                                   [[maybe_unused]] field_location location) { return true; };
 
   auto const row_i32 = static_cast<int32_t>(row);
   auto on_repeated_scan =
     [&](int f, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
-      auto* occs       = scan_descs[f].occurrences;
+      auto* occs       = fields.descriptors[f].occurrences;
       int& wi          = write_idx[f];
-      int const we     = scan_descs[f].row_offsets[row + 1];
+      int const we     = fields.descriptors[f].row_offsets[row + 1];
       auto scan_action = [&](int32_t off, int32_t len) {
         if (wi >= we) {
           set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
@@ -493,12 +532,13 @@ __device__ bool scan_all_repeated_occurrences_in_message(uint8_t const* msg_base
                                     lookup_by_fn,
                                     is_repeated_field,
                                     get_expected_wire_type,
+                                    always_record_singular,
                                     on_repeated_scan)) {
     return false;
   }
 
-  for (int f = 0; f < num_scan_fields; f++) {
-    if (write_idx[f] != scan_descs[f].row_offsets[row + 1]) {
+  for (int f = 0; f < fields.size; f++) {
+    if (write_idx[f] != fields.descriptors[f].row_offsets[row + 1]) {
       set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
       return false;
     }
@@ -525,14 +565,7 @@ CUDF_KERNEL void scan_all_repeated_occurrences_kernel(cudf::column_device_view c
 
   [[maybe_unused]] auto const scan_succeeded =
     scan_all_repeated_occurrences_in_message<wire_type_mismatch_policy::report_error>(
-      bytes + start,
-      bytes + end,
-      fields.descriptors,
-      fields.size,
-      error_flag,
-      fields.field_number_lookup,
-      fields.lookup_size,
-      row);
+      bytes + start, bytes + end, fields, error_flag, row);
 }
 
 // ============================================================================
@@ -589,6 +622,23 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   };
   auto is_repeated_field      = [&](int f) { return fields.descriptors[f].is_repeated; };
   auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].expected_wire_type; };
+  auto should_record_singular = [&](int f,
+                                    uint8_t const* value_start,
+                                    uint8_t const* value_end,
+                                    [[maybe_unused]] field_location location) {
+    auto const& descriptor = fields.descriptors[f];
+    if (descriptor.num_valid_enum_values == 0) return true;
+
+    uint64_t raw_value;
+    [[maybe_unused]] int value_size;
+    if (!read_varint(value_start, value_end, raw_value, value_size)) {
+      set_error_once(error_flag, protobuf_error::VARINT);
+      return false;
+    }
+    return enum_binary_search(descriptor.valid_enum_values,
+                              descriptor.num_valid_enum_values,
+                              static_cast<int32_t>(raw_value)) >= 0;
+  };
   auto validate_repeated =
     [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
       auto const expected_wire_type = get_expected_wire_type(f);
@@ -609,6 +659,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
                                     lookup_desc_idx,
                                     is_repeated_field,
                                     get_expected_wire_type,
+                                    should_record_singular,
                                     validate_repeated)) {
     mark_row_error();
   }
@@ -636,11 +687,8 @@ CUDF_KERNEL void scan_all_repeated_occurrences_in_nested_kernel(protobuf_input_v
     scan_all_repeated_occurrences_in_message<wire_type_mismatch_policy::skip>(
       input.message_data + msg_start_off,
       input.message_data + msg_end_off,
-      fields.descriptors,
-      fields.size,
+      fields,
       error_flag,
-      fields.field_number_lookup,
-      fields.lookup_size,
       row);
 }
 
@@ -796,11 +844,8 @@ __device__ inline int enum_binary_search(int32_t const* valid_enum_values,
 /**
  * Validate enum values against a set of valid values.
  * If a value is not in the valid set:
- * 1. Mark the field as invalid (valid[row] = false)
- * 2. Mark the row as having an invalid enum (row_has_invalid_enum[row] = true)
- *
- * This matches Spark CPU PERMISSIVE mode behavior: when an unknown enum value is
- * encountered, the entire struct row is set to null (not just the enum field).
+ * 1. Mark the value as invalid.
+ * 2. Record it for the caller's root/nested enum policy.
  *
  * The valid_values array must be sorted for binary search.
  *
@@ -809,7 +854,7 @@ __device__ inline int enum_binary_search(int32_t const* valid_enum_values,
 CUDF_KERNEL void validate_enum_values_kernel(
   int32_t const* values,             // [num_rows] extracted enum values
   bool* valid,                       // [num_rows] field validity flags (will be modified)
-  bool* row_has_invalid_enum,        // [num_rows] row-level invalid enum flag (will be set to true)
+  bool* item_has_invalid_enum,       // [num_rows] invalid enum flags (will be set to true)
   int32_t const* valid_enum_values,  // sorted array of valid enum values
   int num_valid_values,              // size of valid_enum_values
   int num_rows)
@@ -821,16 +866,14 @@ CUDF_KERNEL void validate_enum_values_kernel(
   if (!valid[row]) return;
 
   if (enum_binary_search(valid_enum_values, num_valid_values, values[row]) < 0) {
-    valid[row] = false;
-    // Also mark the row as having an invalid enum - this will null the entire struct row
-    row_has_invalid_enum[row] = true;
+    valid[row]                 = false;
+    item_has_invalid_enum[row] = true;
   }
 }
 
 /**
  * Compute output UTF-8 length for enum-as-string rows.
- * Invalid/missing values produce length 0 (null row/field semantics handled by valid[] and
- * row_has_invalid_enum).
+ * Invalid/missing values produce length 0; the caller applies row/field semantics.
  */
 CUDF_KERNEL void compute_enum_string_lengths_kernel(
   int32_t const* values,             // [num_rows] enum numeric values
@@ -989,47 +1032,52 @@ void launch_compute_grandchild_parent_locations(field_location const* parent_loc
     parent_locs, child_locs, child_idx, num_child_fields, gc_parent_locs, num_rows, error_flag);
 }
 
-void launch_compute_virtual_parents_for_nested_repeated(repeated_occurrence const* occurrences,
-                                                        cudf::size_type const* row_list_offsets,
-                                                        field_location const* parent_locations,
+void launch_compute_virtual_parents_for_nested_repeated(protobuf_input_view input,
+                                                        nested_parent_view parent,
+                                                        repeated_field_work const& work,
                                                         cudf::size_type* virtual_row_offsets,
                                                         field_location* virtual_parent_locs,
-                                                        int total_count,
-                                                        protobuf_error* error_flag,
+                                                        protobuf_decode_runtime_context decode_ctx,
                                                         rmm::cuda_stream_view stream)
 {
-  if (total_count == 0) return;
-  auto const blocks = static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+  if (work.total_count == 0) return;
+  auto const blocks =
+    static_cast<int>((work.total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   compute_virtual_parents_for_nested_repeated_kernel<<<blocks,
                                                        THREADS_PER_BLOCK,
                                                        0,
-                                                       stream.value()>>>(occurrences,
-                                                                         row_list_offsets,
-                                                                         parent_locations,
+                                                       stream.value()>>>(work.occurrences->data(),
+                                                                         input.row_offsets,
+                                                                         parent.locations,
                                                                          virtual_row_offsets,
                                                                          virtual_parent_locs,
-                                                                         total_count,
-                                                                         error_flag);
+                                                                         work.total_count,
+                                                                         decode_ctx.error->data());
 }
 
-void launch_compute_msg_locations_from_occurrences(repeated_occurrence const* occurrences,
-                                                   cudf::size_type const* list_offsets,
-                                                   cudf::size_type base_offset,
+void launch_compute_msg_locations_from_occurrences(protobuf_input_view input,
+                                                   repeated_field_work const& work,
                                                    field_location* msg_locs,
                                                    cudf::size_type* msg_row_offsets,
-                                                   int total_count,
-                                                   protobuf_error* error_flag,
+                                                   protobuf_decode_runtime_context decode_ctx,
                                                    rmm::cuda_stream_view stream)
 {
-  if (total_count == 0) return;
-  auto const blocks = static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
+  if (work.total_count == 0) return;
+  auto const blocks =
+    static_cast<int>((work.total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   compute_msg_locations_from_occurrences_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
-    occurrences, list_offsets, base_offset, msg_locs, msg_row_offsets, total_count, error_flag);
+    work.occurrences->data(),
+    input.row_offsets,
+    input.base_offset,
+    msg_locs,
+    msg_row_offsets,
+    work.total_count,
+    decode_ctx.error->data());
 }
 
 void launch_validate_enum_values(int32_t const* values,
                                  bool* valid,
-                                 bool* row_has_invalid_enum,
+                                 bool* item_has_invalid_enum,
                                  int32_t const* valid_enum_values,
                                  int num_valid_values,
                                  int num_rows,
@@ -1038,7 +1086,7 @@ void launch_validate_enum_values(int32_t const* values,
   if (num_rows == 0) return;
   auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   validate_enum_values_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
-    values, valid, row_has_invalid_enum, valid_enum_values, num_valid_values, num_rows);
+    values, valid, item_has_invalid_enum, valid_enum_values, num_valid_values, num_rows);
 }
 
 void launch_compute_enum_string_lengths(int32_t const* values,
@@ -1115,16 +1163,40 @@ void maybe_check_required_fields(required_field_input_view input,
     decode_ctx.error->data());
 }
 
-void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
-                                          rmm::device_uvector<bool>& row_invalid,
-                                          int num_items,
-                                          int32_t const* top_row_indices,
-                                          bool propagate_to_rows,
-                                          rmm::cuda_stream_view stream)
+namespace {
+
+void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
+                               protobuf_decode_runtime_context decode_ctx,
+                               int num_items,
+                               int32_t const* top_row_indices,
+                               rmm::cuda_stream_view stream)
 {
-  if (num_items == 0 || row_invalid.size() == 0 || !propagate_to_rows) return;
+  if (num_items == 0 || !decode_ctx.invalidate_root_on_invalid_enum) return;
+
+  CUDF_EXPECTS(decode_ctx.row_force_null != nullptr,
+               "enum validation requires a row-invalid buffer");
+  CUDF_EXPECTS(decode_ctx.error != nullptr && decode_ctx.error->size() == 1,
+               "enum validation requires a single error flag");
+  CUDF_EXPECTS(
+    decode_ctx.deferred_enum_error != nullptr && decode_ctx.deferred_enum_error->size() == 1,
+    "enum validation requires a single deferred enum error flag");
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
+  if (decode_ctx.fail_on_errors) {
+    thrust::for_each(rmm::exec_policy_nosync(stream, scratch_mr),
+                     thrust::make_counting_iterator(0),
+                     thrust::make_counting_iterator(num_items),
+                     [item_invalid = item_invalid.data(),
+                      error        = decode_ctx.deferred_enum_error->data()] __device__(int idx) {
+                       if (item_invalid[idx]) {
+                         set_error_once(error, protobuf_error::INVALID_ENUM);
+                       }
+                     });
+    return;
+  }
+
+  auto& row_invalid = *decode_ctx.row_force_null;
+  CUDF_EXPECTS(!row_invalid.is_empty(), "PERMISSIVE enum validation requires a row-invalid buffer");
   if (top_row_indices == nullptr) {
     CUDF_EXPECTS(static_cast<size_t>(num_items) <= row_invalid.size(),
                  "enum invalid-row propagation exceeded row buffer");
@@ -1157,34 +1229,54 @@ void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_
     });
 }
 
-void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values,
-                                      rmm::device_uvector<bool>& valid,
-                                      cudf::detail::host_vector<int32_t> const& valid_enums,
-                                      rmm::device_uvector<bool>& row_invalid,
-                                      int num_items,
-                                      int32_t const* top_row_indices,
-                                      bool propagate_to_rows,
-                                      rmm::cuda_stream_view stream)
+}  // namespace
+
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    int32_t const* valid_enums,
+                                    int num_valid_enums,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    int num_items,
+                                    int32_t const* top_row_indices,
+                                    rmm::cuda_stream_view stream)
 {
-  if (num_items == 0 || valid_enums.empty()) return;
+  if (num_items == 0 || num_valid_enums == 0) return;
+  CUDF_EXPECTS(valid_enums != nullptr, "enum validation requires valid enum values");
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto const blocks  = static_cast<int>((num_items + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
-  auto d_valid_enums = cudf::detail::make_device_uvector_async(valid_enums, stream, scratch_mr);
-
   rmm::device_uvector<bool> item_invalid(num_items, stream, scratch_mr);
   thrust::fill(
     rmm::exec_policy_nosync(stream, scratch_mr), item_invalid.begin(), item_invalid.end(), false);
-  validate_enum_values_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
-    values.data(),
-    valid.data(),
-    item_invalid.data(),
-    d_valid_enums.data(),
-    static_cast<int>(valid_enums.size()),
-    num_items);
+  launch_validate_enum_values(values.data(),
+                              valid.data(),
+                              item_invalid.data(),
+                              valid_enums,
+                              num_valid_enums,
+                              num_items,
+                              stream);
+  apply_invalid_enum_policy(item_invalid, decode_ctx, num_items, top_row_indices, stream);
+}
 
-  propagate_invalid_enum_flags_to_rows(
-    item_invalid, row_invalid, num_items, top_row_indices, propagate_to_rows, stream);
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    cudf::detail::host_vector<int32_t> const& valid_enums,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    int num_items,
+                                    int32_t const* top_row_indices,
+                                    rmm::cuda_stream_view stream)
+{
+  if (num_items == 0 || valid_enums.empty()) return;
+
+  auto d_valid_enums = cudf::detail::make_device_uvector_async(
+    valid_enums, stream, cudf::get_current_device_resource_ref());
+  validate_enum_and_apply_policy(values,
+                                 valid,
+                                 d_valid_enums.data(),
+                                 static_cast<int>(d_valid_enums.size()),
+                                 decode_ctx,
+                                 num_items,
+                                 top_row_indices,
+                                 stream);
 }
 
 }  // namespace spark_rapids_jni::protobuf::detail
