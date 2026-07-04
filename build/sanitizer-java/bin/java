@@ -23,6 +23,8 @@ log_basename="sanitizer_for_pid_${log_token}"
 sanitizer_pid=""
 forwarded_status=""
 
+# forward_signal is invoked from the trap handlers below.
+# shellcheck disable=SC2329
 forward_signal() {
     local signal="$1"
     local status_after_signal="$2"
@@ -45,7 +47,7 @@ sanitizer_pid=$!
 
 wait "$sanitizer_pid"
 status=$?
-if [[ -n "$forwarded_status" ]]; then
+if [[ -n "$forwarded_status" && $status -gt 128 ]]; then
     wait "$sanitizer_pid" 2>/dev/null || true
     status="$forwarded_status"
 fi
@@ -57,8 +59,8 @@ if [[ $status -ne 0 ]]; then
     found_logs=false
     while IFS= read -r sanitizer_log; do
         found_logs=true
-        echo "===== $sanitizer_log =====" >&2
-        cat "$sanitizer_log" >&2
+        echo "===== Last 80 lines of $sanitizer_log =====" >&2
+        tail -n 80 "$sanitizer_log" >&2
     done < <(find . -maxdepth 1 -type f -name "${log_basename}_*.log" | sort)
 
     if [[ $found_logs == false ]]; then
