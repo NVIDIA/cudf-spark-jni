@@ -42,21 +42,35 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::cuda_stream_view stream);
 
+enum_string_lookup_tables const& protobuf_schema::enum_lookup(int schema_idx,
+                                                              rmm::cuda_stream_view stream) const
+{
+  auto entry = enum_lookup_cache_.find(schema_idx);
+  if (entry == enum_lookup_cache_.end()) {
+    auto const field = this->field(schema_idx);
+    entry =
+      enum_lookup_cache_
+        .emplace(schema_idx,
+                 make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream))
+        .first;
+  }
+  return entry->second;
+}
+
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
-                                               std::vector<nested_field_descriptor> const& schema,
-                                               schema_context_view schema_ctx,
+                                               protobuf_schema const& schema,
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr)
 {
   size_t num_enum_values = 0;
   for (auto const schema_idx : field_indices) {
-    num_enum_values += schema_ctx.enum_valid_values[schema_idx].size();
+    num_enum_values += schema.field(schema_idx).enum_valid_values.size();
   }
 
   auto h_enum_values = cudf::detail::make_pinned_vector_async<int32_t>(num_enum_values, stream);
   size_t enum_offset = 0;
   for (auto const schema_idx : field_indices) {
-    auto const& values = schema_ctx.enum_valid_values[schema_idx];
+    auto const& values = schema.field(schema_idx).enum_valid_values;
     std::copy(values.begin(), values.end(), h_enum_values.begin() + enum_offset);
     enum_offset += values.size();
   }
@@ -67,14 +81,14 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
   enum_offset = 0;
   for (size_t i = 0; i < field_indices.size(); ++i) {
     auto const schema_idx = field_indices[i];
-    auto const& field     = schema[schema_idx];
-    auto const enum_size  = schema_ctx.enum_valid_values[schema_idx].size();
+    auto const field      = schema.field(schema_idx);
+    auto const enum_size  = field.enum_valid_values.size();
     CUDF_EXPECTS(enum_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
                  "protobuf enum metadata exceeds supported value count");
-    h_descriptors[i] = {field.field_number,
-                        static_cast<int>(field.wire_type),
-                        field.is_repeated,
-                        field.output_type == cudf::type_id::STRUCT,
+    h_descriptors[i] = {field.schema.field_number,
+                        static_cast<int>(field.schema.wire_type),
+                        field.schema.is_repeated,
+                        field.schema.output_type == cudf::type_id::STRUCT,
                         enum_size > 0 ? d_enum_values.data() + enum_offset : nullptr,
                         static_cast<int>(enum_size)};
     enum_offset += enum_size;
@@ -86,36 +100,14 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
 
 namespace {
 
-enum_string_lookup_tables const& get_enum_lookup(schema_context_view schema_ctx,
-                                                 int schema_idx,
-                                                 protobuf_field_meta_view field,
-                                                 rmm::cuda_stream_view stream,
-                                                 std::optional<enum_string_lookup_tables>& fallback)
-{
-  if (schema_ctx.enum_lookup_cache == nullptr) {
-    fallback.emplace(
-      make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream));
-    return *fallback;
-  }
-
-  auto& cache = *schema_ctx.enum_lookup_cache;
-  auto entry  = cache.find(schema_idx);
-  if (entry == cache.end()) {
-    entry =
-      cache
-        .emplace(schema_idx,
-                 make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream))
-        .first;
-  }
-  return entry->second;
-}
-
-std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
-                                                       rmm::device_uvector<bool>& valid,
-                                                       enum_string_lookup_tables const& lookup,
-                                                       protobuf_value_decode_context input,
-                                                       rmm::cuda_stream_view stream,
-                                                       rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> build_enum_string_column_with_lookup(
+  rmm::device_uvector<int32_t>& enum_values,
+  rmm::device_uvector<bool>& valid,
+  enum_string_lookup_tables const& lookup,
+  protobuf_decode_runtime_context runtime,
+  protobuf_value_domain_view values,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
 
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent_locations(
   field_location const* parent_locs,
@@ -204,42 +196,19 @@ std::unique_ptr<cudf::column> drop_unknown_repeated_enum_values(std::unique_ptr<
     input_view, cudf::lists_column_view{keep_lists->view()}, stream, mr);
 }
 
-inline protobuf_field_meta_view make_field_meta_view(schema_context_view schema_ctx,
-                                                     nested_field_descriptor const& field,
-                                                     int schema_idx)
-{
-  return {field,
-          cudf::data_type{field.output_type},
-          schema_ctx.default_ints[schema_idx],
-          schema_ctx.default_floats[schema_idx],
-          schema_ctx.default_bools[schema_idx],
-          schema_ctx.default_strings[schema_idx],
-          schema_ctx.enum_valid_values[schema_idx],
-          schema_ctx.enum_names[schema_idx]};
-}
-
-struct protobuf_field_build_view {
-  protobuf_field_decode_view decode;
-  schema_context_view schema_context;
-  int schema_idx;
-};
-
 template <typename LocationProvider, typename ValidityFn, typename TopRowIndexProvider>
 std::unique_ptr<cudf::column> build_protobuf_field_values_column(
-  protobuf_field_build_view input,
+  protobuf_field_decode_request request,
   LocationProvider const& loc_provider,
   ValidityFn validity_fn,
   TopRowIndexProvider get_top_row_indices,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto field_decode       = input.decode;
-  auto const message_data = field_decode.message_data;
-  auto const field        = field_decode.field;
-  auto const schema_ctx   = input.schema_context;
-  auto const decode_ctx   = field_decode.values.runtime;
-  auto const schema_idx   = input.schema_idx;
-  auto const num_values   = field_decode.values.num_values;
+  auto const message_data = request.message_data;
+  auto const field        = request.schema.field(request.schema_idx);
+  auto const decode_ctx   = request.runtime;
+  auto const num_values   = request.values.size;
   CUDF_EXPECTS(num_values > 0, std::string{__func__} + ": value count must be positive");
   auto const value_type  = field.output_type;
   auto const has_default = field.schema.has_default_value;
@@ -256,9 +225,14 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
       bool const is_numeric_enum =
         value_type.id() == cudf::type_id::INT32 && !field.enum_valid_values.empty();
       bool const invalidates_top_row =
-        is_numeric_enum && decode_ctx.invalidate_root_on_invalid_enum;
-      field_decode.values.top_row_indices = invalidates_top_row ? get_top_row_indices() : nullptr;
-      return extract_typed_column(field_decode, loc_provider, stream, mr);
+        is_numeric_enum && request.values.enum_scope == enum_error_scope::root;
+      auto values            = request.values;
+      values.top_row_indices = invalidates_top_row ? get_top_row_indices() : nullptr;
+      return extract_typed_column(
+        {request.schema, request.message_data, request.schema_idx, request.runtime, values},
+        loc_provider,
+        stream,
+        mr);
     }
     case cudf::type_id::STRING:
     case cudf::type_id::LIST: {
@@ -275,13 +249,15 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
             num_values,
             {values.data(), valid.data(), decode_ctx.error->data()},
             {has_default, field.default_int});
-        std::optional<enum_string_lookup_tables> fallback_lookup;
-        auto const& lookup =
-          get_enum_lookup(schema_ctx, schema_idx, field, stream, fallback_lookup);
-        auto value_context = field_decode.values;
-        value_context.top_row_indices =
-          decode_ctx.invalidate_root_on_invalid_enum ? get_top_row_indices() : nullptr;
-        return build_enum_string_column(values, valid, lookup, value_context, stream, mr);
+        auto enum_values = request.values;
+        enum_values.top_row_indices =
+          enum_values.enum_scope == enum_error_scope::root ? get_top_row_indices() : nullptr;
+        return build_enum_string_column(
+          values,
+          valid,
+          {request.schema, request.message_data, request.schema_idx, request.runtime, enum_values},
+          stream,
+          mr);
       }
       return extract_and_build_string_or_bytes_column(
         field, message_data, num_values, loc_provider, validity_fn, stream, mr);
@@ -495,41 +471,36 @@ std::unique_ptr<cudf::column> build_enum_string_values_column(
 
 namespace {
 
-std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
-                                                       rmm::device_uvector<bool>& valid,
-                                                       enum_string_lookup_tables const& lookup,
-                                                       protobuf_value_decode_context input,
-                                                       rmm::cuda_stream_view stream,
-                                                       rmm::device_async_resource_ref mr)
+std::unique_ptr<cudf::column> build_enum_string_column_with_lookup(
+  rmm::device_uvector<int32_t>& enum_values,
+  rmm::device_uvector<bool>& valid,
+  enum_string_lookup_tables const& lookup,
+  protobuf_decode_runtime_context runtime,
+  protobuf_value_domain_view values,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
 {
-  validate_enum_and_apply_policy(enum_values,
-                                 valid,
-                                 lookup.d_valid_enums.data(),
-                                 static_cast<int>(lookup.d_valid_enums.size()),
-                                 input.runtime,
-                                 input.num_values,
-                                 input.top_row_indices,
-                                 stream);
-  return build_enum_string_values_column(enum_values, valid, lookup, input.num_values, stream, mr);
+  validate_enum_and_apply_policy(enum_values, valid, lookup.view().domain, runtime, values, stream);
+  return build_enum_string_values_column(enum_values, valid, lookup, values.size, stream, mr);
 }
 
 }  // namespace
 
 std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
                                                        rmm::device_uvector<bool>& valid,
-                                                       enum_string_decode_view input,
+                                                       protobuf_field_decode_request request,
                                                        rmm::cuda_stream_view stream,
                                                        rmm::device_async_resource_ref mr)
 {
-  auto const lookup =
-    make_enum_string_lookup_tables(input.valid_enums, input.enum_name_bytes, stream);
-  return build_enum_string_column(enum_values, valid, lookup, input.values, stream, mr);
+  auto const& lookup = request.schema.enum_lookup(request.schema_idx, stream);
+  return build_enum_string_column_with_lookup(
+    enum_values, valid, lookup, request.runtime, request.values, stream, mr);
 }
 
 std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  protobuf_field_meta_view field,
+  protobuf_schema const& schema,
   protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
   rmm::cuda_stream_view stream,
@@ -542,8 +513,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   auto const rep_blocks =
     static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto const lookup =
-    make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream);
+  auto const& lookup    = schema.enum_lookup(work.schema_idx, stream);
 
   // 1. Extract enum integer values from occurrences
   rmm::device_uvector<int32_t> enum_ints(total_count, stream, scratch_mr);
@@ -559,11 +529,9 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   auto d_top_row_indices = materialize_top_row_indices(occurrences, nullptr, stream, scratch_mr);
   validate_enum_and_apply_policy(enum_ints,
                                  elem_valid,
-                                 lookup.d_valid_enums.data(),
-                                 static_cast<int>(lookup.d_valid_enums.size()),
+                                 lookup.view().domain,
                                  decode_ctx,
-                                 total_count,
-                                 d_top_row_indices.data(),
+                                 {total_count, d_top_row_indices.data(), enum_error_scope::root},
                                  stream);
 
   auto child_col =
@@ -686,8 +654,8 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
   validate_singular_message_merge_work(work, input.num_rows);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
 
-  auto validation_fields = make_field_descriptors(
-    child_field_indices, context.schema, context.schema_metadata, stream, scratch_mr);
+  auto validation_fields =
+    make_field_descriptors(child_field_indices, context.schema, stream, scratch_mr);
   auto h_field_lookup = build_field_lookup_table(
     validation_fields.host.data(), static_cast<int>(validation_fields.host.size()), stream);
   auto d_field_lookup = cudf::detail::make_device_uvector_async(h_field_lookup, stream, scratch_mr);
@@ -819,16 +787,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto const& schema    = context.schema;
-  auto const schema_ctx = context.schema_metadata;
-  auto const decode_ctx = context.runtime;
+  auto const& schema_context = context.schema;
+  auto const& schema         = schema_context.fields();
+  auto const decode_ctx      = context.runtime;
   CUDF_EXPECTS(depth < MAX_NESTING_DEPTH,
                "Nested protobuf struct depth exceeds supported decode recursion limit");
   validate_nested_parent_view(input, parent);
   validate_protobuf_decode_context(decode_ctx, input, parent);
 
   if (input.num_rows == 0) {
-    return make_empty_struct_column_from_children(schema, child_field_indices, stream, mr);
+    return make_empty_struct_column_from_children(schema_context, child_field_indices, stream, mr);
   }
 
   int num_child_fields = static_cast<int>(child_field_indices.size());
@@ -848,7 +816,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto child_field_descs =
-    make_field_descriptors(child_field_indices, schema, schema_ctx, stream, scratch_mr);
+    make_field_descriptors(child_field_indices, schema_context, stream, scratch_mr);
   auto const& d_child_field_descs = child_field_descs.device;
 
   auto const child_location_count = static_cast<size_t>(input.num_rows) * num_child_fields;
@@ -980,8 +948,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     }
 
     if (dt.id() == cudf::type_id::STRUCT) {
-      // Recursive linear child lookup is fine for realistic schemas; precompute if it gets hot.
-      auto gc_indices = find_child_field_indices(schema, child_schema_idx);
+      auto const& gc_indices = schema_context.children(child_schema_idx);
       if (message_merge_work[ci].has_value()) {
         struct_children.push_back(
           build_merged_singular_struct_column(input,
@@ -1028,17 +995,17 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     auto get_top_row_indices = [top_row_indices = parent.top_row_indices]() {
       return top_row_indices;
     };
-    struct_children.push_back(build_protobuf_field_values_column(
-      {{input.message_data,
-        make_field_meta_view(schema_ctx, schema[child_schema_idx], child_schema_idx),
-        {decode_ctx, input.num_rows}},
-       schema_ctx,
-       child_schema_idx},
-      loc_provider,
-      valid_fn,
-      get_top_row_indices,
-      stream,
-      mr));
+    struct_children.push_back(
+      build_protobuf_field_values_column({schema_context,
+                                          input.message_data,
+                                          child_schema_idx,
+                                          decode_ctx,
+                                          {input.num_rows, nullptr, enum_error_scope::local}},
+                                         loc_provider,
+                                         valid_fn,
+                                         get_top_row_indices,
+                                         stream,
+                                         mr));
   }
 
   auto [struct_mask, struct_null_count] =
@@ -1058,9 +1025,9 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
                                                                rmm::cuda_stream_view stream,
                                                                rmm::device_async_resource_ref mr)
 {
-  auto const& schema    = context.schema;
-  auto const schema_ctx = context.schema_metadata;
-  auto const decode_ctx = context.runtime;
+  auto const& schema_context = context.schema;
+  auto const& schema         = schema_context.fields();
+  auto const decode_ctx      = context.runtime;
   validate_nested_parent_view(input, parent);
   validate_protobuf_decode_context(decode_ctx, input, parent);
   auto const child_schema_idx = work.schema_idx;
@@ -1069,7 +1036,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
   CUDF_EXPECTS(schema[child_schema_idx].is_repeated,
                "nested repeated child builder requires a repeated child schema");
   auto const elem_type     = cudf::data_type{schema[child_schema_idx].output_type};
-  auto const is_enum_field = !schema_ctx.enum_valid_values[child_schema_idx].empty();
+  auto const is_enum_field = !schema_context.field(child_schema_idx).enum_valid_values.empty();
 
   CUDF_EXPECTS(work.offsets.size() == static_cast<size_t>(input.num_rows) + 1,
                "Protobuf decode internal error: nested repeated offsets size mismatch");
@@ -1082,9 +1049,10 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
                                                       work.offsets.release(),
                                                       rmm::device_buffer{},
                                                       0);
-    auto child_col   = elem_type.id() == cudf::type_id::STRUCT
-                         ? make_empty_struct_column_with_schema(schema, child_schema_idx, stream, mr)
-                         : make_empty_column_safe(elem_type, stream, mr);
+    auto child_col =
+      elem_type.id() == cudf::type_id::STRUCT
+        ? make_empty_struct_column_with_schema(schema_context, child_schema_idx, stream, mr)
+        : make_empty_column_safe(elem_type, stream, mr);
     return make_list_column_with_parent_nulls(
       input.num_rows, std::move(offsets_col), std::move(child_col), parent.locations, stream, mr);
   }
@@ -1118,7 +1086,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
                                                        decode_ctx,
                                                        stream);
 
-    auto child_field_indices = find_child_field_indices(schema, child_schema_idx);
+    auto const& child_field_indices = schema_context.children(child_schema_idx);
     protobuf_input_view const virtual_input{input.message_data,
                                             input.message_data_size,
                                             d_virtual_row_offsets.data(),
@@ -1136,17 +1104,17 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
     nested_repeated_location_provider loc_provider{
       input.row_offsets, input.base_offset, parent.locations, d_occurrences.data()};
     auto valid_fn = [] __device__(cudf::size_type) { return true; };
-    child_values  = build_protobuf_field_values_column(
-      {{input.message_data,
-         make_field_meta_view(schema_ctx, schema[child_schema_idx], child_schema_idx),
-         {decode_ctx, total_count}},
-        schema_ctx,
-        child_schema_idx},
-      loc_provider,
-      valid_fn,
-      get_top_row_indices,
-      stream,
-      mr);
+    child_values =
+      build_protobuf_field_values_column({schema_context,
+                                          input.message_data,
+                                          child_schema_idx,
+                                          decode_ctx,
+                                          {total_count, nullptr, enum_error_scope::local}},
+                                         loc_provider,
+                                         valid_fn,
+                                         get_top_row_indices,
+                                         stream,
+                                         mr);
   }
 
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
@@ -1169,8 +1137,6 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto const& schema    = context.schema;
-  auto const schema_ctx = context.schema_metadata;
   auto const decode_ctx = context.runtime;
   validate_nonempty_repeated_field_work(work, input.num_rows);
 
@@ -1185,13 +1151,11 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
 
   protobuf_input_view const message_input{
     input.message_data, input.message_data_size, d_message_row_offsets.data(), 0, work.total_count};
-  auto child_decode_ctx                            = decode_ctx;
-  child_decode_ctx.invalidate_root_on_invalid_enum = false;
-  auto struct_values                               = build_nested_struct_column(
+  auto struct_values = build_nested_struct_column(
     message_input,
     {d_message_locs.data(), d_message_locs.size(), d_top_row_indices.data()},
     child_field_indices,
-    {schema, schema_ctx, child_decode_ctx},
+    context,
     work.depth,
     stream,
     mr);

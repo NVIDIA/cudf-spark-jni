@@ -2610,6 +2610,29 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedWirePrecedesDeferredUnknownRootEnum_Failfast() {
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(999)),
+        box(tag(2, WT_LEN)), new Byte[]{(byte) 0x80});
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
+        .addField(2, DType.STRING)
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(
+          ai.rapids.cudf.CudfException.class,
+          () -> {
+            try (ColumnVector ignored = Protobuf.decodeToStruct(
+                input.getColumn(0), schema, true)) {
+            }
+          });
+      assertTrue(error.getMessage().contains("invalid or truncated varint"));
+      assertFalse(error.getMessage().contains("unknown enum value"));
+    }
+  }
+
+  @Test
   void testEnumWithOtherFields_NullsEntireRow() {
     // message Msg { Color color = 1; int32 count = 2; }
     // Test that unknown enum value nulls the ENTIRE struct row (not just the enum field)
@@ -3707,6 +3730,100 @@ public class ProtobufTest {
              input.getColumn(0), schema, true)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actualPermissive);
       AssertUtils.assertStructColumnsAreEqual(expected, actualFailfast);
+    }
+  }
+
+  @Test
+  void testSlicedInputPreservesDuplicateSingularMessageMergeInsideRepeatedParent() {
+    Byte[] child0First = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(10)));
+    Byte[] child0Second = concat(
+        box(tag(2, WT_VARINT)), box(encodeVarint(2)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(20)));
+    Byte[] child1First = concat(box(tag(1, WT_VARINT)), box(encodeVarint(3)));
+    Byte[] child1Second = concat(box(tag(2, WT_VARINT)), box(encodeVarint(4)));
+    Byte[] child2First = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(5)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(50)));
+    Byte[] child2Second = concat(
+        box(tag(2, WT_VARINT)), box(encodeVarint(6)),
+        box(tag(3, WT_VARINT)), box(encodeVarint(60)));
+    Byte[] item0 = concat(
+        box(tag(1, WT_LEN)), encodeMessage(child0First),
+        box(tag(1, WT_LEN)), encodeMessage(child0Second));
+    Byte[] item1 = concat(
+        box(tag(1, WT_LEN)), encodeMessage(child1First),
+        box(tag(1, WT_LEN)), encodeMessage(child1Second));
+    Byte[] item2 = concat(
+        box(tag(1, WT_LEN)), encodeMessage(child2First),
+        box(tag(1, WT_LEN)), encodeMessage(child2Second));
+    Byte[] firstSlicedRow = concat(
+        box(tag(1, WT_LEN)), encodeMessage(item0),
+        box(tag(1, WT_LEN)), encodeMessage(item1));
+    Byte[] secondSlicedRow = concat(box(tag(1, WT_LEN)), encodeMessage(item2));
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).repeated().down()
+            .addField(1, DType.STRUCT).down()
+                .addField(1, DType.INT32)
+                .addField(2, DType.INT32)
+                .addField(3, DType.INT32).repeated()
+            .up()
+        .up()
+        .build();
+    StructType childType = new StructType(true,
+        new BasicType(true, DType.INT32),
+        new BasicType(true, DType.INT32),
+        new ListType(true, new BasicType(true, DType.INT32)));
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, firstSlicedRow, secondSlicedRow, sentinel})
+             .build();
+         ColumnVector expectedItems = ColumnVector.fromLists(
+             new ListType(true, new StructType(true, childType)),
+             Arrays.asList(
+                 struct(struct(1, 2, Arrays.asList(10, 20))),
+                 struct(struct(3, 4, Collections.emptyList()))),
+             Collections.singletonList(
+                 struct(struct(5, 6, Arrays.asList(50, 60)))));
+         ColumnVector expected = ColumnVector.makeStruct(expectedItems)) {
+      ColumnView[] views = input.getColumn(0).splitAsViews(1, 3);
+      try (ColumnVector actualPermissive = Protobuf.decodeToStruct(views[1], schema, false);
+           ColumnVector actualFailfast = Protobuf.decodeToStruct(views[1], schema, true)) {
+        AssertUtils.assertStructColumnsAreEqual(expected, actualPermissive);
+        AssertUtils.assertStructColumnsAreEqual(expected, actualFailfast);
+      } finally {
+        for (ColumnView view : views) {
+          view.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  void testSlicedNullableInputMapsMalformedRootScalarRow_Permissive() {
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] malformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] valid = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .build();
+    StructType outputType = new StructType(true, new BasicType(true, DType.INT32));
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, null, malformed, valid, sentinel})
+             .build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             outputType, (StructData) null, (StructData) null, struct(42))) {
+      ColumnView[] views = input.getColumn(0).splitAsViews(1, 4);
+      try (ColumnVector actual = Protobuf.decodeToStruct(views[1], schema, false)) {
+        AssertUtils.assertStructColumnsAreEqual(expected, actual);
+      } finally {
+        for (ColumnView view : views) {
+          view.close();
+        }
+      }
     }
   }
 

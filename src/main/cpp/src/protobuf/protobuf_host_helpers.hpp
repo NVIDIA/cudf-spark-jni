@@ -49,13 +49,6 @@
 
 namespace spark_rapids_jni::protobuf::detail {
 
-struct enum_string_lookup_device_view {
-  int32_t const* valid_values;
-  int32_t const* name_offsets;
-  uint8_t const* name_chars;
-  int size;
-};
-
 struct enum_string_lookup_tables {
   rmm::device_uvector<int32_t> d_valid_enums;
   rmm::device_uvector<int32_t> d_name_offsets;
@@ -63,33 +56,45 @@ struct enum_string_lookup_tables {
 
   enum_string_lookup_device_view view() const
   {
-    return {d_valid_enums.data(),
+    return {{d_valid_enums.data(), static_cast<int>(d_valid_enums.size())},
             d_name_offsets.data(),
-            d_name_chars.data(),
-            static_cast<int>(d_valid_enums.size())};
+            d_name_chars.data()};
   }
 };
 
 using enum_string_lookup_cache = std::unordered_map<int, enum_string_lookup_tables>;
 
-// ============================================================================
-// Schema-context bundle
-// ============================================================================
+class protobuf_schema {
+ public:
+  explicit protobuf_schema(protobuf_decode_context const& context);
 
-/**
- * View of the per-decode default-value and enum metadata. Reduces parameter pressure on the
- * recursive nested/repeated builders, which all consume the same six host vectors. Holds
- * non-owning references and is cheap to copy, so it is passed by value; the referenced vectors
- * must outlive every call that takes the view.
- */
-struct schema_context_view {
-  std::vector<int64_t> const& default_ints;
-  std::vector<double> const& default_floats;
-  std::vector<bool> const& default_bools;
-  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings;
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values;
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names;
-  enum_string_lookup_cache* enum_lookup_cache = nullptr;
+  protobuf_schema(protobuf_schema const&)            = delete;
+  protobuf_schema& operator=(protobuf_schema const&) = delete;
+  protobuf_schema(protobuf_schema&&)                 = delete;
+  protobuf_schema& operator=(protobuf_schema&&)      = delete;
+
+  [[nodiscard]] std::vector<nested_field_descriptor> const& fields() const
+  {
+    return context_.schema;
+  }
+
+  [[nodiscard]] nested_field_descriptor const& operator[](int schema_idx) const
+  {
+    return context_.schema.at(static_cast<size_t>(schema_idx));
+  }
+
+  [[nodiscard]] size_t size() const { return context_.schema.size(); }
+
+  [[nodiscard]] protobuf_field_meta_view field(int schema_idx) const;
+  [[nodiscard]] std::vector<int> const& children(int parent_schema_idx) const;
+  [[nodiscard]] bool is_output(int schema_idx) const;
+  [[nodiscard]] enum_string_lookup_tables const& enum_lookup(int schema_idx,
+                                                             rmm::cuda_stream_view stream) const;
+
+ private:
+  protobuf_decode_context const& context_;
+  std::vector<std::vector<int>> children_by_parent_;
+  mutable enum_string_lookup_cache enum_lookup_cache_;
 };
 
 struct field_descriptor_bundle {
@@ -99,8 +104,7 @@ struct field_descriptor_bundle {
 };
 
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
-                                               std::vector<nested_field_descriptor> const& schema,
-                                               schema_context_view schema_ctx,
+                                               protobuf_schema const& schema,
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr);
 
@@ -122,35 +126,31 @@ struct nested_parent_view {
   int32_t const* top_row_indices;
 };
 
+enum class enum_error_scope { root, local };
+
 struct protobuf_decode_runtime_context {
   rmm::device_uvector<bool>* row_force_null;
   rmm::device_uvector<protobuf_error>* error;
   rmm::device_uvector<protobuf_error>* deferred_enum_error;
   bool fail_on_errors;
-  bool invalidate_root_on_invalid_enum = true;
 };
 
-struct protobuf_value_decode_context {
-  protobuf_decode_runtime_context runtime;
-  int num_values;
+struct protobuf_value_domain_view {
+  int size;
   int32_t const* top_row_indices = nullptr;
+  enum_error_scope enum_scope    = enum_error_scope::local;
 };
 
-struct protobuf_field_decode_view {
+struct protobuf_field_decode_request {
+  protobuf_schema const& schema;
   uint8_t const* message_data;
-  protobuf_field_meta_view field;
-  protobuf_value_decode_context values;
-};
-
-struct enum_string_decode_view {
-  cudf::detail::host_vector<int32_t> const& valid_enums;
-  std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes;
-  protobuf_value_decode_context values;
+  int schema_idx;
+  protobuf_decode_runtime_context runtime;
+  protobuf_value_domain_view values;
 };
 
 struct recursive_decode_context {
-  std::vector<nested_field_descriptor> const& schema;
-  schema_context_view schema_metadata;
+  protobuf_schema const& schema;
   protobuf_decode_runtime_context runtime;
 };
 
@@ -383,6 +383,12 @@ std::vector<int> find_child_field_indices(SchemaT const& schema, int parent_idx)
   return child_indices;
 }
 
+inline std::vector<int> const& find_child_field_indices(protobuf_schema const& schema,
+                                                        int parent_idx)
+{
+  return schema.children(parent_idx);
+}
+
 // Forward declarations needed by make_empty_struct_column_with_schema
 std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
                                                      rmm::cuda_stream_view stream,
@@ -452,7 +458,7 @@ std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto child_indices = find_child_field_indices(schema, parent_idx);
+  auto const& child_indices = find_child_field_indices(schema, parent_idx);
   return make_empty_struct_column_from_children(schema, child_indices, stream, mr);
 }
 
@@ -464,19 +470,16 @@ void maybe_check_required_fields(required_field_input_view input,
 
 void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
                                     rmm::device_uvector<bool>& valid,
-                                    int32_t const* valid_enums,
-                                    int num_valid_enums,
+                                    enum_domain_device_view enum_domain,
                                     protobuf_decode_runtime_context decode_ctx,
-                                    int num_items,
-                                    int32_t const* top_row_indices,
+                                    protobuf_value_domain_view value_domain,
                                     rmm::cuda_stream_view stream);
 
 void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
                                     rmm::device_uvector<bool>& valid,
                                     cudf::detail::host_vector<int32_t> const& valid_enums,
                                     protobuf_decode_runtime_context decode_ctx,
-                                    int num_items,
-                                    int32_t const* top_row_indices,
+                                    protobuf_value_domain_view value_domain,
                                     rmm::cuda_stream_view stream);
 
 // ============================================================================
@@ -491,12 +494,11 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
 // Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
 // in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce
 // but with `num_rows` all-null rows.
-std::unique_ptr<cudf::column> make_null_column_with_schema(
-  std::vector<nested_field_descriptor> const& schema,
-  int schema_idx,
-  cudf::size_type num_rows,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const& schema,
+                                                           int schema_idx,
+                                                           cudf::size_type num_rows,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> make_null_list_column_with_child(
   std::unique_ptr<cudf::column> child_col,
@@ -506,7 +508,7 @@ std::unique_ptr<cudf::column> make_null_list_column_with_child(
 
 std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
                                                        rmm::device_uvector<bool>& valid,
-                                                       enum_string_decode_view input,
+                                                       protobuf_field_decode_request request,
                                                        rmm::cuda_stream_view stream,
                                                        rmm::device_async_resource_ref mr);
 
@@ -524,7 +526,7 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
 std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  protobuf_field_meta_view field,
+  protobuf_schema const& schema,
   protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
   rmm::cuda_stream_view stream,

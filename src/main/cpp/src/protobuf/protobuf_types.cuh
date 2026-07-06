@@ -19,6 +19,7 @@
 #include "protobuf/protobuf.hpp"
 
 #include <string>
+#include <type_traits>
 
 namespace spark_rapids_jni::protobuf::detail {
 
@@ -91,6 +92,22 @@ struct field_location {
   int32_t offset;  // Offset of field data within the message (-1 if not found)
   int32_t length;  // Length of field data in bytes
 };
+
+struct enum_domain_device_view {
+  int32_t const* valid_values;
+  int size;
+};
+
+struct enum_string_lookup_device_view {
+  enum_domain_device_view domain;
+  int32_t const* name_offsets;
+  uint8_t const* name_chars;
+};
+
+static_assert(std::is_trivially_copyable_v<enum_domain_device_view>);
+static_assert(std::is_standard_layout_v<enum_domain_device_view>);
+static_assert(std::is_trivially_copyable_v<enum_string_lookup_device_view>);
+static_assert(std::is_standard_layout_v<enum_string_lookup_device_view>);
 
 /**
  * Field descriptor passed to the scanning kernel.

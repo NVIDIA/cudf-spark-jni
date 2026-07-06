@@ -166,10 +166,9 @@ struct message_fragment_location_provider {
 };
 
 struct scalar_value_input {
-  uint8_t const* message_data;
-  field_location location;
-  int32_t data_offset;
-  int index;
+  uint8_t const* data;
+  int32_t length;
+  bool present;
 };
 
 struct enum_value_device_view {
@@ -191,35 +190,54 @@ struct scalar_decode_options {
   T default_value;
 };
 
+static_assert(std::is_trivially_copyable_v<scalar_value_input>);
+static_assert(std::is_standard_layout_v<scalar_value_input>);
+static_assert(std::is_trivially_copyable_v<enum_value_device_view>);
+static_assert(std::is_standard_layout_v<enum_value_device_view>);
+static_assert(std::is_trivially_copyable_v<scalar_value_output<int32_t>>);
+static_assert(std::is_standard_layout_v<scalar_value_output<int32_t>>);
+static_assert(std::is_trivially_copyable_v<scalar_decode_options<int64_t>>);
+static_assert(std::is_standard_layout_v<scalar_decode_options<int64_t>>);
+
+__device__ inline scalar_value_input resolve_scalar_value(uint8_t const* message_data,
+                                                          field_location location,
+                                                          int32_t data_offset)
+{
+  return {location.offset < 0 ? nullptr : message_data + data_offset,
+          location.length,
+          location.offset >= 0};
+}
+
 template <typename OutputType, bool ZigZag = false>
 __device__ inline void decode_varint_value(scalar_value_input input,
+                                           int index,
                                            scalar_decode_options<int64_t> options,
                                            scalar_value_output<OutputType> output)
 {
-  if (input.location.offset < 0) {
+  if (!input.present) {
     if (options.has_default) {
-      write_varint_value(&output.values[input.index], static_cast<uint64_t>(options.default_value));
-      if (output.valid) output.valid[input.index] = true;
+      write_varint_value(&output.values[index], static_cast<uint64_t>(options.default_value));
+      if (output.valid) output.valid[index] = true;
     } else {
-      if (output.valid) output.valid[input.index] = false;
+      if (output.valid) output.valid[index] = false;
     }
     return;
   }
 
-  uint8_t const* cur     = input.message_data + input.data_offset;
-  uint8_t const* cur_end = cur + input.location.length;
+  uint8_t const* cur     = input.data;
+  uint8_t const* cur_end = cur + input.length;
 
   uint64_t v;
   int n;
   if (!read_varint(cur, cur_end, v, n)) {
     set_error_once(output.error, protobuf_error::VARINT);
-    if (output.valid) output.valid[input.index] = false;
+    if (output.valid) output.valid[index] = false;
     return;
   }
 
   if constexpr (ZigZag) { v = (v >> 1) ^ (-(v & 1)); }
-  write_varint_value(&output.values[input.index], v);
-  if (output.valid) output.valid[input.index] = true;
+  write_varint_value(&output.values[index], v);
+  if (output.valid) output.valid[index] = true;
 }
 
 template <typename OutputType, bool ZigZag = false, typename LocationProvider>
@@ -234,47 +252,49 @@ CUDF_KERNEL void extract_varint_kernel(uint8_t const* message_data,
 
   int32_t data_offset = 0;
   auto loc            = loc_provider.get(idx, data_offset);
-  decode_varint_value<OutputType, ZigZag>({message_data, loc, data_offset, idx}, options, output);
+  decode_varint_value<OutputType, ZigZag>(
+    resolve_scalar_value(message_data, loc, data_offset), idx, options, output);
 }
 
 template <typename OutputType, int WT>
 __device__ inline void decode_fixed_value(scalar_value_input input,
+                                          int index,
                                           scalar_decode_options<OutputType> options,
                                           scalar_value_output<OutputType> output)
 {
-  if (input.location.offset < 0) {
+  if (!input.present) {
     if (options.has_default) {
-      output.values[input.index] = options.default_value;
-      if (output.valid) output.valid[input.index] = true;
+      output.values[index] = options.default_value;
+      if (output.valid) output.valid[index] = true;
     } else {
-      if (output.valid) output.valid[input.index] = false;
+      if (output.valid) output.valid[index] = false;
     }
     return;
   }
 
-  uint8_t const* cur = input.message_data + input.data_offset;
+  uint8_t const* cur = input.data;
   OutputType value;
 
   if constexpr (WT == wire_type_value(proto_wire_type::I32BIT)) {
-    if (input.location.length < 4) {
+    if (input.length < 4) {
       set_error_once(output.error, protobuf_error::FIXED_LEN);
-      if (output.valid) output.valid[input.index] = false;
+      if (output.valid) output.valid[index] = false;
       return;
     }
     uint32_t raw = load_le<uint32_t>(cur);
     memcpy(&value, &raw, sizeof(value));
   } else {
-    if (input.location.length < 8) {
+    if (input.length < 8) {
       set_error_once(output.error, protobuf_error::FIXED_LEN);
-      if (output.valid) output.valid[input.index] = false;
+      if (output.valid) output.valid[index] = false;
       return;
     }
     uint64_t raw = load_le<uint64_t>(cur);
     memcpy(&value, &raw, sizeof(value));
   }
 
-  output.values[input.index] = value;
-  if (output.valid) output.valid[input.index] = true;
+  output.values[index] = value;
+  if (output.valid) output.valid[index] = true;
 }
 
 template <typename OutputType, int WT, typename LocationProvider>
@@ -289,7 +309,8 @@ CUDF_KERNEL void extract_fixed_kernel(uint8_t const* message_data,
 
   int32_t data_offset = 0;
   auto loc            = loc_provider.get(idx, data_offset);
-  decode_fixed_value<OutputType, WT>({message_data, loc, data_offset, idx}, options, output);
+  decode_fixed_value<OutputType, WT>(
+    resolve_scalar_value(message_data, loc, data_offset), idx, options, output);
 }
 
 // ============================================================================
@@ -329,9 +350,11 @@ CUDF_KERNEL void extract_varint_batched_kernel(batched_scalar_input_view input)
   auto* out        = static_cast<OutputType*>(desc.output);
   int32_t data_offset =
     loc.offset < 0 ? 0 : input.row_offsets[row] - input.base_offset + loc.offset;
-  decode_varint_value<OutputType, ZigZag>({input.message_data, loc, data_offset, row},
-                                          {desc.has_default, desc.default_int},
-                                          {out, desc.valid, input.error});
+  decode_varint_value<OutputType, ZigZag>(
+    resolve_scalar_value(input.message_data, loc, data_offset),
+    row,
+    {desc.has_default, desc.default_int},
+    {out, desc.valid, input.error});
 }
 
 template <typename OutputType, int WT>
@@ -352,7 +375,8 @@ CUDF_KERNEL void extract_fixed_batched_kernel(batched_scalar_input_view input)
   } else {
     default_value = static_cast<OutputType>(desc.default_float);
   }
-  decode_fixed_value<OutputType, WT>({input.message_data, loc, data_offset, row},
+  decode_fixed_value<OutputType, WT>(resolve_scalar_value(input.message_data, loc, data_offset),
+                                     row,
                                      {desc.has_default, default_value},
                                      {out, desc.valid, input.error});
 }
@@ -688,16 +712,15 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
 }
 
 template <typename LocationProvider>
-inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_view input,
+inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_request request,
                                                           LocationProvider const& loc_provider,
                                                           rmm::cuda_stream_view stream,
                                                           rmm::device_async_resource_ref mr)
 {
-  auto const field             = input.field;
-  auto const message_data      = input.message_data;
-  auto const decode_ctx        = input.values.runtime;
-  auto const num_items         = input.values.num_values;
-  auto const top_row_indices   = input.values.top_row_indices;
+  auto const field             = request.schema.field(request.schema_idx);
+  auto const message_data      = request.message_data;
+  auto const decode_ctx        = request.runtime;
+  auto const num_items         = request.values.size;
   auto const dt                = field.output_type;
   auto const has_default       = field.schema.has_default_value;
   auto const threads_per_block = THREADS_PER_BLOCK;
@@ -737,7 +760,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         stream);
       if (!field.enum_valid_values.empty()) {
         validate_enum_and_apply_policy(
-          out, valid, field.enum_valid_values, decode_ctx, num_items, top_row_indices, stream);
+          out, valid, field.enum_valid_values, decode_ctx, request.values, stream);
       }
       auto [mask, null_count] = make_null_mask_from_valid(valid, num_items, stream, mr);
       return std::make_unique<cudf::column>(
@@ -794,7 +817,7 @@ template <typename T>
 inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  protobuf_field_meta_view field,
+  protobuf_schema const& schema,
   protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
   rmm::cuda_stream_view stream,
@@ -802,6 +825,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
 {
   validate_nonempty_repeated_field_work(work, input.num_rows);
 
+  auto const field                 = schema.field(work.schema_idx);
   auto const total_count           = work.total_count;
   auto& occurrences                = *work.occurrences;
   auto const threads               = THREADS_PER_BLOCK;
@@ -817,11 +841,15 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
     if (!field.enum_valid_values.empty()) {
       auto const scratch_mr = cudf::get_current_device_resource_ref();
       auto top_row_indices  = materialize_top_row_indices(occurrences, nullptr, stream, scratch_mr);
-      child_col             = extract_typed_column(
-        {input.message_data, field, {decode_ctx, total_count, top_row_indices.data()}},
-        loc_provider,
-        stream,
-        mr);
+      child_col =
+        extract_typed_column({schema,
+                              input.message_data,
+                              work.schema_idx,
+                              decode_ctx,
+                              {total_count, top_row_indices.data(), enum_error_scope::root}},
+                             loc_provider,
+                             stream,
+                             mr);
     }
   }
 
@@ -887,7 +915,7 @@ void launch_scan_all_fields(cudf::column_device_view const& d_in,
 
 void launch_validate_enum_values(enum_value_device_view input,
                                  bool* item_has_invalid_enum,
-                                 enum_string_lookup_device_view lookup,
+                                 enum_domain_device_view domain,
                                  rmm::cuda_stream_view stream);
 
 void launch_compute_enum_string_lengths(enum_value_device_view input,

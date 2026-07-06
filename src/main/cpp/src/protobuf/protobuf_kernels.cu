@@ -933,7 +933,7 @@ __device__ inline int enum_binary_search(int32_t const* valid_enum_values,
  */
 CUDF_KERNEL void validate_enum_values_kernel(enum_value_device_view input,
                                              bool* item_has_invalid_enum,
-                                             enum_string_lookup_device_view lookup)
+                                             enum_domain_device_view domain)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= input.size) return;
@@ -941,7 +941,7 @@ CUDF_KERNEL void validate_enum_values_kernel(enum_value_device_view input,
   // Skip if already invalid (field was missing) - missing field is not an enum error
   if (!input.valid[row]) return;
 
-  if (enum_binary_search(lookup.valid_values, lookup.size, input.values[row]) < 0) {
+  if (enum_binary_search(domain.valid_values, domain.size, input.values[row]) < 0) {
     input.valid[row]           = false;
     item_has_invalid_enum[row] = true;
   }
@@ -963,7 +963,7 @@ CUDF_KERNEL void compute_enum_string_lengths_kernel(enum_value_device_view input
     return;
   }
 
-  int idx = enum_binary_search(lookup.valid_values, lookup.size, input.values[row]);
+  int idx = enum_binary_search(lookup.domain.valid_values, lookup.domain.size, input.values[row]);
   // Should not happen when validate_enum_values_kernel has already run, but keep safe.
   lengths[row] = idx >= 0 ? (lookup.name_offsets[idx + 1] - lookup.name_offsets[idx]) : 0;
 }
@@ -980,7 +980,7 @@ CUDF_KERNEL void copy_enum_string_chars_kernel(enum_value_device_view input,
   if (row >= input.size) return;
   if (!input.valid[row]) return;
 
-  int idx = enum_binary_search(lookup.valid_values, lookup.size, input.values[row]);
+  int idx = enum_binary_search(lookup.domain.valid_values, lookup.domain.size, input.values[row]);
   if (idx < 0) return;
   int32_t src_begin = lookup.name_offsets[idx];
   int32_t src_end   = lookup.name_offsets[idx + 1];
@@ -1179,13 +1179,13 @@ void launch_compute_msg_locations_from_occurrences(protobuf_input_view input,
 
 void launch_validate_enum_values(enum_value_device_view input,
                                  bool* item_has_invalid_enum,
-                                 enum_string_lookup_device_view lookup,
+                                 enum_domain_device_view domain,
                                  rmm::cuda_stream_view stream)
 {
   if (input.size == 0) return;
   auto const blocks = static_cast<int>((input.size + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   validate_enum_values_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
-    input, item_has_invalid_enum, lookup);
+    input, item_has_invalid_enum, domain);
 }
 
 void launch_compute_enum_string_lengths(enum_value_device_view input,
@@ -1250,11 +1250,10 @@ namespace {
 
 void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
                                protobuf_decode_runtime_context decode_ctx,
-                               int num_items,
-                               int32_t const* top_row_indices,
+                               protobuf_value_domain_view value_domain,
                                rmm::cuda_stream_view stream)
 {
-  if (num_items == 0 || !decode_ctx.invalidate_root_on_invalid_enum) return;
+  if (value_domain.size == 0 || value_domain.enum_scope == enum_error_scope::local) return;
 
   CUDF_EXPECTS(decode_ctx.row_force_null != nullptr,
                "enum validation requires a row-invalid buffer");
@@ -1268,7 +1267,7 @@ void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
   if (decode_ctx.fail_on_errors) {
     thrust::for_each(rmm::exec_policy_nosync(stream, scratch_mr),
                      thrust::make_counting_iterator(0),
-                     thrust::make_counting_iterator(num_items),
+                     thrust::make_counting_iterator(value_domain.size),
                      [item_invalid = item_invalid.data(),
                       error        = decode_ctx.deferred_enum_error->data()] __device__(int idx) {
                        if (item_invalid[idx]) {
@@ -1280,12 +1279,12 @@ void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
 
   auto& row_invalid = *decode_ctx.row_force_null;
   CUDF_EXPECTS(!row_invalid.is_empty(), "PERMISSIVE enum validation requires a row-invalid buffer");
-  if (top_row_indices == nullptr) {
-    CUDF_EXPECTS(static_cast<size_t>(num_items) <= row_invalid.size(),
+  if (value_domain.top_row_indices == nullptr) {
+    CUDF_EXPECTS(static_cast<size_t>(value_domain.size) <= row_invalid.size(),
                  "enum invalid-row propagation exceeded row buffer");
     thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                       row_invalid.begin(),
-                      row_invalid.begin() + num_items,
+                      row_invalid.begin() + value_domain.size,
                       item_invalid.begin(),
                       row_invalid.begin(),
                       [] __device__(bool row_is_invalid, bool item_is_invalid) {
@@ -1301,10 +1300,10 @@ void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
   thrust::for_each(
     rmm::exec_policy_nosync(stream, scratch_mr),
     thrust::make_counting_iterator(0),
-    thrust::make_counting_iterator(num_items),
-    [item_invalid = item_invalid.data(),
-     top_row_indices,
-     row_invalid = row_invalid.data()] __device__(int idx) {
+    thrust::make_counting_iterator(value_domain.size),
+    [item_invalid    = item_invalid.data(),
+     top_row_indices = value_domain.top_row_indices,
+     row_invalid     = row_invalid.data()] __device__(int idx) {
       if (item_invalid[idx]) {
         cuda::atomic_ref<bool, cuda::thread_scope_device> ref(row_invalid[top_row_indices[idx]]);
         ref.store(true, cuda::memory_order_relaxed);
@@ -1316,46 +1315,49 @@ void apply_invalid_enum_policy(rmm::device_uvector<bool> const& item_invalid,
 
 void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
                                     rmm::device_uvector<bool>& valid,
-                                    int32_t const* valid_enums,
-                                    int num_valid_enums,
+                                    enum_domain_device_view enum_domain,
                                     protobuf_decode_runtime_context decode_ctx,
-                                    int num_items,
-                                    int32_t const* top_row_indices,
+                                    protobuf_value_domain_view value_domain,
                                     rmm::cuda_stream_view stream)
 {
-  if (num_items == 0 || num_valid_enums == 0) return;
-  CUDF_EXPECTS(valid_enums != nullptr, "enum validation requires valid enum values");
+  CUDF_EXPECTS(value_domain.size >= 0, "enum value count must be non-negative");
+  CUDF_EXPECTS(values.size() == static_cast<size_t>(value_domain.size),
+               "enum values size must match value domain");
+  CUDF_EXPECTS(valid.size() == static_cast<size_t>(value_domain.size),
+               "enum validity size must match value domain");
+  if (value_domain.size == 0 || enum_domain.size == 0) return;
+  CUDF_EXPECTS(enum_domain.valid_values != nullptr, "enum validation requires valid enum values");
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  rmm::device_uvector<bool> item_invalid(num_items, stream, scratch_mr);
+  rmm::device_uvector<bool> item_invalid(value_domain.size, stream, scratch_mr);
   thrust::fill(
     rmm::exec_policy_nosync(stream, scratch_mr), item_invalid.begin(), item_invalid.end(), false);
-  launch_validate_enum_values({values.data(), valid.data(), num_items},
-                              item_invalid.data(),
-                              {valid_enums, nullptr, nullptr, num_valid_enums},
-                              stream);
-  apply_invalid_enum_policy(item_invalid, decode_ctx, num_items, top_row_indices, stream);
+  launch_validate_enum_values(
+    {values.data(), valid.data(), value_domain.size}, item_invalid.data(), enum_domain, stream);
+  apply_invalid_enum_policy(item_invalid, decode_ctx, value_domain, stream);
 }
 
 void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
                                     rmm::device_uvector<bool>& valid,
                                     cudf::detail::host_vector<int32_t> const& valid_enums,
                                     protobuf_decode_runtime_context decode_ctx,
-                                    int num_items,
-                                    int32_t const* top_row_indices,
+                                    protobuf_value_domain_view value_domain,
                                     rmm::cuda_stream_view stream)
 {
-  if (num_items == 0 || valid_enums.empty()) return;
+  CUDF_EXPECTS(value_domain.size >= 0, "enum value count must be non-negative");
+  CUDF_EXPECTS(values.size() == static_cast<size_t>(value_domain.size),
+               "enum values size must match value domain");
+  CUDF_EXPECTS(valid.size() == static_cast<size_t>(value_domain.size),
+               "enum validity size must match value domain");
+  if (value_domain.size == 0 || valid_enums.empty()) return;
 
   auto d_valid_enums = cudf::detail::make_device_uvector_async(
     valid_enums, stream, cudf::get_current_device_resource_ref());
   validate_enum_and_apply_policy(values,
                                  valid,
-                                 d_valid_enums.data(),
-                                 static_cast<int>(d_valid_enums.size()),
+                                 {d_valid_enums.data(), static_cast<int>(d_valid_enums.size())},
                                  decode_ctx,
-                                 num_items,
-                                 top_row_indices,
+                                 value_domain,
                                  stream);
 }
 
