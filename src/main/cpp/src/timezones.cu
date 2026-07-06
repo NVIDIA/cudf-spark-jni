@@ -553,6 +553,8 @@ void validate_timezone_table(cudf::table_view const* table)
   CUDF_EXPECTS(table->column(0).type().id() == cudf::type_id::INT64 &&
                  table->column(1).type().id() == cudf::type_id::INT32,
                "Timezone table columns must be INT64 transitions and INT32 offsets");
+  CUDF_EXPECTS(table->column(0).size() == table->column(1).size(),
+               "Transition and offset columns must have the same size");
 }
 
 CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
