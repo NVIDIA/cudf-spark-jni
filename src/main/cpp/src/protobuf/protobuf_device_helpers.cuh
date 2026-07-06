@@ -86,13 +86,9 @@ __device__ inline int get_wire_type_size(int wt, uint8_t const* cur, uint8_t con
 {
   switch (wt) {
     case wire_type_value(proto_wire_type::VARINT): {
-      // Need to scan to find the end of varint
-      int count = 0;
-      while (cur < end && count < MAX_VARINT_BYTES) {
-        if ((*cur++ & 0x80u) == 0) { return count + 1; }
-        count++;
-      }
-      return -1;  // Invalid varint
+      uint64_t value;
+      int bytes;
+      return read_varint(cur, end, value, bytes) ? bytes : -1;
     }
     case wire_type_value(proto_wire_type::I64BIT):
       // Check if there's enough data for 8 bytes
@@ -112,66 +108,70 @@ __device__ inline int get_wire_type_size(int wt, uint8_t const* cur, uint8_t con
       }
       return n + static_cast<int>(len);
     }
-    case wire_type_value(proto_wire_type::SGROUP): {
-      auto const* start = cur;
-      int depth         = 1;
-      while (cur < end && depth > 0) {
-        uint64_t key;
-        int key_bytes;
-        if (!read_varint(cur, end, key, key_bytes)) return -1;
-        cur += key_bytes;
-
-        int inner_wt = static_cast<int>(key & 0x7);
-        if (inner_wt == wire_type_value(proto_wire_type::EGROUP)) {
-          --depth;
-          if (depth == 0) { return static_cast<int>(cur - start); }
-        } else if (inner_wt == wire_type_value(proto_wire_type::SGROUP)) {
-          if (++depth > 32) return -1;
-        } else {
-          int inner_size = -1;
-          switch (inner_wt) {
-            case wire_type_value(proto_wire_type::VARINT): {
-              uint64_t dummy;
-              int vbytes;
-              if (!read_varint(cur, end, dummy, vbytes)) return -1;
-              inner_size = vbytes;
-              break;
-            }
-            case wire_type_value(proto_wire_type::I64BIT): inner_size = 8; break;
-            case wire_type_value(proto_wire_type::LEN): {
-              uint64_t len;
-              int len_bytes;
-              if (!read_varint(cur, end, len, len_bytes)) return -1;
-              if (len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max() - len_bytes)) {
-                return -1;
-              }
-              inner_size = len_bytes + static_cast<int>(len);
-              break;
-            }
-            case wire_type_value(proto_wire_type::I32BIT): inner_size = 4; break;
-            default: return -1;
-          }
-          if (inner_size < 0 || cur + inner_size > end) return -1;
-          cur += inner_size;
-        }
-      }
-      return -1;
-    }
-    case wire_type_value(proto_wire_type::EGROUP): return 0;
+    case wire_type_value(proto_wire_type::SGROUP):
+    case wire_type_value(proto_wire_type::EGROUP): return -1;
     default: return -1;
   }
 }
 
+// Keep the rare group stack out of the scanner hot paths.
+static __device__ __noinline__ bool skip_group(uint8_t const* cur,
+                                               uint8_t const* end,
+                                               int field_number,
+                                               int max_group_depth,
+                                               uint8_t const*& out_cur)
+{
+  if (max_group_depth < 1) return false;
+  int group_fields[PROTOBUF_JAVA_RECURSION_LIMIT];
+  int depth       = 1;
+  group_fields[0] = field_number;
+
+  while (cur < end) {
+    uint64_t key;
+    int key_bytes;
+    if (!read_varint(cur, end, key, key_bytes)) return false;
+    cur += key_bytes;
+
+    auto const inner_field_number = key >> 3;
+    if (inner_field_number == 0 || inner_field_number > static_cast<uint64_t>(MAX_FIELD_NUMBER)) {
+      return false;
+    }
+    int const inner_wire_type = static_cast<int>(key & 0x7);
+    if (inner_wire_type == wire_type_value(proto_wire_type::EGROUP)) {
+      if (static_cast<int>(inner_field_number) != group_fields[depth - 1]) return false;
+      if (--depth == 0) {
+        out_cur = cur;
+        return true;
+      }
+      continue;
+    }
+    if (inner_wire_type == wire_type_value(proto_wire_type::SGROUP)) {
+      if (depth == max_group_depth) return false;
+      group_fields[depth++] = static_cast<int>(inner_field_number);
+      continue;
+    }
+
+    int const inner_size = get_wire_type_size(inner_wire_type, cur, end);
+    if (inner_size < 0 || inner_size > end - cur) return false;
+    cur += inner_size;
+  }
+  return false;
+}
+
 __device__ inline bool skip_field(uint8_t const* cur,
                                   uint8_t const* end,
+                                  int field_number,
                                   int wt,
+                                  int max_group_depth,
                                   uint8_t const*& out_cur)
 {
-  // A bare end-group is only valid while a start-group payload is being parsed recursively inside
-  // get_wire_type_size(wire_type_value(proto_wire_type::SGROUP)).
+  // A bare end-group is only valid while a start-group payload is being parsed by skip_group.
   // The scan/count kernels should never accept it as a standalone field because Spark CPU treats
   // unmatched end-groups as malformed protobuf.
   if (wt == wire_type_value(proto_wire_type::EGROUP)) { return false; }
+  if (wt == wire_type_value(proto_wire_type::SGROUP)) {
+    return skip_group(cur, end, field_number, max_group_depth, out_cur);
+  }
 
   int size = get_wire_type_size(wt, cur, end);
   if (size < 0) return false;

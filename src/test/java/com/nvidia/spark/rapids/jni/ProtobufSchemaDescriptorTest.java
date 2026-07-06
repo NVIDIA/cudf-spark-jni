@@ -107,6 +107,29 @@ public class ProtobufSchemaDescriptorTest {
   }
 
   @Test
+  void testEnumMetadataRequiresCompatibleOutputType() {
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT64).enumValidValues(new int[]{0, 1})
+            .build());
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).wireType(Protobuf.WT_32BIT)
+                .encoding(Protobuf.ENC_FIXED).enumValidValues(new int[]{0, 1})
+            .build());
+    assertDoesNotThrow(() ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).enumValidValues(new int[]{0, 1})
+            .build());
+    assertDoesNotThrow(() ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.STRING)
+                .enumMetadata(new int[]{0, 1},
+                    new byte[][]{"A".getBytes(), "B".getBytes()})
+            .build());
+  }
+
+  @Test
   void testDuplicateFieldNumbersUnderSameParentRejected() {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()

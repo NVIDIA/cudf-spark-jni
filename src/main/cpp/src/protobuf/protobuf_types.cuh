@@ -25,6 +25,9 @@ namespace spark_rapids_jni::protobuf::detail {
 // Protobuf varint encoding uses at most 10 bytes to represent a 64-bit value.
 constexpr int MAX_VARINT_BYTES = 10;
 
+// Match protobuf-java's shared embedded-message/group recursion limit.
+constexpr int PROTOBUF_JAVA_RECURSION_LIMIT = 100;
+
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
 
@@ -32,7 +35,7 @@ constexpr int THREADS_PER_BLOCK = 256;
 // Field numbers above this threshold fall back to linear search.
 constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
 
-// Maximum number of top-level repeated fields the combined occurrence-scan kernel can process
+// Maximum number of repeated fields in one message the combined occurrence-scan kernel can process
 // in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
 // array on the stack; raising the limit pushes the array into local memory, which would otherwise
 // cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the

@@ -25,7 +25,7 @@ import java.util.Set;
  * that describe field structure, types, defaults, and enum metadata.
  *
  * <p>Use this class instead of passing 15+ individual arrays through the JNI boundary.
- * Validation is performed once in the constructor (and again on deserialization).
+ * Validation is performed during construction and deserialization.
  *
  * <p>All arrays provided to the constructor are defensively copied to guarantee immutability.
  * During deserialization, {@code defaultReadObject()} reconstructs a fresh object graph and
@@ -238,7 +238,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
-      validateEnumMetadata(i, encodings[i], enumValidValues[i], enumNames[i],
+      validateEnumMetadata(i, encodings[i], outputTypeIds[i], enumValidValues[i], enumNames[i],
           hasDefaultValue[i], defaultInts[i]);
     }
   }
@@ -337,7 +337,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     }
   }
 
-  private static void validateEnumMetadata(int index, int encoding,
+  private static void validateEnumMetadata(int index, int encoding, int outputTypeId,
                                             int[] validValues, byte[][] names,
                                             boolean hasDefault, long defaultValue) {
     if (encoding == Protobuf.ENC_ENUM_STRING &&
@@ -348,6 +348,14 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
           " must provide non-empty enumValidValues and enumNames");
     }
     if (validValues != null) {
+      boolean isNumericEnum = outputTypeId == INT32_TYPE_ID &&
+          encoding == Protobuf.ENC_DEFAULT;
+      if (validValues.length > 0 &&
+          !isNumericEnum && encoding != Protobuf.ENC_ENUM_STRING) {
+        throw new IllegalArgumentException(
+            "Enum metadata at index " + index +
+            " requires default-encoded INT32 or enum-as-string output");
+      }
       for (int j = 1; j < validValues.length; j++) {
         if (validValues[j] <= validValues[j - 1]) {
           throw new IllegalArgumentException(

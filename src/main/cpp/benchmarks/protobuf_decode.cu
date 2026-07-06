@@ -15,26 +15,23 @@
  */
 
 #include <cudf/column/column_factories.hpp>
-#include <cudf/detail/utilities/cuda_memcpy.hpp>
-#include <cudf/lists/lists_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
 #include <rmm/device_buffer.hpp>
-#include <rmm/device_uvector.hpp>
 
 #include <nvbench/nvbench.cuh>
 #include <protobuf.hpp>
-#include <protobuf_common.cuh>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <random>
-#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
+
+namespace protobuf = spark_rapids_jni::protobuf;
 
 // ---------------------------------------------------------------------------
 // Protobuf wire-format encoding helpers (host side, for generating test data)
@@ -56,17 +53,13 @@ void encode_tag(std::vector<uint8_t>& buf, int field_number, int wire_type)
 
 void encode_varint_field(std::vector<uint8_t>& buf, int field_number, int64_t value)
 {
-  encode_tag(buf,
-             field_number,
-             spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT));
+  encode_tag(buf, field_number, protobuf::wire_type_value(protobuf::proto_wire_type::VARINT));
   encode_varint(buf, static_cast<uint64_t>(value));
 }
 
 void encode_fixed32_field(std::vector<uint8_t>& buf, int field_number, float value)
 {
-  encode_tag(buf,
-             field_number,
-             spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I32BIT));
+  encode_tag(buf, field_number, protobuf::wire_type_value(protobuf::proto_wire_type::I32BIT));
   uint32_t bits;
   std::memcpy(&bits, &value, sizeof(bits));
   for (int i = 0; i < 4; i++) {
@@ -77,9 +70,7 @@ void encode_fixed32_field(std::vector<uint8_t>& buf, int field_number, float val
 
 void encode_fixed64_field(std::vector<uint8_t>& buf, int field_number, double value)
 {
-  encode_tag(buf,
-             field_number,
-             spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I64BIT));
+  encode_tag(buf, field_number, protobuf::wire_type_value(protobuf::proto_wire_type::I64BIT));
   uint64_t bits;
   std::memcpy(&bits, &value, sizeof(bits));
   for (int i = 0; i < 8; i++) {
@@ -90,8 +81,7 @@ void encode_fixed64_field(std::vector<uint8_t>& buf, int field_number, double va
 
 void encode_len_field(std::vector<uint8_t>& buf, int field_number, void const* data, size_t len)
 {
-  encode_tag(
-    buf, field_number, spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::LEN));
+  encode_tag(buf, field_number, protobuf::wire_type_value(protobuf::proto_wire_type::LEN));
   encode_varint(buf, len);
   auto const* p = static_cast<uint8_t const*>(data);
   buf.insert(buf.end(), p, p + len);
@@ -130,7 +120,7 @@ void encode_packed_repeated_int32(std::vector<uint8_t>& buf,
 std::unique_ptr<cudf::column> make_binary_column(std::vector<std::vector<uint8_t>> const& messages)
 {
   auto stream = cudf::get_default_stream();
-  auto mr     = rmm::mr::get_current_device_resource();
+  auto mr     = cudf::get_current_device_resource_ref();
 
   std::vector<int32_t> h_offsets(messages.size() + 1);
   h_offsets[0] = 0;
@@ -168,32 +158,31 @@ std::unique_ptr<cudf::column> make_binary_column(std::vector<std::vector<uint8_t
 // Schema + message generators for different benchmark scenarios
 // ---------------------------------------------------------------------------
 
-using nfd                    = spark_rapids_jni::nested_field_descriptor;
-using pb_field_location      = spark_rapids_jni::protobuf_detail::field_location;
-using pb_repeated_occurrence = spark_rapids_jni::protobuf_detail::repeated_occurrence;
+using protobuf::nested_field_descriptor;
+using protobuf::proto_encoding;
+using protobuf::proto_wire_type;
 
-inline int32_t checked_size_to_i32(size_t value, char const* what)
+nested_field_descriptor make_field_descriptor(int field_number,
+                                              int parent_idx,
+                                              int depth,
+                                              proto_wire_type wire_type,
+                                              cudf::type_id output_type,
+                                              bool is_repeated        = false,
+                                              proto_encoding encoding = proto_encoding::DEFAULT)
 {
-  if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-    throw std::overflow_error(std::string("benchmark protobuf size exceeds int32_t for ") + what);
-  }
-  return static_cast<int32_t>(value);
+  return {
+    field_number, parent_idx, depth, wire_type, output_type, encoding, is_repeated, false, false};
 }
 
-void encode_string_field_record(std::vector<uint8_t>& buf,
-                                int field_number,
-                                std::string const& s,
-                                std::vector<pb_repeated_occurrence>& out_occurrences,
-                                int32_t row_idx)
+void initialize_context_metadata(protobuf::protobuf_decode_context& context)
 {
-  encode_tag(buf,
-             field_number,
-             /*spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::LEN)=*/2);
-  encode_varint(buf, s.size());
-  auto const data_offset = checked_size_to_i32(buf.size(), "string field data offset");
-  buf.insert(buf.end(), s.begin(), s.end());
-  out_occurrences.push_back(
-    {row_idx, data_offset, checked_size_to_i32(s.size(), "string field length")});
+  auto const size = context.schema.size();
+  context.default_ints.resize(size, 0);
+  context.default_floats.resize(size, 0.0);
+  context.default_bools.resize(size, false);
+  context.default_strings.resize(size);
+  context.enum_valid_values.resize(size);
+  context.enum_names.resize(size);
 }
 
 // Case 1: Flat scalars only — many top-level scalar fields.
@@ -205,62 +194,41 @@ void encode_string_field_record(std::vector<uint8_t>& buf,
 //     string s_k+1 = k+1;   (a few string fields)
 //   }
 struct FlatScalarCase {
-  int num_int_fields;
+  int num_non_string_fields;
   int num_string_fields;
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
-    // type_id cycle for integer-like fields
-    cudf::type_id int_types[] = {cudf::type_id::INT32,
-                                 cudf::type_id::INT64,
-                                 cudf::type_id::FLOAT32,
-                                 cudf::type_id::FLOAT64,
-                                 cudf::type_id::BOOL8};
-    int wt_for_type[]         = {
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT),
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT),
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I32BIT),
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I64BIT),
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT)};
+    cudf::type_id non_string_types[] = {cudf::type_id::INT32,
+                                        cudf::type_id::INT64,
+                                        cudf::type_id::FLOAT32,
+                                        cudf::type_id::FLOAT64,
+                                        cudf::type_id::BOOL8};
+    proto_wire_type wt_for_type[]    = {proto_wire_type::VARINT,
+                                        proto_wire_type::VARINT,
+                                        proto_wire_type::I32BIT,
+                                        proto_wire_type::I64BIT,
+                                        proto_wire_type::VARINT};
 
     int fn = 1;
-    for (int i = 0; i < num_int_fields; i++, fn++) {
-      int ti  = i % 5;
-      auto ty = int_types[ti];
-      int wt  = wt_for_type[ti];
-      int enc = spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT);
-      if (ty == cudf::type_id::FLOAT32)
-        enc = spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::FIXED);
-      if (ty == cudf::type_id::FLOAT64)
-        enc = spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::FIXED);
-      ctx.schema.push_back({fn, -1, 0, wt, ty, enc, false, false, false});
+    for (int i = 0; i < num_non_string_fields; i++, fn++) {
+      int ti   = i % 5;
+      auto ty  = non_string_types[ti];
+      auto wt  = wt_for_type[ti];
+      auto enc = proto_encoding::DEFAULT;
+      if (ty == cudf::type_id::FLOAT32) { enc = proto_encoding::FIXED; }
+      if (ty == cudf::type_id::FLOAT64) { enc = proto_encoding::FIXED; }
+      ctx.schema.push_back(make_field_descriptor(fn, -1, 0, wt, ty, false, enc));
     }
     for (int i = 0; i < num_string_fields; i++, fn++) {
       ctx.schema.push_back(
-        {fn,
-         -1,
-         0,
-         spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::LEN),
-         cudf::type_id::STRING,
-         spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT),
-         false,
-         false,
-         false});
+        make_field_descriptor(fn, -1, 0, proto_wire_type::LEN, cudf::type_id::STRING));
     }
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -274,7 +242,7 @@ struct FlatScalarCase {
     for (int r = 0; r < num_rows; r++) {
       auto& buf = messages[r];
       int fn    = 1;
-      for (int i = 0; i < num_int_fields; i++, fn++) {
+      for (int i = 0; i < num_non_string_fields; i++, fn++) {
         int ti = i % 5;
         switch (ti) {
           case 0: encode_varint_field(buf, fn, int_dist(rng)); break;
@@ -312,38 +280,33 @@ struct FlatScalarCase {
 struct NestedMessageCase {
   int num_inner_fields;  // scalar fields inside InnerMessage
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
     // idx 0: id (int32, top-level)
-    ctx.schema.push_back({1, -1, 0, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(1, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32));
     // idx 1: name (string, top-level)
-    ctx.schema.push_back({2, -1, 0, 2, cudf::type_id::STRING, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(2, -1, 0, proto_wire_type::LEN, cudf::type_id::STRING));
     // idx 2: inner (STRUCT, top-level)
-    ctx.schema.push_back({3, -1, 0, 2, cudf::type_id::STRUCT, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(3, -1, 0, proto_wire_type::LEN, cudf::type_id::STRUCT));
 
     // Inner message children (parent_idx=2, depth=1)
     cudf::type_id inner_types[] = {
       cudf::type_id::INT32, cudf::type_id::INT64, cudf::type_id::STRING};
-    int inner_wt[] = {0, 0, 2};
+    proto_wire_type inner_wt[] = {
+      proto_wire_type::VARINT, proto_wire_type::VARINT, proto_wire_type::LEN};
 
     for (int i = 0; i < num_inner_fields; i++) {
       int ti = i % 3;
-      ctx.schema.push_back({i + 1, 2, 1, inner_wt[ti], inner_types[ti], 0, false, false, false});
+      ctx.schema.push_back(make_field_descriptor(i + 1, 2, 1, inner_wt[ti], inner_types[ti]));
     }
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -398,36 +361,34 @@ struct RepeatedFieldCase {
   int avg_labels_per_row;
   int avg_items_per_row;
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
     // idx 0: id (int32, scalar)
-    ctx.schema.push_back({1, -1, 0, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(1, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32));
     // idx 1: tags (repeated int32, packed)
-    ctx.schema.push_back({2, -1, 0, 0, cudf::type_id::INT32, 0, true, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(2, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32, true));
     // idx 2: labels (repeated string)
-    ctx.schema.push_back({3, -1, 0, 2, cudf::type_id::STRING, 0, true, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(3, -1, 0, proto_wire_type::LEN, cudf::type_id::STRING, true));
     // idx 3: items (repeated STRUCT)
-    ctx.schema.push_back({4, -1, 0, 2, cudf::type_id::STRUCT, 0, true, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(4, -1, 0, proto_wire_type::LEN, cudf::type_id::STRUCT, true));
     // idx 4: Item.item_id (int32, child of idx 3)
-    ctx.schema.push_back({1, 3, 1, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(1, 3, 1, proto_wire_type::VARINT, cudf::type_id::INT32));
     // idx 5: Item.item_name (string, child of idx 3)
-    ctx.schema.push_back({2, 3, 1, 2, cudf::type_id::STRING, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(2, 3, 1, proto_wire_type::LEN, cudf::type_id::STRING));
     // idx 6: Item.value (int64, child of idx 3)
-    ctx.schema.push_back({3, 3, 1, 0, cudf::type_id::INT64, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(3, 3, 1, proto_wire_type::VARINT, cudf::type_id::INT64));
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -502,22 +463,22 @@ struct RepeatedFieldCase {
 //   }
 //
 // This case is intentionally generic and contains no customer schema details.
-// It is designed to exercise `scan_repeated_message_children_kernel` with a
-// wide repeated STRUCT payload similar in shape to real-world schema-projection
-// workloads.
+// Its wide repeated STRUCT payload approximates real-world schema-projection workloads.
 struct WideRepeatedMessageCase {
   int num_child_fields;
   int avg_items_per_row;
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
     // idx 0: id (scalar)
-    ctx.schema.push_back({1, -1, 0, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(1, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32));
     // idx 1: items (repeated STRUCT)
-    ctx.schema.push_back({2, -1, 0, 2, cudf::type_id::STRUCT, 0, true, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(2, -1, 0, proto_wire_type::LEN, cudf::type_id::STRUCT, true));
 
     cudf::type_id child_types[] = {cudf::type_id::INT32,
                                    cudf::type_id::INT64,
@@ -525,37 +486,28 @@ struct WideRepeatedMessageCase {
                                    cudf::type_id::FLOAT64,
                                    cudf::type_id::BOOL8,
                                    cudf::type_id::STRING};
-    int child_wt[]  = {spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT),
-                       spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT),
-                       spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I32BIT),
-                       spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::I64BIT),
-                       spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::VARINT),
-                       spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::LEN)};
-    int child_enc[] = {spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT),
-                       spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT),
-                       spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::FIXED),
-                       spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::FIXED),
-                       spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT),
-                       spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT)};
+    proto_wire_type child_wt[]  = {proto_wire_type::VARINT,
+                                   proto_wire_type::VARINT,
+                                   proto_wire_type::I32BIT,
+                                   proto_wire_type::I64BIT,
+                                   proto_wire_type::VARINT,
+                                   proto_wire_type::LEN};
+    proto_encoding child_enc[]  = {proto_encoding::DEFAULT,
+                                   proto_encoding::DEFAULT,
+                                   proto_encoding::FIXED,
+                                   proto_encoding::FIXED,
+                                   proto_encoding::DEFAULT,
+                                   proto_encoding::DEFAULT};
 
     // Keep strings sparse so the case remains dominated by wide child scanning
     // rather than varlen copy traffic.
     for (int i = 0; i < num_child_fields; i++) {
       int ti = (i % 10 == 9) ? 5 : (i % 5);
       ctx.schema.push_back(
-        {i + 1, 1, 1, child_wt[ti], child_types[ti], child_enc[ti], false, false, false});
+        make_field_descriptor(i + 1, 1, 1, child_wt[ti], child_types[ti], false, child_enc[ti]));
     }
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -630,39 +582,30 @@ struct RepeatedChildListCase {
     return (child_idx % 4 == 3);
   }
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
     // idx 0: id (scalar)
-    ctx.schema.push_back({1, -1, 0, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(1, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32));
     // idx 1: items (repeated STRUCT)
-    ctx.schema.push_back({2, -1, 0, 2, cudf::type_id::STRUCT, 0, true, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(2, -1, 0, proto_wire_type::LEN, cudf::type_id::STRUCT, true));
 
     for (int i = 0; i < num_repeated_children; i++) {
       bool as_string = child_is_string(i);
-      ctx.schema.push_back({i + 1,
-                            1,
-                            1,
-                            as_string ? 2 : 0,
-                            as_string ? cudf::type_id::STRING : cudf::type_id::INT32,
-                            0,
-                            true,
-                            false,
-                            false});
+      ctx.schema.push_back(
+        make_field_descriptor(i + 1,
+                              1,
+                              1,
+                              as_string ? proto_wire_type::LEN : proto_wire_type::VARINT,
+                              as_string ? cudf::type_id::STRING : cudf::type_id::INT32,
+                              true));
     }
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -717,58 +660,6 @@ struct RepeatedChildListCase {
   }
 };
 
-struct RepeatedChildStringBenchData {
-  std::vector<std::vector<uint8_t>> messages;
-  std::vector<pb_field_location> parent_locs;
-  std::vector<std::vector<int32_t>> counts_by_child;
-  std::vector<std::vector<pb_repeated_occurrence>> occurrences_by_child;
-};
-
-struct RepeatedChildStringOnlyCase {
-  int num_repeated_children;
-  int avg_child_elems;
-
-  RepeatedChildStringBenchData generate_data(int num_rows, std::mt19937& rng) const
-  {
-    RepeatedChildStringBenchData out;
-    out.messages.resize(num_rows);
-    out.parent_locs.resize(num_rows);
-    out.counts_by_child.resize(num_repeated_children);
-    out.occurrences_by_child.resize(num_repeated_children);
-
-    std::uniform_int_distribution<int> str_len_dist(4, 16);
-    std::string alphabet = "abcdefghijklmnopqrstuvwxyz";
-
-    auto random_string = [&](int len) {
-      std::string s(len, ' ');
-      for (int c = 0; c < len; c++)
-        s[c] = alphabet[rng() % alphabet.size()];
-      return s;
-    };
-
-    auto vary = [&](int avg) -> int {
-      int lo = std::max(0, avg / 2);
-      int hi = avg + avg / 2;
-      return std::uniform_int_distribution<int>(lo, std::max(lo, hi))(rng);
-    };
-
-    for (int row = 0; row < num_rows; row++) {
-      auto& buf = out.messages[row];
-      for (int child_idx = 0; child_idx < num_repeated_children; child_idx++) {
-        int fn        = child_idx + 1;
-        int num_elems = vary(avg_child_elems);
-        out.counts_by_child[child_idx].push_back(num_elems);
-        for (int j = 0; j < num_elems; j++) {
-          encode_string_field_record(
-            buf, fn, random_string(str_len_dist(rng)), out.occurrences_by_child[child_idx], row);
-        }
-      }
-      out.parent_locs[row] = {0, static_cast<int32_t>(buf.size())};
-    }
-    return out;
-  }
-};
-
 // Case 6: Many repeated fields — stress-tests per-repeated-field sync overhead.
 //   message WideRepeatedMessage {
 //     int32              id = 1;
@@ -783,32 +674,26 @@ struct ManyRepeatedFieldsCase {
   int num_repeated_int;
   int num_repeated_str;
 
-  spark_rapids_jni::protobuf_decode_context build_context() const
+  protobuf::protobuf_decode_context build_context() const
   {
-    spark_rapids_jni::protobuf_decode_context ctx;
+    protobuf::protobuf_decode_context ctx;
     ctx.fail_on_errors = true;
 
     int fn = 1;
     // idx 0: id (scalar)
-    ctx.schema.push_back({fn++, -1, 0, 0, cudf::type_id::INT32, 0, false, false, false});
+    ctx.schema.push_back(
+      make_field_descriptor(fn++, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32));
 
     for (int i = 0; i < num_repeated_int; i++) {
-      ctx.schema.push_back({fn++, -1, 0, 0, cudf::type_id::INT32, 0, true, false, false});
+      ctx.schema.push_back(
+        make_field_descriptor(fn++, -1, 0, proto_wire_type::VARINT, cudf::type_id::INT32, true));
     }
     for (int i = 0; i < num_repeated_str; i++) {
-      ctx.schema.push_back({fn++, -1, 0, 2, cudf::type_id::STRING, 0, true, false, false});
+      ctx.schema.push_back(
+        make_field_descriptor(fn++, -1, 0, proto_wire_type::LEN, cudf::type_id::STRING, true));
     }
 
-    size_t n = ctx.schema.size();
-    for (auto const& f : ctx.schema) {
-      ctx.schema_output_types.emplace_back(f.output_type);
-    }
-    ctx.default_ints.resize(n, 0);
-    ctx.default_floats.resize(n, 0.0);
-    ctx.default_bools.resize(n, false);
-    ctx.default_strings.resize(n);
-    ctx.enum_valid_values.resize(n);
-    ctx.enum_names.resize(n);
+    initialize_context_metadata(ctx);
     return ctx;
   }
 
@@ -868,12 +753,12 @@ struct ManyRepeatedFieldsCase {
 // ===========================================================================
 static void BM_protobuf_flat_scalars(nvbench::state& state)
 {
-  auto const num_rows   = static_cast<int>(state.get_int64("num_rows"));
-  auto const num_fields = static_cast<int>(state.get_int64("num_fields"));
-  int const num_str     = std::max(1, num_fields / 10);
-  int const num_int     = num_fields - num_str;
+  auto const num_rows      = static_cast<int>(state.get_int64("num_rows"));
+  auto const num_fields    = static_cast<int>(state.get_int64("num_fields"));
+  int const num_str        = std::max(1, num_fields / 10);
+  int const num_non_string = num_fields - num_str;
 
-  FlatScalarCase flat_case{num_int, num_str};
+  FlatScalarCase flat_case{num_non_string, num_str};
   auto ctx = flat_case.build_context();
 
   std::mt19937 rng(42);
@@ -887,7 +772,8 @@ static void BM_protobuf_flat_scalars(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -921,7 +807,8 @@ static void BM_protobuf_nested(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -955,7 +842,8 @@ static void BM_protobuf_repeated(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -990,7 +878,8 @@ static void BM_protobuf_wide_repeated_message(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -1029,7 +918,8 @@ static void BM_protobuf_repeated_child_lists(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -1045,264 +935,7 @@ NVBENCH_BENCH(BM_protobuf_repeated_child_lists)
   .add_string_axis("child_mix", {"int_only", "mixed", "string_only"});
 
 // ===========================================================================
-// Benchmark 6: Repeated child string count+scan only
-// ===========================================================================
-static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
-{
-  auto const num_rows              = static_cast<int>(state.get_int64("num_rows"));
-  auto const num_repeated_children = static_cast<int>(state.get_int64("num_repeated_children"));
-  auto const avg_child_elems       = static_cast<int>(state.get_int64("avg_child_elems"));
-
-  RepeatedChildStringOnlyCase list_case{num_repeated_children, avg_child_elems};
-  std::mt19937 rng(42);
-  auto data       = list_case.generate_data(num_rows, rng);
-  auto binary_col = make_binary_column(data.messages);
-
-  cudf::lists_column_view in_list(binary_col->view());
-  auto const* row_offsets      = in_list.offsets().data<cudf::size_type>();
-  auto const* message_data     = reinterpret_cast<uint8_t const*>(in_list.child().data<int8_t>());
-  auto const message_data_size = static_cast<cudf::size_type>(in_list.child().size());
-
-  auto stream = cudf::get_default_stream();
-  auto mr     = cudf::get_current_device_resource_ref();
-
-  rmm::device_uvector<pb_field_location> d_parent_locs(num_rows, stream, mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    d_parent_locs.data(), data.parent_locs.data(), num_rows * sizeof(pb_field_location), stream));
-
-  std::vector<spark_rapids_jni::protobuf_detail::device_nested_field_descriptor> h_schema(
-    num_repeated_children);
-  for (int i = 0; i < num_repeated_children; i++) {
-    h_schema[i].field_number = i + 1;
-    h_schema[i].parent_idx   = -1;
-    h_schema[i].depth        = 0;
-    h_schema[i].wire_type =
-      spark_rapids_jni::wire_type_value(spark_rapids_jni::proto_wire_type::LEN);
-    h_schema[i].output_type_id = static_cast<int>(cudf::type_id::STRING);
-    h_schema[i].encoding =
-      spark_rapids_jni::encoding_value(spark_rapids_jni::proto_encoding::DEFAULT);
-    h_schema[i].is_repeated       = true;
-    h_schema[i].is_required       = false;
-    h_schema[i].has_default_value = false;
-  }
-  rmm::device_uvector<spark_rapids_jni::protobuf_detail::device_nested_field_descriptor> d_schema(
-    num_repeated_children, stream, mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    d_schema.data(), h_schema.data(), num_repeated_children * sizeof(h_schema[0]), stream));
-
-  std::vector<int> h_rep_indices(num_repeated_children);
-  for (int i = 0; i < num_repeated_children; i++) {
-    CUDF_EXPECTS(h_schema[i].is_repeated,
-                 "count_repeated_in_nested_kernel benchmark expects repeated child fields");
-    CUDF_EXPECTS(h_schema[i].depth == 0,
-                 "count_repeated_in_nested_kernel benchmark expects pre-filtered child depth 0");
-    h_rep_indices[i] = i;
-  }
-  rmm::device_uvector<int> d_rep_indices(num_repeated_children, stream, mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    d_rep_indices.data(), h_rep_indices.data(), num_repeated_children * sizeof(int), stream));
-
-  size_t total_bytes = 0;
-  for (auto const& m : data.messages)
-    total_bytes += m.size();
-
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
-  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    rmm::device_uvector<int> d_error(1, stream, mr);
-    CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(int), stream.value()));
-
-    rmm::device_uvector<spark_rapids_jni::protobuf_detail::repeated_field_info> d_rep_info(
-      static_cast<size_t>(num_rows) * num_repeated_children, stream, mr);
-    spark_rapids_jni::protobuf_detail::
-      count_repeated_in_nested_kernel<<<(num_rows + 255) / 256, 256, 0, stream.value()>>>(
-        message_data,
-        message_data_size,
-        row_offsets,
-        0,
-        d_parent_locs.data(),
-        num_rows,
-        d_schema.data(),
-        num_repeated_children,
-        d_rep_info.data(),
-        num_repeated_children,
-        d_rep_indices.data(),
-        d_error.data());
-
-    struct rep_work {
-      rmm::device_uvector<int32_t> counts;
-      rmm::device_uvector<int32_t> offsets;
-      int32_t total_count{0};
-      std::unique_ptr<rmm::device_uvector<pb_repeated_occurrence>> occs;
-      rep_work(int n, rmm::cuda_stream_view s, rmm::device_async_resource_ref m)
-        : counts(n, s, m), offsets(n + 1, s, m)
-      {
-      }
-    };
-
-    std::vector<std::unique_ptr<rep_work>> work;
-    work.reserve(num_repeated_children);
-    for (int ri = 0; ri < num_repeated_children; ri++) {
-      auto& w = *work.emplace_back(std::make_unique<rep_work>(num_rows, stream, mr));
-      thrust::transform(rmm::exec_policy_nosync(stream, mr),
-                        thrust::make_counting_iterator(0),
-                        thrust::make_counting_iterator(num_rows),
-                        w.counts.data(),
-                        spark_rapids_jni::protobuf_detail::extract_strided_count{
-                          d_rep_info.data(), ri, num_repeated_children});
-      CUDF_CUDA_TRY(cudaMemsetAsync(w.offsets.data(), 0, sizeof(int32_t), stream.value()));
-      thrust::inclusive_scan(rmm::exec_policy_nosync(stream, mr),
-                             w.counts.begin(),
-                             w.counts.end(),
-                             w.offsets.data() + 1);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        &w.total_count, w.offsets.data() + num_rows, sizeof(int32_t), stream));
-    }
-    stream.synchronize();
-
-    for (int ri = 0; ri < num_repeated_children; ri++) {
-      auto& w = *work[ri];
-      if (w.total_count > 0) {
-        w.occs =
-          std::make_unique<rmm::device_uvector<pb_repeated_occurrence>>(w.total_count, stream, mr);
-        spark_rapids_jni::protobuf_detail::
-          scan_repeated_in_nested_kernel<<<(num_rows + 255) / 256, 256, 0, stream.value()>>>(
-            message_data,
-            message_data_size,
-            row_offsets,
-            0,
-            d_parent_locs.data(),
-            num_rows,
-            d_schema.data(),
-            w.offsets.data(),
-            d_rep_indices.data() + ri,
-            w.occs->data(),
-            d_error.data());
-      }
-    }
-  });
-
-  state.add_element_count(num_rows, "Rows");
-  state.add_global_memory_reads<nvbench::int8_t>(total_bytes);
-}
-
-NVBENCH_BENCH(BM_protobuf_repeated_child_string_count_scan)
-  .set_name("Protobuf Repeated Child String CountScan")
-  .add_int64_axis("num_rows", {10'000, 20'000})
-  .add_int64_axis("num_repeated_children", {1, 4, 8})
-  .add_int64_axis("avg_child_elems", {1, 5});
-
-// ===========================================================================
-// Benchmark 7: Repeated child string build-only
-// ===========================================================================
-static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
-{
-  auto const num_rows              = static_cast<int>(state.get_int64("num_rows"));
-  auto const num_repeated_children = static_cast<int>(state.get_int64("num_repeated_children"));
-  auto const avg_child_elems       = static_cast<int>(state.get_int64("avg_child_elems"));
-
-  RepeatedChildStringOnlyCase list_case{num_repeated_children, avg_child_elems};
-  std::mt19937 rng(42);
-  auto data       = list_case.generate_data(num_rows, rng);
-  auto binary_col = make_binary_column(data.messages);
-
-  cudf::lists_column_view in_list(binary_col->view());
-  auto const* row_offsets  = in_list.offsets().data<cudf::size_type>();
-  auto const* message_data = reinterpret_cast<uint8_t const*>(in_list.child().data<int8_t>());
-
-  auto stream = cudf::get_default_stream();
-  auto mr     = cudf::get_current_device_resource_ref();
-
-  rmm::device_uvector<pb_field_location> d_parent_locs(num_rows, stream, mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    d_parent_locs.data(), data.parent_locs.data(), num_rows * sizeof(pb_field_location), stream));
-
-  struct precomputed_child {
-    rmm::device_uvector<int32_t> counts;
-    rmm::device_uvector<pb_repeated_occurrence> occs;
-    int total_count;
-    precomputed_child(int nrows,
-                      int total,
-                      rmm::cuda_stream_view s,
-                      rmm::device_async_resource_ref m)
-      : counts(nrows, s, m), occs(total, s, m), total_count(total)
-    {
-    }
-  };
-
-  std::vector<std::unique_ptr<precomputed_child>> children;
-  children.reserve(num_repeated_children);
-  for (int i = 0; i < num_repeated_children; i++) {
-    int total = static_cast<int>(data.occurrences_by_child[i].size());
-    auto& c =
-      *children.emplace_back(std::make_unique<precomputed_child>(num_rows, total, stream, mr));
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-      c.counts.data(), data.counts_by_child[i].data(), num_rows * sizeof(int32_t), stream));
-    if (total > 0) {
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(c.occs.data(),
-                                               data.occurrences_by_child[i].data(),
-                                               total * sizeof(pb_repeated_occurrence),
-                                               stream));
-    }
-  }
-
-  size_t total_bytes = 0;
-  for (auto const& m : data.messages)
-    total_bytes += m.size();
-
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
-  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    rmm::device_uvector<int> d_error(1, stream, mr);
-    CUDF_CUDA_TRY(cudaMemsetAsync(d_error.data(), 0, sizeof(int), stream.value()));
-
-    for (int i = 0; i < num_repeated_children; i++) {
-      auto& c = *children[i];
-      rmm::device_uvector<int32_t> list_offs(num_rows + 1, stream, mr);
-      thrust::exclusive_scan(rmm::exec_policy_nosync(stream, mr),
-                             c.counts.begin(),
-                             c.counts.end(),
-                             list_offs.begin(),
-                             0);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        list_offs.data() + num_rows, &c.total_count, sizeof(int32_t), stream));
-
-      spark_rapids_jni::protobuf_detail::nested_repeated_location_provider nr_loc{
-        row_offsets, 0, d_parent_locs.data(), c.occs.data()};
-      auto valid_fn = [] __device__(cudf::size_type) { return true; };
-      std::vector<uint8_t> empty_default;
-      auto child_values =
-        spark_rapids_jni::protobuf_detail::extract_and_build_string_or_bytes_column(false,
-                                                                                    message_data,
-                                                                                    c.total_count,
-                                                                                    nr_loc,
-                                                                                    nr_loc,
-                                                                                    valid_fn,
-                                                                                    false,
-                                                                                    empty_default,
-                                                                                    d_error,
-                                                                                    stream,
-                                                                                    mr);
-      auto list_offs_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                          num_rows + 1,
-                                                          list_offs.release(),
-                                                          rmm::device_buffer{},
-                                                          0);
-      auto result        = cudf::make_lists_column(
-        num_rows, std::move(list_offs_col), std::move(child_values), 0, rmm::device_buffer{});
-    }
-  });
-
-  state.add_element_count(num_rows, "Rows");
-  state.add_global_memory_reads<nvbench::int8_t>(total_bytes);
-}
-
-NVBENCH_BENCH(BM_protobuf_repeated_child_string_build)
-  .set_name("Protobuf Repeated Child String Build")
-  .add_int64_axis("num_rows", {10'000, 20'000})
-  .add_int64_axis("num_repeated_children", {1, 4, 8})
-  .add_int64_axis("avg_child_elems", {1, 5});
-
-// ===========================================================================
-// Benchmark 8: Many repeated fields — measures per-field sync overhead at scale
+// Benchmark 6: Many repeated fields — measures per-field sync overhead at scale
 // ===========================================================================
 static void BM_protobuf_many_repeated(nvbench::state& state)
 {
@@ -1326,7 +959,8 @@ static void BM_protobuf_many_repeated(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    auto result = spark_rapids_jni::decode_protobuf_to_struct(binary_col->view(), ctx, stream);
+    auto result = protobuf::decode_protobuf_to_struct(
+      binary_col->view(), ctx, stream, cudf::get_current_device_resource_ref());
   });
 
   state.add_element_count(num_rows, "Rows");
@@ -1336,4 +970,4 @@ static void BM_protobuf_many_repeated(nvbench::state& state)
 NVBENCH_BENCH(BM_protobuf_many_repeated)
   .set_name("Protobuf Many Repeated Fields")
   .add_int64_axis("num_rows", {10'000, 100'000})
-  .add_int64_axis("num_rep_fields", {10, 30, 50});
+  .add_int64_axis("num_rep_fields", {10, 20, 30});

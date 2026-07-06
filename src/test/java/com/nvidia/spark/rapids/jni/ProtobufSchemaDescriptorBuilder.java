@@ -150,7 +150,7 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Conditional form so callers can pass a flag inline; {@code repeated(false)} is a no-op. */
+  /** Set whether the current field is repeated. */
   public ProtobufSchemaDescriptorBuilder repeated(boolean value) {
     current().isRepeated = value;
     return this;
@@ -204,7 +204,7 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Conditional form so callers can pass a flag inline; {@code hasDefault(false)} is a no-op. */
+  /** Set whether the current field has a default value. */
   public ProtobufSchemaDescriptorBuilder hasDefault(boolean value) {
     current().hasDefaultValue = value;
     return this;
