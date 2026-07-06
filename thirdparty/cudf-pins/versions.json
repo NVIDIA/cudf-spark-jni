@@ -25,8 +25,8 @@
     "cuco" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cuCollections/archive/f517bbb1277753b1852dfd388993383e401eaa38.tar.gz",
-      "url_hash" : "SHA256=d17e2f6d58cfb2cd473efcbd741c633e7607717102cedc08173a4a69bb2a8ba9",
+      "url" : "https://github.com/NVIDIA/cuCollections/archive/0883368d39296f3bef3a058033141bcc642c5c54.tar.gz",
+      "url_hash" : "SHA256=4ec8320a0372839b991f0b431c7f8bf0e770006cb3c8631c6e373c434471fd45",
       "version" : "0.0.1"
     },
     "dlpack" : 
