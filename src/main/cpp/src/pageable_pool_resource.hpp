@@ -140,8 +140,11 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   /**
    * @brief Allocate @p bytes from the pool (best-fit).
    *
-   * Rounds up to default_cuda_malloc_host_alignment. Throws pageable_pool_exhausted if
-   * no free block is large enough.
+   * Like rmm::mr::pool_memory_resource, this pool uses a fixed allocation
+   * granularity and does not honor larger per-call alignment requests. Returned
+   * pointers are at least rmm::CUDA_ALLOCATION_ALIGNMENT aligned.
+   *
+   * Throws pageable_pool_exhausted if no free block is large enough.
    */
   [[nodiscard]] void* allocate_sync(
     std::size_t bytes,
@@ -222,8 +225,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
 
   static std::size_t align_up(std::size_t bytes) noexcept
   {
-    constexpr std::size_t a = cuda::mr::default_cuda_malloc_host_alignment;
-    return (bytes + a - 1) & ~(a - 1);
+    return rmm::align_up(bytes, rmm::CUDA_ALLOCATION_ALIGNMENT);
   }
 
   cuda::mr::any_synchronous_resource<cuda::mr::host_accessible> upstream_;

@@ -94,7 +94,7 @@ TEST(PageablePool, ZeroByteAllocationDoesNotConsumePool)
 TEST(PageablePool, PointerIsAligned)
 {
   auto pool                   = make_pool();
-  constexpr std::size_t align = cuda::mr::default_cuda_malloc_host_alignment;
+  constexpr std::size_t align = rmm::CUDA_ALLOCATION_ALIGNMENT;
   void* p                     = pool.allocate_sync(1);
   EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p) % align, 0u);
   pool.deallocate_sync(p, 1);
