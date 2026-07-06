@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -497,11 +498,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // before returning STRUCT<>, so malformed rows still null or throw according to the parse mode.
   if (num_fields == 0) {
     rmm::device_uvector<field_location> d_unused_location(1, stream, scratch_mr);
-    launch_scan_all_fields(*d_in,
-                           {nullptr, 0, nullptr, 0, d_unused_location.data(), nullptr, nullptr},
-                           d_error.data(),
-                           track_permissive_null_rows ? d_row_force_null.data() : nullptr,
-                           stream);
+    launch_scan_all_fields(
+      *d_in,
+      {nullptr, 0, nullptr, 0, d_unused_location.data(), nullptr, nullptr, nullptr},
+      d_error.data(),
+      track_permissive_null_rows ? d_row_force_null.data() : nullptr,
+      stream);
   }
 
   auto const threads = THREADS_PER_BLOCK;
@@ -509,10 +511,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Allocate for counting repeated fields. `std::max(..., 1)` keeps the device_uvector
   // non-empty when the corresponding field count is 0, so `.data()` remains a valid pointer.
-  rmm::device_uvector<repeated_field_info> d_repeated_info(
+  rmm::device_uvector<field_occurrence_count> d_repeated_info(
     std::max<size_t>(static_cast<size_t>(num_rows) * num_repeated, 1), stream, scratch_mr);
   rmm::device_uvector<field_location> d_nested_locations(
     std::max<size_t>(static_cast<size_t>(num_rows) * num_nested, 1), stream, scratch_mr);
+  rmm::device_uvector<field_occurrence_count> d_nested_occurrence_info(
+    std::max<size_t>(static_cast<size_t>(num_rows) * num_nested, 1), stream, scratch_mr);
+  auto d_multiple_nested_fields =
+    cudf::detail::make_zeroed_device_uvector_async<int>(num_nested, stream, scratch_mr);
 
   auto d_repeated_indices =
     repeated_field_indices.empty()
@@ -552,13 +558,49 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                   d_fn_to_rep.data(),
                                   static_cast<int>(d_fn_to_rep.size())},
                                  {d_nested_locations.data(),
+                                  d_nested_occurrence_info.data(),
                                   d_nested_indices.data(),
                                   num_nested,
                                   d_fn_to_nested.data(),
-                                  static_cast<int>(d_fn_to_nested.size())},
+                                  static_cast<int>(d_fn_to_nested.size()),
+                                  d_multiple_nested_fields.data()},
                                  d_error.data(),
                                  track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                  stream);
+  }
+
+  std::vector<std::optional<singular_message_merge_work>> nested_merge_work(num_nested);
+  if (num_nested > 0) {
+    auto h_multiple_nested_fields = cudf::detail::make_pinned_vector_async<int>(num_nested, stream);
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(h_multiple_nested_fields.data(),
+                                             d_multiple_nested_fields.data(),
+                                             num_nested * sizeof(int),
+                                             stream));
+    stream.synchronize();
+
+    for (int ni = 0; ni < num_nested; ++ni) {
+      if (h_multiple_nested_fields[ni] == 0) { continue; }
+
+      auto counts_begin = thrust::make_transform_iterator(
+        thrust::make_counting_iterator<int>(0),
+        extract_strided_count{d_nested_occurrence_info.data(), ni, num_nested});
+      nested_merge_work[ni].emplace(
+        nested_field_indices[ni],
+        make_list_offsets_from_counts(
+          counts_begin, num_rows, "Top-level singular message", stream, scratch_mr, scratch_mr),
+        stream,
+        scratch_mr);
+      auto& work = *nested_merge_work[ni];
+
+      auto h_scan_descs =
+        cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(1, stream);
+      h_scan_descs[0]  = {schema[work.schema_idx].field_number,
+                          wire_type_value(proto_wire_type::LEN),
+                          work.row_offsets.data(),
+                          work.fragments.data()};
+      auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
+      launch_scan_singular_message_occurrences(*d_in, scan_bundle.view(), d_error.data(), stream);
+    }
   }
 
   // Store decoded columns by schema index for ordered assembly at the end.
@@ -585,7 +627,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                             static_cast<int>(h_field_lookup.size()),
                             d_locations.data(),
                             nullptr,
-                            d_deferred_enum_error.data()},
+                            d_deferred_enum_error.data(),
+                            nullptr},
                            d_error.data(),
                            track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                            stream);
@@ -896,12 +939,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
-    auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
+    auto h_scan_descs =
+      cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(0, stream);
     h_scan_descs.reserve(num_repeated);
 
     for (auto& w : rep_work) {
       if (w.total_count > 0) {
-        w.occurrences = std::make_unique<rmm::device_uvector<repeated_occurrence>>(
+        w.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
           w.total_count, stream, scratch_mr);
       }
       // Zero-count descriptors keep malformed rows aligned with the count pass.
@@ -912,8 +956,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     if (!h_scan_descs.empty()) {
-      auto scan_bundle = make_repeated_field_scan_bundle(h_scan_descs, stream, scratch_mr);
-      launch_scan_all_repeated_occurrences(*d_in, scan_bundle.view(), d_error.data(), stream);
+      auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
+      launch_scan_all_field_occurrences(*d_in, scan_bundle.view(), d_error.data(), stream);
     }
 
     // Phase C: Build columns per field.
@@ -1021,20 +1065,30 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     // ever make it hot, precompute a parent->children index once in a single pass.
     auto child_field_indices = find_child_field_indices(schema, parent_schema_idx);
 
-    rmm::device_uvector<field_location> d_parent_locs(num_rows, stream, scratch_mr);
-    launch_extract_strided_locations(
-      d_nested_locations.data(), ni, num_nested, d_parent_locs.data(), num_rows, stream);
-
     // Keep row-force-null tracking for nested required-field failures, but do not let invalid
     // nested enum values null the top-level row.
-    auto nested_col =
-      build_nested_struct_column(input,
-                                 {d_parent_locs.data(), d_parent_locs.size(), nullptr},
-                                 child_field_indices,
-                                 {schema, schema_ctx, nested_decode_ctx},
-                                 0,
-                                 stream,
-                                 mr);
+    std::unique_ptr<cudf::column> nested_col;
+    if (nested_merge_work[ni].has_value()) {
+      nested_col = build_merged_singular_struct_column(input,
+                                                       {nullptr, nullptr},
+                                                       child_field_indices,
+                                                       {schema, schema_ctx, nested_decode_ctx},
+                                                       std::move(*nested_merge_work[ni]),
+                                                       0,
+                                                       stream,
+                                                       mr);
+    } else {
+      rmm::device_uvector<field_location> d_parent_locs(num_rows, stream, scratch_mr);
+      launch_extract_strided_locations(
+        d_nested_locations.data(), ni, num_nested, d_parent_locs.data(), num_rows, stream);
+      nested_col = build_nested_struct_column(input,
+                                              {d_parent_locs.data(), d_parent_locs.size(), nullptr},
+                                              child_field_indices,
+                                              {schema, schema_ctx, nested_decode_ctx},
+                                              0,
+                                              stream,
+                                              mr);
+    }
     propagate_nulls_to_descendants(*nested_col, stream, mr);
     column_map[parent_schema_idx] = std::move(nested_col);
   }

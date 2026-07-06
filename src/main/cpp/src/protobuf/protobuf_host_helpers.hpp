@@ -174,7 +174,7 @@ struct repeated_field_work {
   int depth;
   int32_t total_count;
   rmm::device_uvector<int32_t> offsets;
-  std::unique_ptr<rmm::device_uvector<repeated_occurrence>> occurrences;
+  std::unique_ptr<rmm::device_uvector<field_occurrence>> occurrences;
 
   repeated_field_work(int schema_index,
                       list_offsets_from_counts_result offsets_result,
@@ -187,8 +187,31 @@ struct repeated_field_work {
   }
 };
 
+struct singular_message_merge_work {
+  int schema_idx;
+  int32_t total_fragments;
+  rmm::device_uvector<int32_t> row_offsets;
+  rmm::device_uvector<field_occurrence> fragments;
+
+  singular_message_merge_work(int schema_index,
+                              list_offsets_from_counts_result offsets_result,
+                              rmm::cuda_stream_view stream,
+                              rmm::device_async_resource_ref mr)
+    : schema_idx(schema_index),
+      total_fragments(offsets_result.total_count),
+      row_offsets(std::move(offsets_result.offsets)),
+      fragments(total_fragments, stream, mr)
+  {
+  }
+};
+
+struct message_fragment_source_view {
+  field_location const* parent_locations;
+  int32_t const* top_row_indices;
+};
+
 inline rmm::device_uvector<int32_t> materialize_top_row_indices(
-  rmm::device_uvector<repeated_occurrence> const& occurrences,
+  rmm::device_uvector<field_occurrence> const& occurrences,
   int32_t const* parent_top_row_indices,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
@@ -198,7 +221,7 @@ inline rmm::device_uvector<int32_t> materialize_top_row_indices(
                     occurrences.begin(),
                     occurrences.end(),
                     result.begin(),
-                    [parent_top_row_indices] __device__(repeated_occurrence const& occurrence) {
+                    [parent_top_row_indices] __device__(field_occurrence const& occurrence) {
                       return parent_top_row_indices != nullptr
                                ? parent_top_row_indices[occurrence.row_idx]
                                : occurrence.row_idx;
@@ -219,6 +242,20 @@ inline void validate_nonempty_repeated_field_work(
   CUDF_EXPECTS(work.occurrences != nullptr, message("repeated occurrences must be present"));
   CUDF_EXPECTS(work.occurrences->size() == static_cast<size_t>(work.total_count),
                message("occurrence count mismatch"));
+}
+
+inline void validate_singular_message_merge_work(
+  singular_message_merge_work const& work,
+  int num_rows,
+  std::source_location const& location = std::source_location::current())
+{
+  auto const caller  = location.function_name();
+  auto const message = [caller](char const* detail) { return std::string{caller} + ": " + detail; };
+  CUDF_EXPECTS(work.total_fragments > 1, message("duplicate merge requires multiple fragments"));
+  CUDF_EXPECTS(work.row_offsets.size() == static_cast<size_t>(num_rows) + 1,
+               message("row offsets size must match row count"));
+  CUDF_EXPECTS(work.fragments.size() == static_cast<size_t>(work.total_fragments),
+               message("fragment count mismatch"));
 }
 
 template <typename CountIterator>
@@ -302,11 +339,11 @@ inline cudf::detail::host_vector<int> build_field_lookup_table(FieldDesc const* 
   return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
-struct repeated_field_scan_bundle {
-  rmm::device_uvector<repeated_field_scan_desc> descriptors;
+struct field_occurrence_scan_bundle {
+  rmm::device_uvector<field_occurrence_scan_desc> descriptors;
   rmm::device_uvector<int> field_number_lookup;
 
-  repeated_field_scan_view view() const
+  field_occurrence_scan_view view() const
   {
     return {descriptors.data(),
             static_cast<int>(descriptors.size()),
@@ -315,8 +352,8 @@ struct repeated_field_scan_bundle {
   }
 };
 
-inline repeated_field_scan_bundle make_repeated_field_scan_bundle(
-  cudf::detail::host_vector<repeated_field_scan_desc> const& host_descriptors,
+inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
+  cudf::detail::host_vector<field_occurrence_scan_desc> const& host_descriptors,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -505,6 +542,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   nested_parent_view parent,
   std::vector<int> const& child_field_indices,
   recursive_decode_context context,
+  int depth,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
+std::unique_ptr<cudf::column> build_merged_singular_struct_column(
+  protobuf_input_view input,
+  message_fragment_source_view source,
+  std::vector<int> const& child_field_indices,
+  recursive_decode_context context,
+  singular_message_merge_work work,
   int depth,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);

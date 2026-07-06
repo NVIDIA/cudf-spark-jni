@@ -99,21 +99,22 @@ struct field_descriptor {
   int field_number;                  // Protobuf field number
   int expected_wire_type;            // Expected wire type for this field
   bool is_repeated;                  // Repeated children use count/scan kernels
+  bool is_message;                   // Singular messages may need occurrence merging
   int32_t const* valid_enum_values;  // Sorted closed-enum values, or nullptr
   int num_valid_enum_values;         // Size of valid_enum_values
 };
 
 /**
- * Information about repeated field occurrences in a row.
+ * Number of selected field occurrences in a row.
  */
-struct repeated_field_info {
+struct field_occurrence_count {
   int32_t count;  // Number of occurrences in this row
 };
 
 /**
- * Location of a single occurrence of a repeated field.
+ * Location of a single field occurrence.
  */
-struct repeated_occurrence {
+struct field_occurrence {
   int32_t row_idx;  // Which row this occurrence belongs to
   int32_t offset;   // Offset within the message
   int32_t length;   // Length of the field data
@@ -123,11 +124,11 @@ struct repeated_occurrence {
  * Per-field descriptor passed to the combined occurrence scan kernel.
  * Contains device pointers so the kernel can write to each field's output.
  */
-struct repeated_field_scan_desc {
+struct field_occurrence_scan_desc {
   int field_number;
   int wire_type;
-  int32_t const* row_offsets;        // Pre-computed prefix-sum offsets [num_rows + 1]
-  repeated_occurrence* occurrences;  // Output buffer [total_count]
+  int32_t const* row_offsets;     // Pre-computed prefix-sum offsets [num_rows + 1]
+  field_occurrence* occurrences;  // Output buffer [total_count]
 };
 
 /**
@@ -169,7 +170,7 @@ struct device_schema_view {
 };
 
 struct repeated_field_count_view {
-  repeated_field_info* info;
+  field_occurrence_count* info;
   int const* schema_indices;
   int size;
   int const* field_number_lookup;
@@ -178,10 +179,12 @@ struct repeated_field_count_view {
 
 struct nested_field_location_view {
   field_location* locations;
+  field_occurrence_count* occurrence_info;
   int const* schema_indices;
   int size;
   int const* field_number_lookup;
   int lookup_size;
+  int* multiple_message_fields;
 };
 
 struct field_scan_view {
@@ -190,12 +193,20 @@ struct field_scan_view {
   int const* field_number_lookup;
   int lookup_size;
   field_location* locations;
-  repeated_field_info* repeated_info;
+  field_occurrence_count* occurrence_info;
   protobuf_error* deferred_enum_error;
+  int* multiple_message_fields;
 };
 
-struct repeated_field_scan_view {
-  repeated_field_scan_desc const* descriptors;
+struct message_validation_view {
+  field_descriptor const* descriptors;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
+struct field_occurrence_scan_view {
+  field_occurrence_scan_desc const* descriptors;
   int size;
   int const* field_number_lookup;
   int lookup_size;

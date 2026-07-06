@@ -76,7 +76,7 @@ struct top_level_location_provider {
 struct repeated_location_provider {
   cudf::size_type const* row_offsets;
   cudf::size_type base_offset;
-  repeated_occurrence const* occurrences;
+  field_occurrence const* occurrences;
 
   __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
   {
@@ -129,7 +129,7 @@ struct nested_repeated_location_provider {
   cudf::size_type const* row_offsets;
   cudf::size_type base_offset;
   field_location const* parent_locations;
-  repeated_occurrence const* occurrences;
+  field_occurrence const* occurrences;
 
   __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
   {
@@ -141,6 +141,27 @@ struct nested_repeated_location_provider {
     }
     data_offset = 0;
     return {-1, 0};
+  }
+};
+
+struct message_fragment_location_provider {
+  protobuf_input_view input;
+  message_fragment_source_view source;
+  field_occurrence const* fragments;
+
+  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  {
+    auto const fragment      = fragments[thread_idx];
+    auto const parent_offset = source.parent_locations == nullptr
+                                 ? int32_t{0}
+                                 : source.parent_locations[fragment.row_idx].offset;
+    if (parent_offset < 0) {
+      data_offset = 0;
+      return {-1, 0};
+    }
+    data_offset =
+      input.row_offsets[fragment.row_idx] - input.base_offset + parent_offset + fragment.offset;
+    return {fragment.offset, fragment.length};
   }
 };
 
@@ -372,10 +393,15 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   bool* row_has_invalid_data,
                                   rmm::cuda_stream_view stream);
 
-void launch_scan_all_repeated_occurrences(cudf::column_device_view const& d_in,
-                                          repeated_field_scan_view fields,
-                                          protobuf_error* error_flag,
-                                          rmm::cuda_stream_view stream);
+void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
+                                       field_occurrence_scan_view fields,
+                                       protobuf_error* error_flag,
+                                       rmm::cuda_stream_view stream);
+
+void launch_scan_singular_message_occurrences(cudf::column_device_view const& d_in,
+                                              field_occurrence_scan_view fields,
+                                              protobuf_error* error_flag,
+                                              rmm::cuda_stream_view stream);
 
 void launch_extract_strided_locations(field_location const* nested_locations,
                                       int field_idx,
@@ -392,12 +418,21 @@ void launch_scan_nested_message_fields(protobuf_input_view input,
                                        int recursion_depth,
                                        rmm::cuda_stream_view stream);
 
-void launch_scan_all_repeated_occurrences_in_nested(protobuf_input_view input,
-                                                    nested_parent_view parent,
-                                                    repeated_field_scan_view fields,
-                                                    protobuf_error* error_flag,
-                                                    int recursion_depth,
-                                                    rmm::cuda_stream_view stream);
+void launch_scan_all_field_occurrences_in_nested(protobuf_input_view input,
+                                                 nested_parent_view parent,
+                                                 field_occurrence_scan_view fields,
+                                                 protobuf_error* error_flag,
+                                                 int recursion_depth,
+                                                 rmm::cuda_stream_view stream);
+
+void launch_validate_message_fragments(message_fragment_location_provider locations,
+                                       message_validation_view fields,
+                                       int num_fragments,
+                                       bool* invalid_rows,
+                                       bool* row_has_invalid_data,
+                                       protobuf_error* error_flag,
+                                       int recursion_depth,
+                                       rmm::cuda_stream_view stream);
 
 void launch_compute_grandchild_parent_locations(nested_location_provider loc_provider,
                                                 field_location* gc_parent_locs,
@@ -536,7 +571,7 @@ std::unique_ptr<cudf::column> extract_and_build_integer_column(
 }
 
 struct extract_strided_count {
-  repeated_field_info const* info;
+  field_occurrence_count const* info;
   int field_idx;
   int num_fields;
 
