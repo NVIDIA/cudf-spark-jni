@@ -101,15 +101,11 @@ size_t avg_element_size(data_profile const& profile, cudf::data_type dtype);
 // Utilities to determine the mean size of an element, given the data profile
 template <typename T, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>
 size_t non_fixed_width_size(data_profile const& profile)
-{
-  CUDF_FAIL("Should not be called, use `size_of` for this type instead");
-}
+{ CUDF_FAIL("Should not be called, use `size_of` for this type instead"); }
 
 template <typename T, CUDF_ENABLE_IF(!cudf::is_fixed_width<T>())>
 size_t non_fixed_width_size(data_profile const& profile)
-{
-  CUDF_FAIL("not implemented!");
-}
+{ CUDF_FAIL("not implemented!"); }
 
 template <>
 size_t non_fixed_width_size<cudf::string_view>(data_profile const& profile)
@@ -142,9 +138,7 @@ size_t non_fixed_width_size<cudf::struct_view>(data_profile const& profile)
 struct non_fixed_width_size_fn {
   template <typename T>
   size_t operator()(data_profile const& profile)
-  {
-    return non_fixed_width_size<T>(profile);
-  }
+  { return non_fixed_width_size<T>(profile); }
 };
 
 size_t avg_element_size(data_profile const& profile, cudf::data_type dtype)
@@ -447,9 +441,7 @@ std::unique_ptr<cudf::column> create_random_column(data_profile const& profile,
 struct valid_or_zero {
   template <typename T>
   __device__ T operator()(cuda::std::tuple<T, bool> len_valid) const
-  {
-    return cuda::std::get<1>(len_valid) ? cuda::std::get<0>(len_valid) : T{0};
-  }
+  { return cuda::std::get<1>(len_valid) ? cuda::std::get<0>(len_valid) : T{0}; }
 };
 
 struct string_generator {
@@ -563,9 +555,7 @@ template <>
 std::unique_ptr<cudf::column> create_random_column<cudf::dictionary32>(data_profile const& profile,
                                                                        thrust::minstd_rand& engine,
                                                                        cudf::size_type num_rows)
-{
-  CUDF_FAIL("not implemented yet");
-}
+{ CUDF_FAIL("not implemented yet"); }
 
 /**
  * @brief Functor to dispatch create_random_column calls.
@@ -576,9 +566,7 @@ struct create_rand_col_fn {
   std::unique_ptr<cudf::column> operator()(data_profile const& profile,
                                            thrust::minstd_rand& engine,
                                            cudf::size_type num_rows)
-  {
-    return create_random_column<T>(profile, engine, num_rows);
-  }
+  { return create_random_column<T>(profile, engine, num_rows); }
 };
 
 /**

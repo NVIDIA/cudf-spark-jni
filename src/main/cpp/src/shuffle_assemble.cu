@@ -505,9 +505,7 @@ namespace {
  */
 __host__ __device__ constexpr size_t bitmask_allocation_size_bytes(size_type number_of_bits,
                                                                    int pad)
-{
-  return cudf::util::round_up_safe((number_of_bits + 7) / 8, pad);
-}
+{ return cudf::util::round_up_safe((number_of_bits + 7) / 8, pad); }
 
 /**
  * @brief Functor that fills in source buffer sizes (validity, offsets, data) per column.
@@ -766,9 +764,7 @@ struct shared_buffer_size_functor {
                   size_t& validity_size,
                   size_t& offsets_size,
                   size_t& data_size)
-  {
-    CUDF_FAIL("Unsupported type in shared_buffer_size_functor");
-  }
+  { CUDF_FAIL("Unsupported type in shared_buffer_size_functor"); }
 
  private:
   /**
@@ -786,9 +782,7 @@ struct shared_buffer_size_functor {
    * @brief Helper function to calculate offsets buffer size for a column
    */
   size_t get_output_offsets_size(assemble_column_info const& col) const
-  {
-    return cudf::util::round_up_safe(sizeof(size_type) * (col.num_rows + 1), split_align);
-  }
+  { return cudf::util::round_up_safe(sizeof(size_type) * (col.num_rows + 1), split_align); }
 };
 
 // The size that shuffle_assemble uses internally as the GPU unit of work.
@@ -1897,9 +1891,7 @@ struct assemble_column_view_functor {
                            !std::is_same_v<T, cudf::string_view> and
                            !std::is_same_v<T, cudf::list_view>)>
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
-  {
-    CUDF_FAIL("Unsupported type in assemble_column_view_functor");
-  }
+  { CUDF_FAIL("Unsupported type in assemble_column_view_functor"); }
 };
 
 // assemble all the column_views and populate the final shuffle assemble result

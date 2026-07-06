@@ -284,11 +284,11 @@ rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
   auto node_token_ids   = rmm::device_uvector<NodeIndexT>(num_nodes, stream);
   auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
   auto const copy_end   = copy_if(node_id_it,
-                                node_id_it + tokens.size(),
-                                tokens.begin(),
-                                node_token_ids.begin(),
-                                is_node{},
-                                stream);
+                                  node_id_it + tokens.size(),
+                                  tokens.begin(),
+                                  node_token_ids.begin(),
+                                  is_node{},
+                                  stream);
   CUDF_EXPECTS(cuda::std::distance(node_token_ids.begin(), copy_end) == num_nodes,
                "Invalid computation for node-to-token-index map.");
 
@@ -726,11 +726,11 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
   auto extracted_ranges = rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(
     node_ranges.size(), stream, mr);
   auto const range_end   = copy_if(node_ranges.begin(),
-                                 node_ranges.end(),
-                                 thrust::make_counting_iterator(0),
-                                 extracted_ranges.begin(),
-                                 is_key_or_value,
-                                 stream);
+                                   node_ranges.end(),
+                                   thrust::make_counting_iterator(0),
+                                   extracted_ranges.begin(),
+                                   is_key_or_value,
+                                   stream);
   auto const num_extract = cuda::std::distance(extracted_ranges.begin(), range_end);
   if (num_extract == 0) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING}); }
 
@@ -1142,11 +1142,11 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
         return is_element_node(element_flag[node_id]);
       });
     auto const valid_end    = copy_if(element_valid.begin(),
-                                   element_valid.end(),
-                                   thrust::make_counting_iterator(0),
-                                   element_validity.begin(),
-                                   is_element,
-                                   stream);
+                                      element_valid.end(),
+                                      thrust::make_counting_iterator(0),
+                                      element_validity.begin(),
+                                      is_element,
+                                      stream);
     auto const num_elements = cuda::std::distance(element_validity.begin(), valid_end);
     CUDF_EXPECTS(num_elements == extracted_elements->size(),
                  "Invalid element validity extraction.");

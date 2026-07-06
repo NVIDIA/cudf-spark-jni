@@ -43,9 +43,7 @@ namespace detail {
 namespace {
 
 __host__ __device__ constexpr bool not_whitespace(cudf::char_utf8 ch)
-{
-  return ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t';
-}
+{ return ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t'; }
 
 __host__ __device__ constexpr bool can_be_delimiter(char c)
 {

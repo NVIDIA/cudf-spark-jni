@@ -59,15 +59,11 @@ struct MurmurHash3_32 {
   }
 
   [[nodiscard]] result_type __device__ inline operator()(Key const& key) const
-  {
-    return compute(key);
-  }
+  { return compute(key); }
 
   template <typename T>
   result_type __device__ inline compute(T const& key) const
-  {
-    return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T));
-  }
+  { return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T)); }
 
   result_type __device__ inline compute_remaining_bytes(cuda::std::byte const* data,
                                                         cudf::size_type len,
@@ -129,48 +125,34 @@ struct MurmurHash3_32 {
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<bool>::operator()(bool const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<int8_t>::operator()(int8_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<uint8_t>::operator()(
   uint8_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<int16_t>::operator()(
   int16_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<uint16_t>::operator()(
   uint16_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<float>::operator()(float const& key) const
-{
-  return compute<float>(spark_rapids_jni::normalize_nans(key));
-}
+{ return compute<float>(spark_rapids_jni::normalize_nans(key)); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<double>::operator()(double const& key) const
-{
-  return compute<double>(spark_rapids_jni::normalize_nans(key));
-}
+{ return compute<double>(spark_rapids_jni::normalize_nans(key)); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<cudf::string_view>::operator()(
@@ -184,16 +166,12 @@ murmur_hash_value_type __device__ inline MurmurHash3_32<cudf::string_view>::oper
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<numeric::decimal32>::operator()(
   numeric::decimal32 const& key) const
-{
-  return compute<uint64_t>(key.value());
-}
+{ return compute<uint64_t>(key.value()); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<numeric::decimal64>::operator()(
   numeric::decimal64 const& key) const
-{
-  return compute<uint64_t>(key.value());
-}
+{ return compute<uint64_t>(key.value()); }
 
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<numeric::decimal128>::operator()(

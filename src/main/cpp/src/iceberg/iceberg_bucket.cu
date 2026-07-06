@@ -93,9 +93,7 @@ class iceberg_murmur_hash3_32 {
    * @brief Hash a string view (UTF-8 encoded)
    */
   __device__ static inline int32_t hash_string(cudf::string_view const& str)
-  {
-    return hash_bytes(reinterpret_cast<uint8_t const*>(str.data()), str.size_bytes());
-  }
+  { return hash_bytes(reinterpret_cast<uint8_t const*>(str.data()), str.size_bytes()); }
 
   /**
    * @brief Hash a decimal32 value

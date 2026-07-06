@@ -914,7 +914,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                         d_top_row_indices->begin(),
                         [top_row_indices] __device__(repeated_occurrence const& occ) {
                           return top_row_indices != nullptr ? top_row_indices[occ.row_idx]
-                                                               : occ.row_idx;
+                                                            : occ.row_idx;
                         });
     }
     return d_top_row_indices->data();

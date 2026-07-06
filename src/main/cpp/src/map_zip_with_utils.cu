@@ -322,11 +322,11 @@ std::unique_ptr<cudf::column> map_zip(
   // Extract keys and values from the first map column (col1)
   // Create a column view that represents the keys and values part of col1
   auto const map1_keys   = column_view{data_type{type_id::LIST},
-                                     col1.size(),
-                                     nullptr,
-                                     col1.null_mask(),
-                                     col1.null_count(),
-                                     col1.offset(),
+                                       col1.size(),
+                                       nullptr,
+                                       col1.null_mask(),
+                                       col1.null_count(),
+                                       col1.offset(),
                                        {col1.offsets(), col1.child().child(0)}};
   auto const map1_values = column_view{data_type{type_id::LIST},
                                        col1.size(),
@@ -356,7 +356,7 @@ std::unique_ptr<cudf::column> map_zip(
   // Find the union of all unique keys from both maps
   // This creates a combined set of keys that will be used for the final result
   auto const search_keys      = cudf::lists::union_distinct(cudf::lists_column_view(map1_keys),
-                                                       cudf::lists_column_view(map2_keys));
+                                                            cudf::lists_column_view(map2_keys));
   auto const search_keys_list = cudf::lists_column_view(*search_keys);
 
   // Find the indices of each key in the first map

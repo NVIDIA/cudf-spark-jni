@@ -98,9 +98,7 @@ struct dispatch_float_to_string_fn {
   std::unique_ptr<cudf::column> operator()(cudf::column_view const&,
                                            rmm::cuda_stream_view,
                                            rmm::device_async_resource_ref)
-  {
-    CUDF_FAIL("Values for float_to_string function must be a float type.");
-  }
+  { CUDF_FAIL("Values for float_to_string function must be a float type."); }
 };
 
 }  // namespace
@@ -123,9 +121,7 @@ std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
                                               rmm::cuda_stream_view stream,
                                               rmm::device_async_resource_ref mr)
-{
-  return float_to_string(floats, false, stream, mr);
-}
+{ return float_to_string(floats, false, stream, mr); }
 
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
                                               bool json_string,

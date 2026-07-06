@@ -81,9 +81,7 @@ struct int_iterator_from_column {
   int_iterator_from_column(column_device_view cdv) : cdv(cdv) {}
   __device__ bool is_null(cudf::thread_index_type const index) const { return cdv.is_null(index); }
   __device__ int32_t operator()(cudf::thread_index_type const index) const
-  {
-    return cdv.element<int32_t>(index);
-  }
+  { return cdv.element<int32_t>(index); }
 };
 
 template <typename SRART_ITERATOR, typename LENGTH_ITERATOR>
@@ -150,15 +148,15 @@ auto generate_starts_and_sizes(size_type const* offsets_of_input_lists,
                                rmm::cuda_stream_view stream)
 {
   auto starts              = make_numeric_column(data_type{type_id::INT32},
-                                    num_rows,
-                                    mask_state::UNALLOCATED,
-                                    stream,
-                                    cudf::get_current_device_resource_ref());
+                                                 num_rows,
+                                                 mask_state::UNALLOCATED,
+                                                 stream,
+                                                 cudf::get_current_device_resource_ref());
   auto sizes               = make_numeric_column(data_type{type_id::INT32},
-                                   num_rows,
-                                   mask_state::UNALLOCATED,
-                                   stream,
-                                   cudf::get_current_device_resource_ref());
+                                                 num_rows,
+                                                 mask_state::UNALLOCATED,
+                                                 stream,
+                                                 cudf::get_current_device_resource_ref());
   constexpr int block_size = 256;
   auto grid                = cudf::detail::grid_1d{num_rows, block_size};
   compute_starts_and_sizes_kernel<<<grid.num_blocks, block_size, 0, stream.value()>>>(

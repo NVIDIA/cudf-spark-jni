@@ -135,9 +135,7 @@ class column_pruner {
                 std::vector<Tag> const& tags,
                 int const parent_num_children)
     : children(), tag(Tag::STRUCT)
-  {
-    add_depth_first(names, num_children, tags, parent_num_children);
-  }
+  { add_depth_first(names, num_children, tags, parent_num_children); }
 
   explicit column_pruner(Tag const in_tag) : children(), tag(in_tag) {}
 
@@ -174,14 +172,10 @@ class column_pruner {
  private:
   std::string get_name(parquet::format::SchemaElement& elem,
                        bool const normalize_case = false) const
-  {
-    return normalize_case ? unicode_to_lower(elem.name) : elem.name;
-  }
+  { return normalize_case ? unicode_to_lower(elem.name) : elem.name; }
 
   int get_num_children(parquet::format::SchemaElement& elem) const
-  {
-    return elem.__isset.num_children ? elem.num_children : 0;
-  }
+  { return elem.__isset.num_children ? elem.num_children : 0; }
 
   void skip(std::vector<parquet::format::SchemaElement> const& schema,
             std::size_t& current_input_schema_index,

@@ -42,9 +42,7 @@ constexpr hive_hash_value_t HIVE_INIT_HASH   = 0;
 hive_hash_value_t __device__ inline compute_int(int32_t key) { return key; }
 
 hive_hash_value_t __device__ inline compute_long(int64_t key)
-{
-  return (static_cast<uint64_t>(key) >> 32) ^ key;
-}
+{ return (static_cast<uint64_t>(key) >> 32) ^ key; }
 
 hive_hash_value_t __device__ inline compute_bytes(int8_t const* data, cudf::size_type const len)
 {
@@ -61,9 +59,7 @@ struct hive_hash_function {
   __host__ __device__ constexpr hive_hash_function(uint32_t) {}
 
   [[nodiscard]] hive_hash_value_t __device__ inline operator()(Key const& key) const
-  {
-    CUDF_UNREACHABLE("Unsupported type for hive hash");
-  }
+  { CUDF_UNREACHABLE("Unsupported type for hive hash"); }
 };  // struct hive_hash_function
 
 template <>
@@ -77,36 +73,26 @@ hive_hash_value_t __device__ inline hive_hash_function<cudf::string_view>::opera
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<bool>::operator()(bool const& key) const
-{
-  return compute_int(static_cast<int32_t>(key));
-}
+{ return compute_int(static_cast<int32_t>(key)); }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<int8_t>::operator()(int8_t const& key) const
-{
-  return compute_int(static_cast<int32_t>(key));
-}
+{ return compute_int(static_cast<int32_t>(key)); }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<int16_t>::operator()(
   int16_t const& key) const
-{
-  return compute_int(static_cast<int32_t>(key));
-}
+{ return compute_int(static_cast<int32_t>(key)); }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<int32_t>::operator()(
   int32_t const& key) const
-{
-  return compute_int(key);
-}
+{ return compute_int(key); }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<int64_t>::operator()(
   int64_t const& key) const
-{
-  return compute_long(key);
-}
+{ return compute_long(key); }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<float>::operator()(float const& key) const
@@ -206,9 +192,7 @@ class hive_device_row_hasher {
     template <typename T, CUDF_ENABLE_IF(not cudf::is_nested<T>())>
     __device__ hive_hash_value_t operator()(cudf::column_device_view const& col,
                                             cudf::size_type row_index) const noexcept
-    {
-      return this->hash_functor.template operator()<T>(col, row_index);
-    }
+    { return this->hash_functor.template operator()<T>(col, row_index); }
 
     /**
      * @brief A structure to keep track of the computation for nested types.
@@ -229,9 +213,7 @@ class hive_device_row_hasher {
       }
 
       __device__ void update_cur_hash(hive_hash_value_t hash)
-      {
-        _cur_hash = _cur_hash * HIVE_HASH_FACTOR + hash;
-      }
+      { _cur_hash = _cur_hash * HIVE_HASH_FACTOR + hash; }
 
       __device__ hive_hash_value_t get_hash() { return _cur_hash; }
 

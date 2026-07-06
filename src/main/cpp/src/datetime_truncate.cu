@@ -71,9 +71,7 @@ enum class truncation_format : uint8_t {
 
 // Convert an ASCII character into uppercase.
 __host__ __device__ char to_upper(char const c)
-{
-  return ('a' <= c && c <= 'z') ? static_cast<char>(static_cast<unsigned int>(c ^ 0x20)) : c;
-}
+{ return ('a' <= c && c <= 'z') ? static_cast<char>(static_cast<unsigned int>(c ^ 0x20)) : c; }
 
 // Parse the truncation format from a string.
 __host__ __device__ truncation_format parse_format(char const* fmt_data, cudf::size_type fmt_size)

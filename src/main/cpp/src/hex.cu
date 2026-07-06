@@ -46,9 +46,7 @@ struct output_size_fn {
   cudf::detail::input_offsetalator d_in_offsets;
 
   __device__ cudf::size_type operator()(cudf::size_type idx) const
-  {
-    return static_cast<cudf::size_type>((d_in_offsets[idx + 1] - d_in_offsets[idx]) * 2);
-  }
+  { return static_cast<cudf::size_type>((d_in_offsets[idx + 1] - d_in_offsets[idx]) * 2); }
 };
 
 /**

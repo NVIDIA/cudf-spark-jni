@@ -201,9 +201,7 @@ struct dispatch_decimal_to_non_ansi_string_fn {
   std::unique_ptr<column> operator()(column_view const&,
                                      rmm::cuda_stream_view,
                                      rmm::device_async_resource_ref) const
-  {
-    CUDF_FAIL("Values for decimal_to_non_ansi_string function must be a decimal type.");
-  }
+  { CUDF_FAIL("Values for decimal_to_non_ansi_string function must be a decimal type."); }
 };
 
 }  // namespace

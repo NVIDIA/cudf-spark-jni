@@ -41,14 +41,10 @@ __host__ __device__ constexpr inline bool is_fixed_point()
 struct is_fixed_point_impl {
   template <typename T>
   __host__ __device__ constexpr bool operator()()
-  {
-    return is_fixed_point<T>();
-  }
+  { return is_fixed_point<T>(); }
 };
 __host__ __device__ constexpr bool is_fixed_point(cudf::data_type type)
-{
-  return cudf::type_dispatcher(type, is_fixed_point_impl{});
-}
+{ return cudf::type_dispatcher(type, is_fixed_point_impl{}); }
 
 // per-column information, stored in the metadata header
 struct shuffle_split_col_data {
@@ -61,9 +57,7 @@ struct shuffle_split_col_data {
   }
 
   __host__ __device__ constexpr cudf::size_type num_children() const
-  {
-    return spark_rapids_jni::is_fixed_point(cudf::data_type{type}) ? 0 : param.num_children;
-  }
+  { return spark_rapids_jni::is_fixed_point(cudf::data_type{type}) ? 0 : param.num_children; }
   cudf::size_type scale() const
   {
     CUDF_EXPECTS(cudf::is_fixed_point(cudf::data_type{type}),

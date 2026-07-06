@@ -54,28 +54,20 @@ namespace spark_rapids_jni {
 std::unique_ptr<cudf::column> sha224_nulls_preserved(cudf::column_view const& input,
                                                      rmm::cuda_stream_view stream,
                                                      rmm::device_async_resource_ref mr)
-{
-  return sha_impl(cudf::hashing::sha224, input, stream, mr);
-}
+{ return sha_impl(cudf::hashing::sha224, input, stream, mr); }
 
 std::unique_ptr<cudf::column> sha256_nulls_preserved(cudf::column_view const& input,
                                                      rmm::cuda_stream_view stream,
                                                      rmm::device_async_resource_ref mr)
-{
-  return sha_impl(cudf::hashing::sha256, input, stream, mr);
-}
+{ return sha_impl(cudf::hashing::sha256, input, stream, mr); }
 
 std::unique_ptr<cudf::column> sha384_nulls_preserved(cudf::column_view const& input,
                                                      rmm::cuda_stream_view stream,
                                                      rmm::device_async_resource_ref mr)
-{
-  return sha_impl(cudf::hashing::sha384, input, stream, mr);
-}
+{ return sha_impl(cudf::hashing::sha384, input, stream, mr); }
 
 std::unique_ptr<cudf::column> sha512_nulls_preserved(cudf::column_view const& input,
                                                      rmm::cuda_stream_view stream,
                                                      rmm::device_async_resource_ref mr)
-{
-  return sha_impl(cudf::hashing::sha512, input, stream, mr);
-}
+{ return sha_impl(cudf::hashing::sha512, input, stream, mr); }
 }  // namespace spark_rapids_jni

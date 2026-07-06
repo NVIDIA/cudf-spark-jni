@@ -120,9 +120,7 @@ struct nested_location_provider {
   }
 
   __device__ inline bool valid(int thread_idx) const
-  {
-    return get_rebased_child_location(thread_idx, nullptr).offset >= 0;
-  }
+  { return get_rebased_child_location(thread_idx, nullptr).offset >= 0; }
 };
 
 struct nested_repeated_location_provider {
@@ -618,9 +616,7 @@ struct extract_strided_count {
   int num_fields;
 
   __device__ int32_t operator()(int row) const
-  {
-    return info[flat_index(row, num_fields, field_idx)].count;
-  }
+  { return info[flat_index(row, num_fields, field_idx)].count; }
 };
 
 template <typename LocationProvider, typename ValidityFn>

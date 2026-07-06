@@ -322,15 +322,11 @@ static nvtxPayloadSchemaAttr_t const cuptiOverheadSchemaAttr = {
   nullptr};
 #undef PAYLOAD_ENTRY_SIMPLE
 
-const nvtxPayloadSchemaAttr_t* GetNameSchemaAttr() { return &nameSchemaAttr; }
+nvtxPayloadSchemaAttr_t const* GetNameSchemaAttr() { return &nameSchemaAttr; }
 nvtxPayloadSchemaAttr_t const* GetNvtxRangePushPopSchemaAttr()
-{
-  return &nvtxRangePushPopSchemaAttr;
-}
+{ return &nvtxRangePushPopSchemaAttr; }
 nvtxPayloadSchemaAttr_t const* GetNvtxRangeStartEndSchemaAttr()
-{
-  return &nvtxRangeStartEndSchemaAttr;
-}
+{ return &nvtxRangeStartEndSchemaAttr; }
 nvtxPayloadSchemaAttr_t const* GetCuptiApiSchemaAttr() { return &cuptiApiSchemaAttr; }
 nvtxPayloadSchemaAttr_t const* GetCuptiDeviceSchemaAttr() { return &cuptiDeviceSchemaAttr; }
 nvtxPayloadSchemaAttr_t const* GetCuptiKernelSchemaAttr() { return &cuptiKernelSchemaAttr; }

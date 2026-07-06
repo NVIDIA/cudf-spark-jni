@@ -116,9 +116,7 @@ struct days_from_epoch_for_ts_fn {
   int64_t const* tss;
 
   __device__ int32_t operator()(int32_t row_index) const
-  {
-    return static_cast<int>(integer_utils::floor_div(tss[row_index], MICROS_PER_DAY));
-  }
+  { return static_cast<int>(integer_utils::floor_div(tss[row_index], MICROS_PER_DAY)); }
 };
 
 /**

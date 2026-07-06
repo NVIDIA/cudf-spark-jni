@@ -65,14 +65,10 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_TaskPriority_getTaskPriority(
   JNIEnv* env, jclass, jlong task_attempt_id)
-{
-  return spark_rapids_jni::get_task_priority(task_attempt_id);
-}
+{ return spark_rapids_jni::get_task_priority(task_attempt_id); }
 
 JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_TaskPriority_taskDone(JNIEnv* env,
                                                                               jclass,
                                                                               jlong task_attempt_id)
-{
-  spark_rapids_jni::task_done(task_attempt_id);
-}
+{ spark_rapids_jni::task_done(task_attempt_id); }
 }

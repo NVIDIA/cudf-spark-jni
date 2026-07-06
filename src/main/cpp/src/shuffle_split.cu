@@ -318,9 +318,7 @@ struct buf_info_functor {
 
   template <typename T, typename... Args>
   std::enable_if_t<std::is_same_v<T, cudf::dictionary32>, void> operator()(Args&&...)
-  {
-    CUDF_FAIL("Unsupported type");
-  }
+  { CUDF_FAIL("Unsupported type"); }
 
  private:
   void add_null_buffer(column_view const& col,
@@ -835,10 +833,10 @@ std::pair<shuffle_split_result, shuffle_split_metadata> shuffle_split(
   // and total # of buffers
   src_buf_count const num_src_bufs_by_type = count_src_bufs(input.begin(), input.end());
   size_t const num_src_bufs                = num_src_bufs_by_type.validity_buf_count +
-                              num_src_bufs_by_type.offset_buf_count +
-                              num_src_bufs_by_type.data_buf_count;
-  size_t const num_bufs         = num_src_bufs * num_partitions;
-  auto const bufs_per_partition = num_src_bufs;
+                                             num_src_bufs_by_type.offset_buf_count +
+                                             num_src_bufs_by_type.data_buf_count;
+  size_t const num_bufs                    = num_src_bufs * num_partitions;
+  auto const bufs_per_partition            = num_src_bufs;
 
   // packed block of memory 1. split indices and src_buf_info structs
   size_t const indices_size =

@@ -63,9 +63,7 @@ struct strings_to_host_fn {
                   char const*,
                   cudf::column_view const&,
                   rmm::cuda_stream_view)
-  {
-    CUDF_FAIL("invalid offsets type");
-  }
+  { CUDF_FAIL("invalid offsets type"); }
 };
 
 template <typename CV>

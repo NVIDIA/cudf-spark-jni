@@ -128,9 +128,7 @@ struct round_type_dispatcher {
   template <typename T, typename... Args>
   std::unique_ptr<cudf::column> operator()(Args&&...)
     requires(!std::is_floating_point_v<T>)
-  {
-    CUDF_FAIL("Type not supported for spark_rapids_jni::round");
-  }
+  { CUDF_FAIL("Type not supported for spark_rapids_jni::round"); }
 
   template <typename T>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& input,
