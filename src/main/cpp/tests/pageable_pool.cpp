@@ -19,23 +19,40 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <new>
 #include <thread>
 #include <vector>
 
 using namespace spark_rapids_jni;
 
+namespace {
+
 static constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
-// Explicit any_resource construction is required — the converting constructor
-// of any_resource is not implicit in this CCCL version.
 static pageable_pool_resource make_pool(std::size_t size = kPoolSize, int threads = 1)
 {
+  // Explicit any_resource construction is required because the converting constructor
+  // of any_resource is not implicit in this CCCL version.
   return pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
     size,
     threads);
 }
+
+testing::AssertionResult all_eq(unsigned char const* data,
+                                std::size_t length,
+                                unsigned char expected)
+{
+  for (std::size_t i = 0; i < length; ++i) {
+    if (data[i] != expected) {
+      return testing::AssertionFailure()
+             << "mismatch at index " << i << " expected " << static_cast<int>(expected)
+             << " actual " << static_cast<int>(data[i]);
+    }
+  }
+  return testing::AssertionSuccess();
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Basic alloc / dealloc
@@ -55,8 +72,7 @@ TEST(PageablePool, AllocFillAndFree)
   ASSERT_NE(p, nullptr);
   std::memset(p, 0xAB, 1024);
   auto* bytes = static_cast<unsigned char*>(p);
-  for (std::size_t i = 0; i < 1024; ++i)
-    ASSERT_EQ(bytes[i], 0xAB);
+  EXPECT_TRUE(all_eq(bytes, 1024, 0xAB));
   pool.deallocate_sync(p, 1024);
 }
 
@@ -64,7 +80,7 @@ TEST(PageablePool, ZeroByteAllocationDoesNotConsumePool)
 {
   auto pool = make_pool();
   void* p   = pool.allocate_sync(0);
-  ASSERT_EQ(p, nullptr);
+  EXPECT_EQ(p, nullptr);
   pool.deallocate_sync(p, 0);
 
   void* full = pool.allocate_sync(kPoolSize);
@@ -80,7 +96,7 @@ TEST(PageablePool, PointerIsAligned)
   auto pool                   = make_pool();
   constexpr std::size_t align = cuda::mr::default_cuda_malloc_host_alignment;
   void* p                     = pool.allocate_sync(1);
-  ASSERT_EQ(reinterpret_cast<std::uintptr_t>(p) % align, 0u);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p) % align, 0u);
   pool.deallocate_sync(p, 1);
 }
 
@@ -132,11 +148,12 @@ TEST(PageablePool, MultipleAllocsExhaustPool)
   std::vector<void*> ptrs(n);
   for (int i = 0; i < n; ++i) {
     ptrs[i] = pool.allocate_sync(chunk);
-    ASSERT_NE(ptrs[i], nullptr);
+    ASSERT_NE(ptrs[i], nullptr) << "i=" << i;
   }
   EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(chunk); }, pageable_pool_exhausted);
-  for (int i = 0; i < n; ++i)
+  for (int i = 0; i < n; ++i) {
     pool.deallocate_sync(ptrs[i], chunk);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +183,9 @@ TEST(PageablePool, ConcurrentAllocFree)
       }
     });
   }
-  for (auto& th : threads)
+  for (auto& th : threads) {
     th.join();
+  }
 
   // After all threads finish the full pool must be reclaimable.
   void* final_alloc = pool.allocate_sync(16 * 1024 * 1024);

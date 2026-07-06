@@ -31,7 +31,7 @@
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(
-  JNIEnv* env, jclass, jlong pool_size, jlong /* max_size unused */, jint pretouch_threads)
+  JNIEnv* env, jclass, jlong pool_size, jint pretouch_threads)
 {
   JNI_TRY
   {

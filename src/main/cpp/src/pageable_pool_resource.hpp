@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <rmm/aligned.hpp>
 #include <rmm/detail/error.hpp>
 #include <rmm/mr/detail/coalescing_free_list.hpp>
 #include <rmm/resource_ref.hpp>
@@ -32,6 +33,11 @@
 #include <vector>
 
 namespace spark_rapids_jni {
+
+inline bool is_power_of_two(std::size_t value) noexcept
+{
+  return value != 0 && (value & (value - 1)) == 0;
+}
 
 struct pageable_pool_exhausted : std::exception {
   [[nodiscard]] char const* what() const noexcept override { return "pageable pool exhausted"; }
@@ -52,6 +58,7 @@ struct pageable_memory_resource : cuda::mr::memory_resource_base<pageable_memory
     void* ptr = nullptr;
     // posix_memalign requires alignment to be a power of two and a multiple of sizeof(void*).
     std::size_t const a = std::max(alignment, sizeof(void*));
+    RMM_EXPECTS(is_power_of_two(a), "alignment must be a power of two", rmm::logic_error);
     if (::posix_memalign(&ptr, a, bytes) != 0 || ptr == nullptr) {
       RMM_FAIL("posix_memalign failed", rmm::out_of_memory);
     }
@@ -89,8 +96,9 @@ static_assert(
 // bandwidth rather than incurring per-page faults at copy time.
 //
 // Fragmentation: known limitation inherited from the underlying coalescing free
-// list — same behavior as rmm::pool_memory_resource. The fixed single-buffer
-// design means memory cannot be returned to the OS.
+// list — same behavior as rmm::pool_memory_resource. Unlike the pinned pool, this
+// pool is not growable; supporting growth would require multiple backing buffers
+// plus per-buffer lifetime, pretouch, and coalescing-boundary bookkeeping.
 // ---------------------------------------------------------------------------
 class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_pool_resource> {
  public:
@@ -109,7 +117,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
                          int pretouch_threads)
     : upstream_(std::move(upstream)),
       pool_size_(size),
-      base_(upstream_.allocate_sync(size, alignof(std::max_align_t)))
+      base_(upstream_.allocate_sync(size, system_page_size()))
   {
     try {
       pretouch_parallel(base_, pool_size_, pretouch_threads);
@@ -117,15 +125,12 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
       // allocation and may coalesce freely across their boundaries.
       free_list_.insert(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
     } catch (...) {
-      upstream_.deallocate_sync(base_, pool_size_, alignof(std::max_align_t));
+      upstream_.deallocate_sync(base_, pool_size_, system_page_size());
       throw;
     }
   }
 
-  ~pageable_pool_resource()
-  {
-    upstream_.deallocate_sync(base_, pool_size_, alignof(std::max_align_t));
-  }
+  ~pageable_pool_resource() { upstream_.deallocate_sync(base_, pool_size_, system_page_size()); }
 
   pageable_pool_resource(pageable_pool_resource const&)            = delete;
   pageable_pool_resource& operator=(pageable_pool_resource const&) = delete;
@@ -160,7 +165,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   void deallocate_sync(
     void* ptr,
     std::size_t bytes,
-    [[maybe_unused]] std::size_t alignment = cuda::mr::default_cuda_malloc_host_alignment) noexcept
+    [[maybe_unused]] std::size_t alignment = cuda::mr::default_cuda_malloc_host_alignment)
   {
     if (bytes == 0) { return; }
     std::lock_guard<std::mutex> lock(mtx_);
@@ -181,7 +186,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
     std::vector<std::thread> ts;
     ts.reserve(n);
     std::size_t per = (bytes + n - 1) / static_cast<std::size_t>(n);
-    per             = ((per + page_size - 1) / page_size) * page_size;
+    per             = rmm::align_up(per, page_size);
     try {
       for (int i = 0; i < n; ++i) {
         std::size_t off = static_cast<std::size_t>(i) * per;

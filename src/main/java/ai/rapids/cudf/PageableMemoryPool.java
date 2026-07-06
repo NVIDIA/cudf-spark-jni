@@ -11,7 +11,6 @@ package ai.rapids.cudf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -29,7 +28,7 @@ public final class PageableMemoryPool implements AutoCloseable {
   // These static fields should only ever be accessed when class-synchronized.
   // Do NOT use singleton_ directly!  Use the getSingleton accessor instead.
   private static volatile PageableMemoryPool singleton_ = null;
-  private static Future<PageableMemoryPool> initFuture = null;
+  private static volatile Future<PageableMemoryPool> initFuture = null;
   private long poolHandle;
   private long poolSize;
 
@@ -37,8 +36,7 @@ public final class PageableMemoryPool implements AutoCloseable {
     NativeDepsLoader.loadNativeDeps();
   }
 
-  private static native long newPageablePoolMemoryResource(long initSize, long maxSize,
-                                                           int pretouchThreads);
+  private static native long newPageablePoolMemoryResource(long poolSize, int pretouchThreads);
 
   private static native void releasePageablePoolMemoryResource(long poolPtr);
 
@@ -91,13 +89,14 @@ public final class PageableMemoryPool implements AutoCloseable {
         return null;
       }
       synchronized (PageableMemoryPool.class) {
-        if (singleton_ == null) {
+        if (singleton_ == null && initFuture != null) {
           try {
             singleton_ = initFuture.get();
           } catch (Exception e) {
             throw new RuntimeException("Error initializing pageable memory pool", e);
+          } finally {
+            initFuture = null;
           }
-          initFuture = null;
         }
       }
     }
@@ -105,7 +104,13 @@ public final class PageableMemoryPool implements AutoCloseable {
   }
 
   private static void freeInternal(long address, long origLength) {
-    Objects.requireNonNull(getSingleton()).free(address, origLength);
+    PageableMemoryPool pool = getSingleton();
+    if (pool == null) {
+      throw new IllegalStateException(
+          "Cannot free pageable host buffer after pageable pool shutdown: address="
+              + Long.toHexString(address) + " length=" + origLength);
+    }
+    pool.free(address, origLength);
   }
 
   /**
@@ -131,14 +136,15 @@ public final class PageableMemoryPool implements AutoCloseable {
   }
 
   /**
-   * Check if the pool has been initialized or not.
+   * Check if the pool has been initialized or not. If initialization is in progress,
+   * this waits for it to finish.
    */
   public static boolean isInitialized() {
     return getSingleton() != null;
   }
 
   /**
-   * Shut down the pool, nulling out our reference. Any allocation or free in flight
+   * Shut down the pool, nulling out our reference. Any in-flight allocation or free
    * will fail after this.
    */
   public static synchronized void shutdown() {
@@ -158,12 +164,11 @@ public final class PageableMemoryPool implements AutoCloseable {
    *         (caller should fall back to a regular malloc'd buffer)
    */
   public static HostMemoryBuffer tryAllocate(long bytes) {
-    HostMemoryBuffer result = null;
     PageableMemoryPool pool = getSingleton();
     if (pool != null) {
-      result = pool.tryAllocateInternal(bytes);
+      return pool.tryAllocateInternal(bytes);
     }
-    return result;
+    return null;
   }
 
   /**
@@ -178,14 +183,16 @@ public final class PageableMemoryPool implements AutoCloseable {
   }
 
   private PageableMemoryPool(long poolSize, int pretouchThreads) {
-    this.poolHandle = newPageablePoolMemoryResource(poolSize, poolSize, pretouchThreads);
+    this.poolHandle = newPageablePoolMemoryResource(poolSize, pretouchThreads);
     this.poolSize = poolSize;
   }
 
   @Override
-  public void close() {
-    releasePageablePoolMemoryResource(this.poolHandle);
-    this.poolHandle = -1;
+  public synchronized void close() {
+    if (this.poolHandle != -1) {
+      releasePageablePoolMemoryResource(this.poolHandle);
+      this.poolHandle = -1;
+    }
   }
 
   /**
@@ -193,16 +200,21 @@ public final class PageableMemoryPool implements AutoCloseable {
    * the pool is exhausted, so callers can fall back gracefully.
    */
   private synchronized HostMemoryBuffer tryAllocateInternal(long bytes) {
+    if (this.poolHandle == -1) {
+      throw new IllegalStateException("Pageable memory pool has been closed");
+    }
     long allocated = allocFromPageablePool(this.poolHandle, bytes);
     if (allocated == -1) {
       return null;
-    } else {
-      return new HostMemoryBuffer(allocated, bytes,
-              new PageableHostBufferCleaner(allocated, bytes));
     }
+    return new HostMemoryBuffer(allocated, bytes,
+            new PageableHostBufferCleaner(allocated, bytes));
   }
 
   private synchronized void free(long address, long size) {
+    if (this.poolHandle == -1) {
+      throw new IllegalStateException("Pageable memory pool has been closed");
+    }
     freeFromPageablePool(this.poolHandle, address, size);
   }
 }
