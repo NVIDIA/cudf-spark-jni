@@ -19,11 +19,13 @@ package com.nvidia.spark.rapids.jni;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
+import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.JSONOptions;
 import ai.rapids.cudf.Schema;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FromJsonToStructsTest {
   private static JSONOptions getOptions() {
@@ -53,6 +55,10 @@ public class FromJsonToStructsTest {
              input, schema, getOptions(), true);
          ColumnView outputAniviaData = output.getChildColumnView(0);
          ColumnView outputAsset = outputAniviaData.getChildColumnView(0)) {
+      try (ColumnView outputAssetId = outputAsset.getChildColumnView(0);
+           HostColumnVector hostAssetId = outputAssetId.copyToHost()) {
+        assertTrue(hostAssetId.isNull(0), "malformed record should nullify assetId");
+      }
       assertEquals(input.getRowCount(), output.getRowCount());
       assertEquals(input.getRowCount(), outputAniviaData.getRowCount());
       assertEquals(input.getRowCount(), outputAsset.getRowCount());
