@@ -43,7 +43,6 @@
 #include <source_location>
 #include <string>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -61,8 +60,6 @@ struct enum_string_lookup_tables {
             d_name_chars.data()};
   }
 };
-
-using enum_string_lookup_cache = std::unordered_map<int, enum_string_lookup_tables>;
 
 class protobuf_schema {
  public:
@@ -88,13 +85,12 @@ class protobuf_schema {
   [[nodiscard]] protobuf_field_meta_view field(int schema_idx) const;
   [[nodiscard]] std::vector<int> const& children(int parent_schema_idx) const;
   [[nodiscard]] bool is_output(int schema_idx) const;
-  [[nodiscard]] enum_string_lookup_tables const& enum_lookup(int schema_idx,
-                                                             rmm::cuda_stream_view stream) const;
+  [[nodiscard]] enum_string_lookup_tables enum_lookup(int schema_idx,
+                                                      rmm::cuda_stream_view stream) const;
 
  private:
   protobuf_decode_context const& context_;
   std::vector<std::vector<int>> children_by_parent_;
-  mutable enum_string_lookup_cache enum_lookup_cache_;
 };
 
 struct field_descriptor_bundle {
@@ -242,20 +238,6 @@ inline void validate_nonempty_repeated_field_work(
   CUDF_EXPECTS(work.occurrences != nullptr, message("repeated occurrences must be present"));
   CUDF_EXPECTS(work.occurrences->size() == static_cast<size_t>(work.total_count),
                message("occurrence count mismatch"));
-}
-
-inline void validate_singular_message_merge_work(
-  singular_message_merge_work const& work,
-  int num_rows,
-  std::source_location const& location = std::source_location::current())
-{
-  auto const caller  = location.function_name();
-  auto const message = [caller](char const* detail) { return std::string{caller} + ": " + detail; };
-  CUDF_EXPECTS(work.total_fragments > 1, message("duplicate merge requires multiple fragments"));
-  CUDF_EXPECTS(work.row_offsets.size() == static_cast<size_t>(num_rows) + 1,
-               message("row offsets size must match row count"));
-  CUDF_EXPECTS(work.fragments.size() == static_cast<size_t>(work.total_fragments),
-               message("fragment count mismatch"));
 }
 
 template <typename CountIterator>

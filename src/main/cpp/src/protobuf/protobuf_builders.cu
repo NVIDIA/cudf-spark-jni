@@ -42,19 +42,11 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
   rmm::cuda_stream_view stream);
 
-enum_string_lookup_tables const& protobuf_schema::enum_lookup(int schema_idx,
-                                                              rmm::cuda_stream_view stream) const
+enum_string_lookup_tables protobuf_schema::enum_lookup(int schema_idx,
+                                                       rmm::cuda_stream_view stream) const
 {
-  auto entry = enum_lookup_cache_.find(schema_idx);
-  if (entry == enum_lookup_cache_.end()) {
-    auto const field = this->field(schema_idx);
-    entry =
-      enum_lookup_cache_
-        .emplace(schema_idx,
-                 make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream))
-        .first;
-  }
-  return entry->second;
+  auto const field = this->field(schema_idx);
+  return make_enum_string_lookup_tables(field.enum_valid_values, field.enum_names, stream);
 }
 
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
@@ -492,7 +484,7 @@ std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32
                                                        rmm::cuda_stream_view stream,
                                                        rmm::device_async_resource_ref mr)
 {
-  auto const& lookup = request.schema.enum_lookup(request.schema_idx, stream);
+  auto const lookup = request.schema.enum_lookup(request.schema_idx, stream);
   return build_enum_string_column_with_lookup(
     enum_values, valid, lookup, request.runtime, request.values, stream, mr);
 }
@@ -513,7 +505,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   auto const rep_blocks =
     static_cast<int>((total_count + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto const& lookup    = schema.enum_lookup(work.schema_idx, stream);
+  auto const lookup     = schema.enum_lookup(work.schema_idx, stream);
 
   // 1. Extract enum integer values from occurrences
   rmm::device_uvector<int32_t> enum_ints(total_count, stream, scratch_mr);
@@ -651,7 +643,11 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  validate_singular_message_merge_work(work, input.num_rows);
+  CUDF_EXPECTS(work.total_fragments > 1, "duplicate merge requires multiple fragments");
+  CUDF_EXPECTS(work.row_offsets.size() == static_cast<size_t>(input.num_rows) + 1,
+               "fragment offsets size must match row count");
+  CUDF_EXPECTS(work.fragments.size() == static_cast<size_t>(work.total_fragments),
+               "fragment count mismatch");
   auto const scratch_mr = cudf::get_current_device_resource_ref();
 
   auto validation_fields =
