@@ -492,7 +492,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Allocate for counting repeated fields. `std::max(..., 1)` keeps the device_uvector
   // non-empty when the corresponding field count is 0, so `.data()` remains a valid pointer.
-  rmm::device_uvector<repeated_field_info> d_repeated_info(
+  rmm::device_uvector<field_occurrence_count> d_repeated_info(
     std::max<size_t>(static_cast<size_t>(num_rows) * num_repeated, 1), stream, scratch_mr);
   rmm::device_uvector<field_location> d_nested_locations(
     std::max<size_t>(static_cast<size_t>(num_rows) * num_nested, 1), stream, scratch_mr);
@@ -534,20 +534,18 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     launch_count_repeated_fields(*d_in,
-                                 d_schema.data(),
-                                 num_fields,
-                                 0,
-                                 d_repeated_info.data(),
-                                 num_repeated,
-                                 d_repeated_indices.data(),
-                                 d_nested_locations.data(),
-                                 num_nested,
-                                 d_nested_indices.data(),
+                                 {d_schema.data(), 0},
+                                 {d_repeated_info.data(),
+                                  d_repeated_indices.data(),
+                                  num_repeated,
+                                  d_fn_to_rep.data(),
+                                  static_cast<int>(d_fn_to_rep.size())},
+                                 {d_nested_locations.data(),
+                                  d_nested_indices.data(),
+                                  num_nested,
+                                  d_fn_to_nested.data(),
+                                  static_cast<int>(d_fn_to_nested.size())},
                                  d_error.data(),
-                                 d_fn_to_rep.data(),
-                                 static_cast<int>(d_fn_to_rep.size()),
-                                 d_fn_to_nested.data(),
-                                 static_cast<int>(d_fn_to_nested.size()),
                                  num_rows,
                                  stream);
   }
@@ -583,11 +581,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     launch_scan_all_fields(*d_in,
-                           d_field_descs.data(),
-                           num_scalar,
-                           h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
-                           static_cast<int>(h_field_lookup.size()),
-                           d_locations.data(),
+                           {d_field_descs.data(),
+                            num_scalar,
+                            h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
+                            static_cast<int>(h_field_lookup.size()),
+                            d_locations.data(),
+                            nullptr},
                            d_error.data(),
                            track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                            num_rows,

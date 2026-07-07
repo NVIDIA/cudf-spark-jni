@@ -403,20 +403,10 @@ CUDF_KERNEL void extract_lengths_kernel(LocationProvider loc_provider,
 // ============================================================================
 
 void launch_count_repeated_fields(cudf::column_device_view const& d_in,
-                                  device_nested_field_descriptor const* schema,
-                                  int num_fields,
-                                  int depth_level,
-                                  repeated_field_info* repeated_info,
-                                  int num_repeated_fields,
-                                  int const* repeated_field_indices,
-                                  field_location* nested_locations,
-                                  int num_nested_fields,
-                                  int const* nested_field_indices,
+                                  device_schema_view schema,
+                                  repeated_field_count_view repeated,
+                                  nested_field_location_view nested,
                                   protobuf_error* error_flag,
-                                  int const* fn_to_rep_idx,
-                                  int fn_to_rep_size,
-                                  int const* fn_to_nested_idx,
-                                  int fn_to_nested_size,
                                   int num_rows,
                                   rmm::cuda_stream_view stream);
 
@@ -433,29 +423,17 @@ void launch_extract_strided_locations(field_location const* nested_locations,
                                       int num_rows,
                                       rmm::cuda_stream_view stream);
 
-void launch_scan_nested_message_fields(uint8_t const* message_data,
-                                       cudf::size_type message_data_size,
-                                       cudf::size_type const* parent_row_offsets,
-                                       cudf::size_type parent_base_offset,
-                                       field_location const* parent_locations,
-                                       int num_parent_rows,
-                                       field_descriptor const* field_descs,
-                                       int num_fields,
-                                       field_location* output_locations,
-                                       repeated_field_info* repeated_info,
+void launch_scan_nested_message_fields(protobuf_input_view input,
+                                       nested_parent_view parent,
+                                       field_scan_view fields,
                                        protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
-                                       int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
 
-void launch_scan_all_field_occurrences_in_nested(uint8_t const* message_data,
-                                                 cudf::size_type message_data_size,
-                                                 cudf::size_type const* row_offsets,
-                                                 cudf::size_type base_offset,
-                                                 field_location const* parent_locs,
+void launch_scan_all_field_occurrences_in_nested(protobuf_input_view input,
+                                                 nested_parent_view parent,
                                                  field_occurrence_scan_view fields,
                                                  protobuf_error* error_flag,
-                                                 int num_rows,
                                                  rmm::cuda_stream_view stream);
 
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
@@ -607,7 +585,7 @@ std::unique_ptr<cudf::column> extract_and_build_integer_column(
 }
 
 struct extract_strided_count {
-  repeated_field_info const* info;
+  field_occurrence_count const* info;
   int field_idx;
   int num_fields;
 
@@ -964,11 +942,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
 // ============================================================================
 
 void launch_scan_all_fields(cudf::column_device_view const& d_in,
-                            field_descriptor const* field_descs,
-                            int num_fields,
-                            int const* field_lookup,
-                            int field_lookup_size,
-                            field_location* locations,
+                            field_scan_view fields,
                             protobuf_error* error_flag,
                             bool* row_has_invalid_data,
                             int num_rows,

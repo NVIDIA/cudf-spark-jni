@@ -97,9 +97,9 @@ struct field_descriptor {
 };
 
 /**
- * Information about repeated field occurrences in a row.
+ * Number of selected field occurrences in a row.
  */
-struct repeated_field_info {
+struct field_occurrence_count {
   int32_t count;  // Number of occurrences in this row
 };
 
@@ -161,6 +161,36 @@ struct device_nested_field_descriptor {
       has_default_value(src.has_default_value)
   {
   }
+};
+
+struct device_schema_view {
+  device_nested_field_descriptor const* fields;
+  int depth;
+};
+
+struct repeated_field_count_view {
+  field_occurrence_count* info;
+  int const* schema_indices;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
+struct nested_field_location_view {
+  field_location* locations;
+  int const* schema_indices;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
+struct field_scan_view {
+  field_descriptor const* descriptors;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+  field_location* locations;
+  field_occurrence_count* repeated_info;
 };
 
 }  // namespace spark_rapids_jni::protobuf::detail

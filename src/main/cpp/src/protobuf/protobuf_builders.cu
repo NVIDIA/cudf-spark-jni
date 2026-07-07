@@ -678,26 +678,23 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   auto const child_location_count = static_cast<size_t>(input.num_rows) * num_child_fields;
   rmm::device_uvector<field_location> d_child_locations(
     std::max(child_location_count, size_t{1}), stream, scratch_mr);
-  rmm::device_uvector<repeated_field_info> d_repeated_info(
+  rmm::device_uvector<field_occurrence_count> d_repeated_info(
     repeated_child_positions.empty() ? 0 : child_location_count, stream, scratch_mr);
   CUDF_EXPECTS(repeated_child_positions.empty() || d_repeated_info.size() == child_location_count,
                "Protobuf decode internal error: nested repeated count buffer size mismatch");
   // Repeated counts are collected in the same pass as singleton locations so each nested
   // message is parsed only once before LIST offsets are built.
   launch_scan_nested_message_fields(
-    input.message_data,
-    input.message_data_size,
-    input.row_offsets,
-    input.base_offset,
-    parent.locations,
-    input.num_rows,
-    d_child_field_descs.data(),
-    num_child_fields,
-    d_child_locations.data(),
-    d_repeated_info.data(),
+    input,
+    parent,
+    {d_child_field_descs.data(),
+     num_child_fields,
+     nullptr,
+     0,
+     d_child_locations.data(),
+     d_repeated_info.data()},
     decode_ctx.error->data(),
     !decode_ctx.row_force_null->is_empty() ? decode_ctx.row_force_null->data() : nullptr,
-    parent.top_row_indices,
     stream);
 
   maybe_check_required_fields(
@@ -741,15 +738,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 
   if (!h_scan_descs.empty()) {
     auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
-    launch_scan_all_field_occurrences_in_nested(input.message_data,
-                                                input.message_data_size,
-                                                input.row_offsets,
-                                                input.base_offset,
-                                                parent.locations,
-                                                scan_bundle.view(),
-                                                decode_ctx.error->data(),
-                                                input.num_rows,
-                                                stream);
+    launch_scan_all_field_occurrences_in_nested(
+      input, parent, scan_bundle.view(), decode_ctx.error->data(), stream);
   }
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
