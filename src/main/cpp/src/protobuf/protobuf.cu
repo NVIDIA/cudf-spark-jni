@@ -931,35 +931,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     if (!h_scan_descs.empty()) {
-      rmm::device_uvector<field_occurrence_scan_desc> d_scan_descs(
-        h_scan_descs.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
-                                               h_scan_descs.data(),
-                                               h_scan_descs.size() * sizeof(h_scan_descs[0]),
-                                               stream));
-
-      // Build field_number -> scan_desc_index lookup. The helper returns an empty table when
-      // max field_number exceeds FIELD_LOOKUP_TABLE_MAX (would over-allocate); the kernel
-      // detects this via fn_to_scan_size == 0 and falls back to a linear scan.
-      auto h_fn_to_scan = build_field_lookup_table(
-        h_scan_descs.data(), static_cast<int>(h_scan_descs.size()), stream);
-      rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
-      int fn_to_scan_size = 0;
-      if (!h_fn_to_scan.empty()) {
-        d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
-        CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-          d_fn_to_scan.data(), h_fn_to_scan.data(), h_fn_to_scan.size() * sizeof(int), stream));
-        fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
-      }
-
-      launch_scan_all_field_occurrences(*d_in,
-                                        d_scan_descs.data(),
-                                        static_cast<int>(h_scan_descs.size()),
-                                        d_error.data(),
-                                        fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
-                                        fn_to_scan_size,
-                                        num_rows,
-                                        stream);
+      auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
+      launch_scan_all_field_occurrences(
+        *d_in, scan_bundle.view(), d_error.data(), num_rows, stream);
     }
 
     // Phase C: Build columns per field.

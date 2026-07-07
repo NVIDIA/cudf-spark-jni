@@ -740,35 +740,14 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   }
 
   if (!h_scan_descs.empty()) {
-    rmm::device_uvector<field_occurrence_scan_desc> d_scan_descs(
-      h_scan_descs.size(), stream, scratch_mr);
-    CUDF_CUDA_TRY(
-      cudf::detail::memcpy_async(d_scan_descs.data(),
-                                 h_scan_descs.data(),
-                                 h_scan_descs.size() * sizeof(field_occurrence_scan_desc),
-                                 stream));
-
-    auto h_fn_to_scan =
-      build_field_lookup_table(h_scan_descs.data(), static_cast<int>(h_scan_descs.size()), stream);
-    rmm::device_uvector<int> d_fn_to_scan(0, stream, scratch_mr);
-    int fn_to_scan_size = 0;
-    if (!h_fn_to_scan.empty()) {
-      d_fn_to_scan = rmm::device_uvector<int>(h_fn_to_scan.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_fn_to_scan.data(), h_fn_to_scan.data(), h_fn_to_scan.size() * sizeof(int), stream));
-      fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
-    }
-
+    auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
     launch_scan_all_field_occurrences_in_nested(input.message_data,
                                                 input.message_data_size,
                                                 input.row_offsets,
                                                 input.base_offset,
                                                 parent.locations,
-                                                d_scan_descs.data(),
-                                                static_cast<int>(d_scan_descs.size()),
+                                                scan_bundle.view(),
                                                 decode_ctx.error->data(),
-                                                fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
-                                                fn_to_scan_size,
                                                 input.num_rows,
                                                 stream);
   }

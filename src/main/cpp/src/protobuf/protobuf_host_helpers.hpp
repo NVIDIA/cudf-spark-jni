@@ -189,6 +189,32 @@ inline cudf::detail::host_vector<int> build_field_lookup_table(FieldDesc const* 
   return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
+struct field_occurrence_scan_bundle {
+  rmm::device_uvector<field_occurrence_scan_desc> descriptors;
+  rmm::device_uvector<int> field_number_lookup;
+
+  field_occurrence_scan_view view() const
+  {
+    auto const lookup_size = static_cast<int>(field_number_lookup.size());
+    return {descriptors.data(),
+            static_cast<int>(descriptors.size()),
+            lookup_size > 0 ? field_number_lookup.data() : nullptr,
+            lookup_size};
+  }
+};
+
+inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
+  cudf::detail::host_vector<field_occurrence_scan_desc> const& host_descriptors,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto descriptors = cudf::detail::make_device_uvector_async(host_descriptors, stream, mr);
+  auto host_lookup = build_field_lookup_table(
+    host_descriptors.data(), static_cast<int>(host_descriptors.size()), stream);
+  auto lookup = cudf::detail::make_device_uvector_async(host_lookup, stream, mr);
+  return {std::move(descriptors), std::move(lookup)};
+}
+
 /**
  * Find all child field indices for a given parent index in the schema.
  * This is a commonly used pattern throughout the codebase.

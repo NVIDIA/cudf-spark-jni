@@ -421,11 +421,8 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   rmm::cuda_stream_view stream);
 
 void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
-                                       field_occurrence_scan_desc const* scan_descs,
-                                       int num_scan_fields,
+                                       field_occurrence_scan_view fields,
                                        protobuf_error* error_flag,
-                                       int const* fn_to_desc_idx,
-                                       int fn_to_desc_size,
                                        int num_rows,
                                        rmm::cuda_stream_view stream);
 
@@ -456,11 +453,8 @@ void launch_scan_all_field_occurrences_in_nested(uint8_t const* message_data,
                                                  cudf::size_type const* row_offsets,
                                                  cudf::size_type base_offset,
                                                  field_location const* parent_locs,
-                                                 field_occurrence_scan_desc const* scan_descs,
-                                                 int num_scan_fields,
+                                                 field_occurrence_scan_view fields,
                                                  protobuf_error* error_flag,
-                                                 int const* fn_to_desc_idx,
-                                                 int fn_to_desc_size,
                                                  int num_rows,
                                                  rmm::cuda_stream_view stream);
 

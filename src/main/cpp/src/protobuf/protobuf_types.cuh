@@ -123,6 +123,13 @@ struct field_occurrence_scan_desc {
   field_occurrence* occurrences;  // Output buffer [total_count]
 };
 
+struct field_occurrence_scan_view {
+  field_occurrence_scan_desc const* descriptors;
+  int size;
+  int const* field_number_lookup;
+  int lookup_size;
+};
+
 /**
  * Device-side descriptor for nested schema fields.
  */
