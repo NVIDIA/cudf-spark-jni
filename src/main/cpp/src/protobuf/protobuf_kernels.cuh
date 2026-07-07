@@ -706,29 +706,24 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
 
 template <typename LocationProvider>
 inline std::unique_ptr<cudf::column> extract_typed_column(
-  cudf::data_type dt,
-  int encoding,
+  protobuf_field_meta_view field,
   uint8_t const* message_data,
   LocationProvider const& loc_provider,
   int num_items,
   int blocks,
   int threads_per_block,
-  bool has_default,
-  int64_t default_int,
-  double default_float,
-  bool default_bool,
-  cudf::detail::host_vector<uint8_t> const& default_string,
-  int schema_idx,
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values,
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names,
   protobuf_decode_runtime_context decode_ctx,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr,
   int32_t const* top_row_indices = nullptr)
 {
+  auto const dt          = field.output_type;
+  auto const encoding    = static_cast<int>(field.schema.encoding);
+  auto const has_default = field.schema.has_default_value;
+
   switch (dt.id()) {
     case cudf::type_id::BOOL8: {
-      int64_t def_val = has_default ? (default_bool ? 1 : 0) : 0;
+      int64_t def_val = has_default ? (field.default_bool ? 1 : 0) : 0;
       return extract_and_build_scalar_column<uint8_t>(
         dt,
         num_items,
@@ -758,25 +753,22 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                               blocks,
                                                               threads_per_block,
                                                               has_default,
-                                                              default_int,
+                                                              field.default_int,
                                                               encoding,
                                                               true,
                                                               out.data(),
                                                               valid.data(),
                                                               decode_ctx.error->data(),
                                                               stream);
-      if (schema_idx < static_cast<int>(enum_valid_values.size())) {
-        auto const& valid_enums = enum_valid_values[schema_idx];
-        if (!valid_enums.empty()) {
-          validate_enum_and_propagate_rows(out,
-                                           valid,
-                                           valid_enums,
-                                           *decode_ctx.row_force_null,
-                                           num_items,
-                                           top_row_indices,
-                                           decode_ctx.propagate_invalid_enum_rows,
-                                           stream);
-        }
+      if (!field.enum_valid_values.empty()) {
+        validate_enum_and_propagate_rows(out,
+                                         valid,
+                                         field.enum_valid_values,
+                                         *decode_ctx.row_force_null,
+                                         num_items,
+                                         top_row_indices,
+                                         decode_ctx.propagate_invalid_enum_rows,
+                                         stream);
       }
       auto [mask, null_count] = make_null_mask_from_valid(valid, num_items, stream, mr);
       return std::make_unique<cudf::column>(
@@ -791,7 +783,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         threads_per_block,
                                                         *decode_ctx.error,
                                                         has_default,
-                                                        default_int,
+                                                        field.default_int,
                                                         encoding,
                                                         false,
                                                         stream,
@@ -805,7 +797,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                        threads_per_block,
                                                        *decode_ctx.error,
                                                        has_default,
-                                                       default_int,
+                                                       field.default_int,
                                                        encoding,
                                                        true,
                                                        stream,
@@ -819,13 +811,13 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
                                                         threads_per_block,
                                                         *decode_ctx.error,
                                                         has_default,
-                                                        default_int,
+                                                        field.default_int,
                                                         encoding,
                                                         false,
                                                         stream,
                                                         mr);
     case cudf::type_id::FLOAT32: {
-      float def_float_val = has_default ? static_cast<float>(default_float) : 0.0f;
+      float def_float_val = has_default ? static_cast<float>(field.default_float) : 0.0f;
       return extract_and_build_scalar_column<float>(
         dt,
         num_items,
@@ -844,7 +836,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(
         mr);
     }
     case cudf::type_id::FLOAT64: {
-      double def_double = has_default ? default_float : 0.0;
+      double def_double = has_default ? field.default_float : 0.0;
       return extract_and_build_scalar_column<double>(
         dt,
         num_items,
