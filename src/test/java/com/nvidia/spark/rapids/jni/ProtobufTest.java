@@ -386,6 +386,30 @@ public class ProtobufTest {
   }
 
   @Test
+  void testEmptySchemaStillValidatesMalformedWireData() {
+    Byte[] malformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    ProtobufSchemaDescriptor emptySchema = new ProtobufSchemaDescriptorBuilder().build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), emptySchema, false)) {
+      assertEquals(0, actual.getNumChildren());
+      assertSingleNullStructRow(actual, "Malformed wire data should null an empty-schema row");
+    }
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed}).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(
+          ai.rapids.cudf.CudfException.class,
+          () -> {
+            try (ColumnVector ignored = Protobuf.decodeToStruct(
+                input.getColumn(0), emptySchema, true)) {
+            }
+          });
+      assertTrue(error.getMessage().contains("unable to skip unknown field"));
+    }
+  }
+
+  @Test
   void testVarintZero() {
     // Zero encoded as single byte: 0x00
     Byte[] row = concat(box(tag(1, WT_VARINT)), new Byte[]{0x00});
@@ -1706,11 +1730,10 @@ public class ProtobufTest {
   }
 
   @Test
-  void testPermissiveRepeatedWrongWireTypeDoesNotCorruptFollowingRow() {
+  void testPermissiveRepeatedWrongWireTypeNullsMalformedRow() {
     // message Msg { repeated int32 ids = 1; }
     // Row 0 has one valid element, then a malformed fixed32 occurrence for the same field,
-    // then another valid varint that must be ignored once the row is marked malformed.
-    // Row 1 must keep its own slot and not be overwritten by row 0's trailing occurrence.
+    // then another valid varint. Spark CPU nulls the entire malformed row in PERMISSIVE mode.
     Byte[] row0 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(1)),
         box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
@@ -1719,11 +1742,11 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(100)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT32)),
-             Arrays.asList(1),
-             Arrays.asList(100));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(100)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -1731,6 +1754,31 @@ public class ProtobufTest {
                  .build(),
              false)) {
       AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
+    }
+  }
+
+  @Test
+  void testTopLevelNestedMessageWrongWireTypeBeforeRepeatedField_Permissive() {
+    // message Msg { Inner inner = 1; repeated int32 ids = 2; }
+    Byte[] malformed = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] valid = concat(box(tag(2, WT_VARINT)), box(encodeVarint(8)));
+    Byte[][] rows = new Byte[][]{malformed, valid};
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).isOutput(false)
+        .addField(2, DType.INT32).repeated()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(8)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -2312,10 +2360,8 @@ public class ProtobufTest {
 
   @Test
   void testPackedFixedMisalignedPermissive() {
-    // PERMISSIVE counterpart of testPackedFixedMisaligned: instead of throwing on the
-    // misaligned packed payload, the malformed row should produce an empty list (the
-    // error fires inside walk_repeated_element before any occurrence is counted) and
-    // a following well-formed row in the same batch must still decode normally.
+    // Spark CPU nulls the malformed row in PERMISSIVE mode; a following well-formed row in the
+    // same batch must still decode normally.
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
@@ -2325,11 +2371,11 @@ public class ProtobufTest {
         box(tag(1, WT_32BIT)), box(encodeFixed32(99)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT32)),
-             Arrays.asList(),
-             Arrays.asList(42, 99));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(42, 99)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2342,7 +2388,7 @@ public class ProtobufTest {
 
   @Test
   void testPackedFixedMisaligned64Permissive() {
-    // PERMISSIVE counterpart of testPackedFixedMisaligned64.
+    // Spark CPU nulls the malformed row in PERMISSIVE mode.
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
@@ -2352,11 +2398,11 @@ public class ProtobufTest {
         box(tag(1, WT_64BIT)), box(encodeFixed64(11L)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT64)),
-             Arrays.asList(),
-             Arrays.asList(7L, 11L));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT64))),
+             null,
+             struct(Arrays.asList(7L, 11L)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2364,6 +2410,33 @@ public class ProtobufTest {
                  .build(),
              false)) {
       AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
+    }
+  }
+
+  @Test
+  void testMalformedZeroCountRepeatedFieldBeforeLaterField_Permissive() {
+    Byte[] invalidRow = concat(
+        box(tag(1, WT_LEN)), encodeBytes(new byte[]{(byte) 0x80}),
+        box(tag(2, WT_VARINT)), box(encodeVarint(11)));
+    Byte[] validRow = concat(box(tag(2, WT_VARINT)), box(encodeVarint(22)));
+    StructType expectedType = new StructType(
+        true,
+        new ListType(true, new BasicType(true, DType.INT32)),
+        new ListType(true, new BasicType(true, DType.INT32)));
+
+    try (Table input = new Table.TestBuilder().column(invalidRow, validRow).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             expectedType,
+             null,
+             struct(Collections.emptyList(), Collections.singletonList(22)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32).repeated()
+                 .addField(2, DType.INT32).repeated()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 

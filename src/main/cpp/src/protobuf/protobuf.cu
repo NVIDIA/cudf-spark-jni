@@ -392,16 +392,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   auto const num_rows   = binary_input.size();
   auto const num_fields = static_cast<int>(schema.size());
 
-  if (num_fields == 0) {
-    auto const input_null_count = binary_input.null_count();
-    if (input_null_count > 0) {
-      auto null_mask = cudf::copy_bitmask(binary_input, stream, mr);
-      return cudf::make_structs_column(
-        num_rows, {}, input_null_count, std::move(null_mask), stream, mr);
-    }
-    return cudf::make_structs_column(num_rows, {}, 0, rmm::device_buffer{}, stream, mr);
-  }
-
   if (num_rows == 0) {
     std::vector<std::unique_ptr<cudf::column>> empty_children;
     for (int i = 0; i < num_fields; i++) {
@@ -447,10 +437,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   }
 
   rmm::device_uvector<device_nested_field_descriptor> d_schema(num_fields, stream, scratch_mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_schema.data(),
-                                           h_device_schema.data(),
-                                           num_fields * sizeof(device_nested_field_descriptor),
-                                           stream));
+  if (num_fields > 0) {
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_schema.data(),
+                                             h_device_schema.data(),
+                                             num_fields * sizeof(device_nested_field_descriptor),
+                                             stream));
+  }
 
   auto d_in = cudf::column_device_view::create(binary_input, stream);
   // Identify repeated and nested fields at depth 0
@@ -486,6 +478,21 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.value()));
   }
   auto const decode_ctx = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
+
+  // Spark still parses unknown fields before producing an empty struct.
+  if (num_fields == 0) {
+    rmm::device_uvector<field_location> d_unused_location(1, stream, scratch_mr);
+    launch_scan_all_fields(*d_in,
+                           nullptr,
+                           0,
+                           nullptr,
+                           0,
+                           d_unused_location.data(),
+                           d_error.data(),
+                           track_permissive_null_rows ? d_row_force_null.data() : nullptr,
+                           num_rows,
+                           stream);
+  }
 
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
@@ -544,6 +551,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                  num_nested,
                                  d_nested_indices.data(),
                                  d_error.data(),
+                                 track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                  d_fn_to_rep.data(),
                                  static_cast<int>(d_fn_to_rep.size()),
                                  d_fn_to_nested.data(),

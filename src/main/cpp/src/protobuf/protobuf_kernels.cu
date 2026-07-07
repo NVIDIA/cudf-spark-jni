@@ -324,6 +324,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
                                               int num_nested_fields,
                                               int const* nested_field_indices,
                                               protobuf_error* error_flag,
+                                              bool* row_has_invalid_data,
                                               int const* fn_to_rep_idx,
                                               int fn_to_rep_size,
                                               int const* fn_to_nested_idx,
@@ -332,6 +333,9 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
   cudf::lists_column_device_view in{d_in};
   if (row >= in.size()) return;
+  auto mark_row_error = [&]() {
+    if (row_has_invalid_data != nullptr) { row_has_invalid_data[row] = true; }
+  };
 
   // Initialize repeated counts to 0
   for (int f = 0; f < num_repeated_fields; f++) {
@@ -350,7 +354,10 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   auto const* bytes = reinterpret_cast<uint8_t const*>(child.data<int8_t>());
   int32_t start     = in.offset_at(row) - base;
   int32_t end       = in.offset_at(row + 1) - base;
-  if (!check_message_bounds(start, end, child.size(), error_flag)) return;
+  if (!check_message_bounds(start, end, child.size(), error_flag)) {
+    mark_row_error();
+    return;
+  }
 
   uint8_t const* const msg_base = bytes + start;
   uint8_t const* const msg_end  = bytes + end;
@@ -372,7 +379,10 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
 
   for (uint8_t const* cur = msg_base; cur < msg_end;) {
     proto_tag tag;
-    if (!decode_tag(cur, msg_end, tag, error_flag)) return;
+    if (!decode_tag(cur, msg_end, tag, error_flag)) {
+      mark_row_error();
+      return;
+    }
     int const fn = tag.field_number;
     int const wt = tag.wire_type;
 
@@ -387,6 +397,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
       };
       if (!walk_repeated_element<wire_type_mismatch_policy::report_error>(
             cur, msg_end, msg_base, wt, schema[schema_idx].wire_type, error_flag, count_action)) {
+        mark_row_error();
         return;
       }
     }
@@ -397,36 +408,41 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
         f >= 0) {
       if (wt != wire_type_value(proto_wire_type::LEN)) {
         set_error_once(error_flag, protobuf_error::WIRE_TYPE);
-        return;
+        mark_row_error();
+      } else {
+        uint64_t len;
+        int len_bytes;
+        if (!read_varint(cur, msg_end, len, len_bytes)) {
+          set_error_once(error_flag, protobuf_error::VARINT);
+          mark_row_error();
+          return;
+        }
+        if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
+            len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
+          set_error_once(error_flag, protobuf_error::OVERFLOW);
+          mark_row_error();
+          return;
+        }
+        // cur - msg_base is bounded by the message length (<= INT32_MAX via
+        // check_message_bounds), so this fits int32; checked_add_int32 still guards the offset +
+        // len_bytes addition. Matches the LEN handling in scan_message_field_locations.
+        int const data_offset = static_cast<int>(cur - msg_base);
+        int32_t data_location;
+        if (!checked_add_int32(data_offset, len_bytes, data_location)) {
+          set_error_once(error_flag, protobuf_error::OVERFLOW);
+          mark_row_error();
+          return;
+        }
+        nested_locations[flat_index(row, num_nested_fields, f)] = {data_location,
+                                                                   static_cast<int32_t>(len)};
       }
-      uint64_t len;
-      int len_bytes;
-      if (!read_varint(cur, msg_end, len, len_bytes)) {
-        set_error_once(error_flag, protobuf_error::VARINT);
-        return;
-      }
-      if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
-          len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
-        set_error_once(error_flag, protobuf_error::OVERFLOW);
-        return;
-      }
-      // cur - msg_base is bounded by the message length (<= INT32_MAX via check_message_bounds),
-      // so this fits int32; checked_add_int32 still guards the offset + len_bytes addition. Matches
-      // the LEN handling in scan_message_field_locations.
-      int const data_offset = static_cast<int>(cur - msg_base);
-      int32_t data_location;
-      if (!checked_add_int32(data_offset, len_bytes, data_location)) {
-        set_error_once(error_flag, protobuf_error::OVERFLOW);
-        return;
-      }
-      nested_locations[flat_index(row, num_nested_fields, f)] = {data_location,
-                                                                 static_cast<int32_t>(len)};
     }
 
     // Skip to next field
     uint8_t const* next;
     if (!skip_field(cur, msg_end, wt, next)) {
       set_error_once(error_flag, protobuf_error::SKIP);
+      mark_row_error();
       return;
     }
     cur = next;
@@ -891,6 +907,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   int num_nested_fields,
                                   int const* nested_field_indices,
                                   protobuf_error* error_flag,
+                                  bool* row_has_invalid_data,
                                   int const* fn_to_rep_idx,
                                   int fn_to_rep_size,
                                   int const* fn_to_nested_idx,
@@ -912,6 +929,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
     num_nested_fields,
     nested_field_indices,
     error_flag,
+    row_has_invalid_data,
     fn_to_rep_idx,
     fn_to_rep_size,
     fn_to_nested_idx,
