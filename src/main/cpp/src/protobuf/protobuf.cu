@@ -915,12 +915,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     // Phase B: allocate occurrence buffers and launch the combined scan kernel.
-    auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
+    auto h_scan_descs =
+      cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(0, stream);
     h_scan_descs.reserve(num_repeated);
 
     for (auto& w : rep_work) {
       if (w.total_count > 0) {
-        w.occurrences = std::make_unique<rmm::device_uvector<repeated_occurrence>>(
+        w.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
           w.total_count, stream, scratch_mr);
         h_scan_descs.push_back({schema[w.schema_idx].field_number,
                                 static_cast<int>(schema[w.schema_idx].wire_type),
@@ -930,7 +931,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     if (!h_scan_descs.empty()) {
-      rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
+      rmm::device_uvector<field_occurrence_scan_desc> d_scan_descs(
         h_scan_descs.size(), stream, scratch_mr);
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
                                                h_scan_descs.data(),
@@ -951,14 +952,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
       }
 
-      launch_scan_all_repeated_occurrences(*d_in,
-                                           d_scan_descs.data(),
-                                           static_cast<int>(h_scan_descs.size()),
-                                           d_error.data(),
-                                           fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
-                                           fn_to_scan_size,
-                                           num_rows,
-                                           stream);
+      launch_scan_all_field_occurrences(*d_in,
+                                        d_scan_descs.data(),
+                                        static_cast<int>(h_scan_descs.size()),
+                                        d_error.data(),
+                                        fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
+                                        fn_to_scan_size,
+                                        num_rows,
+                                        stream);
     }
 
     // Phase C: Build columns per field.

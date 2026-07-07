@@ -454,7 +454,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
@@ -502,7 +502,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
                     d_occurrences.begin(),
                     d_occurrences.end(),
                     d_top_row_indices.begin(),
-                    [] __device__(repeated_occurrence const& occ) { return occ.row_idx; });
+                    [] __device__(field_occurrence const& occ) { return occ.row_idx; });
   // STRICT mode leaves the row buffer empty, while nested decoding disables propagation in the
   // runtime context. The callee treats both cases as no-ops.
   propagate_invalid_enum_flags_to_rows(d_elem_has_invalid_enum,
@@ -529,7 +529,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   bool is_bytes,
   rmm::device_uvector<protobuf_error>& d_error,
@@ -714,7 +714,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     stream);
 
   std::vector<std::optional<repeated_field_work>> repeated_work(num_child_fields);
-  auto h_scan_descs = cudf::detail::make_pinned_vector_async<repeated_field_scan_desc>(0, stream);
+  auto h_scan_descs = cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(0, stream);
   h_scan_descs.reserve(repeated_child_positions.size());
   for (auto const ci : repeated_child_positions) {
     // The row-major buffer has `num_child_fields` entries per row, so this strided iterator
@@ -730,7 +730,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
 
     auto& work = *repeated_work[ci];
     if (work.total_count > 0) {
-      work.occurrences = std::make_unique<rmm::device_uvector<repeated_occurrence>>(
+      work.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
         work.total_count, stream, scratch_mr);
       h_scan_descs.push_back({schema[child_schema_idx].field_number,
                               static_cast<int>(schema[child_schema_idx].wire_type),
@@ -740,12 +740,13 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   }
 
   if (!h_scan_descs.empty()) {
-    rmm::device_uvector<repeated_field_scan_desc> d_scan_descs(
+    rmm::device_uvector<field_occurrence_scan_desc> d_scan_descs(
       h_scan_descs.size(), stream, scratch_mr);
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_scan_descs.data(),
-                                             h_scan_descs.data(),
-                                             h_scan_descs.size() * sizeof(repeated_field_scan_desc),
-                                             stream));
+    CUDF_CUDA_TRY(
+      cudf::detail::memcpy_async(d_scan_descs.data(),
+                                 h_scan_descs.data(),
+                                 h_scan_descs.size() * sizeof(field_occurrence_scan_desc),
+                                 stream));
 
     auto h_fn_to_scan =
       build_field_lookup_table(h_scan_descs.data(), static_cast<int>(h_scan_descs.size()), stream);
@@ -758,19 +759,18 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
       fn_to_scan_size = static_cast<int>(h_fn_to_scan.size());
     }
 
-    launch_scan_all_repeated_occurrences_in_nested(
-      input.message_data,
-      input.message_data_size,
-      input.row_offsets,
-      input.base_offset,
-      parent.locations,
-      d_scan_descs.data(),
-      static_cast<int>(d_scan_descs.size()),
-      decode_ctx.error->data(),
-      fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
-      fn_to_scan_size,
-      input.num_rows,
-      stream);
+    launch_scan_all_field_occurrences_in_nested(input.message_data,
+                                                input.message_data_size,
+                                                input.row_offsets,
+                                                input.base_offset,
+                                                parent.locations,
+                                                d_scan_descs.data(),
+                                                static_cast<int>(d_scan_descs.size()),
+                                                decode_ctx.error->data(),
+                                                fn_to_scan_size > 0 ? d_fn_to_scan.data() : nullptr,
+                                                fn_to_scan_size,
+                                                input.num_rows,
+                                                stream);
   }
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
@@ -912,7 +912,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(
                         d_occurrences.begin(),
                         d_occurrences.end(),
                         d_top_row_indices->begin(),
-                        [top_row_indices] __device__(repeated_occurrence const& occ) {
+                        [top_row_indices] __device__(field_occurrence const& occ) {
                           return top_row_indices != nullptr ? top_row_indices[occ.row_idx]
                                                                : occ.row_idx;
                         });

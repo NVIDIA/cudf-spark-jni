@@ -104,9 +104,9 @@ struct repeated_field_info {
 };
 
 /**
- * Location of a single occurrence of a repeated field.
+ * Location of a single field occurrence.
  */
-struct repeated_occurrence {
+struct field_occurrence {
   int32_t row_idx;  // Which row this occurrence belongs to
   int32_t offset;   // Offset within the message
   int32_t length;   // Length of the field data
@@ -116,11 +116,11 @@ struct repeated_occurrence {
  * Per-field descriptor passed to the combined occurrence scan kernel.
  * Contains device pointers so the kernel can write to each field's output.
  */
-struct repeated_field_scan_desc {
+struct field_occurrence_scan_desc {
   int field_number;
   int wire_type;
-  int32_t const* row_offsets;        // Pre-computed prefix-sum offsets [num_rows + 1]
-  repeated_occurrence* occurrences;  // Output buffer [total_count]
+  int32_t const* row_offsets;     // Pre-computed prefix-sum offsets [num_rows + 1]
+  field_occurrence* occurrences;  // Output buffer [total_count]
 };
 
 /**

@@ -76,7 +76,7 @@ struct top_level_location_provider {
 struct repeated_location_provider {
   cudf::size_type const* row_offsets;
   cudf::size_type base_offset;
-  repeated_occurrence const* occurrences;
+  field_occurrence const* occurrences;
 
   __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
   {
@@ -129,7 +129,7 @@ struct nested_repeated_location_provider {
   cudf::size_type const* row_offsets;
   cudf::size_type base_offset;
   field_location const* parent_locations;
-  repeated_occurrence const* occurrences;
+  field_occurrence const* occurrences;
 
   __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
   {
@@ -420,14 +420,14 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   int num_rows,
                                   rmm::cuda_stream_view stream);
 
-void launch_scan_all_repeated_occurrences(cudf::column_device_view const& d_in,
-                                          repeated_field_scan_desc const* scan_descs,
-                                          int num_scan_fields,
-                                          protobuf_error* error_flag,
-                                          int const* fn_to_desc_idx,
-                                          int fn_to_desc_size,
-                                          int num_rows,
-                                          rmm::cuda_stream_view stream);
+void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
+                                       field_occurrence_scan_desc const* scan_descs,
+                                       int num_scan_fields,
+                                       protobuf_error* error_flag,
+                                       int const* fn_to_desc_idx,
+                                       int fn_to_desc_size,
+                                       int num_rows,
+                                       rmm::cuda_stream_view stream);
 
 void launch_extract_strided_locations(field_location const* nested_locations,
                                       int field_idx,
@@ -451,18 +451,18 @@ void launch_scan_nested_message_fields(uint8_t const* message_data,
                                        int32_t const* top_row_indices,
                                        rmm::cuda_stream_view stream);
 
-void launch_scan_all_repeated_occurrences_in_nested(uint8_t const* message_data,
-                                                    cudf::size_type message_data_size,
-                                                    cudf::size_type const* row_offsets,
-                                                    cudf::size_type base_offset,
-                                                    field_location const* parent_locs,
-                                                    repeated_field_scan_desc const* scan_descs,
-                                                    int num_scan_fields,
-                                                    protobuf_error* error_flag,
-                                                    int const* fn_to_desc_idx,
-                                                    int fn_to_desc_size,
-                                                    int num_rows,
-                                                    rmm::cuda_stream_view stream);
+void launch_scan_all_field_occurrences_in_nested(uint8_t const* message_data,
+                                                 cudf::size_type message_data_size,
+                                                 cudf::size_type const* row_offsets,
+                                                 cudf::size_type base_offset,
+                                                 field_location const* parent_locs,
+                                                 field_occurrence_scan_desc const* scan_descs,
+                                                 int num_scan_fields,
+                                                 protobuf_error* error_flag,
+                                                 int const* fn_to_desc_idx,
+                                                 int fn_to_desc_size,
+                                                 int num_rows,
+                                                 rmm::cuda_stream_view stream);
 
 void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
                                                 field_location const* child_locs,
@@ -900,7 +900,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   protobuf_input_view input,
   device_nested_field_descriptor const& field_desc,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,

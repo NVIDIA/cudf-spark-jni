@@ -98,7 +98,7 @@ struct repeated_field_work {
   int schema_idx;
   int32_t total_count;
   rmm::device_uvector<int32_t> offsets;
-  std::unique_ptr<rmm::device_uvector<repeated_occurrence>> occurrences;
+  std::unique_ptr<rmm::device_uvector<field_occurrence>> occurrences;
 
   repeated_field_work(int schema_index, list_offsets_from_counts_result offsets_result)
     : schema_idx(schema_index),
@@ -367,7 +367,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
@@ -379,7 +379,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   bool is_bytes,
   rmm::device_uvector<protobuf_error>& d_error,
@@ -415,7 +415,7 @@ std::unique_ptr<cudf::column> build_repeated_struct_column(
   cudf::size_type const* list_offsets,
   cudf::size_type base_offset,
   rmm::device_uvector<int32_t> const& d_field_counts,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   int num_rows,
   std::vector<device_nested_field_descriptor> const& h_device_schema,
