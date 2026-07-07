@@ -3711,6 +3711,32 @@ public class ProtobufTest {
   }
 
   @Test
+  void testSlicedNullableInputMapsMalformedRootScalarRow_Permissive() {
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] malformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] valid = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .build();
+    StructType outputType = new StructType(true, new BasicType(true, DType.INT32));
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, null, malformed, valid, sentinel})
+             .build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             outputType, (StructData) null, (StructData) null, struct(42))) {
+      ColumnView[] views = input.getColumn(0).splitAsViews(1, 4);
+      try (ColumnVector actual = Protobuf.decodeToStruct(views[1], schema, false)) {
+        AssertUtils.assertStructColumnsAreEqual(expected, actual);
+      } finally {
+        for (ColumnView view : views) {
+          view.close();
+        }
+      }
+    }
+  }
+
+  @Test
   void testHiddenRequiredFieldStillValidates() {
     // message Msg { int32 a = 1; int32 b = 2 [required]; } — b is hidden but required;
     // wire data omits b. In failfast mode the missing required field must still throw.

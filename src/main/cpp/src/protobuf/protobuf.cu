@@ -421,9 +421,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Extract shared input data pointers (used by scalar, repeated, and nested sections)
   cudf::lists_column_view const in_list_view(binary_input);
-  auto const* message_data = reinterpret_cast<uint8_t const*>(in_list_view.child().data<int8_t>());
-  auto const message_data_size = in_list_view.child().size();
-  auto const* list_offsets     = in_list_view.offsets().data<cudf::size_type>();
+  auto const message_bytes     = in_list_view.get_sliced_child(stream);
+  auto const* message_data     = reinterpret_cast<uint8_t const*>(message_bytes.data<int8_t>());
+  auto const message_data_size = message_bytes.size();
+  auto const* list_offsets     = in_list_view.offsets_begin();
 
   // Stage list_offsets[0] through pinned host memory so the D2H stays truly async.
   auto h_base_offset = cudf::detail::make_pinned_vector_async<cudf::size_type>(1, stream);
