@@ -192,6 +192,22 @@ public class FromJsonToRawMapTest {
     }
   }
 
+  // The delimiter used to concatenate rows must not split an embedded NUL in an array element.
+  @Test
+  void testExtractRawMapArrayEmbeddedNul() {
+    String valueWithNul = "a\u0000b";
+    List<HostColumnVector.StructData> row0 =
+        Arrays.asList(pair("k", Arrays.asList(valueWithNul)));
+    try (ColumnVector input =
+             ColumnVector.fromStrings("{\"k\":[\"" + valueWithNul + "\"]}");
+         ColumnVector result = JSONUtils.extractRawMapFromJsonString(input, getOptions(),
+             JSONUtils.MapValueType.ARRAY_OF_STRING);
+         ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0)) {
+      assertColumnsAreEqual(expected, result);
+      assertKeyAndStructNonNullable(result);
+    }
+  }
+
   // ARRAY_OF_STRING nested validity through the public HostColumnVector path:
   //  - {"k":null}       -> row kept, the value inner list is null (mask #1);
   //  - {"k":[null,"x"]} -> inner list present with a null first element (mask #2).
