@@ -3640,7 +3640,7 @@ public class ProtobufTest {
     }
     ProtobufSchemaDescriptor schema = builder.build();
 
-    // The MAX_STACK_FIELDS guard in scan_all_field_occurrences_kernel only fires when
+    // The MAX_REPEATED_FIELDS_PER_KERNEL guard in scan_all_field_occurrences_kernel only fires when
     // every field actually has occurrences (zero-count fields are filtered out before the
     // kernel launch). Encode one occurrence per field so num_scan_fields == n.
     java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
