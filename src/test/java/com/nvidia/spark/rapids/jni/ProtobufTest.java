@@ -3631,7 +3631,7 @@ public class ProtobufTest {
 
   @Test
   void testSchemaWithTooManyRepeatedFields() {
-    // Hits protobuf_error::SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
+    // Hits protobuf_error::SCHEMA_TOO_LARGE: the scan_all_field_occurrences_kernel stack-array
     // guard rejects schemas with more than 32 top-level repeated fields.
     int n = 33;
     ProtobufSchemaDescriptorBuilder builder = new ProtobufSchemaDescriptorBuilder();
@@ -3640,7 +3640,7 @@ public class ProtobufTest {
     }
     ProtobufSchemaDescriptor schema = builder.build();
 
-    // The MAX_STACK_FIELDS guard in scan_all_repeated_occurrences_kernel only fires when
+    // The MAX_STACK_FIELDS guard in scan_all_field_occurrences_kernel only fires when
     // every field actually has occurrences (zero-count fields are filtered out before the
     // kernel launch). Encode one occurrence per field so num_scan_fields == n.
     java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
