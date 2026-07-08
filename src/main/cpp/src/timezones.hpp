@@ -121,13 +121,12 @@ std::unique_ptr<cudf::column> convert_timestamp_to_utc(
  *   0 = WALL_TIME, 1 = STANDARD_TIME, 2 = UTC_TIME
  */
 struct dst_rule {
-  bool has_dst;               // false means no DST, just use raw_offset
-  int8_t has_dst_padding[3];  // explicit ABI padding for host/JNI serialization
-  int32_t dst_savings;        // in milliseconds (typically 3600000)
-  int32_t start_month;        // 0-based (Jan=0..Dec=11)
-  int32_t start_day;          // day-of-month or occurrence, depends on start_mode
-  int32_t start_dow;          // day-of-week 1=Sun..7=Sat, 0 for DOM_MODE
-  int32_t start_time;         // ms within day
+  int32_t has_dst{};    // 0 means no DST, just use raw_offset
+  int32_t dst_savings;  // in milliseconds (typically 3600000)
+  int32_t start_month;  // 0-based (Jan=0..Dec=11)
+  int32_t start_day;    // day-of-month or occurrence, depends on start_mode
+  int32_t start_dow;    // day-of-week 1=Sun..7=Sat, 0 for DOM_MODE
+  int32_t start_time;   // ms within day
   int32_t start_time_mode;
   int32_t start_mode;  // 0=DOM, 1=DOW_IN_MONTH, 2=DOW_GE_DOM, 3=DOW_LE_DOM
   int32_t end_month;
@@ -136,6 +135,13 @@ struct dst_rule {
   int32_t end_time;
   int32_t end_time_mode;
   int32_t end_mode;
+};
+
+struct orc_tz_side {
+  cudf::table_view const* tz_info_table;  // nullptr for fixed-offset TZ
+  int32_t initial_offset;                 // historical offset before the first transition
+  int32_t raw_offset;                     // standard/raw offset (ms) used for DST fallback
+  dst_rule dst{};
 };
 
 /**
@@ -148,14 +154,8 @@ struct dst_rule {
  * @param base_offset_us Fixed microsecond offset to apply before timezone conversion.
  *        Fuses ORC's base-timestamp adjustment (writer TZ offset at 2015-01-01) into
  *        the kernel, eliminating a separate pass. Pass 0 for no adjustment.
- * @param writer_tz_info_table transition/offset table, nullptr for fixed-offset TZ.
- * @param writer_initial_offset the historical offset before the first transition.
- * @param writer_raw_offset the standard/raw offset in milliseconds used for DST fallback.
- * @param writer_dst DST rule for the writer timezone.
- * @param reader_tz_info_table transition/offset table, nullptr for fixed-offset TZ.
- * @param reader_initial_offset the historical offset before the first transition.
- * @param reader_raw_offset the standard/raw offset in milliseconds used for DST fallback.
- * @param reader_dst DST rule for the reader timezone.
+ * @param writer writer timezone transition data, offsets, and DST rule.
+ * @param reader reader timezone transition data, offsets, and DST rule.
  * @param stream CUDA stream.
  * @param mr Device memory resource.
  * @return timestamps rebased between writer and reader timezones.
@@ -163,14 +163,8 @@ struct dst_rule {
 [[nodiscard]] std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
   int64_t base_offset_us,
-  cudf::table_view const* writer_tz_info_table,
-  int32_t writer_initial_offset,
-  int32_t writer_raw_offset,
-  dst_rule writer_dst,
-  cudf::table_view const* reader_tz_info_table,
-  int32_t reader_initial_offset,
-  int32_t reader_raw_offset,
-  dst_rule reader_dst,
+  orc_tz_side writer,
+  orc_tz_side reader,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

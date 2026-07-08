@@ -357,7 +357,7 @@ namespace {
 spark_rapids_jni::dst_rule make_us_dst_rule()
 {
   spark_rapids_jni::dst_rule rule{};
-  rule.has_dst         = true;
+  rule.has_dst         = 1;
   rule.dst_savings     = 3600000;
   rule.start_month     = 2;        // March
   rule.start_day       = 8;        // "first Sunday on or after the 8th" == 2nd Sunday
@@ -384,7 +384,7 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
                                                        int32_t end_month   = 9)
 {
   spark_rapids_jni::dst_rule rule{};
-  rule.has_dst         = true;
+  rule.has_dst         = 1;
   rule.dst_savings     = 3'600'000;
   rule.start_month     = start_month;
   rule.start_day       = start_day;
@@ -405,18 +405,12 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
   cudf::column_view const& input, spark_rapids_jni::dst_rule reader_dst, int64_t base_offset_us = 0)
 {
   spark_rapids_jni::dst_rule no_dst{};
-  no_dst.has_dst = false;
+  no_dst.has_dst = 0;
   return spark_rapids_jni::convert_orc_writer_reader_timezones(
     input,
     base_offset_us,
-    /*writer_tz_info_table=*/nullptr,
-    /*writer_initial_offset=*/0,
-    /*writer_raw_offset=*/0,
-    no_dst,
-    /*reader_tz_info_table=*/nullptr,
-    /*reader_initial_offset=*/0,
-    /*reader_raw_offset=*/0,
-    reader_dst,
+    spark_rapids_jni::orc_tz_side{/*tz_info_table=*/nullptr, 0, 0, no_dst},
+    spark_rapids_jni::orc_tz_side{/*tz_info_table=*/nullptr, 0, 0, reader_dst},
     cudf::get_default_stream(),
     cudf::get_current_device_resource_ref());
 }
@@ -425,7 +419,7 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
 TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
 {
   spark_rapids_jni::dst_rule no_dst{};
-  no_dst.has_dst = false;
+  no_dst.has_dst = 0;
 
   auto const input    = micros_col{3'600'000'000L, 7'200'000'000L};
   auto const expected = micros_col{0L, 3'600'000'000L};
@@ -440,19 +434,13 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesBaseOffset)
 
   auto const transition_input    = micros_col{1'000L};
   auto const transition_expected = micros_col{-1'000L};
-  auto const transition_actual =
-    spark_rapids_jni::convert_orc_writer_reader_timezones(transition_input,
-                                                          /*base_offset_us=*/int64_t{2'000},
-                                                          &writer_tv,
-                                                          /*writer_initial_offset=*/0,
-                                                          /*writer_raw_offset=*/0,
-                                                          no_dst,
-                                                          /*reader_tz_info_table=*/nullptr,
-                                                          /*reader_initial_offset=*/0,
-                                                          /*reader_raw_offset=*/0,
-                                                          no_dst,
-                                                          cudf::get_default_stream(),
-                                                          cudf::get_current_device_resource_ref());
+  auto const transition_actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    transition_input,
+    /*base_offset_us=*/int64_t{2'000},
+    spark_rapids_jni::orc_tz_side{&writer_tv, 0, 0, no_dst},
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(transition_expected, *transition_actual);
 }
@@ -470,26 +458,14 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesRejectsInvalidTables)
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::convert_orc_writer_reader_timezones(
                  input,
                  /*base_offset_us=*/0,
-                 &one_column,
-                 /*writer_initial_offset=*/0,
-                 /*writer_raw_offset=*/0,
-                 no_dst,
-                 /*reader_tz_info_table=*/nullptr,
-                 /*reader_initial_offset=*/0,
-                 /*reader_raw_offset=*/0,
-                 no_dst)),
+                 spark_rapids_jni::orc_tz_side{&one_column, 0, 0, no_dst},
+                 spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst})),
                cudf::logic_error);
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::convert_orc_writer_reader_timezones(
                  input,
                  /*base_offset_us=*/0,
-                 /*writer_tz_info_table=*/nullptr,
-                 /*writer_initial_offset=*/0,
-                 /*writer_raw_offset=*/0,
-                 no_dst,
-                 &wrong_types,
-                 /*reader_initial_offset=*/0,
-                 /*reader_raw_offset=*/0,
-                 no_dst)),
+                 spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+                 spark_rapids_jni::orc_tz_side{&wrong_types, 0, 0, no_dst})),
                cudf::logic_error);
 }
 
@@ -502,23 +478,17 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReaderDstBeyondTable)
 {
   auto const reader_dst = make_us_dst_rule();
   spark_rapids_jni::dst_rule no_dst{};
-  no_dst.has_dst = false;
+  no_dst.has_dst = 0;
 
   auto const input    = micros_col{1894665600000000L, 1910304000000000L};
   auto const expected = micros_col{1894665600000000L, 1910300400000000L};
-  auto const actual =
-    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
-                                                          /*base_offset_us=*/int64_t{0},
-                                                          /*writer_tz_info_table=*/nullptr,
-                                                          /*writer_initial_offset=*/0,
-                                                          /*writer_raw_offset=*/0,
-                                                          no_dst,
-                                                          /*reader_tz_info_table=*/nullptr,
-                                                          /*reader_initial_offset=*/0,
-                                                          /*reader_raw_offset=*/0,
-                                                          reader_dst,
-                                                          cudf::get_default_stream(),
-                                                          cudf::get_current_device_resource_ref());
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/int64_t{0},
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0, reader_dst},
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
@@ -534,19 +504,13 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesUsesInitialOffsetBeforeFirstTransition)
   // The historical initial offset must win over the fallback DST rule.
   auto const input    = micros_col{1'910'304'000'000'000L};
   auto const expected = micros_col{1'910'304'000'000'000L};
-  auto const actual =
-    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
-                                                          /*base_offset_us=*/0,
-                                                          /*writer_tz_info_table=*/nullptr,
-                                                          /*writer_initial_offset=*/0,
-                                                          /*writer_raw_offset=*/0,
-                                                          spark_rapids_jni::dst_rule{},
-                                                          &reader_tv,
-                                                          /*reader_initial_offset=*/0,
-                                                          /*reader_raw_offset=*/0,
-                                                          rule,
-                                                          cudf::get_default_stream(),
-                                                          cudf::get_current_device_resource_ref());
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/0,
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0},
+    spark_rapids_jni::orc_tz_side{&reader_tv, 0, 0, rule},
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
@@ -685,19 +649,13 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesSameDstZoneIsIdentity)
 
   auto const input    = micros_col{1894665600000000L, 1910304000000000L};
   auto const expected = micros_col{1894665600000000L, 1910304000000000L};
-  auto const actual =
-    spark_rapids_jni::convert_orc_writer_reader_timezones(input,
-                                                          /*base_offset_us=*/int64_t{0},
-                                                          /*writer_tz_info_table=*/nullptr,
-                                                          /*writer_initial_offset=*/0,
-                                                          /*writer_raw_offset=*/0,
-                                                          rule,
-                                                          /*reader_tz_info_table=*/nullptr,
-                                                          /*reader_initial_offset=*/0,
-                                                          /*reader_raw_offset=*/0,
-                                                          rule,
-                                                          cudf::get_default_stream(),
-                                                          cudf::get_current_device_resource_ref());
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    input,
+    /*base_offset_us=*/int64_t{0},
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0, rule},
+    spark_rapids_jni::orc_tz_side{nullptr, 0, 0, rule},
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }

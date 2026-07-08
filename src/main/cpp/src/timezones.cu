@@ -643,14 +643,8 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
 
 std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           int64_t base_offset_us,
-                                          cudf::table_view const* writer_tz_info_table,
-                                          int32_t writer_initial_offset,
-                                          int32_t writer_raw_offset,
-                                          spark_rapids_jni::dst_rule writer_dst,
-                                          cudf::table_view const* reader_tz_info_table,
-                                          int32_t reader_initial_offset,
-                                          int32_t reader_raw_offset,
-                                          spark_rapids_jni::dst_rule reader_dst,
+                                          spark_rapids_jni::orc_tz_side writer,
+                                          spark_rapids_jni::orc_tz_side reader,
                                           rmm::cuda_stream_view stream,
                                           rmm::device_async_resource_ref mr)
 {
@@ -658,8 +652,8 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
 
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
                "Input column must be of type TIMESTAMP_MICROSECONDS");
-  validate_timezone_table(writer_tz_info_table);
-  validate_timezone_table(reader_tz_info_table);
+  validate_timezone_table(writer.tz_info_table);
+  validate_timezone_table(reader.tz_info_table);
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -671,16 +665,16 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   if (input.size() == 0) { return results; }
 
   int64_t const* writer_trans_ptr =
-    writer_tz_info_table ? writer_tz_info_table->column(0).begin<int64_t>() : nullptr;
+    writer.tz_info_table ? writer.tz_info_table->column(0).begin<int64_t>() : nullptr;
   int32_t const* writer_offsets_ptr =
-    writer_tz_info_table ? writer_tz_info_table->column(1).begin<int32_t>() : nullptr;
-  int32_t writer_trans_count = writer_tz_info_table ? writer_tz_info_table->column(0).size() : 0;
+    writer.tz_info_table ? writer.tz_info_table->column(1).begin<int32_t>() : nullptr;
+  int32_t writer_trans_count = writer.tz_info_table ? writer.tz_info_table->column(0).size() : 0;
 
   int64_t const* reader_trans_ptr =
-    reader_tz_info_table ? reader_tz_info_table->column(0).begin<int64_t>() : nullptr;
+    reader.tz_info_table ? reader.tz_info_table->column(0).begin<int64_t>() : nullptr;
   int32_t const* reader_offsets_ptr =
-    reader_tz_info_table ? reader_tz_info_table->column(1).begin<int32_t>() : nullptr;
-  int32_t reader_trans_count = reader_tz_info_table ? reader_tz_info_table->column(0).size() : 0;
+    reader.tz_info_table ? reader.tz_info_table->column(1).begin<int32_t>() : nullptr;
+  int32_t reader_trans_count = reader.tz_info_table ? reader.tz_info_table->column(0).size() : 0;
 
   size_t smem_bytes = 0;
   if (writer_trans_count > 0 && writer_trans_count <= MAX_SMEM_TRANSITIONS) {
@@ -708,15 +702,15 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                writer_trans_ptr,
                writer_offsets_ptr,
                writer_trans_count,
-               writer_initial_offset,
-               writer_raw_offset,
-               writer_dst,
+               writer.initial_offset,
+               writer.raw_offset,
+               writer.dst,
                reader_trans_ptr,
                reader_offsets_ptr,
                reader_trans_count,
-               reader_initial_offset,
-               reader_raw_offset,
-               reader_dst);
+               reader.initial_offset,
+               reader.raw_offset,
+               reader.dst);
   CUDF_CHECK_CUDA(stream.value());
 
   return results;
@@ -796,32 +790,14 @@ std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input_second
                                                 mr);
 }
 
-std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
-  cudf::column_view const& input,
-  int64_t base_offset_us,
-  cudf::table_view const* writer_tz_info_table,
-  int32_t writer_initial_offset,
-  int32_t writer_raw_offset,
-  dst_rule writer_dst,
-  cudf::table_view const* reader_tz_info_table,
-  int32_t reader_initial_offset,
-  int32_t reader_raw_offset,
-  dst_rule reader_dst,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(cudf::column_view const& input,
+                                                                  int64_t base_offset_us,
+                                                                  orc_tz_side writer,
+                                                                  orc_tz_side reader,
+                                                                  rmm::cuda_stream_view stream,
+                                                                  rmm::device_async_resource_ref mr)
 {
-  return convert_timezones(input,
-                           base_offset_us,
-                           writer_tz_info_table,
-                           writer_initial_offset,
-                           writer_raw_offset,
-                           writer_dst,
-                           reader_tz_info_table,
-                           reader_initial_offset,
-                           reader_raw_offset,
-                           reader_dst,
-                           stream,
-                           mr);
+  return convert_timezones(input, base_offset_us, writer, reader, stream, mr);
 }
 
 std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
@@ -839,14 +815,12 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   // kernel exactly.
   return convert_orc_writer_reader_timezones(input,
                                              /*base_offset_us=*/int64_t{0},
-                                             writer_tz_info_table,
-                                             /*writer_initial_offset=*/writer_raw_offset,
-                                             writer_raw_offset,
-                                             dst_rule{/*has_dst=*/false},
-                                             reader_tz_info_table,
-                                             /*reader_initial_offset=*/reader_raw_offset,
-                                             reader_raw_offset,
-                                             dst_rule{/*has_dst=*/false},
+                                             orc_tz_side{writer_tz_info_table,
+                                                         /*initial_offset=*/writer_raw_offset,
+                                                         writer_raw_offset},
+                                             orc_tz_side{reader_tz_info_table,
+                                                         /*initial_offset=*/reader_raw_offset,
+                                                         reader_raw_offset},
                                              stream,
                                              mr);
 }
