@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.JSONOptions;
@@ -27,6 +28,9 @@ import java.util.Arrays;
 import java.util.Collections;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FromJsonToStructsTest {
   private static JSONOptions getOptions() {
@@ -34,7 +38,7 @@ public class FromJsonToStructsTest {
         .withNormalizeSingleQuotes(true)
         .withLeadingZeros(true)
         .withNonNumericNumbers(true)
-        .withUnquotedControlChars(true)
+        .withUnquotedControlChars(false)
         .build();
   }
 
@@ -51,10 +55,39 @@ public class FromJsonToStructsTest {
   }
 
   @Test
+  void testEmbeddedNulIsNotUsedAsRowDelimiter() {
+    String malformedBanner =
+        "\uFFFD\uFFFD[\u0000\"\u0000\uFFFD\u0000\"\u0000]\u0000";
+    String json = "{\"aniviaData\":{\"asset\":{\"assetId\":\"va\"}," +
+        "\"bannerDetails\":" + malformedBanner + "}}";
+
+    Schema.Builder root = Schema.builder();
+    Schema.Builder aniviaData = root.addColumn(DType.STRUCT, "aniviaData");
+    Schema.Builder asset = aniviaData.addColumn(DType.STRUCT, "asset");
+    asset.addColumn(DType.STRING, "assetId");
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(json);
+         ColumnVector output = JSONUtils.fromJSONToStructs(
+             input, schema, getOptions(), true);
+         ColumnView outputAniviaData = output.getChildColumnView(0);
+         ColumnView outputAsset = outputAniviaData.getChildColumnView(0)) {
+      try (ColumnView outputAssetId = outputAsset.getChildColumnView(0);
+           HostColumnVector hostAssetId = outputAssetId.copyToHost()) {
+        assertTrue(hostAssetId.isNull(0), "malformed record should nullify assetId");
+      }
+      assertEquals(input.getRowCount(), output.getRowCount());
+      assertEquals(input.getRowCount(), outputAniviaData.getRowCount());
+      assertEquals(input.getRowCount(), outputAsset.getRowCount());
+    }
+  }
+
+  @Test
   void testFromJsonToStructsNullsOnlyMismatchedRowsForDepthOneParent() {
     String valid = "{\"data\":{\"c2\":[{\"c3\":19,\"c4\":\"x\"}],\"c1\":1},\"id\":10}";
     String mismatched = "{\"data\":{\"c2\":[19],\"c1\":2},\"id\":20}";
-    String validAfterMismatch = "{\"data\":{\"c2\":[{\"c3\":39,\"c4\":\"z\"}],\"c1\":3},\"id\":30}";
+    String validAfterMismatch =
+        "{\"data\":{\"c2\":[{\"c3\":39,\"c4\":\"z\"}],\"c1\":3},\"id\":30}";
     Schema schema = mixedNestedTypesSchema();
 
     try (ColumnVector input = ColumnVector.fromStrings(valid, mismatched, validAfterMismatch);
@@ -70,8 +103,11 @@ public class FromJsonToStructsTest {
                  new HostColumnVector.StructData(
                      3,
                      Collections.singletonList(new HostColumnVector.StructData(39, "z"))),
-                 30))) {
+                 30));
+         ColumnView data = actual.getChildColumnView(0);
+         ColumnView c2 = data.getChildColumnView(1)) {
       assertColumnsAreEqual(expected, actual);
+      assertFalse(c2.hasNonEmptyNulls(), "mismatched row must have an empty null LIST");
     }
   }
 }

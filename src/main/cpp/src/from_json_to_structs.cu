@@ -53,6 +53,7 @@
 
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 
 namespace spark_rapids_jni {
 
@@ -156,10 +157,6 @@ void nullify_rows(cudf::column& input,
   if (row_indices.empty()) { return; }
 
   auto const input_view = input.view();
-  for (auto const row : row_indices) {
-    CUDF_EXPECTS(row >= 0 && row < input_view.size(), "Schema mismatch row index out of bounds.");
-  }
-
   auto null_mask =
     input_view.nullable()
       ? cudf::copy_bitmask(input_view, stream, mr)
@@ -196,7 +193,9 @@ std::unique_ptr<cudf::column> make_lists_column_with_null_sanitization(
                                                null_count,
                                                std::move(children));
   // Row-level schema mismatch nulls can leave child data under null parents; sanitize it here.
-  if (null_count > 0) { output = cudf::purge_nonempty_nulls(output->view(), stream, mr); }
+  if (cudf::has_nonempty_nulls(output->view(), stream)) {
+    output = cudf::purge_nonempty_nulls(output->view(), stream, mr);
+  }
   return output;
 }
 
@@ -921,6 +920,14 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
   CUDF_EXPECTS(parsed_columns.size() == schema.child_types.size(),
                "Numbers of output columns is different from schema size.");
 
+  auto const& mismatch_diagnostics =
+    parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows;
+  std::unordered_map<std::string, std::vector<cudf::size_type> const*> mismatch_rows_by_column;
+  mismatch_rows_by_column.reserve(mismatch_diagnostics.size());
+  for (auto const& mismatch : mismatch_diagnostics) {
+    mismatch_rows_by_column.emplace(mismatch.column_name, &mismatch.row_indices);
+  }
+
   std::vector<std::unique_ptr<cudf::column>> converted_cols;
   converted_cols.reserve(parsed_columns.size());
   for (std::size_t i = 0; i < parsed_columns.size(); ++i) {
@@ -931,13 +938,9 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
 
     auto const& [col_name, col_schema] = schema_with_precision.child_types[i];
     CUDF_EXPECTS(parsed_meta.schema_info[i].name == col_name, "Mismatched column name.");
-    auto const mismatch_rows =
-      std::find_if(parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows.begin(),
-                   parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows.end(),
-                   [&col_name](auto const& row_info) { return row_info.column_name == col_name; });
-    if (mismatch_rows !=
-        parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows.end()) {
-      nullify_rows(*parsed_columns[i], mismatch_rows->row_indices, stream, mr);
+    auto const mismatch_rows = mismatch_rows_by_column.find(col_name);
+    if (mismatch_rows != mismatch_rows_by_column.end()) {
+      nullify_rows(*parsed_columns[i], *mismatch_rows->second, stream, mr);
     }
     converted_cols.emplace_back(convert_data_type(std::move(parsed_columns[i]),
                                                   col_schema,
