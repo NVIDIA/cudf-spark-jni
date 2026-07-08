@@ -58,6 +58,7 @@ __host__ __device__ constexpr bool can_be_delimiter(char c)
     case ',':
     case ':':
     case '"':
+    case '\0':
     case '\'':
     case '\\':
     case ' ':

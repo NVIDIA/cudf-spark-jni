@@ -1998,6 +1998,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
           batch_row_offset,
           reinterpret_cast<int8_t*>(output_data[i]));
     }
+
+    // Drain the async H2D uploads above before variable_width_input_data goes out of scope:
+    // CUDA 13+ may read the host source only when the stream executes the copy.
+    stream.synchronize();
   }
 
   // split up the output buffer into multiple buffers based on row batch sizes and create list of
@@ -2028,6 +2032,11 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
                                             0,
                                             rmm::device_buffer{0, cudf::get_default_stream(), mr});
                  });
+
+  // Drain the async H2D uploads above before input_data, input_nm, output_data and
+  // validity_tile_infos go out of scope: CUDA 13+ may read the host source only when the stream
+  // executes the copy.
+  stream.synchronize();
 
   return ret;
 }
@@ -2223,6 +2232,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
                                                          stream,
                                                          mr));
   }
+
+  // Drain the async H2D uploads above before column_start, column_size, input_data and input_nm
+  // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
+  stream.synchronize();
 
   return ret;
 }
@@ -2540,12 +2553,21 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         string_idx++;
       }
     }
+
+    // Drain the async H2D uploads above before string_col_offset_ptrs and string_data_col_ptrs
+    // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
+    stream.synchronize();
   }
 
   // Set null counts, because output_columns are modified via mutable-view,
   // in the kernel above.
   // TODO(future): Consider setting null count in the kernel itself.
   fixup_null_counts(output_columns, stream);
+
+  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
+  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
+  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
+  stream.synchronize();
 
   return std::make_unique<table>(std::move(output_columns));
 }
@@ -2619,6 +2641,11 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   // in the kernel above.
   // TODO(future): Consider setting null count in the kernel itself.
   fixup_null_counts(output_columns, stream);
+
+  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
+  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
+  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
+  stream.synchronize();
 
   return std::make_unique<table>(std::move(output_columns));
 }
