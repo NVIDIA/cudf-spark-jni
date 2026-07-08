@@ -409,6 +409,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
       if (wt != wire_type_value(proto_wire_type::LEN)) {
         set_error_once(error_flag, protobuf_error::WIRE_TYPE);
         mark_row_error();
+        // Keep scanning so later repeated-field counts stay aligned with the occurrence scan.
       } else {
         uint64_t len;
         int len_bytes;

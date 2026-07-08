@@ -481,6 +481,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Spark still parses unknown fields before producing an empty struct.
   if (num_fields == 0) {
+    // The zero-width kernel still forms a row pointer; one element keeps it valid, and no
+    // locations are written.
     rmm::device_uvector<field_location> d_unused_location(1, stream, scratch_mr);
     launch_scan_all_fields(*d_in,
                            nullptr,
