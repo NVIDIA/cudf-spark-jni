@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.jni;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -56,6 +57,9 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   final boolean[] isRepeated;
   final boolean[] isRequired;
   final boolean[] hasDefaultValue;
+  // Not final: instances serialized before isOutput existed deserialize it as null, and
+  // readObject() backfills it via allOutput() for backward compatibility.
+  boolean[] isOutput;
   final long[] defaultInts;
   final double[] defaultFloats;
   final boolean[] defaultBools;
@@ -64,6 +68,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   final byte[][][] enumNames;
 
   /**
+   * Back-compat constructor: every field is treated as visible in the output.
+   *
    * @throws IllegalArgumentException if any array is null, arrays have mismatched lengths,
    *         field numbers are out of range, or encoding values are invalid.
    */
@@ -83,9 +89,39 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       byte[][] defaultStrings,
       int[][] enumValidValues,
       byte[][][] enumNames) {
+    this(fieldNumbers, parentIndices, depthLevels, wireTypes, outputTypeIds,
+        encodings, isRepeated, isRequired, hasDefaultValue,
+        fieldNumbers == null ? null : allOutput(fieldNumbers.length),
+        defaultInts, defaultFloats, defaultBools, defaultStrings, enumValidValues, enumNames);
+  }
+
+  /**
+   * @param isOutput per-field flag; if {@code false}, the field is decoded for validation but
+   *        dropped from the returned struct. Hidden fields must agree with their parent — a
+   *        visible STRUCT cannot have hidden children and vice versa.
+   * @throws IllegalArgumentException if any array is null, arrays have mismatched lengths,
+   *         field numbers are out of range, or encoding values are invalid.
+   */
+  public ProtobufSchemaDescriptor(
+      int[] fieldNumbers,
+      int[] parentIndices,
+      int[] depthLevels,
+      int[] wireTypes,
+      int[] outputTypeIds,
+      int[] encodings,
+      boolean[] isRepeated,
+      boolean[] isRequired,
+      boolean[] hasDefaultValue,
+      boolean[] isOutput,
+      long[] defaultInts,
+      double[] defaultFloats,
+      boolean[] defaultBools,
+      byte[][] defaultStrings,
+      int[][] enumValidValues,
+      byte[][][] enumNames) {
 
     validate(fieldNumbers, parentIndices, depthLevels, wireTypes, outputTypeIds,
-        encodings, isRepeated, isRequired, hasDefaultValue, defaultInts,
+        encodings, isRepeated, isRequired, hasDefaultValue, isOutput, defaultInts,
         defaultFloats, defaultBools, defaultStrings, enumValidValues, enumNames);
 
     this.fieldNumbers = fieldNumbers.clone();
@@ -97,6 +133,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     this.isRepeated = isRepeated.clone();
     this.isRequired = isRequired.clone();
     this.hasDefaultValue = hasDefaultValue.clone();
+    this.isOutput = isOutput.clone();
     this.defaultInts = defaultInts.clone();
     this.defaultFloats = defaultFloats.clone();
     this.defaultBools = defaultBools.clone();
@@ -113,9 +150,16 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     // receive caller-owned array aliases here. Re-run validate() so deserialization cannot bypass
     // the constructor's schema invariants.
     in.defaultReadObject();
+    // Backward compatibility: streams written before isOutput existed carry no such field, so
+    // defaultReadObject() leaves it null. Treat a legacy descriptor as "all fields output",
+    // mirroring the back-compat constructor. A fully malformed stream (no fieldNumbers) still
+    // fails the non-null check in validate() below.
+    if (isOutput == null && fieldNumbers != null) {
+      isOutput = allOutput(fieldNumbers.length);
+    }
     try {
       validate(fieldNumbers, parentIndices, depthLevels, wireTypes, outputTypeIds,
-          encodings, isRepeated, isRequired, hasDefaultValue, defaultInts,
+          encodings, isRepeated, isRequired, hasDefaultValue, isOutput, defaultInts,
           defaultFloats, defaultBools, defaultStrings, enumValidValues, enumNames);
     } catch (IllegalArgumentException e) {
       java.io.InvalidObjectException ioe = new java.io.InvalidObjectException(e.getMessage());
@@ -152,18 +196,26 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     return dst;
   }
 
+  private static boolean[] allOutput(int length) {
+    boolean[] ret = new boolean[length];
+    Arrays.fill(ret, true);
+    return ret;
+  }
+
   private static void validate(
       int[] fieldNumbers, int[] parentIndices, int[] depthLevels,
       int[] wireTypes, int[] outputTypeIds, int[] encodings,
       boolean[] isRepeated, boolean[] isRequired, boolean[] hasDefaultValue,
+      boolean[] isOutput,
       long[] defaultInts, double[] defaultFloats, boolean[] defaultBools,
       byte[][] defaultStrings, int[][] enumValidValues, byte[][][] enumNames) {
 
     if (fieldNumbers == null || parentIndices == null || depthLevels == null ||
         wireTypes == null || outputTypeIds == null || encodings == null ||
         isRepeated == null || isRequired == null || hasDefaultValue == null ||
-        defaultInts == null || defaultFloats == null || defaultBools == null ||
-        defaultStrings == null || enumValidValues == null || enumNames == null) {
+        isOutput == null || defaultInts == null || defaultFloats == null ||
+        defaultBools == null || defaultStrings == null || enumValidValues == null ||
+        enumNames == null) {
       throw new IllegalArgumentException("All schema arrays must be non-null");
     }
 
@@ -172,6 +224,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
         wireTypes.length != n || outputTypeIds.length != n ||
         encodings.length != n || isRepeated.length != n ||
         isRequired.length != n || hasDefaultValue.length != n ||
+        isOutput.length != n ||
         defaultInts.length != n || defaultFloats.length != n ||
         defaultBools.length != n || defaultStrings.length != n ||
         enumValidValues.length != n || enumNames.length != n) {
@@ -181,7 +234,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     Set<Long> seenFieldNumbers = new HashSet<>();
     for (int i = 0; i < n; i++) {
       validateFieldRange(i, fieldNumbers[i], depthLevels[i]);
-      validateParentChild(i, parentIndices[i], depthLevels, outputTypeIds);
+      validateParentChild(i, parentIndices[i], depthLevels, outputTypeIds, isOutput);
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
@@ -203,7 +256,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   }
 
   private static void validateParentChild(int index, int parentIndex,
-                                           int[] depthLevels, int[] outputTypeIds) {
+                                           int[] depthLevels, int[] outputTypeIds,
+                                           boolean[] isOutput) {
     if (parentIndex < -1 || parentIndex >= index) {
       throw new IllegalArgumentException(
           "Invalid parent index at index " + index + ": " + parentIndex +
@@ -220,6 +274,13 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
         throw new IllegalArgumentException(
             "Parent at index " + parentIndex + " for field " + index +
             " must be STRUCT, got type id " + outputTypeIds[parentIndex]);
+      }
+      // A field and its parent must share an output flag: a hidden STRUCT cannot expose
+      // visible children, and a visible STRUCT cannot hide individual children.
+      if (isOutput[index] != isOutput[parentIndex]) {
+        throw new IllegalArgumentException(
+            "Nested field at index " + index + " must use the same output flag as parent " +
+            parentIndex);
       }
       if (depthLevels[index] != depthLevels[parentIndex] + 1) {
         throw new IllegalArgumentException(

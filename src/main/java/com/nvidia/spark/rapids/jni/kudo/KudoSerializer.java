@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -377,9 +377,9 @@ public class KudoSerializer {
 
   /**
    * See {@link #mergeOnHost(KudoTable[])}.
-   * @deprecated Use {@link #mergeOnHost(KudoTable[])} instead.
+   * This overload is retained temporarily. Use {@link #mergeOnHost(KudoTable[])} instead; remove
+   * this overload after all callers migrate.
    */
-  @Deprecated
   public Pair<KudoHostMergeResult, MergeMetrics> mergeOnHost(List<KudoTable> kudoTables) {
     MergeMetrics.Builder metricsBuilder = MergeMetrics.builder();
 
@@ -414,9 +414,9 @@ public class KudoSerializer {
   /**
    * See {@link #mergeToTable(KudoTable[])}.
    *
-   * @deprecated Use {@link #mergeToTable(KudoTable[])} instead.
+   * This overload is retained temporarily. Use {@link #mergeToTable(KudoTable[])} instead; remove
+   * this overload after all callers migrate.
    */
-  @Deprecated
   public Pair<Table, MergeMetrics> mergeToTable(List<KudoTable> kudoTables) throws Exception {
     Pair<KudoHostMergeResult, MergeMetrics> result = mergeOnHost(kudoTables);
     MergeMetrics.Builder builder = MergeMetrics.builder(result.getRight());

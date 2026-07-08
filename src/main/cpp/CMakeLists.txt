@@ -48,6 +48,11 @@ project(
   LANGUAGES CXX CUDA
 )
 
+# We use no C++20 modules; disable module scanning so CMake emits no ninja dyndep phase. Otherwise
+# its dyndep refresh trips ninja's RefreshDyndepDependents assertion on incremental rebuilds after
+# a structural source change. Mirrors libcudf (rapidsai/cudf#19192).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 # ##################################################################################################
 # * build options ---------------------------------------------------------------------------------
 
@@ -131,10 +136,15 @@ else()
   message(FATAL_ERROR "JDK with JNI not found, please check your settings.")
 endif()
 
-# cudf
+# cudf. GoogleTest is only needed by the JNI's own gtest binaries, so keep it under BUILD_TESTS.
 if(BUILD_TESTS)
   include(${rapids-cmake-dir}/cpm/gtest.cmake)
   rapids_cpm_gtest(BUILD_STATIC)
+endif()
+
+# Benchmarks link cudf::cudftestutil (cudf's "testing" component; the headers they use are
+# gtest-free), so request that component when either tests or benchmarks are built.
+if(BUILD_TESTS OR BUILD_BENCHMARKS)
   rapids_find_package(cudf REQUIRED COMPONENTS testing)
 else()
   rapids_find_package(cudf REQUIRED)

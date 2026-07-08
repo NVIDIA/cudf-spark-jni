@@ -4,8 +4,8 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/207502e57019cefacf6f21d3bb6045aeebef2a3e.tar.gz",
-      "url_hash" : "SHA256=a71a14671bd7e72a45783f6c6e51ba3ea81d39e937e756f322f1be77d10555ee",
+      "url" : "https://github.com/NVIDIA/cccl/archive/a5630ac57111e1aaef8cfe0069ede566c3d15f60.tar.gz",
+      "url_hash" : "SHA256=cbd4051441fe2fa19fe0da2987e8dea90bc51fe9d2111e55b75b0ec1301f33ae",
       "version" : "3.4.0"
     },
     "GTest" : 
@@ -25,8 +25,8 @@
     "cuco" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cuCollections/archive/f517bbb1277753b1852dfd388993383e401eaa38.tar.gz",
-      "url_hash" : "SHA256=d17e2f6d58cfb2cd473efcbd741c633e7607717102cedc08173a4a69bb2a8ba9",
+      "url" : "https://github.com/NVIDIA/cuCollections/archive/0883368d39296f3bef3a058033141bcc642c5c54.tar.gz",
+      "url_hash" : "SHA256=4ec8320a0372839b991f0b431c7f8bf0e770006cb3c8631c6e373c434471fd45",
       "version" : "0.0.1"
     },
     "dlpack" : 
@@ -53,19 +53,11 @@
       "git_url" : "https://github.com/fmtlib/fmt.git",
       "version" : "11.0.2"
     },
-    "jitify" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "35a5b2d772691b7d1a3e739308f90d84c2c3d7ec",
-      "git_url" : "https://github.com/NVIDIA/jitify.git",
-      "version" : "2.0.0"
-    },
     "kvikio" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "f554d7c20538f18cb72d0aefae6eab9627e4245c",
+      "git_tag" : "72f51b1afde57c2053a92a80df09affe1cfad3da",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
@@ -74,9 +66,9 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "c57ddd8672b8ddf29e2db5dc444df311afcda5aa",
+      "git_tag" : "a579fbf5d192e85b6249935e117de7d02a6dc4e9",
       "git_url" : "https://github.com/apache/arrow-nanoarrow.git",
-      "version" : "0.7.0"
+      "version" : "0.8.0"
     },
     "nvtx3" : 
     {
@@ -97,18 +89,10 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "3cd0279a441287f7f4a315f4f590ff4d0a5e2321",
+      "git_tag" : "a5037ca70e0a85d1e06205347a06ec3acd171a13",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
-    },
-    "roaring" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "1a2c980f90e533ce79c7610bd2eae5df5a177aff",
-      "git_url" : "https://github.com/RoaringBitmap/CRoaring.git",
-      "version" : "4.3.11"
     },
     "spdlog" : 
     {
@@ -117,6 +101,14 @@
       "git_tag" : "27cb4c76708608465c413f6d0e6b8d99a4d84302",
       "git_url" : "https://github.com/gabime/spdlog.git",
       "version" : "1.14.1"
+    },
+    "xxhash" : 
+    {
+      "always_download" : true,
+      "git_shallow" : false,
+      "git_tag" : "e626a72bc2321cd320e953a0ccf1584cad60f363",
+      "git_url" : "https://github.com/Cyan4973/xxHash.git",
+      "version" : "0.8.3"
     },
     "zstd" : 
     {

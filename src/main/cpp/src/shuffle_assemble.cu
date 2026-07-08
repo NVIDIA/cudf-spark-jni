@@ -184,7 +184,9 @@ rmm::device_uvector<offset_column_info> compute_offset_column_info(
   while (col_index < static_cast<int>(metadata.col_info.size())) {
     col_index = compute_offset_column_info_traverse(metadata.col_info, col_index, -1, offset_info);
   }
-  return cudf::detail::make_device_uvector_async(offset_info, stream, mr);
+  // Sync variant required: offset_info dies at return, but an async upload may read the host
+  // source only when the stream executes the copy (CUDA 13+ deferred source read).
+  return cudf::detail::make_device_uvector(offset_info, stream, mr);
 }
 
 /**
@@ -953,7 +955,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   std::transform(buffer_slices.begin(),
                  buffer_slices.end(),
                  h_dst_buffers.begin(),
-                 [](const buffer_slice& slice) { return slice.data; });
+                 [](buffer_slice const& slice) { return slice.data; });
   auto dst_buffers = cudf::detail::make_device_uvector_async(h_dst_buffers, stream, temp_mr);
 
   // compute:
@@ -1330,6 +1332,11 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
       }),
     stream,
     mr);
+
+  // Drain the async H2D uploads above before h_dst_buffers and validity_spans_to_zero (uploaded
+  // by batched_memset) go out of scope: CUDA 13+ may read the host source only when the stream
+  // executes the copy.
+  stream.synchronize();
 
   // Return shuffle assemble result with slices and copy batches (column_views will be populated
   // later)

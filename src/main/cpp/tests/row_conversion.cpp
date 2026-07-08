@@ -20,6 +20,7 @@
 #include <cudf_test/table_utilities.hpp>
 
 #include <cudf/column/column_view.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/types.hpp>
 
@@ -494,6 +495,216 @@ TEST_F(ColumnToRowTests, PivotLikeLayout)
     int32_t actual = 0;
     std::memcpy(&actual, host_bytes.data() + r * row_stride + int_offset, sizeof(int32_t));
     EXPECT_EQ(actual, int_data[r]) << "row " << r;
+  }
+}
+
+// Regression test for spark-rapids-jni#4586: the default branch of the type-size switch in
+// copy_to_rows wrote to the same byte col_size times rather than advancing the offset, so any
+// fixed-width column wider than 8 bytes (DECIMAL128 in practice) was silently corrupted.
+TEST_F(ColumnToRowTests, Decimal128RoundTrip)
+{
+  // Include a value with non-zero bytes spread across all 16 positions so a regression that
+  // copies the same byte 16 times (the original bug) is detected anywhere in the word, not
+  // only in the low bytes. Also include a null to cover the validity-bitmap path.
+  auto const wide = (static_cast<__int128_t>(0x0102030405060708LL) << 64) |
+                    static_cast<__int128_t>(0x090A0B0C0D0E0F10LL);
+  std::vector<__int128_t> vals{static_cast<__int128_t>(12345),
+                               static_cast<__int128_t>(-67890),
+                               static_cast<__int128_t>(999999999999LL),
+                               wide};
+  cudf::test::fixed_point_column_wrapper<__int128_t> col(
+    vals.begin(), vals.end(), {true, false, true, true}, numeric::scale_type{-2});
+  cudf::table_view in({col});
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::DECIMAL128, -2}};
+
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_EQ(rows.size(), 1u);
+  auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(in, *result);
+}
+
+// Regression test for spark-rapids-jni#4590: when a tile boundary falls at a byte offset that
+// is not 8-aligned, the old code wrote `round_up_8(actual_size)` bytes from the shared tile to
+// global memory. The trailing padding bytes overlapped with the next tile's destination range,
+// causing a non-deterministic race between adjacent CUDA blocks. With the fix, the write length
+// is the actual data span, so adjacent tiles never touch the same bytes.
+//
+// The race itself is timing-dependent; this test simply round-trips a wide INT32 schema known
+// to produce a multi-tile layout and asserts data integrity over many iterations. With the bug,
+// at least some iterations would mismatch on certain GPUs.
+TEST_F(ColumnToRowTests, TileBoundaryWideInt32RoundTrip)
+{
+  // A row of 500 INT32 columns is ~2 KB, which overflows the per-tile shmem budget and
+  // forces multiple tiles. The exact tile boundary location depends on shmem_limit_per_tile
+  // at runtime, but for the supported budgets it lands somewhere inside the schema.
+  constexpr int num_cols = 500;
+  constexpr int num_rows = 64;
+
+  auto data_iter = spark_rapids_jni::util::make_counting_transform_iterator(
+    0, [](auto i) -> int32_t { return static_cast<int32_t>(i * 2654435761u); });
+
+  std::vector<cudf::test::fixed_width_column_wrapper<int32_t>> cols;
+  cols.reserve(num_cols);
+  std::vector<cudf::column_view> views;
+  views.reserve(num_cols);
+  std::vector<cudf::data_type> schema;
+  schema.reserve(num_cols);
+  for (int c = 0; c < num_cols; ++c) {
+    cols.emplace_back(data_iter + c * num_rows, data_iter + c * num_rows + num_rows);
+    views.emplace_back(cols.back());
+    schema.push_back(cudf::data_type{cudf::type_id::INT32});
+  }
+  cudf::table_view in(views);
+
+  // Repeat to give a non-deterministic tile-write race more chances to surface.
+  for (int iter = 0; iter < 8; ++iter) {
+    auto rows = spark_rapids_jni::convert_to_rows(in);
+    ASSERT_EQ(rows.size(), 1u);
+    auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(in, *result);
+  }
+}
+
+// Regression test for spark-rapids-jni#4586: nested types (LIST, STRUCT, MAP) and other
+// unsupported data types must be rejected at the entry point with a clear exception, rather
+// than producing silently corrupted output (which happened when LIST/STRUCT columns reached
+// the variable-width path that assumes STRING).
+TEST_F(ColumnToRowTests, RejectListColumn)
+{
+  cudf::test::lists_column_wrapper<int32_t> list_col{{1, 2}, {3}, {4, 5, 6}};
+  cudf::table_view in({list_col});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
+}
+
+TEST_F(ColumnToRowTests, RejectStructColumn)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> child_a({1, 2, 3});
+  cudf::test::fixed_width_column_wrapper<int64_t> child_b({10L, 20L, 30L});
+  cudf::test::structs_column_wrapper struct_col({child_a, child_b});
+  cudf::table_view in({struct_col});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
+}
+
+// Regression test for spark-rapids-jni#4586: column_view::data<int8_t>() returns
+// `head + offset_in_elements` interpreted as bytes, so a sliced column produced a misaligned
+// input pointer and could either crash or silently corrupt data. With the entry-point guard
+// the caller now gets a clear exception.
+TEST_F(ColumnToRowTests, RejectSlicedColumn)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> source({10, 11, 12, 13, 14, 15, 16, 17});
+  auto sliced = cudf::slice(static_cast<cudf::column_view>(source), {2, 6})[0];
+  cudf::table_view in({sliced});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
+}
+
+TEST_F(ColumnToRowTests, RejectSlicedColumnFixedWidthOptimized)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> source({10, 11, 12, 13, 14, 15, 16, 17});
+  auto sliced = cudf::slice(static_cast<cudf::column_view>(source), {2, 6})[0];
+  cudf::table_view in({sliced});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows_fixed_width_optimized(in), cudf::logic_error);
+}
+
+TEST_F(ColumnToRowTests, RejectStringColumnInFixedWidthOptimized)
+{
+  cudf::test::strings_column_wrapper col({"a", "bb", "ccc"});
+  cudf::table_view in({col});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows_fixed_width_optimized(in), cudf::logic_error);
+}
+
+TEST_F(RowToColumnTests, RejectUnsupportedSchema)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> col({1, 2, 3});
+  cudf::table_view in({col});
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_EQ(rows.size(), 1u);
+
+  std::vector<cudf::data_type> list_schema{cudf::data_type{cudf::type_id::LIST}};
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), list_schema),
+               cudf::logic_error);
+
+  std::vector<cudf::data_type> string_schema{cudf::data_type{cudf::type_id::STRING}};
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows_fixed_width_optimized(
+                 cudf::lists_column_view(*rows[0]), string_schema),
+               cudf::logic_error);
+}
+
+TEST_F(RowToColumnTests, RejectSlicedRowList)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> col({1, 2, 3});
+  cudf::table_view in({col});
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_EQ(rows.size(), 1u);
+  auto sliced = cudf::slice(rows[0]->view(), {1, 3})[0];
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::INT32}};
+
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows(cudf::lists_column_view(sliced), schema),
+               cudf::logic_error);
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows_fixed_width_optimized(
+                 cudf::lists_column_view(sliced), schema),
+               cudf::logic_error);
+}
+
+// Regression repro for spark-rapids-jni#4587. Disabled by default because it requires ~2.5 GB
+// of free GPU memory to build the input; enable manually with --gtest_also_run_disabled_tests.
+//
+// With fewer than 32 rows whose cumulative encoded size exceeds 2 GiB, the old
+// detail::build_batches would loop forever because round_down_safe(batch_size, 32) returned
+// zero and last_row_end never advanced. The fix surfaces the situation as an exception.
+TEST_F(ColumnToRowTests, DISABLED_HugeStringRowThrows)
+{
+  constexpr std::size_t per_col_bytes = 35ULL * 1024 * 1024;
+  constexpr int num_rows              = 33;
+
+  std::string const s(per_col_bytes, 'x');
+  std::vector<std::string> data(num_rows, s);
+
+  cudf::test::strings_column_wrapper col_a(data.begin(), data.end());
+  cudf::test::strings_column_wrapper col_b(data.begin(), data.end());
+  cudf::table_view in({col_a, col_b});
+
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
+}
+
+// Regression repro for spark-rapids-jni#4588. Disabled by default for the same memory reason as
+// HugeStringRowThrows.
+//
+// The old kernel launch passed batch_num_rows (a per-batch count) as the kernel's `num_rows`
+// while start_row was an absolute index, so all batches whose start lay past the per-batch
+// count silently produced uninitialized output. The fix passes batch_row_offset +
+// batch_num_rows as the absolute end bound; this test exercises the multi-batch path.
+TEST_F(ColumnToRowTests, DISABLED_MultiBatchStringDoesNotSkip)
+{
+  constexpr std::size_t per_col_bytes = 33ULL * 1024 * 1024;
+  constexpr int num_rows              = 35;
+
+  std::vector<std::string> data_a, data_b;
+  data_a.reserve(num_rows);
+  data_b.reserve(num_rows);
+  for (int i = 0; i < num_rows; ++i) {
+    data_a.push_back(std::string(per_col_bytes, static_cast<char>('a' + (i % 26))));
+    data_b.push_back(std::string(per_col_bytes, static_cast<char>('A' + (i % 26))));
+  }
+
+  cudf::test::strings_column_wrapper col_a(data_a.begin(), data_a.end());
+  cudf::test::strings_column_wrapper col_b(data_b.begin(), data_b.end());
+  cudf::table_view in({col_a, col_b});
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::STRING},
+                                      cudf::data_type{cudf::type_id::STRING}};
+
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_GE(rows.size(), 2u) << "Expected multiple batches; if a single batch fits the issue "
+                                "cannot be reproduced — increase per_col_bytes or num_rows.";
+
+  // Reconstruct each batch and compare against the matching row slice of the input.
+  std::size_t row_start = 0;
+  for (auto& batch : rows) {
+    auto result   = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*batch), schema);
+    auto in_slice = cudf::slice(in,
+                                {static_cast<cudf::size_type>(row_start),
+                                 static_cast<cudf::size_type>(row_start + result->num_rows())})[0];
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(in_slice, *result);
+    row_start += result->num_rows();
   }
 }
 

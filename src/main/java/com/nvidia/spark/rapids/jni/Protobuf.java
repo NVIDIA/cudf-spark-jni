@@ -91,6 +91,7 @@ public class Protobuf {
         schema.fieldNumbers, schema.parentIndices, schema.depthLevels,
         schema.wireTypes, schema.outputTypeIds, schema.encodings,
         schema.isRepeated, schema.isRequired, schema.hasDefaultValue,
+        schema.isOutput,
         schema.defaultInts, schema.defaultFloats, schema.defaultBools,
         schema.defaultStrings, schema.enumValidValues, schema.enumNames, failOnErrors);
     return new ColumnVector(handle);
@@ -106,6 +107,7 @@ public class Protobuf {
                                             boolean[] isRepeated,
                                             boolean[] isRequired,
                                             boolean[] hasDefaultValue,
+                                            boolean[] isOutput,
                                             long[] defaultInts,
                                             double[] defaultFloats,
                                             boolean[] defaultBools,

@@ -37,7 +37,7 @@
 using column                   = cudf::column;
 using column_device_view       = cudf::column_device_view;
 using column_view              = cudf::column_view;
-using lists_column_device_view = cudf::detail::lists_column_device_view;
+using lists_column_device_view = cudf::lists_column_device_view;
 using size_type                = cudf::size_type;
 using struct_view              = cudf::struct_view;
 using table_view               = cudf::table_view;
@@ -91,7 +91,7 @@ auto convert_timestamp_tz(column_view const& input,
 
   // get the DST rules
   auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::detail::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -205,7 +205,7 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
 
   // get DST rules
   auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::detail::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             input_seconds.size(),
@@ -314,8 +314,14 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
 {
   constexpr int64_t MICROS_PER_MILLI = 1000L;
 
-  int64_t const epoch_millis = static_cast<int64_t>(
-    cuda::std::chrono::duration_cast<cudf::duration_ms>(ts.time_since_epoch()).count());
+  // Floor-divide µs to ms. `duration_cast` truncates toward zero, so a negative timestamp with a
+  // non-zero sub-millisecond component would round up by one ms; at a DST gap whose recorded
+  // instant is exactly that ms, get_transition_index would then return the post-transition offset
+  // (1-hour off-by-one). Same shape of bug as the µs→s path in
+  // datetime_utils.cuh::convert_timestamp. GpuTimeZoneDBTest.convertOrcTimezonesOnCPU uses
+  // Math.floorDiv/floorMod to match.
+  int64_t const epoch_millis = spark_rapids_jni::integer_utils::floor_div(
+    static_cast<int64_t>(ts.time_since_epoch().count()), MICROS_PER_MILLI);
 
   int32_t writer_offset_millis = get_transition_index(writer_trans_begin,
                                                       writer_trans_end,

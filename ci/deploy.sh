@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2022-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -94,7 +94,7 @@ echo "Deploy CMD: $DEPLOY_CMD"
 
 ###### Deploy spark-rapids-jni jar with all its additions ######
 $DEPLOY_CMD -Dfile=$FPATH.jar \
-            -DpomFile=pom.xml \
+            -DpomFile=$POM_FILE \
             -Dsources=$FPATH-sources.jar \
             -Djavadoc=$FPATH-javadoc.jar \
             -Dfiles=$CLASS_FILES \

@@ -81,6 +81,10 @@ struct protobuf_decode_context {
   std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names;
   bool fail_on_errors;
+  // Per-field flag (parallel to `schema`) controlling whether a field appears in the
+  // returned struct. Hidden fields are still decoded so required/enum/wire validation
+  // runs, but they are dropped from the final output. An empty vector means "all output".
+  std::vector<bool> output_fields;
 };
 
 struct protobuf_field_meta_view {

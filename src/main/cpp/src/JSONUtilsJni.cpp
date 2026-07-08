@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -69,7 +69,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
 
     for (int i = 0; i < size; i++) {
       path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[i]);
-      const char* name_str                   = names[i].get();
+      char const* name_str                   = names[i].get();
       jlong index                            = indexes[i];
       instructions.emplace_back(instruction_type, name_str, index);
     }
@@ -125,7 +125,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
       path.reserve(path_size);
       for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
         path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[j]);
-        const char* name_str                   = names[j].get();
+        char const* name_str                   = names[j].get();
         jlong index                            = indexes[j];
         path.emplace_back(instruction_type, name_str, index);
       }
@@ -162,11 +162,41 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMap
     cudf::jni::auto_set_device(env);
     auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
     return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::from_json_to_raw_map(cudf::strings_column_view{*input_cv},
-                                             normalize_single_quotes,
-                                             allow_leading_zeros,
-                                             allow_nonnumeric_numbers,
-                                             allow_unquoted_control)
+      spark_rapids_jni::from_json_to_raw_map(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
+        .release());
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMapArrayFromJsonString(
+  JNIEnv* env,
+  jclass,
+  jlong j_input,
+  jboolean normalize_single_quotes,
+  jboolean allow_leading_zeros,
+  jboolean allow_nonnumeric_numbers,
+  jboolean allow_unquoted_control)
+{
+  JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
+
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
+    return cudf::jni::ptr_as_jlong(
+      spark_rapids_jni::from_json_to_raw_map_array_values(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
         .release());
   }
   JNI_CATCH(env, 0);

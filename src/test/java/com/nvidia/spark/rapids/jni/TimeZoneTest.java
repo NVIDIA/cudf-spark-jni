@@ -1,5 +1,5 @@
 /*
-* Copyright (c)  2023-2025, NVIDIA CORPORATION.
+* Copyright (c) 2023-2026, NVIDIA CORPORATION.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -403,7 +403,9 @@ public class TimeZoneTest {
           null);
         ColumnVector expected = ColumnVector.timestampMicroSecondsFromBoxedLongs(
           -1262260800000123L,
-          -908838000000456L,
+          // input -908870400000456 is 456 µs before the 1941 Shanghai spring-forward at
+          // UTC -908870400. Pre-transition offset is +8h (CST), so wall = utc + 28800.
+          -908841600000456L,
           -908837100000789L,
           -888800400000001L,
           -888799500000999L,
@@ -463,7 +465,8 @@ public class TimeZoneTest {
           null);
         ColumnVector expected = ColumnVector.timestampNanoSecondsFromBoxedLongs(
           -1262260800000000123L,
-          -908838000000000456L,
+          // Pre-transition offset (+8h CST) applies; see micros variant above.
+          -908841600000000456L,
           -908837100000000789L,
           -888800400000000001L,
           -888799500000000999L,

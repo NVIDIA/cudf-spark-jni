@@ -525,8 +525,8 @@ struct daylight_saving_time_utils {
 template <typename timestamp_type>
 __device__ static timestamp_type convert_timestamp(
   timestamp_type const& timestamp,
-  cudf::detail::lists_column_device_view const& fixed_transitions,
-  cudf::detail::lists_column_device_view const& dst_rules,
+  cudf::lists_column_device_view const& fixed_transitions,
+  cudf::lists_column_device_view const& dst_rules,
   cudf::size_type tz_index,
   bool to_utc)
 {
@@ -536,8 +536,22 @@ __device__ static timestamp_type convert_timestamp(
   auto const tz_instants  = fixed_transitions.child().child(1);
   auto const utc_offsets  = fixed_transitions.child().child(2);
 
-  auto const epoch_seconds = static_cast<int64_t>(
-    cuda::std::chrono::duration_cast<cudf::duration_s>(timestamp.time_since_epoch()).count());
+  // Direction-aware µs→s conversion:
+  //
+  //   - from_utc (to_utc == false): the input is a UTC instant. `duration_cast` truncates
+  //     toward zero, which for a negative count with non-zero sub-second part rounds up by
+  //     one second. At a UTC instant 1 µs before a DST gap transition this snaps onto the
+  //     transition itself and the binary search returns the post-transition offset (1-hour
+  //     off-by-one, see #14861). Floor-divide gives the correct pre-transition offset.
+  //
+  //   - to_utc (to_utc == true): the input is a local wall clock. Sub-second negative inputs
+  //     that fall inside a DST gap (a local time that does not exist) must resolve to the
+  //     post-gap `offset_after`, matching Spark/Java's `LocalDateTime.atZone()` convention.
+  //     Truncation toward zero happens to land on the post-gap row, so we keep it.
+  constexpr int64_t sub_seconds_per_second = duration_type::period::den;
+  auto const raw_count                     = timestamp.time_since_epoch().count();
+  auto const epoch_seconds  = to_utc ? static_cast<int64_t>(raw_count / sub_seconds_per_second)
+                                     : integer_utils::floor_div(raw_count, sub_seconds_per_second);
   auto const tz_transitions = cudf::list_device_view{fixed_transitions, tz_index};
   auto const list_size      = tz_transitions.size();
 

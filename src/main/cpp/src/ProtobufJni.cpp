@@ -100,6 +100,7 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
                                                          jbooleanArray is_repeated,
                                                          jbooleanArray is_required,
                                                          jbooleanArray has_default_value,
+                                                         jbooleanArray is_output,
                                                          jlongArray default_ints,
                                                          jdoubleArray default_floats,
                                                          jbooleanArray default_bools,
@@ -110,9 +111,9 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
 {
   auto const all_inputs_valid = binary_input_view && field_numbers && parent_indices &&
                                 depth_levels && wire_types && output_type_ids && encodings &&
-                                is_repeated && is_required && has_default_value && default_ints &&
-                                default_floats && default_bools && default_strings &&
-                                enum_valid_values && enum_names;
+                                is_repeated && is_required && has_default_value && is_output &&
+                                default_ints && default_floats && default_bools &&
+                                default_strings && enum_valid_values && enum_names;
   JNI_NULL_CHECK(env, all_inputs_valid, "one or more input arrays are null", 0);
 
   JNI_TRY
@@ -129,6 +130,7 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
     cudf::jni::native_jbooleanArray n_is_repeated(env, is_repeated);
     cudf::jni::native_jbooleanArray n_is_required(env, is_required);
     cudf::jni::native_jbooleanArray n_has_default(env, has_default_value);
+    cudf::jni::native_jbooleanArray n_is_output(env, is_output);
     cudf::jni::native_jlongArray n_default_ints(env, default_ints);
     cudf::jni::native_jdoubleArray n_default_floats(env, default_floats);
     cudf::jni::native_jbooleanArray n_default_bools(env, default_bools);
@@ -140,8 +142,8 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
         n_wire_types.size() != num_fields || n_output_type_ids.size() != num_fields ||
         n_encodings.size() != num_fields || n_is_repeated.size() != num_fields ||
         n_is_required.size() != num_fields || n_has_default.size() != num_fields ||
-        n_default_ints.size() != num_fields || n_default_floats.size() != num_fields ||
-        n_default_bools.size() != num_fields ||
+        n_is_output.size() != num_fields || n_default_ints.size() != num_fields ||
+        n_default_floats.size() != num_fields || n_default_bools.size() != num_fields ||
         env->GetArrayLength(default_strings) != num_fields ||
         env->GetArrayLength(enum_valid_values) != num_fields ||
         env->GetArrayLength(enum_names) != num_fields) {
@@ -169,8 +171,11 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
     // Convert boolean arrays
     std::vector<bool> default_bool_values;
     default_bool_values.reserve(num_fields);
+    std::vector<bool> output_fields;
+    output_fields.reserve(num_fields);
     for (int i = 0; i < num_fields; ++i) {
       default_bool_values.push_back(n_default_bools[i] != 0);
+      output_fields.push_back(n_is_output[i] != 0);
     }
 
     // Convert default values
@@ -206,7 +211,8 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
                                                                 std::move(default_string_values),
                                                                 std::move(enum_values),
                                                                 std::move(enum_name_values),
-                                                                static_cast<bool>(fail_on_errors)};
+                                                                static_cast<bool>(fail_on_errors),
+                                                                std::move(output_fields)};
 
     auto result = spark_rapids_jni::protobuf::decode_protobuf_to_struct(
       *input, context, cudf::get_default_stream(), cudf::get_current_device_resource_ref());

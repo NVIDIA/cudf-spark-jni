@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import org.junit.jupiter.api.Assertions;
 
@@ -216,6 +217,140 @@ public class CastStringsTest {
     }
   }
 
+  // Regression test for https://github.com/NVIDIA/spark-rapids/issues/10773.
+  // Inputs whose decimal mantissa exceeds 2^53 used to lose 1 ULP because the
+  // kernel cast the uint64 digits to double *before* applying the exp10 factor.
+  // After the correctly-rounded fallback was added, the GPU result must match
+  // Java's Double.parseDouble (which falls back to BigDecimal for these).
+  //
+  // Coverage groups (helper-triggered unless noted):
+  //  - happy path: 17- to 19-digit mantissas across normal magnitudes (q <= 0)
+  //  - positive-exponent (q > 0) path with digits > 2^53
+  //  - the 2^53 trigger boundary (exactly at, one above)
+  //  - mantissa rounding that rolls into the exponent
+  //  - overflow to +/-infinity past Double.MAX_VALUE (caller's legacy path)
+  //  - subnormal magnitudes (caller's legacy path)
+  //  - signs
+  //  - |q| > 19 fallback to the legacy path
+  @Test
+  void castToDoubleHighPrecisionTest() {
+    // Helper-window inputs: digits > 2^53 AND |q| <= 19, plus the boundary
+    // case where the mantissa rounding rolls into the exponent. These take
+    // the new correctly-rounded fallback path and MUST match Double.parseDouble
+    // bit-for-bit. A 1-ULP regression here means the helper is broken and
+    // NVIDIA/spark-rapids#10773 has regressed.
+    String[] helperInputs = new String[] {
+        // --- happy path: helper, q <= 0 ---
+        "1.7976931348623157",        // the literal that broke RapidsJsonSuite
+        "9.9999999999999999",
+        "1.0000000000000001",
+        "1.0000000000000002",
+        "3.1415926535897932",
+        "2.7182818284590452",
+        "2.2250738585072014",        // Double.MIN_NORMAL mantissa (no e-308 here)
+        "1.234567890123456789",      // 19-digit mantissa
+        "9.999999999999999999",
+        "-1.7976931348623157",
+        // --- helper q > 0 path: 17-digit mantissa with explicit positive
+        // exponent. digits > 2^53 AND |exp_ten| <= 19, so helper_eligible
+        // is true and exp_ten is positive, exercising the
+        // `quotient128 = digits * 10^q` branch inside the helper.
+        "9007199254740993e10",
+        "12345678901234567e7",
+        "-9007199254740993e15",
+        // --- helper |q| = 19 boundary: exact upper edge of the eligibility
+        // window (`cuda::std::abs(exp_ten) <= 19`). Tests both signs so a
+        // mutation from `<= 19` to `< 19` in the gate trips this case.
+        "9007199254740993e19",
+        "9007199254740993e-19",
+        // --- 2^53 + 1 trigger boundary: first input the helper handles ---
+        "9007199254740993",
+        // digits = 2^53 + 1 with q < 0 and >16 sig figs
+        "9.007199254740993",
+        // --- tie-to-even rounds UP via the (mantissa & 1ULL) arm:
+        // round_bit=1, sticky=0, mantissa odd → `mantissa & 1ULL` adds 1.
+        // 9007199254740995 (2^53 + 3): shift=1, mantissa=4503599627370497
+        // (odd), round_bit=1, sticky=0 → rounds to 9007199254740996.0,
+        // matching Double.parseDouble's correctly-rounded result. Without
+        // this case the `mantissa & 1ULL` arm of the round-up condition is
+        // dead under the existing inputs.
+        "9007199254740995",
+        // --- mantissa rounding rolls into the exponent ---
+        // After rounding, the 53-bit mantissa hits 2^53 and the helper
+        // increments unbiased_exp.
+        "9999999999999999.5"         // rounds to 1e16
+    };
+    // Legacy-path inputs: take the pre-existing `static_cast<double>(digits)
+    // * exp10(exp_ten)` path. This path is NOT correctly-rounded in general --
+    // GPU's exp10 may differ from Java's BigDecimal-based parser by up to a
+    // few ULP, and codegen across SM archs is sensitive enough that an input
+    // that lands bit-exact on one GPU can be 1-ULP off on another. Examples
+    // observed in CI: "9.99e25" returns 4995803332451764961 on Blossom CUDA12
+    // /CUDA13 GPUs (vs Java's 4995803332451764962). Assert a 1-ULP tolerance
+    // instead of bit-exact so the regression test still trips real breakage
+    // (helper window) without false-positiving on the documented legacy
+    // imprecision.
+    String[] legacyInputs = new String[] {
+        // digits = 2^53 exactly: helper NOT triggered (need strictly greater).
+        // 2^53 is exactly representable as a double, so the legacy path
+        // returns the correct value.
+        "9007199254740992",
+        // --- overflow to +/-infinity past Double.MAX_VALUE ---
+        "1.8e308",                   // > Double.MAX_VALUE
+        "-1.8e308",                  // negative infinity
+        // --- subnormal magnitudes ---
+        "5e-324",                    // Double.MIN_VALUE (smallest subnormal)
+        "1.5e-310",                  // mid-subnormal range
+        // --- |q| > 19 fallback to legacy ---
+        "1e20",
+        "1e-100",
+        "9.99e25",
+        "12345678901234567e21",      // q = +21, large magnitude
+        "12345678901234567e-23",     // q = -23, tiny magnitude
+        "99999999999999999e30"       // q = +30, near overflow-to-infinity
+    };
+
+    // Helper window: bit-exact match required.
+    try (ColumnVector in = ColumnVector.fromStrings(helperInputs);
+         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT64);
+         HostColumnVector hostGot = got.copyToHost()) {
+      for (int i = 0; i < helperInputs.length; i++) {
+        double expected = Double.parseDouble(helperInputs[i]);
+        double actual = hostGot.getDouble(i);
+        assertEquals(Double.doubleToLongBits(expected),
+                     Double.doubleToLongBits(actual),
+                     "helper row " + i + " input=" + helperInputs[i] +
+                     " expected=" + expected + " actual=" + actual);
+      }
+    }
+
+    // Legacy path: allow 1-ULP slack. Infinities and zero subnormals are still
+    // compared bit-exact via Double.doubleToLongBits since their ULP is
+    // ill-defined.
+    try (ColumnVector in = ColumnVector.fromStrings(legacyInputs);
+         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT64);
+         HostColumnVector hostGot = got.copyToHost()) {
+      for (int i = 0; i < legacyInputs.length; i++) {
+        double expected = Double.parseDouble(legacyInputs[i]);
+        double actual = hostGot.getDouble(i);
+        if (Double.isInfinite(expected) || expected == 0.0) {
+          assertEquals(Double.doubleToLongBits(expected),
+                       Double.doubleToLongBits(actual),
+                       "legacy row " + i + " input=" + legacyInputs[i] +
+                       " expected=" + expected + " actual=" + actual);
+        } else {
+          long expectedBits = Double.doubleToLongBits(expected);
+          long actualBits = Double.doubleToLongBits(actual);
+          long ulpDiff = Math.abs(expectedBits - actualBits);
+          assertTrue(ulpDiff <= 1,
+                     "legacy row " + i + " input=" + legacyInputs[i] +
+                     " expected=" + expected + " actual=" + actual +
+                     " ulpDiff=" + ulpDiff);
+        }
+      }
+    }
+  }
+
   @Test
   void castToDecimalTest() {
     Table.TestBuilder tb = new Table.TestBuilder();
@@ -289,6 +424,28 @@ public class CastStringsTest {
          "111111111111111111111111111111111111111111111111111111111111111",
          "1000000000000000000000000000000000000000000000000000000000000000")) {
           AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void castFromFloatToJsonStringTest() {
+    try (ColumnVector input = ColumnVector.fromBoxedFloats(100.0f, -4.0f, Float.NaN,
+             Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, -0.0f, null);
+         ColumnVector result = CastStrings.fromFloat(input, true);
+         ColumnVector expected = ColumnVector.fromStrings("100.0", "-4.0", "\"NaN\"",
+             "\"Infinity\"", "\"-Infinity\"", "-0.0", null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void castFromDoubleToJsonStringTest() {
+    try (ColumnVector input = ColumnVector.fromBoxedDoubles(100.0, -4.0, Double.NaN,
+             Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, -0.0, null);
+         ColumnVector result = CastStrings.fromFloat(input, true);
+         ColumnVector expected = ColumnVector.fromStrings("100.0", "-4.0", "\"NaN\"",
+             "\"Infinity\"", "\"-Infinity\"", "-0.0", null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
     }
   }
 
@@ -1421,16 +1578,41 @@ public class CastStringsTest {
         new String[]{"06/05", "6/05", "06/5", "06-05"},
         "dd/MM", false,
         new Long[]{y1970_05_06, null, null, null});
+
+    // yyyy/MM, MM/dd, MM/yyyy, MM-yyyy corrected: strict 2-digit fields, missing fields default.
+    assertParsedTimestamp(
+        new String[]{"2024/05", "2024/5"},
+        "yyyy/MM", false,
+        new Long[]{y2024_05_01, null});
+    assertParsedTimestamp(
+        new String[]{"05/06", "5/06"},
+        "MM/dd", false,
+        new Long[]{y1970_05_06, null});
+    assertParsedTimestamp(
+        new String[]{"05/2024", "5/2024"},
+        "MM/yyyy", false,
+        new Long[]{y2024_05_01, null});
+    assertParsedTimestamp(
+        new String[]{"05-2024", "5-2024"},
+        "MM-yyyy", false,
+        new Long[]{y2024_05_01, null});
   }
 
   @Test
   void parseTimestampWithFormat_correctedDateTime() {
     long ts = expectedUs(2024, 12, 31, 23, 59, 58);
+    // CORRECTED: one ' ' separator only, so 'T' and double-space are rejected.
     assertParsedTimestamp(
         new String[]{"2024-12-31 23:59:58", "2024-12-31T23:59:58",
                      "2024-12-31 23:59:5", "2024-12-31  23:59:58", "2024-12-31 23:59:60"},
         "yyyy-MM-dd HH:mm:ss", false,
-        new Long[]{ts, ts, null, null, null});
+        new Long[]{ts, null, null, null, null});
+
+    // Packed date + time under CORRECTED: 'T' separator rejected, same as LEGACY.
+    assertParsedTimestamp(
+        new String[]{"20241231 23:59:58", "20241231T23:59:58"},
+        "yyyyMMdd HH:mm:ss", false,
+        new Long[]{ts, null});
   }
 
   @Test
@@ -1463,24 +1645,30 @@ public class CastStringsTest {
   void parseTimestampWithFormat_legacyWhitespaceFold() {
     long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
 
-    // LEGACY yyyy-MM-dd: 1-2 digit month/day, whitespace fold AFTER each '-' separator,
+    // LEGACY yyyy-MM-dd: 1-2 digit month/day, [ \t] skipped before each numeric field,
     // outer trim, trailing non-digit/EOF accepted.
     assertParsedTimestamp(
         new String[]{
             "2024-05-06",
             "2024-5-6",
-            "2024- 05- 06",     // [ \t]* fold after each '-'
-            "2024-\t05-\t06",   // tabs accepted by fold
-            "2024  -05-06",     // whitespace before '-' is NOT folded
+            "2024- 05- 06",     // [ \t] skipped before month/day
+            "2024-\t05-\t06",   // tabs skipped too
+            "2024  -05-06",     // whitespace before the '-' literal is NOT skipped
             " 2024-05-06 ",     // outer trim
             "2024-05-06xxx",    // legacy trailing non-digit accepted
             "2024-05-061",      // trailing digit rejected
             "\n2024-05-06",     // leading newline rejected
+            // SimpleDateFormat skips only ' '/'\t', so other leading control bytes reject on CPU.
+            "\r2024-05-06",
+            "\f2024-05-06",
+            "\u000B2024-05-06",
+            "\b2024-05-06",
             null,
         },
         "yyyy-MM-dd", true,
         new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06,
-                    null, y2024_05_06, y2024_05_06, null, null, null});
+                    null, y2024_05_06, y2024_05_06, null, null,
+                    null, null, null, null, null});
   }
 
   @Test
@@ -1494,26 +1682,27 @@ public class CastStringsTest {
         new Long[]{expectedUs(2024, 5, 6, 0, 0, 0), null, null,
                     expectedUs(2024, 5, 6, 0, 0, 0)});
 
-    // yyyyMMdd HH:mm:ss
+    // yyyyMMdd HH:mm:ss: 'T' separator rejected (literal space matches only ' ').
     assertParsedTimestamp(
         new String[]{"20241231 23:59:58", "20241231T23:59:58", "20241231 23:59:58Z"},
         "yyyyMMdd HH:mm:ss", true,
-        new Long[]{ts, ts, ts});
+        new Long[]{ts, null, ts});
 
     // Slash-separated legacy timestamp path.
     assertParsedTimestamp(
         new String[]{"2024/12/31 23:59:58", "2024/12/31T23:59:58", "2024/12/31 23:59:58Z"},
         "yyyy/MM/dd HH:mm:ss", true,
-        new Long[]{ts, ts, ts});
+        new Long[]{ts, null, ts});
   }
 
   @Test
   void parseTimestampWithFormat_legacyDayFirstFormats() {
     long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
     assertParsedTimestamp(
-        new String[]{"06-05-2024", "6-5-2024", "6- 5-2024", "06-05-2024x"},
+        new String[]{"06-05-2024", "6-5-2024", "6- 5-2024", "06-05-2024x",
+                     "06-05-  2024"},  // [ \t] skipped before a mid-format year field too
         "dd-MM-yyyy", true,
-        new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06});
+        new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06});
     assertParsedTimestamp(
         new String[]{"06/05/2024", "6/5/2024", "6/ 5/2024", "06/05/2024x"},
         "dd/MM/yyyy", true,
@@ -1569,7 +1758,7 @@ public class CastStringsTest {
 
   @Test
   void parseTimestampWithFormat_legacyMultiTabFold() {
-    // skip_ht_whitespace loops, so multiple tabs/spaces after a '-' or '/' are all consumed.
+    // skip_ht_whitespace loops, so a whole run of tabs/spaces before a numeric field is consumed.
     long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
     assertParsedTimestamp(
         new String[]{"2024-\t\t05-\t \t06", "2024/  05/\t\t06"},
@@ -1579,6 +1768,52 @@ public class CastStringsTest {
         new String[]{"2024/  05/\t\t06"},
         "yyyy/MM/dd", true,
         new Long[]{y2024_05_06});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyWhitespaceBeforeEveryField() {
+    // LEGACY skips [ \t] before each numeric field, so whitespace runs after the separator and
+    // after ':' parse; whitespace before a literal, and a tab/'T' separator, still fail.
+    long ts = expectedUs(1999, 12, 31, 11, 59, 59);
+    assertParsedTimestamp(
+        new String[]{
+            "1999-12-31 11:59:59",     // single space
+            "1999-12-31  11:59:59",    // double space after separator
+            "1999-12-31   11:59:59",   // triple space
+            "1999-12-31 \t 11:59:59",  // mixed space/tab run after separator
+            "1999-12-31 11: 59: 59",   // whitespace after ':' before minute/second
+            " 1999-12-31 11:59:59 ",   // outer trim
+            "1999-12-31\t11:59:59",    // tab separator rejected (literal space != '\t')
+            "1999-12-31T11:59:59",     // 'T' separator rejected (literal space != 'T')
+            "1999-12-31 11 :59:59",    // whitespace before ':' literal rejected
+        },
+        "yyyy-MM-dd HH:mm:ss", true,
+        new Long[]{ts, ts, ts, ts, ts, ts, null, null, null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_correctedSingleSeparatorOnly() {
+    // CORRECTED keeps DateTimeFormatter semantics: exactly one separator, no whitespace fold,
+    // and no leading whitespace (CORRECTED does not trim).
+    long ts = expectedUs(1999, 12, 31, 11, 59, 59);
+    assertParsedTimestamp(
+        new String[]{"1999-12-31 11:59:59", "1999-12-31  11:59:59", "1999-12-31 11: 59:59",
+                     "\n1999-12-31 11:59:59", " 1999-12-31 11:59:59"},
+        "yyyy-MM-dd HH:mm:ss", false,
+        new Long[]{ts, null, null, null, null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_correctedSlashDateDeviation() {
+    // CORRECTED yyyy/MM/dd accepts 1-2 digit month/day to preserve the pre-existing spark-rapids
+    // compatibility contract. This DEVIATES from Spark CPU, whose STRICT DateTimeFormatter rejects
+    // single-digit fields ("2024/5/6" is null on CPU). This test pins the deviation so a future
+    // refactor of compile_format's corrected_variable_width_slash_date cannot silently change it.
+    long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"2024/05/06", "2024/5/6", "2024/5/06", "2024/05/6"},
+        "yyyy/MM/dd", false,
+        new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06});
   }
 
   @Test

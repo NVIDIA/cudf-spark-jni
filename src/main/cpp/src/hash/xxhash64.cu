@@ -466,7 +466,7 @@ class device_row_hasher {
         // Replace list column with its most inner non-list child
         if (curr_col.type().id() == cudf::type_id::LIST) {
           do {
-            curr_col = cudf::detail::lists_column_device_view(curr_col).get_sliced_child();
+            curr_col = cudf::lists_column_device_view(curr_col).get_sliced_child();
           } while (curr_col.type().id() == cudf::type_id::LIST);
           col_stack[stack_size - 1] = col_stack_frame(curr_col);
           continue;
@@ -480,7 +480,7 @@ class device_row_hasher {
             } else {
               // Push the next child column into the stack
               col_stack[stack_size++] =
-                col_stack_frame(cudf::detail::structs_column_device_view(curr_col).get_sliced_child(
+                col_stack_frame(cudf::structs_column_device_view(curr_col).get_sliced_child(
                   top.get_and_inc_idx_to_process()));
             }
           } else {  // struct column

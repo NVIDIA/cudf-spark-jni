@@ -22,6 +22,7 @@
 #include <jni_cccl_any_resource.hpp>
 #include <pthread.h>
 #include <spdlog/common.h>
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/sinks/ostream_sink.h>
@@ -33,10 +34,13 @@
 #include <chrono>
 #include <exception>
 #include <format>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -102,7 +106,7 @@ enum class thread_state {
 /**
  * Convert a state to a string representation for logging.
  */
-const char* as_str(thread_state state)
+char const* as_str(thread_state state)
 {
   switch (state) {
     case thread_state::THREAD_RUNNING: return "THREAD_RUNNING";
@@ -361,7 +365,7 @@ class thread_priority {
 
   long get_thread_id() const { return thread_id; }
 
-  bool operator<(const thread_priority& other) const
+  bool operator<(thread_priority const& other) const
   {
     long task_priority       = this->task_priority;
     long other_task_priority = other.task_priority;
@@ -373,7 +377,7 @@ class thread_priority {
     return false;
   }
 
-  bool operator>(const thread_priority& other) const
+  bool operator>(thread_priority const& other) const
   {
     long task_priority       = this->task_priority;
     long other_task_priority = other.task_priority;
@@ -1413,7 +1417,7 @@ class spark_resource_adaptor_impl {
    * and if there are no blocked threads, then we wake up all BUFN threads.
    * Hopefully the frees have already woken up all the blocked threads anyways.
    */
-  void wake_up_threads_after_task_finishes(const std::unique_lock<std::mutex>& lock)
+  void wake_up_threads_after_task_finishes(std::unique_lock<std::mutex> const& lock)
   {
     bool are_any_tasks_just_blocked = false;
     for (auto& [thread_id, t_state] : threads) {
@@ -1452,7 +1456,7 @@ class spark_resource_adaptor_impl {
    */
   bool remove_thread_association(long thread_id,
                                  long remove_task_id,
-                                 const std::unique_lock<std::mutex>& lock)
+                                 std::unique_lock<std::mutex> const& lock)
   {
     bool thread_should_be_removed = false;
     bool ret                      = false;
@@ -1906,7 +1910,7 @@ class spark_resource_adaptor_impl {
    * This split in invocation is done to make the critical sections faster, and leave
    * deadlock busting to the deadlock thread.
    */
-  void check_and_update_for_bufn_state_machine_only(const std::unique_lock<std::mutex>& lock)
+  void check_and_update_for_bufn_state_machine_only(std::unique_lock<std::mutex> const& lock)
   {
     // we pass nullopt because we are calling this method from a place in the code that has
     // no java knowledge of blocked threads.
@@ -1922,7 +1926,7 @@ class spark_resource_adaptor_impl {
    * along a set of java native thread ids that are blocked in the java state (Thread.getState).
    */
   void check_and_update_for_bufn(
-    const std::unique_lock<std::mutex>& lock,
+    std::unique_lock<std::mutex> const& lock,
     std::optional<std::unordered_set<long>> const& java_blocked_thread_ids)
   {
     std::map<long, long> pool_bufn_task_thread_count;
@@ -2185,16 +2189,65 @@ class spark_resource_adaptor_impl {
     wake_next_highest_priority_blocked(lock, is_for_cpu);
   }
 
+ private:
+  static void try_log_exception(long const tid, std::exception_ptr failure)
+  {
+    try {
+      std::rethrow_exception(failure);
+    } catch (std::exception const& e) {
+      // If the exception is a std::exception, we can log what() it is.
+      LOG_STATUS(
+        "ERROR", tid, -2, thread_state::UNKNOWN, "deallocate failed; terminating: {}", e.what());
+    } catch (...) {
+      // If what's thrown is not a std::exception, log a generic message.
+      LOG_STATUS("ERROR",
+                 tid,
+                 -2,
+                 thread_state::UNKNOWN,
+                 "deallocate failed with unknown exception; terminating");
+    }
+  }
+
+  /**
+   * Best-effort logging for failures caught by deallocate()'s noexcept guard.
+   *
+   * The original deallocate failure is handled separately from the logging calls by
+   * try_log_exception() so that a logging exception cannot be mistaken for the exception thrown by
+   * deallocate(). Either way, this helper must not return or allow any exception to escape. The
+   * caller passes std::current_exception() from inside a catch block, so failure is expected to be
+   * non-null.
+   */
+  [[noreturn]] static void log_deallocation_failure_and_terminate(
+    std::exception_ptr failure) noexcept
+  {
+    try {
+      try_log_exception(static_cast<long>(pthread_self()), failure);
+    } catch (...) {
+      // At this point, logging the error itself threw.
+      // Logging is best-effort here. This function must not allow any exception to escape.
+      // Just terminate.
+    }
+    std::terminate();
+  }
+
+ public:
   void deallocate(cuda::stream_ref stream,
                   void* p,
                   std::size_t size,
                   std::size_t alignment = alignof(std::max_align_t)) noexcept
   {
-    resource.deallocate(stream, p, size, alignment);
-    // deallocate success
-    if (size > 0) {
-      std::unique_lock<std::mutex> lock(state_mutex);
-      dealloc_core(false, lock, size);
+    try {
+      resource.deallocate(stream, p, size, alignment);
+      // deallocate success
+      if (size > 0) {
+        std::unique_lock<std::mutex> lock(state_mutex);
+        dealloc_core(false, lock, size);
+      }
+    } catch (...) {
+      // This deallocator is part of the RMM/CCCL memory-resource contract and is called through
+      // noexcept wrappers such as cuda::mr::shared_resource. If an exception escaped, the wrapper
+      // would likely call std::terminate() anyway; doing it here makes that fatal path explicit.
+      log_deallocation_failure_and_terminate(std::current_exception());
     }
   }
 
@@ -2220,6 +2273,8 @@ class spark_resource_adaptor_impl {
 
   friend void get_property(spark_resource_adaptor_impl const&, cuda::mr::device_accessible) noexcept
   {
+    // Empty by design: CCCL/RMM finds this overload via ADL as a marker that allocations
+    // from this resource are device-accessible.
   }
 };
 
@@ -2251,6 +2306,66 @@ inline spark_resource_adaptor get_spark_adaptor(jlong handle)
   }
   return it->second;  // Returning by value, while under lock.
 }
+
+// Support for RmmSparkDeallocationFailureTest. The test runs this in a child JVM so the
+// intentional std::terminate() does not kill the JUnit process.
+class test_deallocate_noop_resource {
+ public:
+  void* allocate(cuda::stream_ref, std::size_t, std::size_t = alignof(std::max_align_t))
+  {
+    return nullptr;
+  }
+
+  void deallocate(cuda::stream_ref,
+                  void*,
+                  std::size_t,
+                  std::size_t = alignof(std::max_align_t)) noexcept
+  {
+    // Empty by design: this test resource is used with a fake pointer, and the test needs the
+    // enclosing spark_resource_adaptor_impl::deallocate() path to continue past the upstream free.
+  }
+
+  void* allocate_sync(std::size_t bytes, std::size_t alignment = alignof(std::max_align_t))
+  {
+    return allocate(cuda::stream_ref{cudaStream_t{nullptr}}, bytes, alignment);
+  }
+
+  void deallocate_sync(void* ptr,
+                       std::size_t bytes,
+                       std::size_t alignment = alignof(std::max_align_t)) noexcept
+  {
+    deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, ptr, bytes, alignment);
+  }
+
+  bool operator==(test_deallocate_noop_resource const&) const noexcept { return true; }
+
+  bool operator!=(test_deallocate_noop_resource const&) const noexcept { return false; }
+
+  friend void get_property(test_deallocate_noop_resource const&,
+                           cuda::mr::device_accessible) noexcept
+  {
+    // Empty by design: CCCL/RMM finds this overload via ADL as a marker that allocations from this
+    // test resource satisfy the device_accessible property.
+  }
+};
+static_assert(cuda::mr::resource_with<test_deallocate_noop_resource, cuda::mr::device_accessible>);
+
+class throw_on_dealloc_log_sink : public spdlog::sinks::base_sink<std::mutex> {
+ protected:
+  void sink_it_(spdlog::details::log_msg const& msg) override
+  {
+    auto const payload = std::string(msg.payload.data(), msg.payload.size());
+    if (payload.rfind("DEALLOC", 0) == 0) {
+      throw std::runtime_error("injected deallocate failure");
+    }
+
+    spdlog::memory_buf_t formatted;
+    formatter_->format(msg, formatted);
+    std::cerr.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
+  }
+
+  void flush_() override { std::cerr.flush(); }
+};
 
 }  // namespace
 
@@ -2750,6 +2865,39 @@ JNIEXPORT void JNICALL
 Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_shutdownLoggerNative(JNIEnv* env, jclass)
 {
   JNI_TRY { shutdown_global_logger(); }
+  JNI_CATCH(env, );
+}
+
+/**
+ * Test utility for RmmSparkDeallocationFailureTest.Child.
+ *
+ * This deliberately drives spark_resource_adaptor_impl::deallocate() into its fatal exception path.
+ * It installs a test logger that throws when the normal DEALLOC status is logged, constructs a
+ * spark_resource_adaptor_impl around a no-op upstream resource, registers the current thread as a
+ * task thread, then calls deallocate(). The injected logging exception is caught by deallocate()'s
+ * noexcept guard, which should log the deallocation failure and call std::terminate().
+ *
+ * This must only be called from a subprocess death-style test, because success means the process
+ * terminates.
+ */
+JNIEXPORT void JNICALL
+Java_com_nvidia_spark_rapids_jni_RmmSparkDeallocationFailureTest_00024Child_triggerDeallocationFailureForTesting(
+  JNIEnv* env, jclass)
+{
+  JNI_TRY
+  {
+    auto logger = std::make_shared<spdlog::logger>("SPARK_RMM_TEST",
+                                                   std::make_shared<throw_on_dealloc_log_sink>());
+    logger->set_error_handler([](std::string const& msg) { throw std::runtime_error(msg); });
+    set_global_logger(std::make_shared<spark_resource_adaptor_logger>(logger, true));
+
+    auto adaptor = cuda::mr::make_shared_resource<spark_resource_adaptor_impl>(
+      env, cuda::mr::any_resource<cuda::mr::device_accessible>{test_deallocate_noop_resource{}});
+
+    auto const tid = static_cast<long>(pthread_self());
+    adaptor->start_dedicated_task_thread(tid, 1);
+    adaptor->deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, reinterpret_cast<void*>(0x1), 1);
+  }
   JNI_CATCH(env, );
 }
 }

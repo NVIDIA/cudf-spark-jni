@@ -198,7 +198,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
         ts.emplace_back([base, off, end, page_size]() {
           // volatile prevents the compiler from eliding these writes — the write's
           // only purpose is to fault in the page.
-          auto* c = static_cast<volatile char*>(base);
+          auto* c = static_cast<char volatile*>(base);
           for (std::size_t k = off; k < end; k += page_size)
             c[k] = 0;
         });

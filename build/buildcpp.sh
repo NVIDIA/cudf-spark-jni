@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -116,7 +116,7 @@ if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.tx
     -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
     -DCUDF_KVIKIO_REMOTE_IO=OFF \
     -DCUDF_LARGE_STRINGS_DISABLED=ON \
-    -DCUDF_EXPORT_NVCOMP=ON \
+    -DCUDF_BUILD_STATIC_DEPS=FORCE \
     -DLIBCUDF_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
     -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
     -C="$CUDF_PIN_PATH/setup.cmake"

@@ -24,7 +24,7 @@
 set -ex
 
 OWNER=${OWNER:-"NVIDIA"}
-REPO=${REPO:-"spark-rapids-jni"}
+REPO=${REPO:-"cudf-spark-jni"}
 PARALLEL_LEVEL=${PARALLEL_LEVEL:-4}
 REPO_LOC="github.com/${OWNER}/${REPO}.git"
 

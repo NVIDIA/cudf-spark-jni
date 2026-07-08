@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,6 +78,48 @@ TEST_F(FloatToStringTests, FromFloats64)
                                                            "NaN",
                                                            "8.395422232327942E11",
                                                            "-0.0"};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*results, expected, verbosity);
+}
+
+TEST_F(FloatToStringTests, FromFloats32ToJsonString)
+{
+  auto const floats =
+    cudf::test::fixed_width_column_wrapper<float>{100.0f,
+                                                  -4.0f,
+                                                  std::numeric_limits<float>::quiet_NaN(),
+                                                  std::numeric_limits<float>::infinity(),
+                                                  -std::numeric_limits<float>::infinity(),
+                                                  -0.0f};
+
+  auto results = spark_rapids_jni::float_to_string(floats,
+                                                   /*json_string=*/true,
+                                                   cudf::get_default_stream(),
+                                                   cudf::get_current_device_resource_ref());
+
+  auto const expected = cudf::test::strings_column_wrapper{
+    "100.0", "-4.0", "\"NaN\"", "\"Infinity\"", "\"-Infinity\"", "-0.0"};
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*results, expected, verbosity);
+}
+
+TEST_F(FloatToStringTests, FromFloats64ToJsonString)
+{
+  auto const floats =
+    cudf::test::fixed_width_column_wrapper<double>{100.0d,
+                                                   -4.0d,
+                                                   std::numeric_limits<double>::quiet_NaN(),
+                                                   std::numeric_limits<double>::infinity(),
+                                                   -std::numeric_limits<double>::infinity(),
+                                                   -0.0d};
+
+  auto results = spark_rapids_jni::float_to_string(floats,
+                                                   /*json_string=*/true,
+                                                   cudf::get_default_stream(),
+                                                   cudf::get_current_device_resource_ref());
+
+  auto const expected = cudf::test::strings_column_wrapper{
+    "100.0", "-4.0", "\"NaN\"", "\"Infinity\"", "\"-Infinity\"", "-0.0"};
 
   CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*results, expected, verbosity);
 }

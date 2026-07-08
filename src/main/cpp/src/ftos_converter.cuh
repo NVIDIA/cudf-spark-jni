@@ -1156,38 +1156,35 @@ __device__ inline int copy_special_str_json(char* const result,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  // no NaN in json
-  if (exponent) {
-    if (sign) {
-      memcpy(result, "\"-Infinity\"", 11);
-      return 11;
-    } else {
-      memcpy(result, "\"Infinity\"", 10);
-      return 10;
-    }
-  }
-  if (sign) {
-    memcpy(result, "-0.0", 4);
-    return 4;
-  } else {
-    memcpy(result, "0.0", 3);
-    return 3;
-  }
+  bool const quote = mantissa || exponent;
+  int const offset = quote ? 1 : 0;
+  int const quotes = quote ? 2 : 0;
+  if (quote) { result[0] = '"'; }
+  int const length = copy_special_str(result + offset, sign, exponent, mantissa);
+  if (quote) { result[offset + length] = '"'; }
+  return length + quotes;
 }
 
 __device__ inline int special_str_size_json(bool const sign,
                                             bool const exponent,
                                             bool const mantissa)
 {
-  // no NaN in json
-  if (exponent) { return sign + 10; }
-  return sign + 3;
+  int const quotes = (mantissa || exponent) ? 2 : 0;
+  return special_str_size(sign, exponent, mantissa) + quotes;
 }
 
 __device__ inline int d2s_buffered_n_json(double f, char* result)
 {
   bool sign = false, special = false;
   floating_decimal_64 v = d2d(f, sign, special);
+  if (special) { return copy_special_str_json(result, sign, v.exponent, v.mantissa); }
+  return to_chars(v, sign, result);
+}
+
+__device__ inline int f2s_buffered_n_json(float f, char* result)
+{
+  bool sign = false, special = false;
+  floating_decimal_32 v = f2d(f, sign, special);
   if (special) { return copy_special_str_json(result, sign, v.exponent, v.mantissa); }
   return to_chars(v, sign, result);
 }
@@ -1200,25 +1197,53 @@ __device__ inline int compute_d2s_size_json(double value)
   return d2s_size(v, sign);
 }
 
+__device__ inline int compute_f2s_size_json(float value)
+{
+  bool sign = false, special = false;
+  floating_decimal_32 v = f2d(value, sign, special);
+  if (special) { return special_str_size_json(sign, v.exponent, v.mantissa); }
+  return f2s_size(v, sign);
+}
+
 }  // namespace
 
 //===== APIs =====
 
-__device__ inline int compute_ftos_size(double value, bool is_float)
+template <typename FloatType, bool json_string = false>
+__device__ inline int compute_ftos_size(FloatType value)
 {
-  if (is_float) {
-    return compute_f2s_size(value);
+  static_assert(cuda::std::is_same_v<FloatType, float> || cuda::std::is_same_v<FloatType, double>);
+  if constexpr (cuda::std::is_same_v<FloatType, float>) {
+    if constexpr (json_string) {
+      return compute_f2s_size_json(value);
+    } else {
+      return compute_f2s_size(value);
+    }
   } else {
-    return compute_d2s_size(value);
+    if constexpr (json_string) {
+      return compute_d2s_size_json(value);
+    } else {
+      return compute_d2s_size(value);
+    }
   }
 }
 
-__device__ inline int float_to_string(double value, bool is_float, char* output)
+template <typename FloatType, bool json_string = false>
+__device__ inline int float_to_string(FloatType value, char* output)
 {
-  if (is_float) {
-    return f2s_buffered_n(value, output);
+  static_assert(cuda::std::is_same_v<FloatType, float> || cuda::std::is_same_v<FloatType, double>);
+  if constexpr (cuda::std::is_same_v<FloatType, float>) {
+    if constexpr (json_string) {
+      return f2s_buffered_n_json(value, output);
+    } else {
+      return f2s_buffered_n(value, output);
+    }
   } else {
-    return d2s_buffered_n(value, output);
+    if constexpr (json_string) {
+      return d2s_buffered_n_json(value, output);
+    } else {
+      return d2s_buffered_n(value, output);
+    }
   }
 }
 

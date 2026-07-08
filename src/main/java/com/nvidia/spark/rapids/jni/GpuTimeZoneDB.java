@@ -24,13 +24,13 @@ import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.DateTimeException;
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneOffsetTransitionRule;
 import java.time.zone.ZoneRules;
-import java.time.zone.ZoneRulesException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -42,7 +42,7 @@ import java.util.TimeZone;
 
 /**
  * Gpu timezone utility.
- *
+ * <p>
  * Provides the following APIs
  * - Timezone rebasing APIs: `fromTimestampToUtcTimestamp`, etc.
  * - Utilities for casting string with timezone to timestamp APIs
@@ -66,7 +66,7 @@ public class GpuTimeZoneDB {
    * If a timezone has DST, then the list has 12 integers, which contains 2
    * rules(start rule and end rule)
    * The integers in a list are:
-   *
+   * <p>
    * index 0: month:int, // from 1 (January) to 12 (December)
    * index 1: dayOfMonth: int, // from -28 to 31 excluding 0
    * index 2: dayOfWeek: int, // from 0 (Monday) to 6 (Sunday), -1 means ignore
@@ -189,7 +189,7 @@ public class GpuTimeZoneDB {
       // check that zoneID is valid and supported by Java
       getZoneId(zoneId);
       return true;
-    } catch (ZoneRulesException e) {
+    } catch (DateTimeException e) {
       return false;
     }
   }
@@ -531,7 +531,6 @@ public class GpuTimeZoneDB {
 
   private static Table getTableForUtilTZ(OrcTimezoneInfo info) {
     if (info.transitions == null) {
-      // fixed offset timezone
       return null;
     }
     try (ColumnVector trans = getTransitionsForUtilTZ(info);
@@ -544,7 +543,10 @@ public class GpuTimeZoneDB {
 
   /**
    * Only for testing purpose.
-   * Get all supported timezones for ORC timezone conversion.
+   * Get all supported timezones for ORC timezone conversion. The returned list
+   * is the same as {@link OrcTimezoneInfo#getAllTimezoneIds()}: it is already
+   * filtered to ids that {@link OrcTimezoneInfo#get(String)} can build, so
+   * callers do not need to pre-filter via {@link #isSupportedTimeZone(String)}.
    */
   static List<String> getOrcSupportedTimezones() {
     return OrcTimezoneInfo.getAllTimezoneIds();

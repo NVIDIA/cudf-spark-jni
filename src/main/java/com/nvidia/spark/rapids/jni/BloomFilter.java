@@ -36,13 +36,13 @@ public class BloomFilter {
    * Create a V1 bloom filter with the specified number of hashes and bloom filter bits,
    * using the default seed.
    *
-   * @deprecated Use {@link #create(int, int, long, int)} instead.
+   * This overload is retained temporarily. Use {@link #create(int, int, long, int)} instead;
+   * remove this overload after all callers migrate.
    * @param numHashes Number of bit positions set (and checked) per key.
    * @param bloomFilterBits Total size of the bloom filter in bits (will be rounded up to a
    *        multiple of 64).
    * @return A Scalar wrapping the GPU bloom filter (Spark format).
    */
-  @Deprecated
   public static Scalar create(int numHashes, long bloomFilterBits) {
     return create(VERSION_1, numHashes, bloomFilterBits, DEFAULT_SEED);
   }

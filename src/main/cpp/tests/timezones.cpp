@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -289,6 +289,58 @@ TEST_F(TimeZoneTest, ConvertFromUTCMicroseconds)
                                                         1,
                                                         cudf::get_default_stream(),
                                                         rmm::mr::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
+// Regression for the negative-microsecond floor-division bug: when a negative timestamp lies in
+// the last sub-second window before a gap transition (here -908870400s, offset 28800 → 32400),
+// truncation toward zero would snap to the transition itself and pick the post-transition offset.
+TEST_F(TimeZoneTest, ConvertFromUTCMicrosecondsSubSecondBeforeGap)
+{
+  auto const ts_col   = micros_col{-908870400000001L, -908870400000000L};
+  auto const expected = micros_col{-908841600000001L, -908838000000000L};
+  auto const actual =
+    spark_rapids_jni::convert_utc_timestamp_to_timezone(ts_col,
+                                                        *transitions,
+                                                        1,
+                                                        cudf::get_default_stream(),
+                                                        rmm::mr::get_current_device_resource_ref());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
+// Sibling regression for the ORC path (convert_orc_writer_reader_timezones). The two-pass
+// `convertBetweenTimezones` algorithm self-corrects on natural DST tables (the second lookup at
+// adjusted_ms lands in the same row as the first, so floor and truncate give the same final
+// answer). To lock down the floor semantics end-to-end this test uses a contrived 3-transition
+// reader table that forces the adjusted_ms lookups in the floor vs truncate paths to land in
+// different rows.
+//
+// Reader transitions (ms): [-1800000, 0, 1000000000], offsets (ms): [0, 3600000, 0],
+// raw_offset = 7_200_000. Writer is nullptr (fixed UTC, offset 0). For input µs = -1:
+//   * floor: epoch_ms = -1, reader_offset = 0, adjusted_ms = -1, reader_adjusted = 0,
+//            final_diff = 0, result = -1.
+//   * truncate (pre-fix): epoch_ms = 0, reader_offset = 3_600_000, adjusted_ms = -3_600_000,
+//            reader_adjusted = raw_offset = 7_200_000, final_diff = -7_200_000,
+//            result = -1 - 7_200_000_000 = -7200000001.
+// The fix flips the result back to -1.
+TEST_F(TimeZoneTest, ConvertOrcTimezonesSubMillisBeforeGap)
+{
+  auto reader_trans   = int64_col({-1800000L, 0L, 1000000000L});
+  auto reader_offsets = int32_col({0, 3600000, 0});
+  auto reader_tv      = cudf::table_view({reader_trans, reader_offsets});
+
+  auto const ts_col   = micros_col{-1L};
+  auto const expected = micros_col{-1L};
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    ts_col,
+    nullptr,
+    0,
+    &reader_tv,
+    7200000,
+    cudf::get_default_stream(),
+    rmm::mr::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
