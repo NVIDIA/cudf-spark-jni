@@ -239,6 +239,7 @@ inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
   rmm::device_async_resource_ref mr)
 {
   auto descriptors = cudf::detail::make_device_uvector_async(host_descriptors, stream, mr);
+  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
   auto host_lookup = build_field_lookup_table(
     host_descriptors.data(), static_cast<int>(host_descriptors.size()), stream);
   auto lookup = cudf::detail::make_device_uvector_async(host_lookup, stream, mr);
