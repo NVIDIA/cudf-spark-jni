@@ -167,7 +167,10 @@ void nullify_rows(cudf::column& input,
   thrust::for_each(rmm::exec_policy_nosync(stream),
                    d_row_indices.begin(),
                    d_row_indices.end(),
-                   [mask_ptr] __device__(auto const row) { cudf::clear_bit(mask_ptr, row); });
+                   [mask_ptr] __device__(auto const row) {
+                     // clear_bit uses atomicAnd, so concurrent updates to one mask word are safe.
+                     cudf::clear_bit(mask_ptr, row);
+                   });
 
   auto const null_count = cudf::null_count(
     static_cast<cudf::bitmask_type const*>(null_mask.data()), 0, input_view.size(), stream);
