@@ -193,7 +193,7 @@ std::unique_ptr<cudf::column> make_lists_column_with_null_sanitization(
                                                null_count,
                                                std::move(children));
   // Row-level schema mismatch nulls can leave child data under null parents; sanitize it here.
-  if (cudf::has_nonempty_nulls(output->view(), stream)) {
+  if (null_count > 0 && cudf::has_nonempty_nulls(output->view(), stream)) {
     output = cudf::purge_nonempty_nulls(output->view(), stream, mr);
   }
   return output;
