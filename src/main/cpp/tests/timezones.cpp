@@ -358,17 +358,17 @@ spark_rapids_jni::dst_rule make_us_dst_rule()
 {
   spark_rapids_jni::dst_rule rule{};
   rule.has_dst         = 1;
-  rule.dst_savings     = 3600000;
-  rule.start_month     = 2;        // March
-  rule.start_day       = 8;        // "first Sunday on or after the 8th" == 2nd Sunday
-  rule.start_dow       = 1;        // Sunday
-  rule.start_time      = 7200000;  // 02:00
-  rule.start_time_mode = 1;        // STANDARD
-  rule.start_mode      = 2;        // DOW_GE_DOM
-  rule.end_month       = 10;       // November
-  rule.end_day         = 1;        // "first Sunday on or after the 1st"
+  rule.dst_savings     = 3'600'000;
+  rule.start_month     = 2;          // March
+  rule.start_day       = 8;          // "first Sunday on or after the 8th" == 2nd Sunday
+  rule.start_dow       = 1;          // Sunday
+  rule.start_time      = 7'200'000;  // 02:00
+  rule.start_time_mode = 1;          // STANDARD
+  rule.start_mode      = 2;          // DOW_GE_DOM
+  rule.end_month       = 10;         // November
+  rule.end_day         = 1;          // "first Sunday on or after the 1st"
   rule.end_dow         = 1;
-  rule.end_time        = 3600000;  // 01:00
+  rule.end_time        = 3'600'000;  // 01:00
   rule.end_time_mode   = 1;
   rule.end_mode        = 2;
   return rule;
