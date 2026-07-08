@@ -104,6 +104,14 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
 // Convenience: every row valid.
 std::vector<bool> all_valid(std::size_t n) { return std::vector<bool>(n, true); }
 
+// Returns the delimiter `concat_json` picks for `input`; used to pin delimiter selection.
+char selected_delimiter(std::string const& input)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{input};
+  auto const result    = spark_rapids_jni::concat_json(cudf::strings_column_view{input_col});
+  return std::get<1>(result);
+}
+
 // Default leniency options shared by all calls and the single source of truth for the defaults.
 // Individual tests override only the field a case exercises (designated initializers below).
 constexpr spark_rapids_jni::json_parse_options default_options{
@@ -126,6 +134,71 @@ std::unique_ptr<cudf::column> raw_map_array(cudf::strings_column_view const& inp
 }
 
 }  // namespace
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_PrefersLineFeedWithEmbeddedNul)
+{
+  auto input = std::string{R"({"v":"a)"};
+  input.push_back('\0');
+  input.append(R"(b"})");
+
+  EXPECT_EQ(selected_delimiter(input), '\n');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_SkipsPresentPrintable)
+{
+  auto const input = std::string{"{\n!}"};
+
+  EXPECT_EQ(selected_delimiter(input), '#');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_CountsDelAndSkipsNulFallback)
+{
+  auto input = std::string{"{\n"};
+  for (int byte = 0x20; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x01');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_PrefersDelBeforeC0Fallback)
+{
+  // '\n' plus every printable 0x20..0x7e are present, but DEL (0x7f) is absent. DEL is preferred
+  // over the C0 control-byte fallback, so it must be selected instead of dropping to 0x01.
+  auto input = std::string{"{\n"};
+  for (int byte = 0x20; byte <= 0x7e; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x7f');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_ThrowsWhenAsciiExhausted)
+{
+  auto input = std::string{"{"};
+  for (int byte = 0; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_THROW(selected_delimiter(input), std::logic_error);
+}
+
+TEST_F(FromJsonTest, RawMapOpt_UnquotedControlCharactersStrict)
+{
+  std::vector<std::string> rows{R"({"str":"value"})",
+                                "{\"str\":\t\"value\"}",
+                                "{\"str\":\"val\001ue\"}",
+                                "{\"str\":\"val\002ue\"}",
+                                "{\"str\":\"v\003alue\"}",
+                                "{\"str\":\"value\",\"other\":\"in\001fo\"}"};
+  auto const input_col = cudf::test::strings_column_wrapper{rows.begin(), rows.end()};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"str", "value"}}, {{"str", "value"}}, {}, {}, {}, {}},
+                          {true, true, false, false, false, false});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
 
 // ===========================================================================
 // RawMapOpt_* : pin the exact LIST<STRUCT<STRING,STRING>> output of `from_json_to_raw_map`.
@@ -422,21 +495,34 @@ TEST_F(FromJsonTest, RawMapOpt_EmptyInput)
   EXPECT_EQ(scv.child(1).type().id(), cudf::type_id::STRING);  // value.
 }
 
-// allow_unquoted_control=true: a literal control char (tab) inside a quoted value is accepted and
-// copied verbatim into the value bytes.
+// allow_unquoted_control=true: literal C0 bytes inside quoted values are accepted and copied
+// verbatim. Keeping several distinct bytes present also guards delimiter selection.
 TEST_F(FromJsonTest, RawMapOpt_UnquotedControl)
 {
-  auto const input_col = cudf::test::strings_column_wrapper{"{\"k\":\"a\tb\"}"};
+  std::vector<std::string> rows{R"({"str":"value"})",
+                                "{\"str\":\t\"value\"}",
+                                "{\"str\":\"val\001ue\"}",
+                                "{\"str\":\"val\002ue\"}",
+                                "{\"str\":\"v\003alue\"}",
+                                "{\"str\":\"value\",\"other\":\"in\001fo\"}"};
+  auto const input_col = cudf::test::strings_column_wrapper{rows.begin(), rows.end()};
   auto const input     = cudf::strings_column_view{input_col};
 
   auto const result = spark_rapids_jni::from_json_to_raw_map(
     input,
-    spark_rapids_jni::json_parse_options{default_options.normalize_single_quotes,
-                                         default_options.allow_leading_zeros,
-                                         default_options.allow_nonnumeric_numbers,
-                                         /*allow_unquoted_control=*/true});
+    spark_rapids_jni::json_parse_options{
+      .normalize_single_quotes  = default_options.normalize_single_quotes,
+      .allow_leading_zeros      = default_options.allow_leading_zeros,
+      .allow_nonnumeric_numbers = default_options.allow_nonnumeric_numbers,
+      .allow_unquoted_control   = true});
 
-  auto const expected = make_expected_raw_map({{{"k", "a\tb"}}}, all_valid(1));
+  auto const expected = make_expected_raw_map({{{"str", "value"}},
+                                               {{"str", "value"}},
+                                               {{"str", "val\001ue"}},
+                                               {{"str", "val\002ue"}},
+                                               {{"str", "v\003alue"}},
+                                               {{"str", "value"}, {"other", "in\001fo"}}},
+                                              all_valid(rows.size()));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
 }
 

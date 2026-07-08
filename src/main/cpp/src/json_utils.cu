@@ -36,6 +36,8 @@
 #include <thrust/transform.h>
 #include <thrust/uninitialized_fill.h>
 
+#include <cstdint>
+
 namespace spark_rapids_jni {
 
 namespace detail {
@@ -47,9 +49,9 @@ __host__ __device__ constexpr bool not_whitespace(cudf::char_utf8 ch)
   return ch != ' ' && ch != '\r' && ch != '\n' && ch != '\t';
 }
 
-__host__ __device__ constexpr bool can_be_delimiter(char c)
+__host__ __device__ constexpr bool can_be_delimiter(std::uint8_t c)
 {
-  // The character list below is from `json_reader_options.set_delimiter`.
+  // The character list below is from `json_reader_options::set_delimiter`.
   switch (c) {
     case '{':
     case '[':
@@ -66,6 +68,43 @@ __host__ __device__ constexpr bool can_be_delimiter(char c)
     case '\r': return false;
     default: return true;
   }
+}
+
+// Delimiter preference, in the order `delimiter_candidate` enumerates it:
+//   1. '\n'                         - the natural JSON-lines delimiter
+//   2. printable ASCII 0x21..0x7e   - safe, never confused with unquoted control chars
+//   3. DEL 0x7f
+//   4. C0 controls 0x01..0x1f       - last-resort fallback (see note in `delimiter_candidate`)
+// NUL (0x00) is never a candidate; the other excluded bytes are filtered by `can_be_delimiter`.
+constexpr std::uint8_t first_printable = 0x21;  // '!'
+constexpr std::uint8_t last_printable  = 0x7e;  // '~'
+constexpr std::uint8_t del_byte        = 0x7f;
+constexpr std::uint8_t last_c0         = 0x1f;  // highest C0 control byte used in the fallback
+
+constexpr int num_printable         = last_printable - first_printable + 1;
+constexpr int first_printable_index = 1;  // index 0 is '\n'
+constexpr int del_index             = first_printable_index + num_printable;
+constexpr int first_c0_index        = del_index + 1;
+
+// One index per distinct preference slot: '\n' + printables + DEL + C0 fallback (0x01..0x1f).
+constexpr int num_delimiter_candidates = first_c0_index + last_c0;
+
+__host__ __device__ constexpr std::uint8_t delimiter_candidate(int candidate_index)
+{
+  if (candidate_index == 0) { return '\n'; }
+  if (candidate_index < del_index) {
+    return static_cast<std::uint8_t>(first_printable + candidate_index - first_printable_index);
+  }
+  if (candidate_index == del_index) { return del_byte; }
+
+  // C0 bytes (0x01..0x1f) are a last-resort fallback, reached only if '\n', every eligible
+  // printable, and DEL are all already present in the input. A C0 delimiter can still be
+  // mishandled by the reader when `allow_unquoted_control` is set (the very interaction this
+  // ordering avoids), so this branch is intentionally the least preferred. NUL (0x00) is not
+  // reachable here; tab (0x09) and CR (0x0d) fall in this range but are rejected by
+  // `can_be_delimiter`, while LF (0x0a) is already covered at index 0 (its count is nonzero
+  // whenever this branch is reached, so the duplicate is harmless).
+  return static_cast<std::uint8_t>(candidate_index - del_index);
 }
 
 }  // namespace
@@ -138,59 +177,57 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
       output[idx] = cuda::std::make_tuple(not_eol, !not_eol);
     });
 
-  auto constexpr num_levels  = 256;
-  auto constexpr lower_level = std::numeric_limits<char>::min();
-  auto constexpr upper_level = std::numeric_limits<char>::max();
+  // CUB expects one more level than bins. Use byte samples and integer bounds so each bin maps
+  // exactly to one ASCII byte, including DEL (0x7f). High-bit bytes are intentionally ignored.
+  auto constexpr num_bins    = 128;
+  auto constexpr num_levels  = num_bins + 1;
+  auto constexpr lower_level = 0;
+  auto constexpr upper_level = 128;
   auto const num_chars       = input.chars_size(stream);
 
-  rmm::device_uvector<uint32_t> histogram(num_levels, stream, default_mr);
+  rmm::device_uvector<uint32_t> histogram(num_bins, stream, default_mr);
   thrust::uninitialized_fill(
     rmm::exec_policy_nosync(stream), histogram.begin(), histogram.end(), 0);
 
+  auto const byte_samples   = reinterpret_cast<std::uint8_t const*>(input.chars_begin(stream));
   size_t temp_storage_bytes = 0;
-  cub::DeviceHistogram::HistogramEven(nullptr,
-                                      temp_storage_bytes,
-                                      input.chars_begin(stream),
-                                      histogram.begin(),
-                                      num_levels,
-                                      lower_level,
-                                      upper_level,
-                                      num_chars,
-                                      stream.value());
+  CUDF_CUDA_TRY(cub::DeviceHistogram::HistogramEven(nullptr,
+                                                    temp_storage_bytes,
+                                                    byte_samples,
+                                                    histogram.begin(),
+                                                    num_levels,
+                                                    lower_level,
+                                                    upper_level,
+                                                    num_chars,
+                                                    stream.value()));
   rmm::device_buffer d_temp(temp_storage_bytes, stream);
-  cub::DeviceHistogram::HistogramEven(d_temp.data(),
-                                      temp_storage_bytes,
-                                      input.chars_begin(stream),
-                                      histogram.begin(),
-                                      num_levels,
-                                      lower_level,
-                                      upper_level,
-                                      num_chars,
-                                      stream.value());
+  CUDF_CUDA_TRY(cub::DeviceHistogram::HistogramEven(d_temp.data(),
+                                                    temp_storage_bytes,
+                                                    byte_samples,
+                                                    histogram.begin(),
+                                                    num_levels,
+                                                    lower_level,
+                                                    upper_level,
+                                                    num_chars,
+                                                    stream.value()));
 
-  auto const it             = thrust::make_counting_iterator(0);
-  auto const zero_level_idx = -lower_level;  // the bin storing count for character `\0`
-  auto const zero_level_it  = it + zero_level_idx;
-  auto const end            = it + num_levels;
-
-  auto const first_zero_count_pos =
+  auto const candidates_begin = thrust::make_counting_iterator(0);
+  auto const candidates_end   = candidates_begin + num_delimiter_candidates;
+  auto const first_available =
     thrust::find_if(rmm::exec_policy_nosync(stream),
-                    zero_level_it,  // ignore the negative characters
-                    end,
-                    [zero_level_idx, counts = histogram.begin()] __device__(auto idx) -> bool {
-                      auto const count = counts[idx];
-                      if (count > 0) { return false; }
-                      auto const first_non_existing_char = static_cast<char>(idx - zero_level_idx);
-                      return can_be_delimiter(first_non_existing_char);
+                    candidates_begin,
+                    candidates_end,
+                    [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
+                      auto const candidate = delimiter_candidate(candidate_index);
+                      return can_be_delimiter(candidate) && counts[candidate] == 0;
                     });
 
-  // This should never happen since the input should never cover the entire char range.
-  if (first_zero_count_pos == end) {
+  if (first_available == candidates_end) {
     throw std::logic_error(
-      "Cannot find any character suitable as delimiter during joining json strings.");
+      "Cannot find an unused cuDF-supported ASCII delimiter while joining JSON strings.");
   }
   auto const delimiter =
-    static_cast<char>(cuda::std::distance(zero_level_it, first_zero_count_pos));
+    static_cast<char>(delimiter_candidate(cuda::std::distance(candidates_begin, first_available)));
 
   auto [null_mask, null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(is_valid_input), stream, default_mr);
