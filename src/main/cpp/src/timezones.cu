@@ -557,6 +557,38 @@ void validate_timezone_table(cudf::table_view const* table)
                "Transition and offset columns must have the same size");
 }
 
+// Stage one side's transition table into shared memory (if it fits) and resolve the
+// begin/end/offsets pointers to use (shared or global), advancing `ptr` past this side's
+// storage. Null transition tables are only reachable for fixed-offset timezones.
+__device__ static void stage_side_transitions(int64_t const* __restrict__ g_trans,
+                                              int32_t const* __restrict__ g_offsets,
+                                              int32_t trans_count,
+                                              char*& ptr,
+                                              int64_t const*& begin,
+                                              int64_t const*& end,
+                                              int32_t const*& offsets_begin)
+{
+  bool const fits    = trans_count <= MAX_SMEM_TRANSITIONS;
+  int64_t* s_trans   = nullptr;
+  int32_t* s_offsets = nullptr;
+
+  if (fits && trans_count > 0) {
+    ptr     = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
+    s_trans = reinterpret_cast<int64_t*>(ptr);
+    ptr += trans_count * sizeof(int64_t);
+    s_offsets = reinterpret_cast<int32_t*>(ptr);
+    ptr += trans_count * sizeof(int32_t);
+  }
+  for (int32_t i = threadIdx.x; i < trans_count && fits; i += blockDim.x) {
+    s_trans[i]   = g_trans[i];
+    s_offsets[i] = g_offsets[i];
+  }
+
+  begin         = g_trans ? (fits ? s_trans : g_trans) : nullptr;
+  end           = begin ? begin + trans_count : nullptr;
+  offsets_begin = g_trans ? (fits ? s_offsets : g_offsets) : nullptr;
+}
+
 CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   convert_timezones_kernel(cudf::timestamp_us const* __restrict__ input,
                            cudf::bitmask_type const* __restrict__ null_mask,
@@ -579,56 +611,14 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   // Shared memory layout: writer transitions, writer offsets, reader transitions, reader offsets
   extern __shared__ char smem[];
 
-  bool const writer_fits = writer_trans_count <= MAX_SMEM_TRANSITIONS;
-  bool const reader_fits = reader_trans_count <= MAX_SMEM_TRANSITIONS;
-
-  int64_t* s_writer_trans   = nullptr;
-  int32_t* s_writer_offsets = nullptr;
-  int64_t* s_reader_trans   = nullptr;
-  int32_t* s_reader_offsets = nullptr;
-
   char* ptr = smem;
-  if (writer_fits && writer_trans_count > 0) {
-    s_writer_trans = reinterpret_cast<int64_t*>(ptr);
-    ptr += writer_trans_count * sizeof(int64_t);
-    s_writer_offsets = reinterpret_cast<int32_t*>(ptr);
-    ptr += writer_trans_count * sizeof(int32_t);
-  }
-  if (reader_fits && reader_trans_count > 0) {
-    ptr = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
-    s_reader_trans = reinterpret_cast<int64_t*>(ptr);
-    ptr += reader_trans_count * sizeof(int64_t);
-    s_reader_offsets = reinterpret_cast<int32_t*>(ptr);
-  }
-
-  // Cooperatively load transition tables into shared memory
-  for (int32_t i = threadIdx.x; i < writer_trans_count && writer_fits; i += blockDim.x) {
-    s_writer_trans[i]   = g_writer_trans[i];
-    s_writer_offsets[i] = g_writer_offsets[i];
-  }
-  for (int32_t i = threadIdx.x; i < reader_trans_count && reader_fits; i += blockDim.x) {
-    s_reader_trans[i]   = g_reader_trans[i];
-    s_reader_offsets[i] = g_reader_offsets[i];
-  }
+  int64_t const *wt_begin, *wt_end, *rt_begin, *rt_end;
+  int32_t const *wo_begin, *ro_begin;
+  stage_side_transitions(
+    g_writer_trans, g_writer_offsets, writer_trans_count, ptr, wt_begin, wt_end, wo_begin);
+  stage_side_transitions(
+    g_reader_trans, g_reader_offsets, reader_trans_count, ptr, rt_begin, rt_end, ro_begin);
   __syncthreads();
-
-  int64_t const* wt_begin = writer_fits ? s_writer_trans : g_writer_trans;
-  int64_t const* wt_end   = wt_begin ? wt_begin + writer_trans_count : nullptr;
-  int32_t const* wo_begin = writer_fits ? s_writer_offsets : g_writer_offsets;
-
-  int64_t const* rt_begin = reader_fits ? s_reader_trans : g_reader_trans;
-  int64_t const* rt_end   = rt_begin ? rt_begin + reader_trans_count : nullptr;
-  int32_t const* ro_begin = reader_fits ? s_reader_offsets : g_reader_offsets;
-
-  // Null transition tables are only reachable for fixed-offset timezones.
-  if (!g_writer_trans) {
-    wt_begin = wt_end = nullptr;
-    wo_begin          = nullptr;
-  }
-  if (!g_reader_trans) {
-    rt_begin = rt_end = nullptr;
-    ro_begin          = nullptr;
-  }
 
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
