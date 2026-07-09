@@ -36,7 +36,9 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -112,6 +114,14 @@ char selected_delimiter(std::string const& input)
   return std::get<1>(result);
 }
 
+char selected_delimiter(std::vector<std::string> const& input, bool nullify_invalid_rows)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{input.begin(), input.end()};
+  auto const result    = spark_rapids_jni::concat_json(
+    cudf::strings_column_view{input_col}, nullify_invalid_rows);
+  return std::get<1>(result);
+}
+
 // Default leniency options shared by all calls and the single source of truth for the defaults.
 // Individual tests override only the field a case exercises (designated initializers below).
 constexpr spark_rapids_jni::json_parse_options default_options{
@@ -171,6 +181,30 @@ TEST_F(FromJsonTest, ConcatJsonDelimiter_PrefersDelBeforeC0Fallback)
   }
 
   EXPECT_EQ(selected_delimiter(input), '\x7f');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_UsesLastC0Fallback)
+{
+  auto input = std::string{"{"};
+  for (int byte = 0x01; byte <= 0x1e; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+  for (int byte = 0x21; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x1f');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_IgnoresInvalidRowsWhenExhausted)
+{
+  auto invalid_row = std::string{"not-json"};
+  for (int byte = 0; byte <= 0x7f; ++byte) {
+    invalid_row.push_back(static_cast<char>(byte));
+  }
+
+  std::vector<std::string> rows{R"({"k":"v"})", std::move(invalid_row)};
+  EXPECT_EQ(selected_delimiter(rows, /*nullify_invalid_rows=*/true), '\n');
 }
 
 TEST_F(FromJsonTest, ConcatJsonDelimiter_ThrowsWhenAsciiExhausted)

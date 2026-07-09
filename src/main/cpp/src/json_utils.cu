@@ -29,8 +29,11 @@
 
 #include <cub/device/device_histogram.cuh>
 #include <cuda/std/functional>
+#include <cuda/std/iterator>
 #include <cuda/std/tuple>
+#include <thrust/fill.h>
 #include <thrust/find.h>
+#include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/transform.h>
@@ -51,7 +54,8 @@ __host__ __device__ constexpr bool not_whitespace(cudf::char_utf8 ch)
 
 __host__ __device__ constexpr bool can_be_delimiter(std::uint8_t c)
 {
-  // The character list below is from `json_reader_options::set_delimiter`.
+  // Matches `json_reader_options::set_delimiter`, with NUL additionally excluded because
+  // embedded NUL bytes must not be treated as row boundaries.
   switch (c) {
     case '{':
     case '[':
@@ -79,15 +83,17 @@ __host__ __device__ constexpr bool can_be_delimiter(std::uint8_t c)
 constexpr std::uint8_t first_printable = 0x21;  // '!'
 constexpr std::uint8_t last_printable  = 0x7e;  // '~'
 constexpr std::uint8_t del_byte        = 0x7f;
-constexpr std::uint8_t last_c0         = 0x1f;  // highest C0 control byte used in the fallback
+constexpr std::uint8_t first_c0        = 0x01;
+constexpr std::uint8_t last_c0         = 0x1f;
 
 constexpr int num_printable         = last_printable - first_printable + 1;
+constexpr int num_c0                = last_c0 - first_c0 + 1;
 constexpr int first_printable_index = 1;  // index 0 is '\n'
 constexpr int del_index             = first_printable_index + num_printable;
 constexpr int first_c0_index        = del_index + 1;
 
-// One index per distinct preference slot: '\n' + printables + DEL + C0 fallback (0x01..0x1f).
-constexpr int num_delimiter_candidates = first_c0_index + last_c0;
+// One index per preference slot: '\n' + printables + DEL + C0 fallback (0x01..0x1f).
+constexpr int num_delimiter_candidates = first_c0_index + num_c0;
 
 __host__ __device__ constexpr std::uint8_t delimiter_candidate(int candidate_index)
 {
@@ -104,7 +110,7 @@ __host__ __device__ constexpr std::uint8_t delimiter_candidate(int candidate_ind
   // reachable here; tab (0x09) and CR (0x0d) fall in this range but are rejected by
   // `can_be_delimiter`, while LF (0x0a) is already covered at index 0 (its count is nonzero
   // whenever this branch is reached, so the duplicate is harmless).
-  return static_cast<std::uint8_t>(candidate_index - del_index);
+  return static_cast<std::uint8_t>(first_c0 + candidate_index - first_c0_index);
 }
 
 }  // namespace
@@ -200,27 +206,58 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
                                                     upper_level,
                                                     num_chars,
                                                     stream.value()));
-  rmm::device_buffer d_temp(temp_storage_bytes, stream);
-  CUDF_CUDA_TRY(cub::DeviceHistogram::HistogramEven(d_temp.data(),
-                                                    temp_storage_bytes,
-                                                    byte_samples,
-                                                    histogram.begin(),
-                                                    num_levels,
-                                                    lower_level,
-                                                    upper_level,
-                                                    num_chars,
-                                                    stream.value()));
+  {
+    rmm::device_buffer d_temp(temp_storage_bytes, stream);
+    CUDF_CUDA_TRY(cub::DeviceHistogram::HistogramEven(d_temp.data(),
+                                                      temp_storage_bytes,
+                                                      byte_samples,
+                                                      histogram.begin(),
+                                                      num_levels,
+                                                      lower_level,
+                                                      upper_level,
+                                                      num_chars,
+                                                      stream.value()));
+  }
 
   auto const candidates_begin = thrust::make_counting_iterator(0);
   auto const candidates_end   = candidates_begin + num_delimiter_candidates;
-  auto const first_available =
-    thrust::find_if(rmm::exec_policy_nosync(stream),
-                    candidates_begin,
-                    candidates_end,
-                    [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
-                      auto const candidate = delimiter_candidate(candidate_index);
-                      return can_be_delimiter(candidate) && counts[candidate] == 0;
-                    });
+  auto const find_available_delimiter = [&] {
+    return thrust::find_if(
+      rmm::exec_policy_nosync(stream),
+      candidates_begin,
+      candidates_end,
+      [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
+        auto const candidate = delimiter_candidate(candidate_index);
+        return can_be_delimiter(candidate) && counts[candidate] == 0;
+      });
+  };
+
+  auto first_available = find_available_delimiter();
+  if (first_available == candidates_end) {
+    // Invalid rows are replaced with "{}" before parsing, so their original bytes do not need
+    // to reserve a delimiter. Retry with a row-aware histogram only on this rare exhausted path.
+    thrust::fill(rmm::exec_policy_nosync(stream), histogram.begin(), histogram.end(), 0);
+    thrust::for_each(
+      rmm::exec_policy_nosync(stream),
+      thrust::make_counting_iterator(0L),
+      thrust::make_counting_iterator(input.size() * static_cast<int64_t>(cudf::detail::warp_size)),
+      [input      = *d_input_ptr,
+       valid_rows = is_valid_input.data(),
+       counts     = histogram.data()] __device__(int64_t tidx) {
+        auto const lane = static_cast<int32_t>(tidx % cudf::detail::warp_size);
+        auto const row  = tidx / cudf::detail::warp_size;
+        if (!valid_rows[row]) { return; }
+
+        auto const d_str = input.element<cudf::string_view>(row);
+        auto const bytes = reinterpret_cast<std::uint8_t const*>(d_str.data());
+        for (auto byte_index = lane; byte_index < d_str.size_bytes();
+             byte_index += cudf::detail::warp_size) {
+          auto const byte = bytes[byte_index];
+          if (byte < num_bins) { atomicAdd(&counts[byte], 1U); }
+        }
+      });
+    first_available = find_available_delimiter();
+  }
 
   if (first_available == candidates_end) {
     throw std::logic_error(
