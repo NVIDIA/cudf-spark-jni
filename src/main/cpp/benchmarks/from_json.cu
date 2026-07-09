@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
+#include "common/generate_input.hpp"
 #include "json_utils.hpp"
-
-#include <benchmarks/common/generate_input.hpp>
 
 #include <cudf_test/column_wrapper.hpp>
 
