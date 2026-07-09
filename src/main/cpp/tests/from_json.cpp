@@ -117,8 +117,8 @@ char selected_delimiter(std::string const& input)
 char selected_delimiter(std::vector<std::string> const& input, bool nullify_invalid_rows)
 {
   auto const input_col = cudf::test::strings_column_wrapper{input.begin(), input.end()};
-  auto const result    = spark_rapids_jni::concat_json(
-    cudf::strings_column_view{input_col}, nullify_invalid_rows);
+  auto const result =
+    spark_rapids_jni::concat_json(cudf::strings_column_view{input_col}, nullify_invalid_rows);
   return std::get<1>(result);
 }
 

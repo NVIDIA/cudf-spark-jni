@@ -219,17 +219,16 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
                                                       stream.value()));
   }
 
-  auto const candidates_begin = thrust::make_counting_iterator(0);
-  auto const candidates_end   = candidates_begin + num_delimiter_candidates;
+  auto const candidates_begin         = thrust::make_counting_iterator(0);
+  auto const candidates_end           = candidates_begin + num_delimiter_candidates;
   auto const find_available_delimiter = [&] {
-    return thrust::find_if(
-      rmm::exec_policy_nosync(stream),
-      candidates_begin,
-      candidates_end,
-      [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
-        auto const candidate = delimiter_candidate(candidate_index);
-        return can_be_delimiter(candidate) && counts[candidate] == 0;
-      });
+    return thrust::find_if(rmm::exec_policy_nosync(stream),
+                           candidates_begin,
+                           candidates_end,
+                           [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
+                             auto const candidate = delimiter_candidate(candidate_index);
+                             return can_be_delimiter(candidate) && counts[candidate] == 0;
+                           });
   };
 
   auto first_available = find_available_delimiter();
