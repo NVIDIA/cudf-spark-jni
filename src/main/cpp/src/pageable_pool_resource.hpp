@@ -146,9 +146,8 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
    *
    * Throws pageable_pool_exhausted if no free block is large enough.
    */
-  [[nodiscard]] void* allocate_sync(
-    std::size_t bytes,
-    [[maybe_unused]] std::size_t alignment = cuda::mr::default_cuda_malloc_host_alignment)
+  [[nodiscard]] void* allocate_sync(std::size_t bytes,
+                                    std::size_t = cuda::mr::default_cuda_malloc_host_alignment)
   {
     if (bytes == 0) { return nullptr; }
     bytes = align_up(bytes);
@@ -165,10 +164,9 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
    * @brief Return a previously-allocated block to the pool, coalescing with
    *        adjacent free blocks.
    */
-  void deallocate_sync(
-    void* ptr,
-    std::size_t bytes,
-    [[maybe_unused]] std::size_t alignment = cuda::mr::default_cuda_malloc_host_alignment)
+  void deallocate_sync(void* ptr,
+                       std::size_t bytes,
+                       std::size_t = cuda::mr::default_cuda_malloc_host_alignment)
   {
     if (bytes == 0) { return; }
     std::lock_guard<std::mutex> lock(mtx_);
