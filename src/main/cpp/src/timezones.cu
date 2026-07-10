@@ -672,6 +672,7 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                            cudf::bitmask_type const* __restrict__ null_mask,
                            cudf::timestamp_us* __restrict__ output,
                            cudf::size_type num_rows,
+                           cudf::size_type input_offset,
                            orc_base_offset_info writer_2015_year_base_offset,
                            orc_tz_side_kernel_args writer_args,
                            orc_tz_side_kernel_args reader_args)
@@ -700,7 +701,7 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
 
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
-    if (null_mask && !cudf::bit_is_set(null_mask, idx)) { return; }
+    if (null_mask && !cudf::bit_is_set(null_mask, idx + input_offset)) { return; }
     tz_side_info const writer{wt_begin,
                               wt_end,
                               wo_begin,
@@ -789,6 +790,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                input.null_mask(),
                results->mutable_view().begin<cudf::timestamp_us>(),
                input.size(),
+               input.offset(),
                writer_2015_year_base_offset,
                writer_args,
                reader_args);

@@ -22,6 +22,7 @@
 #include <cudf_test/iterator_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
+#include <cudf/copying.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/wrappers/timestamps.hpp>
@@ -468,6 +469,43 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow
     cudf::get_current_device_resource_ref());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+}
+
+TEST_F(TimeZoneTest, ConvertOrcTimezonesEpochBorrowColumnShapes)
+{
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst     = 0;
+  auto const convert = [&](cudf::column_view const& input) {
+    return spark_rapids_jni::convert_orc_writer_reader_timezones(
+      input,
+      /*writer_2015_year_base_offset_us=*/int64_t{28'800'000'000},
+      spark_rapids_jni::orc_tz_side{nullptr, 28'800'000, 28'800'000, no_dst},
+      spark_rapids_jni::orc_tz_side{nullptr, 28'800'000, 28'800'000, no_dst},
+      cudf::get_default_stream(),
+      cudf::get_current_device_resource_ref());
+  };
+
+  {
+    auto const input    = micros_col{};
+    auto const expected = micros_col{};
+    auto const actual   = convert(input);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  {
+    auto const input    = micros_col{{21'087'883'873L, 0L, 9'001'000L}, {true, false, true}};
+    auto const expected = micros_col{{-7'713'116'127L, 0L, -28'791'999'000L}, {true, false, true}};
+    auto const actual   = convert(input);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  {
+    auto const source   = micros_col{{0L, 21'087'883'873L, 9'001'000L}, {false, true, true}};
+    auto const input    = cudf::slice(source, {1, 3})[0];
+    auto const expected = micros_col{-7'713'116'127L, -28'791'999'000L};
+    auto const actual   = convert(input);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
 }
 
 TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrowWithDstRule)
