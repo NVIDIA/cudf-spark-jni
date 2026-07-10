@@ -118,14 +118,13 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
     auto const input              = reinterpret_cast<cudf::column_view const*>(input_handle);
     auto const writer_tz_info_tab = reinterpret_cast<cudf::table_view const*>(writer_tz_info_table);
     auto const reader_tz_info_tab = reinterpret_cast<cudf::table_view const*>(reader_tz_info_table);
-    return cudf::jni::ptr_as_jlong(spark_rapids_jni::convert_orc_writer_reader_timezones(
-                                     *input,
-                                     writer_tz_info_tab,
-                                     writer_tz_raw_offset,
-                                     static_cast<int64_t>(writer_2015_year_base_offset_us),
-                                     reader_tz_info_tab,
-                                     reader_tz_raw_offset)
-                                     .release());
+    return cudf::jni::release_as_jlong(spark_rapids_jni::convert_orc_writer_reader_timezones(
+      *input,
+      writer_tz_info_tab,
+      writer_tz_raw_offset,
+      static_cast<int64_t>(writer_2015_year_base_offset_us),
+      reader_tz_info_tab,
+      reader_tz_raw_offset));
   }
   JNI_CATCH(env, 0);
 }
