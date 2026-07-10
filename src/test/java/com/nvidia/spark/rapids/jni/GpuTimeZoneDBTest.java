@@ -25,8 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
@@ -37,6 +39,44 @@ import java.util.concurrent.TimeUnit;
 public class GpuTimeZoneDBTest {
 
   private static final long microsPerMillis = TimeUnit.MILLISECONDS.toMicros(1);
+  private static final long MICROS_PER_SECOND = TimeUnit.SECONDS.toMicros(1);
+
+  private static TimeZone getTimeZoneForOrc(String timezoneId) {
+    return TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId).getId());
+  }
+
+  private static long orc2015YearBaseOffsetUs(String timezoneId) {
+    ZoneId zoneId = GpuTimeZoneDB.getZoneId(timezoneId);
+    if (zoneId.getRules().isFixedOffset()) {
+      int offsetSeconds = zoneId.getRules().getOffset(Instant.EPOCH).getTotalSeconds();
+      return TimeUnit.SECONDS.toMicros(offsetSeconds);
+    }
+    TimeZone tz = TimeZone.getTimeZone(zoneId.getId());
+    return TimeUnit.MILLISECONDS.toMicros(
+        tz.getOffset(OrcTimezoneInfo.utcMillisForDate(2015, 1, 1)));
+  }
+
+  private static long applyOrcBaseOffsetOnCPU(long decodedUs, long baseOffsetUs) {
+    if (baseOffsetUs == 0) {
+      return decodedUs;
+    }
+
+    // ORC timezone base offsets are second-aligned. For an arbitrary microsecond offset, the
+    // original nanos field cannot be reconstructed reliably, so retain the plain offset behavior.
+    if (baseOffsetUs % MICROS_PER_SECOND != 0) {
+      return decodedUs - baseOffsetUs;
+    }
+
+    long fractionalUs = Math.floorMod(decodedUs, MICROS_PER_SECOND);
+    boolean hasBorrowableFraction = fractionalUs >= microsPerMillis;
+    boolean cudfAppliedBorrow = decodedUs < 0 && hasBorrowableFraction;
+
+    long unborrowedUs = decodedUs + (cudfAppliedBorrow ? MICROS_PER_SECOND : 0L);
+    long adjustedUnborrowedUs = unborrowedUs - baseOffsetUs;
+    boolean apacheAppliesBorrow = adjustedUnborrowedUs < 0 && hasBorrowableFraction;
+
+    return adjustedUnborrowedUs - (apacheAppliesBorrow ? MICROS_PER_SECOND : 0L);
+  }
 
   /**
    * Java implementation of timezone conversion to compare against the GPU
@@ -49,21 +89,24 @@ public class GpuTimeZoneDBTest {
       String writeTzId,
       String readerTzId) {
     long[] results = new long[microseconds.length];
-    TimeZone writeTz = TimeZone.getTimeZone(writeTzId);
-    TimeZone readerTz = TimeZone.getTimeZone(readerTzId);
+    TimeZone writeTz = getTimeZoneForOrc(writeTzId);
+    TimeZone readerTz = getTimeZoneForOrc(readerTzId);
+    long writer2015YearBaseOffsetUs = orc2015YearBaseOffsetUs(writeTzId);
     for (int i = 0; i < microseconds.length; ++i) {
-      // Floor-divide µs to ms (and floor-mod for the sub-ms remainder) so reconstruction round-trips
-      // for negative timestamps with a non-zero sub-millisecond component. Truncation toward zero
-      // would round such an input up by one ms; at a DST gap transition that lands on the
-      // post-transition offset, producing a 1-hour off-by-one. Must match the GPU kernel's
+      long adjustedUs = applyOrcBaseOffsetOnCPU(microseconds[i], writer2015YearBaseOffsetUs);
+      // Floor-divide µs to ms (and floor-mod for the sub-ms remainder) so reconstruction
+      // round-trips for negative timestamps with a non-zero sub-millisecond component. Truncation
+      // toward zero would round such an input up by one ms; at a DST gap transition that lands on
+      // the post-transition offset, producing a 1-hour off-by-one. Must match the GPU kernel's
       // floor-divide in convert_timestamp_between_timezones.
-      long millis = Math.floorDiv(microseconds[i], microsPerMillis);
+      long millis = Math.floorDiv(adjustedUs, microsPerMillis);
       long writerOffset = writeTz.getOffset(millis);
       long readerOffset = readerTz.getOffset(millis);
       long adjustedMillis = millis + writerOffset - readerOffset;
       long adjustedReader = readerTz.getOffset(adjustedMillis);
       long finalDiffs = writerOffset - adjustedReader;
-      results[i] = (millis + finalDiffs) * microsPerMillis + Math.floorMod(microseconds[i], microsPerMillis);
+      results[i] =
+          (millis + finalDiffs) * microsPerMillis + Math.floorMod(adjustedUs, microsPerMillis);
     }
     return ColumnVector.timestampMicroSecondsFromLongs(results);
   }
@@ -103,6 +146,21 @@ public class GpuTimeZoneDBTest {
   }
 
   @Test
+  void testConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    try (ColumnVector input =
+            ColumnVector.timestampMicroSecondsFromLongs(new long[] {21_087_883_873L});
+        ColumnVector expected =
+            ColumnVector.timestampMicroSecondsFromLongs(new long[] {-7_713_116_127L});
+        ColumnVector actual =
+            GpuTimeZoneDB.convertOrcTimezones(input, "Asia/Shanghai", "Asia/Shanghai")) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void testConvertOrcTimezones() {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
@@ -118,6 +176,7 @@ public class GpuTimeZoneDBTest {
 
     List<String> timezones = Arrays.asList(
         "America/Los_Angeles",
+        "America/Cancun",
         "Asia/Shanghai",
         "Antarctica/DumontDUrville",
         "Etc/GMT-12",

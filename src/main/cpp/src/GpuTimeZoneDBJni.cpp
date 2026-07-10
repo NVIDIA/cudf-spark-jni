@@ -1,4 +1,5 @@
-/* Copyright (c) 2023-2025, NVIDIA CORPORATION.
+/*
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +16,8 @@
 
 #include "cudf_jni_apis.hpp"
 #include "timezones.hpp"
+
+#include <cstdint>
 
 extern "C" {
 
@@ -97,14 +100,15 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertTimestampColumnToUTCWithTz
   JNI_CATCH(env, 0);
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezones(JNIEnv* env,
-                                                                   jclass,
-                                                                   jlong input_handle,
-                                                                   jlong writer_tz_info_table,
-                                                                   jint writer_tz_raw_offset,
-                                                                   jlong reader_tz_info_table,
-                                                                   jint reader_tz_raw_offset)
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezones(
+  JNIEnv* env,
+  jclass,
+  jlong input_handle,
+  jlong writer_tz_info_table,
+  jint writer_tz_raw_offset,
+  jlong writer_2015_year_base_offset_us,
+  jlong reader_tz_info_table,
+  jint reader_tz_raw_offset)
 {
   JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
 
@@ -114,10 +118,14 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezones(JNIEnv* env,
     auto const input              = reinterpret_cast<cudf::column_view const*>(input_handle);
     auto const writer_tz_info_tab = reinterpret_cast<cudf::table_view const*>(writer_tz_info_table);
     auto const reader_tz_info_tab = reinterpret_cast<cudf::table_view const*>(reader_tz_info_table);
-    return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::convert_orc_writer_reader_timezones(
-        *input, writer_tz_info_tab, writer_tz_raw_offset, reader_tz_info_tab, reader_tz_raw_offset)
-        .release());
+    return cudf::jni::ptr_as_jlong(spark_rapids_jni::convert_orc_writer_reader_timezones(
+                                     *input,
+                                     writer_tz_info_tab,
+                                     writer_tz_raw_offset,
+                                     static_cast<int64_t>(writer_2015_year_base_offset_us),
+                                     reader_tz_info_tab,
+                                     reader_tz_raw_offset)
+                                     .release());
   }
   JNI_CATCH(env, 0);
 }
