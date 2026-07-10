@@ -25,10 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
@@ -46,12 +44,11 @@ public class GpuTimeZoneDBTest {
   }
 
   private static long orc2015YearBaseOffsetUs(String timezoneId) {
-    ZoneId zoneId = GpuTimeZoneDB.getZoneId(timezoneId);
-    if (zoneId.getRules().isFixedOffset()) {
-      int offsetSeconds = zoneId.getRules().getOffset(Instant.EPOCH).getTotalSeconds();
-      return TimeUnit.SECONDS.toMicros(offsetSeconds);
+    OrcTimezoneInfo info = OrcTimezoneInfo.get(timezoneId);
+    if (info.transitions == null) {
+      return TimeUnit.MILLISECONDS.toMicros(info.rawOffset);
     }
-    TimeZone tz = TimeZone.getTimeZone(zoneId.getId());
+    TimeZone tz = getTimeZoneForOrc(timezoneId);
     return TimeUnit.MILLISECONDS.toMicros(
         tz.getOffset(OrcTimezoneInfo.utcMillisForDate(2015, 1, 1)));
   }
