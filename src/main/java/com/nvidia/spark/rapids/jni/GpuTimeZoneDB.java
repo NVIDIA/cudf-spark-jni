@@ -693,14 +693,6 @@ public class GpuTimeZoneDB {
   }
 
   /**
-   * Does the given timezone have Daylight Saving Time(DST) rules.
-   */
-  private static boolean hasDaylightSavingTime(String timezoneId) {
-    ZoneId zoneId = ZoneId.of(timezoneId, ZoneId.SHORT_IDS);
-    return !zoneId.getRules().getTransitionRules().isEmpty();
-  }
-
-  /**
    * Convert timestamps between writer/reader timezones for ORC reading.
    * Similar to Apache ORC, this first reconstructs the timestamp from ORC's
    * writer-timezone 2015 base instant and applies the negative nanos borrow,
@@ -721,33 +713,9 @@ public class GpuTimeZoneDB {
       ColumnVector input,
       String writerTimezone,
       String readerTimezone) {
-    // Does not support DST timezone now, just throw exception.
-    if (hasDaylightSavingTime(writerTimezone) ||
-        hasDaylightSavingTime(readerTimezone)) {
-      throw new UnsupportedOperationException("Daylight Saving Time is not supported now.");
-    }
-
-    // get timezone info from `java.util.TimeZone`
-    OrcTimezoneInfo writerTzInfo = OrcTimezoneInfo.get(writerTimezone);
-    OrcTimezoneInfo readerTzInfo = OrcTimezoneInfo.get(readerTimezone);
-    try (Table writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
-        Table readerTzInfoTable = getTableForUtilTZ(readerTzInfo)) {
-
-      // ORC first reconstructs the timestamp using the writer timezone's 2015 base instant,
-      // including any DST offset in effect at that instant, then applies the negative nanos borrow.
-      // The native path applies this adjustment before matching ORC's writer/reader timezone
-      // conversion.
-      long writer2015YearBaseOffsetUs = TimeUnit.MILLISECONDS.toMicros(
-          getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
-      return new ColumnVector(convertOrcTimezones(
-          input.getNativeView(),
-          writerTzInfoTable != null ? writerTzInfoTable.getNativeView() : 0L,
-          writerTzInfo.rawOffset,
-          writer2015YearBaseOffsetUs,
-          readerTzInfoTable != null ? readerTzInfoTable.getNativeView() : 0L,
-          readerTzInfo.rawOffset));
-    } catch (Exception e) {
-      throw new IllegalStateException("convert between timezones failed!", e);
+    try (OrcTimezoneContext context =
+        buildOrcTimezoneContext(writerTimezone, readerTimezone)) {
+      return convertOrcTimezones(input, context);
     }
   }
 
@@ -758,14 +726,6 @@ public class GpuTimeZoneDB {
   private static native long convertTimestampColumnToUTCWithTzCv(
       long input_seconds, long input_microseconds, long invalid, long tzType,
       long tzOffset, long timezoneInfo, long tzIndex);
-
-  private static native long convertOrcTimezones(
-      long input,
-      long writerTzInfoTable,
-      int writerTzRawOffset,
-      long writer2015YearBaseOffsetUs,
-      long readerTzInfoTable,
-      int readerTzRawOffset);
 
   private static native long convertOrcTimezonesWithRules(
       long input,

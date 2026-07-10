@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -45,7 +44,7 @@ public class GpuTimeZoneDBTest {
 
   private static long orc2015YearBaseOffsetUs(String timezoneId) {
     OrcTimezoneInfo info = OrcTimezoneInfo.get(timezoneId);
-    if (info.transitions == null) {
+    if (info.transitions == null && info.dstRule == null) {
       return TimeUnit.MILLISECONDS.toMicros(info.rawOffset);
     }
     TimeZone tz = getTimeZoneForOrc(timezoneId);
@@ -128,12 +127,8 @@ public class GpuTimeZoneDBTest {
   @Test
   void testConvertOrcTimezonesRejectsInvalidId() {
     // Invalid timezone IDs must surface an exception rather than silently
-    // falling back to GMT. The DST guard at the top of convertOrcTimezones
-    // calls ZoneId.of(...), so an unknown id will throw before the runtime
-    // build path or the GPU kernel ever runs. We assert the broad
-    // RuntimeException type so this stays a regression guard even if the
-    // exact wrapping (DateTimeException vs IllegalArgumentException vs
-    // IllegalStateException) is refactored later.
+    // falling back to GMT. We assert the broad RuntimeException type so this
+    // stays a regression guard even if the exact wrapping is refactored later.
     GpuTimeZoneDB.cacheDatabase();
     try (ColumnVector input =
         ColumnVector.timestampMicroSecondsFromLongs(new long[] {0L})) {
@@ -168,8 +163,8 @@ public class GpuTimeZoneDBTest {
     long max = LocalDateTime.of(9999, 12, 31, 23, 59, 59)
         .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1);
 
-    // use today as the random seed so we get different values each day
-    Random rng = new Random(LocalDate.now().toEpochDay());
+    // Keep the DST matrix deterministic so failures are reproducible.
+    Random rng = new Random(42L);
 
     List<String> timezones = Arrays.asList(
         "America/Los_Angeles",
@@ -182,15 +177,7 @@ public class GpuTimeZoneDBTest {
         "Asia/Tokyo");
 
     for (String writerTz : timezones) {
-      if (GpuTimeZoneDB.isDST(writerTz)) {
-        // currently do not support DST conversions
-        continue;
-      }
       for (String readerTz : timezones) {
-        if (GpuTimeZoneDB.isDST(readerTz)) {
-          // currently do not support DST conversions
-          continue;
-        }
         // Use 1024 as a reasonable batch size for testing timezone conversions.
         long[] microseconds = new long[1024];
         for (int i = 0; i < microseconds.length; ++i) {
@@ -205,6 +192,35 @@ public class GpuTimeZoneDBTest {
             ColumnVector actual = GpuTimeZoneDB.convertOrcTimezones(input, writerTz, readerTz)) {
           assertColumnsAreEqual(expected, actual);
         }
+      }
+    }
+  }
+
+  @Test
+  void testConvertOrcTimezonesFutureDstRuleFallback() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    long[] microseconds = {
+        LocalDateTime.of(9999, 1, 15, 12, 0, 0)
+            .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1),
+        LocalDateTime.of(9999, 7, 15, 12, 0, 0)
+            .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1)
+    };
+    String[][] cases = {
+        {"America/Los_Angeles", "UTC"},
+        {"UTC", "America/Los_Angeles"},
+        {"Australia/Sydney", "UTC"},
+        {"UTC", "Australia/Sydney"}
+    };
+
+    for (String[] timezones : cases) {
+      try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
+          ColumnVector expected =
+              convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
+          ColumnVector actual =
+              GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
+        assertColumnsAreEqual(expected, actual);
       }
     }
   }

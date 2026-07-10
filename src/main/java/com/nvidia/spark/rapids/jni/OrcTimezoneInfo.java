@@ -226,9 +226,10 @@ class OrcTimezoneInfo {
       // paired round-trips (e.g. A->B->A) net to zero between entries. If
       // that ever breaks (DST zones, future tzdata revisions), the guard
       // below will not fire and both transitions in the pair will be
-      // silently dropped. The DST guard in
-      // GpuTimeZoneDB.convertOrcTimezones currently keeps this dormant;
-      // any follow-up that relaxes it must revisit this code.
+      // silently dropped. ZoneRules enumerates every transition for this zone,
+      // while the TimeZone gap scan below reconciles any offset differences
+      // between the two APIs using a six-hour base probe that is shorter than
+      // the minimum spacing between real IANA transitions.
       if (beforeTransitionMs >= scanCursor && offsetBeforeTransition != currentOffset) {
         currentOffset = collectTimeZoneTransitionsByScanning(
             tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
