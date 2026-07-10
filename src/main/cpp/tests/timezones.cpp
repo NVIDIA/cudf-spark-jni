@@ -342,6 +342,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesSubMillisBeforeGap)
     ts_col,
     nullptr,
     0,
+    /*writer_2015_year_base_offset_us=*/0,
     &reader_tv,
     7200000,
     cudf::get_default_stream(),
