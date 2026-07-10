@@ -524,7 +524,7 @@ public class GpuTimeZoneDB {
    * timestamp frame before applying ORC's negative nanos borrow and timezone conversion.
    */
   private static int getOrc2015YearBaseOffsetMillis(String timezoneId, OrcTimezoneInfo info) {
-    if (info.transitions == null) {
+    if (info.transitions == null && info.dstRule == null) {
       return info.rawOffset;
     }
     TimeZone tz = TimeZone.getTimeZone(getZoneId(timezoneId).getId());
@@ -564,6 +564,130 @@ public class GpuTimeZoneDB {
    */
   static List<String> getOrcSupportedTimezones() {
     return OrcTimezoneInfo.getAllTimezoneIds();
+  }
+
+  /**
+   * Reusable device-side metadata for converting ORC timestamps between one writer/reader
+   * timezone pair.
+   */
+  public static final class OrcTimezoneContext implements AutoCloseable {
+    private Table writerTzInfoTable;
+    private Table readerTzInfoTable;
+    private final long writerTzOffsetAtOrc2015BaseUs;
+    private final int writerInitialOffset;
+    private final int writerRawOffset;
+    private final int[] writerDstRule;
+    private final int readerInitialOffset;
+    private final int readerRawOffset;
+    private final int[] readerDstRule;
+    private boolean closed;
+
+    private OrcTimezoneContext(Table writerTzInfoTable, Table readerTzInfoTable,
+        String writerTimezone, OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
+      this.writerTzInfoTable = writerTzInfoTable;
+      this.readerTzInfoTable = readerTzInfoTable;
+      this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
+          getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
+      this.writerInitialOffset = writerTzInfo.initialOffset;
+      this.writerRawOffset = writerTzInfo.rawOffset;
+      this.writerDstRule = dstRuleToArray(writerTzInfo.dstRule);
+      this.readerInitialOffset = readerTzInfo.initialOffset;
+      this.readerRawOffset = readerTzInfo.rawOffset;
+      this.readerDstRule = dstRuleToArray(readerTzInfo.dstRule);
+    }
+
+    private void ensureOpen() {
+      if (closed) {
+        throw new IllegalStateException("ORC timezone context is closed");
+      }
+    }
+
+    @Override
+    public void close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      Table writerTable = writerTzInfoTable;
+      Table readerTable = readerTzInfoTable;
+      writerTzInfoTable = null;
+      readerTzInfoTable = null;
+      Arms.closeAll(writerTable, readerTable);
+    }
+  }
+
+  /**
+   * Build reusable GPU metadata for one ORC writer/reader timezone pair.
+   *
+   * @param writerTimezone writer timezone from ORC stripe metadata
+   * @param readerTimezone reader timezone from the current JVM default timezone
+   * @return a context owned by the caller
+   */
+  public static OrcTimezoneContext buildOrcTimezoneContext(
+      String writerTimezone, String readerTimezone) {
+    OrcTimezoneInfo writerTzInfo = OrcTimezoneInfo.get(writerTimezone);
+    OrcTimezoneInfo readerTzInfo = OrcTimezoneInfo.get(readerTimezone);
+    Table writerTzInfoTable = null;
+    Table readerTzInfoTable = null;
+    try {
+      writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
+      readerTzInfoTable = getTableForUtilTZ(readerTzInfo);
+      return new OrcTimezoneContext(writerTzInfoTable, readerTzInfoTable,
+          writerTimezone, writerTzInfo, readerTzInfo);
+    } catch (RuntimeException | Error e) {
+      try {
+        Arms.closeAll(writerTzInfoTable, readerTzInfoTable);
+      } catch (RuntimeException closeError) {
+        e.addSuppressed(closeError);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Convert timestamps using a pre-built ORC timezone context. This entry point is staged for the
+   * DST-enabled dispatch path so callers can reuse transition tables across timestamp columns.
+   *
+   * @param input input timestamp column in microseconds
+   * @param context writer/reader timezone metadata
+   * @return converted timestamp column
+   */
+  public static ColumnVector convertOrcTimezones(
+      ColumnView input, OrcTimezoneContext context) {
+    context.ensureOpen();
+    return new ColumnVector(convertOrcTimezonesWithRules(
+        input.getNativeView(),
+        context.writerTzOffsetAtOrc2015BaseUs,
+        context.writerTzInfoTable != null ? context.writerTzInfoTable.getNativeView() : 0L,
+        context.writerInitialOffset,
+        context.writerRawOffset,
+        context.writerDstRule,
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
+        context.readerDstRule));
+  }
+
+  private static int[] dstRuleToArray(OrcDstRuleExtractor.DstRule rule) {
+    if (rule == null) {
+      return null;
+    }
+    // Keep this field order synchronized with parse_dst_rule in GpuTimeZoneDBJni.cpp.
+    return new int[]{
+        rule.dstSavings,
+        rule.startMonth,
+        rule.startDay,
+        rule.startDayOfWeek,
+        rule.startTime,
+        rule.startTimeMode,
+        rule.startMode,
+        rule.endMonth,
+        rule.endDay,
+        rule.endDayOfWeek,
+        rule.endTime,
+        rule.endTimeMode,
+        rule.endMode
+    };
   }
 
   /**
@@ -640,4 +764,16 @@ public class GpuTimeZoneDB {
       long writer2015YearBaseOffsetUs,
       long readerTzInfoTable,
       int readerTzRawOffset);
+
+  private static native long convertOrcTimezonesWithRules(
+      long input,
+      long writerTzOffsetAtOrc2015BaseUs,
+      long writerTzInfoTable,
+      int writerTzInitialOffset,
+      int writerTzRawOffset,
+      int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule);
 }
