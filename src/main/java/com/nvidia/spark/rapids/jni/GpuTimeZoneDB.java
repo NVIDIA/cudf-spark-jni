@@ -35,10 +35,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.concurrent.Executors;
 import java.util.HashMap;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Gpu timezone utility.
@@ -517,6 +518,19 @@ public class GpuTimeZoneDB {
     return !zoneId.getRules().getTransitionRules().isEmpty();
   }
 
+  /**
+   * ORC stores timestamp seconds as a diff from 2015-01-01 00:00:00 in the writer timezone.
+   * Use the writer offset at that base timestamp so native code can reconstruct the same
+   * timestamp frame before applying ORC's negative nanos borrow and timezone conversion.
+   */
+  private static int getOrc2015YearBaseOffsetMillis(String timezoneId, OrcTimezoneInfo info) {
+    if (info.transitions == null) {
+      return info.rawOffset;
+    }
+    TimeZone tz = TimeZone.getTimeZone(getZoneId(timezoneId).getId());
+    return tz.getOffset(OrcTimezoneInfo.utcMillisForDate(2015, 1, 1));
+  }
+
   private static ColumnVector getTransitionsForUtilTZ(OrcTimezoneInfo info) {
     try (HostColumnVector hcv = HostColumnVector.fromLongs(info.transitions)) {
       return hcv.copyToDevice();
@@ -562,12 +576,14 @@ public class GpuTimeZoneDB {
 
   /**
    * Convert timestamps between writer/reader timezones for ORC reading.
-   * Similar to `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`.
-   * `SerializationUtils.convertBetweenTimezones` gets offset between timezones.
-   * This function does the same thing and then apply the offset to get the
-   * final timestamps.
+   * Similar to Apache ORC, this first reconstructs the timestamp from ORC's
+   * writer-timezone 2015 base instant and applies the negative nanos borrow,
+   * then applies the offset from
+   * `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`.
    * For more details, refer to:
-   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/SerializationUtils.java#L1440">link</a>
+   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/TreeReaderFactory.java#L1284-L1286">borrow logic</a>
+   * and
+   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/SerializationUtils.java#L1440">timezone conversion logic</a>
    *
    * @param input          input timestamp column in microseconds.
    * @param writerTimezone writer timezone, it's from ORC stripe metadata.
@@ -591,11 +607,17 @@ public class GpuTimeZoneDB {
     try (Table writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
         Table readerTzInfoTable = getTableForUtilTZ(readerTzInfo)) {
 
-      // convert between timezones
+      // ORC first reconstructs the timestamp using the writer timezone's 2015 base instant,
+      // including any DST offset in effect at that instant, then applies the negative nanos borrow.
+      // The native path applies this adjustment before matching ORC's writer/reader timezone
+      // conversion.
+      long writer2015YearBaseOffsetUs = TimeUnit.MILLISECONDS.toMicros(
+          getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
       return new ColumnVector(convertOrcTimezones(
           input.getNativeView(),
           writerTzInfoTable != null ? writerTzInfoTable.getNativeView() : 0L,
           writerTzInfo.rawOffset,
+          writer2015YearBaseOffsetUs,
           readerTzInfoTable != null ? readerTzInfoTable.getNativeView() : 0L,
           readerTzInfo.rawOffset));
     } catch (Exception e) {
@@ -615,6 +637,7 @@ public class GpuTimeZoneDB {
       long input,
       long writerTzInfoTable,
       int writerTzRawOffset,
+      long writer2015YearBaseOffsetUs,
       long readerTzInfoTable,
       int readerTzRawOffset);
 }

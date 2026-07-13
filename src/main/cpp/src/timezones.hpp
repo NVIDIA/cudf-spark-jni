@@ -151,9 +151,11 @@ struct orc_tz_side {
  * recurring DST rules derived from JVM timezone APIs for dates beyond the table.
  *
  * @param input The input timestamp column in microseconds.
- * @param base_offset_us Fixed microsecond offset to apply before timezone conversion.
- *        Fuses ORC's base-timestamp adjustment (writer TZ offset at 2015-01-01) into
- *        the kernel, eliminating a separate pass. Pass 0 for no adjustment.
+ * @param writer_2015_year_base_offset_us Writer timezone offset at ORC's 2015-01-01 base instant.
+ *        ORC applies this base-timestamp adjustment, including any DST savings in effect at that
+ *        instant, before running SerializationUtils.convertBetweenTimezones. The native path
+ *        applies the same adjustment first so the negative-timestamp nanos borrow is decided in
+ *        the same frame as Apache ORC. Pass 0 for no adjustment.
  * @param writer writer timezone transition data, offsets, and DST rule.
  * @param reader reader timezone transition data, offsets, and DST rule.
  * @param stream CUDA stream.
@@ -162,26 +164,27 @@ struct orc_tz_side {
  */
 [[nodiscard]] std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   cudf::column_view const& input,
-  int64_t base_offset_us,
+  int64_t writer_2015_year_base_offset_us,
   orc_tz_side writer,
   orc_tz_side reader,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
- * @brief Backward-compatible non-DST overload of the ORC conversion.
+ * @brief JNI-compatible raw-offset overload of the ORC conversion.
  *
- * Forwards to the DST-capable overload with no base offset and no DST rule
- * (`has_dst == false`). Passing `initial_offset == raw_offset` for each side
- * reproduces the legacy behavior exactly: before the first transition the
- * DST-capable kernel returns `initial_offset`, where the legacy kernel returned
- * `raw_offset`. Retained so existing callers (the JNI binding and C++ tests)
- * compile and behave unchanged while the DST path is staged in behind
- * GpuTimeZoneDB's DST gate.
+ * Java computes and passes the writer timezone offset at ORC's 2015-01-01 base instant separately,
+ * because that value is not necessarily the raw offset: for DST zones it can include DST savings,
+ * and for historical transition zones it can come from the transition table. This overload uses
+ * that exact value for the base-timestamp/borrow adjustment, then forwards the transition tables
+ * and raw offsets to the shared conversion kernel. Callers that need recurring DST fallback beyond
+ * a transition table should use the full `orc_tz_side` overload.
  *
  * @param input The input timestamp column in microseconds.
  * @param writer_tz_info_table transition/offset table, nullptr for fixed-offset TZ.
  * @param writer_raw_offset the raw offset in milliseconds.
+ * @param writer_2015_year_base_offset_us writer timezone offset at ORC's 2015-01-01 base instant,
+ *        in microseconds.
  * @param reader_tz_info_table transition/offset table, nullptr for fixed-offset TZ.
  * @param reader_raw_offset the raw offset in milliseconds.
  * @param stream CUDA stream.
@@ -192,6 +195,7 @@ struct orc_tz_side {
   cudf::column_view const& input,
   cudf::table_view const* writer_tz_info_table,
   int32_t writer_raw_offset,
+  int64_t writer_2015_year_base_offset_us,
   cudf::table_view const* reader_tz_info_table,
   int32_t reader_raw_offset,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
