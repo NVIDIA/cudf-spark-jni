@@ -568,7 +568,8 @@ public class GpuTimeZoneDB {
 
   /**
    * Reusable device-side metadata for converting ORC timestamps between one writer/reader
-   * timezone pair.
+   * timezone pair. This context is not thread-safe. Callers must not use it concurrently from
+   * multiple threads or call {@link #close()} while a conversion is in progress.
    */
   public static final class OrcTimezoneContext implements AutoCloseable {
     private Table writerTzInfoTable;
@@ -649,7 +650,8 @@ public class GpuTimeZoneDB {
    * DST-enabled dispatch path so callers can reuse transition tables across timestamp columns.
    *
    * @param input input timestamp column in microseconds
-   * @param context writer/reader timezone metadata
+   * @param context writer/reader timezone metadata; must not be used concurrently or closed while
+   *                this method is running
    * @return converted timestamp column
    */
   public static ColumnVector convertOrcTimezones(
