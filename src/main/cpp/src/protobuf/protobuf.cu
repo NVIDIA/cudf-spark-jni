@@ -350,9 +350,7 @@ void validate_decode_context(protobuf_decode_context const& context)
 }
 
 bool is_output_field(protobuf_decode_context const& context, int schema_idx)
-{
-  return context.output_fields.empty() || context.output_fields.at(schema_idx);
-}
+{ return context.output_fields.empty() || context.output_fields.at(schema_idx); }
 
 protobuf_field_meta_view make_field_meta_view(protobuf_decode_context const& context,
                                               int schema_idx)

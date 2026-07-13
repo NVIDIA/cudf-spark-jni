@@ -45,9 +45,7 @@ struct init_curand_fn {
   long seed;
 
   __device__ void operator()(cudf::size_type const idx) const
-  {
-    curand_init(seed, idx, 0, state + idx);
-  }
+  { curand_init(seed, idx, 0, state + idx); }
 };
 
 __device__ void byte_to_hex(uint8_t byte, char* hex)

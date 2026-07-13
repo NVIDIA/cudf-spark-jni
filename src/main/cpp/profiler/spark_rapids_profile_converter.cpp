@@ -80,9 +80,7 @@ struct thread_id {
 template <>
 struct std::hash<thread_id> {
   std::size_t operator()(thread_id const& t) const
-  {
-    return std::hash<uint32_t>{}(t.pid) ^ (std::hash<uint32_t>{}(t.tid) << 1);
-  }
+  { return std::hash<uint32_t>{}(t.pid) ^ (std::hash<uint32_t>{}(t.tid) << 1); }
 };
 
 struct stream_id {
@@ -91,9 +89,7 @@ struct stream_id {
   uint32_t stream;
 
   bool operator==(stream_id const& s) const
-  {
-    return device == s.device && context == s.context && stream == s.stream;
-  }
+  { return device == s.device && context == s.context && stream == s.stream; }
 };
 
 template <>
@@ -131,9 +127,7 @@ Converts the spark-rapids profile in profile.bin into other forms.
 }
 
 void print_version()
-{
-  std::cout << "spark_rapids_profile_converter " << spark_rapids_jni::Version << std::endl;
-}
+{ std::cout << "spark_rapids_profile_converter " << spark_rapids_jni::Version << std::endl; }
 
 std::pair<program_options, std::vector<std::string_view>> parse_options(
   std::vector<std::string_view> args)

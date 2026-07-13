@@ -179,9 +179,7 @@ struct time_components {
  * @endcode
  */
 __device__ __inline__ auto modulo_time(int64_t time, int64_t base)
-{
-  return static_cast<int32_t>(((time % base) + base) % base);
-}
+{ return static_cast<int32_t>(((time % base) + base) % base); }
 
 /**
  * @brief This function handles converting units by dividing and adjusting for negative values.
@@ -197,9 +195,7 @@ __device__ __inline__ auto modulo_time(int64_t time, int64_t base)
  * @endcode
  */
 __device__ __inline__ int64_t scale_time(int64_t time, int64_t base)
-{
-  return (time - ((time < 0) * (base - 1L))) / base;
-}
+{ return (time - ((time < 0) * (base - 1L))) / base; }
 
 int64_t constexpr MICROS_PER_SECOND = 1'000'000L;
 
@@ -325,7 +321,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_micros(cudf::column_view const
         // the epoch from that Gregorian local date-time.
         auto const gregorian_days = cuda::std::chrono::local_days(ymd).time_since_epoch().count();
         int64_t result            = (gregorian_days * 24L * 3600L) + (timeparts.hour * 3600L) +
-                         (timeparts.minute * 60L) + timeparts.second;
+                                    (timeparts.minute * 60L) + timeparts.second;
         result *= MICROS_PER_SECOND;  // to microseconds
         result += timeparts.subsecond;
 

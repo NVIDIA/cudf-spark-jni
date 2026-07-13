@@ -894,31 +894,31 @@ TEST_F(SparkXXHash64Test, MultiValueWithSeeds)
   // auto const hash_structs = spark_rapids_jni::xxhash64(cudf::table_view({structs_col}),
   // spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_strings    = spark_rapids_jni::xxhash64(cudf::table_view({strings_col}),
-                                                       spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_doubles    = spark_rapids_jni::xxhash64(cudf::table_view({doubles_col}),
-                                                       spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_timestamps = spark_rapids_jni::xxhash64(cudf::table_view({timestamps_col}),
                                                           spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_decimal64  = spark_rapids_jni::xxhash64(cudf::table_view({decimal64_col}),
-                                                         spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_longs      = spark_rapids_jni::xxhash64(cudf::table_view({longs_col}),
-                                                     spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_floats     = spark_rapids_jni::xxhash64(cudf::table_view({floats_col}),
-                                                      spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_dates      = spark_rapids_jni::xxhash64(cudf::table_view({dates_col}),
-                                                     spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_decimal32  = spark_rapids_jni::xxhash64(cudf::table_view({decimal32_col}),
-                                                         spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_ints       = spark_rapids_jni::xxhash64(cudf::table_view({ints_col}),
-                                                    spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_shorts     = spark_rapids_jni::xxhash64(cudf::table_view({shorts_col}),
-                                                      spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_bytes      = spark_rapids_jni::xxhash64(cudf::table_view({bytes_col}),
-                                                     spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_bools1     = spark_rapids_jni::xxhash64(cudf::table_view({bools_col1}),
-                                                      spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_bools2     = spark_rapids_jni::xxhash64(cudf::table_view({bools_col2}),
-                                                      spark_rapids_jni::DEFAULT_XXHASH64_SEED);
+                                                          spark_rapids_jni::DEFAULT_XXHASH64_SEED);
   auto const hash_decimal128 = spark_rapids_jni::xxhash64(cudf::table_view({decimal128_col}),
                                                           spark_rapids_jni::DEFAULT_XXHASH64_SEED);
 

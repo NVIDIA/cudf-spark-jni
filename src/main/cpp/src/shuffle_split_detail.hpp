@@ -33,24 +33,18 @@ struct size_of_helper {
   constexpr cuda::std::
     enable_if_t<!cudf::is_fixed_width<T>() && !cuda::std::is_same_v<T, cudf::string_view>, size_t>
     operator()() const
-  {
-    return 0;
-  }
+  { return 0; }
 
   template <typename T>
   constexpr cuda::std::
     enable_if_t<!cudf::is_fixed_width<T>() && cuda::std::is_same_v<T, cudf::string_view>, size_t>
     operator()() const
-  {
-    return sizeof(cudf::device_storage_type_t<int8_t>);
-  }
+  { return sizeof(cudf::device_storage_type_t<int8_t>); }
 
   template <typename T>
   constexpr cuda::std::enable_if_t<cudf::is_fixed_width<T>(), size_t> __device__
   operator()() const noexcept
-  {
-    return sizeof(cudf::device_storage_type_t<T>);
-  }
+  { return sizeof(cudf::device_storage_type_t<T>); }
 };
 
 /**

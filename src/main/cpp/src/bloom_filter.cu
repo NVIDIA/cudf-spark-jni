@@ -50,9 +50,7 @@ namespace {
 using bloom_hash_type = spark_rapids_jni::murmur_hash_value_type;
 
 inline int32_t byte_swap_int32(int32_t val)
-{
-  return static_cast<int32_t>(bswap_32(static_cast<uint32_t>(val)));
-}
+{ return static_cast<int32_t>(bswap_32(static_cast<uint32_t>(val))); }
 
 // Given a non-negative bit position within the bloom filter, compute
 // the 32-bit word index and bitmask. Handles big-endian swizzle so

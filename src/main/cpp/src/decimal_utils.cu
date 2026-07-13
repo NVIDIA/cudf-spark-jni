@@ -100,9 +100,7 @@ struct chunked256 {
   inline __device__ bool gte_unsigned(chunked256 const& other) const { return !lt_unsigned(other); }
 
   inline __device__ __int128_t as_128_bits() const
-  {
-    return (static_cast<__int128_t>(chunks[1]) << 64) | chunks[0];
-  }
+  { return (static_cast<__int128_t>(chunks[1]) << 64) | chunks[0]; }
 
   inline __device__ uint64_t as_64_bits() const { return chunks[0]; }
 
@@ -1351,9 +1349,7 @@ struct floating_point_to_decimal_dispatcher {
             typename... Args,
             CUDF_ENABLE_IF(not supported_types<FloatType, DecimalType>())>
   void operator()(Args...) const
-  {
-    CUDF_FAIL("Unsupported types for floating_point_to_decimal_fn", cudf::data_type_error);
-  }
+  { CUDF_FAIL("Unsupported types for floating_point_to_decimal_fn", cudf::data_type_error); }
 
   template <typename FloatType,
             typename DecimalType,

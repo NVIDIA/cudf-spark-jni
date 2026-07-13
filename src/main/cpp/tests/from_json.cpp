@@ -133,15 +133,11 @@ constexpr spark_rapids_jni::json_parse_options default_options{
 
 // Thin wrapper to invoke the `Map[String,String]` engine-under-test with the shared default flags.
 std::unique_ptr<cudf::column> raw_map(cudf::strings_column_view const& input)
-{
-  return spark_rapids_jni::from_json_to_raw_map(input, default_options);
-}
+{ return spark_rapids_jni::from_json_to_raw_map(input, default_options); }
 
 // Thin wrapper to invoke the `Map[String,Array[String]]` engine-under-test with the shared flags.
 std::unique_ptr<cudf::column> raw_map_array(cudf::strings_column_view const& input)
-{
-  return spark_rapids_jni::from_json_to_raw_map_array_values(input, default_options);
-}
+{ return spark_rapids_jni::from_json_to_raw_map_array_values(input, default_options); }
 
 }  // namespace
 
@@ -715,9 +711,7 @@ std::unique_ptr<cudf::column> make_expected_raw_map_array(std::vector<std::vecto
 
 // Convenience builders for `array_value` literals.
 array_value arr(std::vector<std::optional<std::string>> elems)
-{
-  return array_value{std::move(elems)};
-}
+{ return array_value{std::move(elems)}; }
 array_value null_arr() { return std::nullopt; }
 std::optional<std::string> null_elem() { return std::nullopt; }
 

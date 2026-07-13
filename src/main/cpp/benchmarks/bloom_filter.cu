@@ -59,14 +59,10 @@ void bloom_filter_put_impl(nvbench::state& state, int version)
 }
 
 void bloom_filter_put_v1(nvbench::state& state)
-{
-  bloom_filter_put_impl(state, spark_rapids_jni::bloom_filter_version_1);
-}
+{ bloom_filter_put_impl(state, spark_rapids_jni::bloom_filter_version_1); }
 
 void bloom_filter_put_v2(nvbench::state& state)
-{
-  bloom_filter_put_impl(state, spark_rapids_jni::bloom_filter_version_2);
-}
+{ bloom_filter_put_impl(state, spark_rapids_jni::bloom_filter_version_2); }
 
 }  // namespace
 

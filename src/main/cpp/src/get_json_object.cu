@@ -83,9 +83,7 @@ class json_generator {
   // create a nested child generator based on this parent generator,
   // child generator is a view, parent and child share the same byte array
   __device__ json_generator new_child_generator() const
-  {
-    return json_generator(offset + output_len);
-  }
+  { return json_generator(offset + output_len); }
 
   // write [
   // add an extra comma if needed,

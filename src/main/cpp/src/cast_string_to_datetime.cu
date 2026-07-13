@@ -91,16 +91,12 @@ struct time_zone {
 };
 
 __device__ time_zone make_fixed_tz(int offset)
-{
-  return time_zone(TZ_TYPE::FIXED_TZ, offset, 0, 0);
-}
+{ return time_zone(TZ_TYPE::FIXED_TZ, offset, 0, 0); }
 
 __device__ time_zone make_invalid_tz() { return time_zone(TZ_TYPE::INVALID_TZ, 0, 0, 0); }
 
 __device__ time_zone make_other_tz(int tz_pos, int tz_end_pos)
-{
-  return time_zone(TZ_TYPE::OTHER_TZ, 0, tz_pos, tz_end_pos);
-}
+{ return time_zone(TZ_TYPE::OTHER_TZ, 0, tz_pos, tz_end_pos); }
 
 /**
  * Is white space, consistent with Spark UTF8String.trimAll for char input
@@ -151,9 +147,7 @@ __device__ bool parse_int(unsigned char const* const ptr,
 __device__ bool eof(int pos, int end_pos) { return end_pos - pos <= 0; }
 
 __device__ bool parse_char(unsigned char const* const ptr, int& pos, unsigned char const c)
-{
-  return ptr[pos++] == c;
-}
+{ return ptr[pos++] == c; }
 
 __device__ bool try_parse_char(unsigned char const* const ptr, int& pos, unsigned char const c)
 {
@@ -695,11 +689,11 @@ __device__ result_type parse_timestamp_string(bool is_spark_320,
   }
 
   seconds      = to_epoch_seconds(segments[segment_index::YEAR],
-                             segments[segment_index::MONTH],
-                             segments[segment_index::DAY],
-                             segments[segment_index::HOUR],
-                             segments[segment_index::MINUTE],
-                             segments[segment_index::SECOND]);
+                                  segments[segment_index::MONTH],
+                                  segments[segment_index::DAY],
+                                  segments[segment_index::HOUR],
+                                  segments[segment_index::MINUTE],
+                                  segments[segment_index::SECOND]);
   microseconds = segments[segment_index::MICROSECOND];
   return result_type::SUCCESS;
 }
@@ -1135,8 +1129,6 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
 std::unique_ptr<cudf::column> parse_strings_to_date(cudf::strings_column_view const& input,
                                                     rmm::cuda_stream_view stream,
                                                     rmm::device_async_resource_ref mr)
-{
-  return parse_to_date(input, stream, mr);
-}
+{ return parse_to_date(input, stream, mr); }
 
 }  // namespace spark_rapids_jni

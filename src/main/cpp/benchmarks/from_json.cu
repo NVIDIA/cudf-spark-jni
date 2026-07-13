@@ -59,9 +59,7 @@ constexpr auto default_value_width = 10;
 // Build a list of `num_keys` all-STRING column types. The raw-map engine extracts every value as a
 // raw substring, so a homogeneous all-STRING flat object is the representative input.
 std::vector<cudf::type_id> make_all_string_column_types(int num_keys)
-{
-  return std::vector<cudf::type_id>(num_keys, cudf::type_id::STRING);
-}
+{ return std::vector<cudf::type_id>(num_keys, cudf::type_id::STRING); }
 
 // Canonical lenient parse options shared verbatim by every raw-map benchmark, so the tokenizer
 // settings live in one place instead of being copy-pasted at each `state.exec` call site.

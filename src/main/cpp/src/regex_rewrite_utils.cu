@@ -81,11 +81,11 @@ std::unique_ptr<cudf::column> find_literal_range_pattern(cudf::strings_column_vi
   auto const d_strings      = *strings_column;
 
   auto results         = make_numeric_column(cudf::data_type{cudf::type_id::BOOL8},
-                                     strings_count,
-                                     cudf::copy_bitmask(strings.parent(), stream, mr),
-                                     strings.null_count(),
-                                     stream,
-                                     mr);
+                                             strings_count,
+                                             cudf::copy_bitmask(strings.parent(), stream, mr),
+                                             strings.null_count(),
+                                             stream,
+                                             mr);
   auto const d_results = results->mutable_view().data<bool>();
   // set the bool values by evaluating the passed function
   thrust::transform(

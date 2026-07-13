@@ -119,7 +119,7 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
 
   auto const per_thread_bytes = static_cast<int>(num_intermediates) *
                                 static_cast<int>(sizeof(intermediate_storage_type<has_nulls>));
-  int block_size = 256;  // default
+  int block_size              = 256;  // default
   if (per_thread_bytes > 0) {
     int const max_by_shmem = max_shmem_per_block / per_thread_bytes;
     if (max_by_shmem > 0) {

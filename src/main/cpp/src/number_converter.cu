@@ -248,9 +248,7 @@ struct str_iter {
   __device__ bool is_null(cudf::size_type idx) const { return d_strings.is_null(idx); }
 
   __device__ cudf::string_view element(cudf::size_type idx) const
-  {
-    return d_strings.element<cudf::string_view>(idx);
-  }
+  { return d_strings.element<cudf::string_view>(idx); }
 };
 
 struct const_str {

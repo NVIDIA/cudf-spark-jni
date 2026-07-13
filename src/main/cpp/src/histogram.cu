@@ -138,9 +138,7 @@ struct fill_percentile_fn {
 struct percentile_dispatcher {
   template <typename T>
   static constexpr bool is_supported()
-  {
-    return std::is_arithmetic_v<T>;
-  }
+  { return std::is_arithmetic_v<T>; }
 
   // The output here is only intermediate result, consisting of:
   //  1. The output percentile values,
@@ -151,9 +149,7 @@ struct percentile_dispatcher {
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
-  {
-    CUDF_FAIL("Unsupported type in histogram-to-percentile evaluation.");
-  }
+  { CUDF_FAIL("Unsupported type in histogram-to-percentile evaluation."); }
 
   template <typename T, CUDF_ENABLE_IF(is_supported<T>())>
   output_type operator()(cudf::size_type const* const offsets,

@@ -214,9 +214,7 @@ __device__ inline bool get_field_data_location(
 CUDF_HOST_DEVICE inline size_t flat_index(std::integral auto row,
                                           std::integral auto width,
                                           std::integral auto col)
-{
-  return static_cast<size_t>(row) * static_cast<size_t>(width) + static_cast<size_t>(col);
-}
+{ return static_cast<size_t>(row) * static_cast<size_t>(width) + static_cast<size_t>(col); }
 
 __device__ inline bool checked_add_int32(int32_t lhs, int32_t rhs, int32_t& out)
 {

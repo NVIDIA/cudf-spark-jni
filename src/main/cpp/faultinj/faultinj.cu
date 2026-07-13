@@ -137,9 +137,7 @@ CUptiResult cuptiInitialize(void)
 }
 
 __global__ static void faultInjectorKernelAssert(void)
-{
-  assert(0 && "faultInjectorKernelAssert triggered");
-}
+{ assert(0 && "faultInjectorKernelAssert triggered"); }
 
 __global__ static void faultInjectorKernelTrap(void) { asm("trap;"); }
 

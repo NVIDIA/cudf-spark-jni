@@ -165,23 +165,17 @@ class spark_resource_adaptor_logger {
    */
   template <typename... Args>
   void log_info(Args&&... args) const
-  {
-    logger->info(std::forward<Args>(args)...);
-  }
+  { logger->info(std::forward<Args>(args)...); }
 
   /**
    * General purpose debug logging with variadic arguments
    */
   template <typename... Args>
   void log_debug(Args&&... args) const
-  {
-    logger->debug(std::forward<Args>(args)...);
-  }
+  { logger->debug(std::forward<Args>(args)...); }
 
   bool should_log_debug() const
-  {
-    return is_log_enabled && logger->should_log(spdlog::level::debug);
-  }
+  { return is_log_enabled && logger->should_log(spdlog::level::debug); }
   bool should_log_info() const { return is_log_enabled && logger->should_log(spdlog::level::info); }
   bool should_log_transition() const { return should_log_info(); }
   bool should_log_status() const { return should_log_info(); }
@@ -211,9 +205,7 @@ inline std::string format_if_args(char const* str) { return std::string(str); }
 // Multiple arguments case (needs formatting)
 template <typename... Args>
 inline std::string format_if_args(std::format_string<Args...> fmt, Args&&... args)
-{
-  return std::format(fmt, std::forward<Args>(args)...);
-}
+{ return std::format(fmt, std::forward<Args>(args)...); }
 
 /**
  * Log macros for various cases in SparkResourceAdaptorJni.
@@ -906,9 +898,7 @@ class spark_resource_adaptor_impl {
    * work successfully.
    */
   void done_waiting_on_pool(long const thread_id)
-  {
-    waiting_on_pool_status_changed(thread_id, false);
-  }
+  { waiting_on_pool_status_changed(thread_id, false); }
 
   /**
    * This should be called before shutting down the adaptor. It will try
@@ -1050,9 +1040,7 @@ class spark_resource_adaptor_impl {
    * get the number of times a retry was thrown and reset the value to 0.
    */
   int get_and_reset_num_retry(long const task_id)
-  {
-    return get_and_reset_metric(task_id, &task_metrics::num_times_retry_throw);
-  }
+  { return get_and_reset_metric(task_id, &task_metrics::num_times_retry_throw); }
 
   void remove_task_metrics(long const task_id)
   {
@@ -1064,35 +1052,25 @@ class spark_resource_adaptor_impl {
    * get the number of times a split and retry was thrown and reset the value to 0.
    */
   int get_and_reset_num_split_retry(long const task_id)
-  {
-    return get_and_reset_metric(task_id, &task_metrics::num_times_split_retry_throw);
-  }
+  { return get_and_reset_metric(task_id, &task_metrics::num_times_split_retry_throw); }
 
   /**
    * get the time in ns that the task was blocked for.
    */
   long get_and_reset_block_time(long const task_id)
-  {
-    return get_and_reset_metric(task_id, &task_metrics::time_blocked_nanos);
-  }
+  { return get_and_reset_metric(task_id, &task_metrics::time_blocked_nanos); }
 
   /**
    * get the time in ns that was lost because a retry was thrown.
    */
   long get_and_reset_lost_time(long const task_id)
-  {
-    return get_and_reset_metric(task_id, &task_metrics::time_lost_nanos);
-  }
+  { return get_and_reset_metric(task_id, &task_metrics::time_lost_nanos); }
 
   long get_and_reset_gpu_max_memory_allocated(long const task_id)
-  {
-    return get_and_reset_metric(task_id, &task_metrics::gpu_max_memory_allocated);
-  }
+  { return get_and_reset_metric(task_id, &task_metrics::gpu_max_memory_allocated); }
 
   long get_max_gpu_task_memory(long const task_id)
-  {
-    return get_metric(task_id, &task_metrics::gpu_memory_max_footprint);
-  }
+  { return get_metric(task_id, &task_metrics::gpu_memory_max_footprint); }
 
   long get_total_blocked_or_lost(long const task_id)
   {
@@ -2141,9 +2119,7 @@ class spark_resource_adaptor_impl {
   }
 
   void* allocate_sync(std::size_t num_bytes, std::size_t alignment = alignof(std::max_align_t))
-  {
-    return allocate(cuda::stream_ref{cudaStream_t{nullptr}}, num_bytes, alignment);
-  }
+  { return allocate(cuda::stream_ref{cudaStream_t{nullptr}}, num_bytes, alignment); }
 
   void dealloc_core(bool const is_for_cpu,
                     std::unique_lock<std::mutex>& lock,
@@ -2254,22 +2230,16 @@ class spark_resource_adaptor_impl {
   void deallocate_sync(void* p,
                        std::size_t size,
                        std::size_t alignment = alignof(std::max_align_t)) noexcept
-  {
-    deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, p, size, alignment);
-  }
+  { deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, p, size, alignment); }
 
   // Identity comparison: two distinct impls own independent state and are never
   // interchangeable. Required to satisfy cuda::mr::synchronous_resource so that
   // this type can be wrapped in cuda::mr::shared_resource.
   bool operator==(spark_resource_adaptor_impl const& other) const noexcept
-  {
-    return this == &other;
-  }
+  { return this == &other; }
 
   bool operator!=(spark_resource_adaptor_impl const& other) const noexcept
-  {
-    return !(*this == other);
-  }
+  { return !(*this == other); }
 
   friend void get_property(spark_resource_adaptor_impl const&, cuda::mr::device_accessible) noexcept
   {
@@ -2312,9 +2282,7 @@ inline spark_resource_adaptor get_spark_adaptor(jlong handle)
 class test_deallocate_noop_resource {
  public:
   void* allocate(cuda::stream_ref, std::size_t, std::size_t = alignof(std::max_align_t))
-  {
-    return nullptr;
-  }
+  { return nullptr; }
 
   void deallocate(cuda::stream_ref,
                   void*,
@@ -2326,16 +2294,12 @@ class test_deallocate_noop_resource {
   }
 
   void* allocate_sync(std::size_t bytes, std::size_t alignment = alignof(std::max_align_t))
-  {
-    return allocate(cuda::stream_ref{cudaStream_t{nullptr}}, bytes, alignment);
-  }
+  { return allocate(cuda::stream_ref{cudaStream_t{nullptr}}, bytes, alignment); }
 
   void deallocate_sync(void* ptr,
                        std::size_t bytes,
                        std::size_t alignment = alignof(std::max_align_t)) noexcept
-  {
-    deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, ptr, bytes, alignment);
-  }
+  { deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, ptr, bytes, alignment); }
 
   bool operator==(test_deallocate_noop_resource const&) const noexcept { return true; }
 

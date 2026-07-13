@@ -839,18 +839,14 @@ std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input,
                                                  size_type tz_index,
                                                  rmm::cuda_stream_view stream,
                                                  rmm::device_async_resource_ref mr)
-{
-  return convert_timestamp(input, transitions, tz_index, true, stream, mr);
-}
+{ return convert_timestamp(input, transitions, tz_index, true, stream, mr); }
 
 std::unique_ptr<column> convert_utc_timestamp_to_timezone(column_view const& input,
                                                           table_view const& transitions,
                                                           size_type tz_index,
                                                           rmm::cuda_stream_view stream,
                                                           rmm::device_async_resource_ref mr)
-{
-  return convert_timestamp(input, transitions, tz_index, false, stream, mr);
-}
+{ return convert_timestamp(input, transitions, tz_index, false, stream, mr); }
 
 std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input_seconds,
                                                  column_view const& input_microseconds,

@@ -76,14 +76,10 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
   }
 
   [[nodiscard]] std::size_t do_hash() const override
-  {
-    return 31 * (31 * std::hash<std::string>{}({"hllpp_groupby_udf"}) + precision) + is_merge;
-  }
+  { return 31 * (31 * std::hash<std::string>{}({"hllpp_groupby_udf"}) + precision) + is_merge; }
 
   [[nodiscard]] std::unique_ptr<cudf::host_udf_base> clone() const override
-  {
-    return std::make_unique<hllpp_groupby_udf>(precision, is_merge);
-  }
+  { return std::make_unique<hllpp_groupby_udf>(precision, is_merge); }
 
  private:
   int precision;
@@ -135,14 +131,10 @@ struct hllpp_reduct_udf : cudf::reduce_host_udf {
   }
 
   [[nodiscard]] std::size_t do_hash() const override
-  {
-    return 31 * (31 * std::hash<std::string>{}({"hllpp_reduct_udf"}) + precision) + is_merge;
-  }
+  { return 31 * (31 * std::hash<std::string>{}({"hllpp_reduct_udf"}) + precision) + is_merge; }
 
   [[nodiscard]] std::unique_ptr<cudf::host_udf_base> clone() const override
-  {
-    return std::make_unique<hllpp_reduct_udf>(precision, is_merge);
-  }
+  { return std::make_unique<hllpp_reduct_udf>(precision, is_merge); }
 
  private:
   int precision;
@@ -152,23 +144,15 @@ struct hllpp_reduct_udf : cudf::reduce_host_udf {
 }  // namespace
 
 cudf::host_udf_base* create_hllpp_reduction_host_udf(int precision)
-{
-  return new hllpp_reduct_udf(precision, /*is_merge*/ false);
-}
+{ return new hllpp_reduct_udf(precision, /*is_merge*/ false); }
 
 cudf::host_udf_base* create_hllpp_reduction_merge_host_udf(int precision)
-{
-  return new hllpp_reduct_udf(precision, /*is_merge*/ true);
-}
+{ return new hllpp_reduct_udf(precision, /*is_merge*/ true); }
 
 cudf::host_udf_base* create_hllpp_groupby_host_udf(int precision)
-{
-  return new hllpp_groupby_udf(precision, /*is_merge*/ false);
-}
+{ return new hllpp_groupby_udf(precision, /*is_merge*/ false); }
 
 cudf::host_udf_base* create_hllpp_groupby_merge_host_udf(int precision)
-{
-  return new hllpp_groupby_udf(precision, /*is_merge*/ true);
-}
+{ return new hllpp_groupby_udf(precision, /*is_merge*/ true); }
 
 }  // namespace spark_rapids_jni

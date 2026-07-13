@@ -85,18 +85,14 @@ namespace {
 // scheme and is considered completely invalid.
 
 __host__ __device__ constexpr bool is_alpha(char c)
-{
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
+{ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
 __host__ __device__ constexpr bool is_numeric(char c) { return c >= '0' && c <= '9'; }
 
 __host__ __device__ constexpr bool is_alphanum(char c) { return is_alpha(c) || is_numeric(c); }
 
 __host__ __device__ constexpr bool is_hex(char c)
-{
-  return is_numeric(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
+{ return is_numeric(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
 
 __device__ cuda::std::pair<bool, string_view::const_iterator> skip_and_validate_special(
   string_view::const_iterator iter,

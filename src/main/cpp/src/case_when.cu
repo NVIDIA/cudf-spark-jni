@@ -95,8 +95,6 @@ std::unique_ptr<cudf::column> select_first_true_index(cudf::table_view const& wh
 std::unique_ptr<cudf::column> select_first_true_index(cudf::table_view const& when_bool_columns,
                                                       rmm::cuda_stream_view stream,
                                                       rmm::device_async_resource_ref mr)
-{
-  return detail::select_first_true_index(when_bool_columns, stream, mr);
-}
+{ return detail::select_first_true_index(when_bool_columns, stream, mr); }
 
 }  // namespace spark_rapids_jni

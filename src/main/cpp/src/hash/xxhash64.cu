@@ -36,9 +36,7 @@ using hash_value_type = int64_t;
 using half_size_type  = int32_t;
 
 constexpr __device__ inline int64_t rotate_bits_left_signed(hash_value_type h, int8_t r)
-{
-  return (h << r) | (h >> (64 - r)) & ~(-1 << r);
-}
+{ return (h << r) | (h >> (64 - r)) & ~(-1 << r); }
 
 template <typename Key>
 struct XXHash_64 {
@@ -71,9 +69,7 @@ struct XXHash_64 {
 
   template <typename T>
   result_type __device__ inline compute(T const& key) const
-  {
-    return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T));
-  }
+  { return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T)); }
 
   result_type __device__ inline compute_remaining_bytes(cuda::std::byte const* data,
                                                         cudf::size_type const nbytes,
@@ -200,45 +196,31 @@ struct XXHash_64 {
 
 template <>
 hash_value_type __device__ inline XXHash_64<bool>::operator()(bool const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<int8_t>::operator()(int8_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<uint8_t>::operator()(uint8_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<int16_t>::operator()(int16_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<uint16_t>::operator()(uint16_t const& key) const
-{
-  return compute<uint32_t>(key);
-}
+{ return compute<uint32_t>(key); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<float>::operator()(float const& key) const
-{
-  return compute<float>(spark_rapids_jni::normalize_nans_and_zeros(key));
-}
+{ return compute<float>(spark_rapids_jni::normalize_nans_and_zeros(key)); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<double>::operator()(double const& key) const
-{
-  return compute<double>(spark_rapids_jni::normalize_nans_and_zeros(key));
-}
+{ return compute<double>(spark_rapids_jni::normalize_nans_and_zeros(key)); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<cudf::string_view>::operator()(
@@ -252,16 +234,12 @@ hash_value_type __device__ inline XXHash_64<cudf::string_view>::operator()(
 template <>
 hash_value_type __device__ inline XXHash_64<numeric::decimal32>::operator()(
   numeric::decimal32 const& key) const
-{
-  return compute<uint64_t>(key.value());
-}
+{ return compute<uint64_t>(key.value()); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<numeric::decimal64>::operator()(
   numeric::decimal64 const& key) const
-{
-  return compute<uint64_t>(key.value());
-}
+{ return compute<uint64_t>(key.value()); }
 
 template <>
 hash_value_type __device__ inline XXHash_64<numeric::decimal128>::operator()(
@@ -356,9 +334,7 @@ class device_row_hasher {
       template <typename T, CUDF_ENABLE_IF(not cudf::column_device_view::has_element_accessor<T>())>
       __device__ hash_value_type operator()(cudf::column_device_view const&,
                                             cudf::size_type) const noexcept
-      {
-        CUDF_UNREACHABLE("Unsupported type for xxhash64");
-      }
+      { CUDF_UNREACHABLE("Unsupported type for xxhash64"); }
     };
 
     template <typename T, CUDF_ENABLE_IF(not cudf::is_nested<T>())>
