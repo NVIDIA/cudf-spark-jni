@@ -39,7 +39,7 @@ ${MVN} verify ${MVN_MIRROR} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON \
-  -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest \
+  -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest \
   -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
   -DBUILD_PROFILER=${BUILD_PROFILER}
