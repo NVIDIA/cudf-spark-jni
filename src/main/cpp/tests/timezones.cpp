@@ -502,7 +502,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEpochBorrowColumnShapes)
   {
     auto const source   = micros_col{{0L, 21'087'883'873L, 9'001'000L}, {false, true, true}};
     auto const input    = cudf::slice(source, {1, 3})[0];
-    auto const expected = micros_col{-7'713'116'127L, -28'791'999'000L};
+    auto const expected = micros_col{{-7'713'116'127L, -28'791'999'000L}, {true, true}};
     auto const actual   = convert(input);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
   }
