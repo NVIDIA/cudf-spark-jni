@@ -422,16 +422,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // Extract shared input data pointers (used by scalar, repeated, and nested sections)
   cudf::lists_column_view const in_list_view(binary_input);
   auto const message_bytes     = in_list_view.get_sliced_child(stream);
-  auto const* message_data     = reinterpret_cast<uint8_t const*>(message_bytes.data<int8_t>());
+  auto const* message_data     = message_bytes.data<uint8_t>();
   auto const message_data_size = message_bytes.size();
   auto const* list_offsets     = in_list_view.offsets_begin();
-
-  // Stage list_offsets[0] through pinned host memory so the D2H stays truly async.
-  auto h_base_offset = cudf::detail::make_pinned_vector_async<cudf::size_type>(1, stream);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    h_base_offset.data(), list_offsets, sizeof(cudf::size_type), stream));
-  stream.synchronize();
-  cudf::size_type base_offset = h_base_offset[0];
+  auto const base_offset       = message_bytes.offset() - in_list_view.child().offset();
   auto const input =
     protobuf_input_view{message_data, message_data_size, list_offsets, base_offset, num_rows};
   auto const schema_ctx = schema_context_view{

@@ -3737,6 +3737,63 @@ public class ProtobufTest {
   }
 
   @Test
+  void testSlicedNestedStringInput() {
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] left = concat(
+        box(tag(1, WT_LEN)),
+        encodeMessage(concat(box(tag(1, WT_LEN)), encodeString("left"))));
+    Byte[] right = concat(
+        box(tag(1, WT_LEN)),
+        encodeMessage(concat(box(tag(1, WT_LEN)), encodeString("right"))));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.STRING)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, left, right, sentinel})
+             .build();
+         ColumnVector expectedName = ColumnVector.fromStrings("left", "right");
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedName);
+         ColumnVector expected = ColumnVector.makeStruct(expectedInner)) {
+      ColumnView[] views = input.getColumn(0).splitAsViews(1, 3);
+      try (ColumnVector actual = Protobuf.decodeToStruct(views[1], schema, true)) {
+        AssertUtils.assertStructColumnsAreEqual(expected, actual);
+      } finally {
+        for (ColumnView view : views) {
+          view.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  void testTruncatedSlicedInputWithZeroOffset() {
+    Byte[] first = concat(box(tag(1, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] second = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] trailingMalformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .build();
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{first, second, trailingMalformed})
+             .build();
+         ColumnVector expectedValue = ColumnVector.fromBoxedInts(7, 42);
+         ColumnVector expected = ColumnVector.makeStruct(expectedValue)) {
+      ColumnView[] views = input.getColumn(0).splitAsViews(2);
+      try (ColumnVector actual = Protobuf.decodeToStruct(views[0], schema, true)) {
+        AssertUtils.assertStructColumnsAreEqual(expected, actual);
+      } finally {
+        for (ColumnView view : views) {
+          view.close();
+        }
+      }
+    }
+  }
+
+  @Test
   void testHiddenRequiredFieldStillValidates() {
     // message Msg { int32 a = 1; int32 b = 2 [required]; } — b is hidden but required;
     // wire data omits b. In failfast mode the missing required field must still throw.
