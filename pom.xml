@@ -227,6 +227,7 @@
                     <exclude>**/CuFileTest.java</exclude>
                     <exclude>**/CudaFatalTest.java</exclude>
                     <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
+                    <exclude>**/NativeDepsLoaderTest.java</exclude>
                   </excludes>
                 </configuration>
               </execution>
@@ -256,6 +257,9 @@
                 <configuration>
                   <groups>!noSanitizer</groups>
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                  <excludes>
+                    <exclude>**/NativeDepsLoaderTest.java</exclude>
+                  </excludes>
                 </configuration>
               </execution>
               <execution>
@@ -617,6 +621,18 @@
           </dependency>
         </dependencies>
         <executions>
+          <!-- NativeDepsLoaderTest sets lib-native-dir before NativeDepsLoader initializes. -->
+          <execution>
+            <id>native-deps-loader-test</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <reuseForks>false</reuseForks>
+              <test>NativeDepsLoaderTest</test>
+            </configuration>
+          </execution>
           <execution>
             <id>default-test</id>
             <goals>
@@ -626,6 +642,7 @@
               <excludes>
                 <exclude>**/CudaFatalTest.java</exclude>
                 <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
+                <exclude>**/NativeDepsLoaderTest.java</exclude>
               </excludes>
             </configuration>
           </execution>
