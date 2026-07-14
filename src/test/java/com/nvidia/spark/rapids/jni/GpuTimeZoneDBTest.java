@@ -138,6 +138,24 @@ public class GpuTimeZoneDBTest {
   }
 
   @Test
+  void testConvertOrcTimezonesPreservesEmptyAndNulls() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    try (ColumnVector input =
+            ColumnVector.timestampMicroSecondsFromBoxedLongs(new Long[] {});
+        ColumnVector actual = GpuTimeZoneDB.convertOrcTimezones(input, "UTC", "UTC")) {
+      assertColumnsAreEqual(input, actual);
+    }
+
+    try (ColumnVector input =
+            ColumnVector.timestampMicroSecondsFromBoxedLongs(null, 0L, null);
+        ColumnVector actual = GpuTimeZoneDB.convertOrcTimezones(input, "UTC", "UTC")) {
+      assertColumnsAreEqual(input, actual);
+    }
+  }
+
+  @Test
   void testConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow() {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
