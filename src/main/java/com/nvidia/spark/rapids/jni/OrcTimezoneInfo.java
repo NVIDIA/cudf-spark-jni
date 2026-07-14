@@ -212,6 +212,7 @@ class OrcTimezoneInfo {
     List<Integer> offsets = new ArrayList<>();
     long scanCursor = MIN_SUPPORTED_ORC_UTC_MILLIS;
     int currentOffset = getInitialOffset(tz);
+    boolean hasPreviousCandidate = false;
 
     for (ZoneOffsetTransition transition : transitionList) {
       long transitionMs = transition.getInstant().toEpochMilli();
@@ -221,18 +222,19 @@ class OrcTimezoneInfo {
 
       long beforeTransitionMs = transitionMs - 1;
       int offsetBeforeTransition = tz.getOffset(beforeTransitionMs);
-      // Invariant: between two consecutive entries returned by
-      // ZoneRules.getTransitions(), the wall offset is constant — no hidden
-      // paired round-trips (e.g. A->B->A) net to zero between entries. If
-      // that ever breaks (DST zones, future tzdata revisions), the guard
-      // below will not fire and both transitions in the pair will be
-      // silently dropped. ZoneRules enumerates every transition for this zone,
-      // while the TimeZone gap scan below reconciles any offset differences
-      // between the two APIs using a six-hour base probe that is shorter than
-      // the minimum spacing between real IANA transitions.
-      if (beforeTransitionMs >= scanCursor && offsetBeforeTransition != currentOffset) {
-        currentOffset = collectTimeZoneTransitionsByScanning(
-            tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+      if (beforeTransitionMs >= scanCursor) {
+        if (hasPreviousCandidate) {
+          // Reconcile every interval between ZoneRules candidates. Endpoints with the same
+          // offset do not prove that the interval is transition-free: TimeZone may contain an
+          // A -> B -> A round trip that ZoneRules does not expose.
+          currentOffset = collectTimeZoneTransitionsByScanning(
+              tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+        } else if (offsetBeforeTransition != currentOffset) {
+          // Keep the year-0001-to-first-candidate path logarithmic. ZoneRules has no candidate
+          // in this interval, which is typically about 1,900 years long.
+          currentOffset = collectInitialTimeZoneTransitions(
+              tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+        }
       }
 
       int offsetAtTransition = tz.getOffset(transitionMs);
@@ -241,7 +243,19 @@ class OrcTimezoneInfo {
         offsets.add(offsetAtTransition);
         currentOffset = offsetAtTransition;
       }
-      scanCursor = transitionMs;
+
+      // Some JDK tzdata versions expose a ZoneRules candidate that TimeZone observes for only
+      // one millisecond. Sampling T+1 catches that immediate return and anchors the following
+      // bounded scan with the correct running offset.
+      long afterTransitionMs = transitionMs + 1;
+      int offsetAfterTransition = tz.getOffset(afterTransitionMs);
+      if (offsetAfterTransition != currentOffset) {
+        transitions.add(afterTransitionMs);
+        offsets.add(offsetAfterTransition);
+        currentOffset = offsetAfterTransition;
+      }
+      scanCursor = afterTransitionMs;
+      hasPreviousCandidate = true;
     }
 
     if (transitions.isEmpty()) {
@@ -250,7 +264,7 @@ class OrcTimezoneInfo {
     return new HistoricalTransitions(toLongArray(transitions), toIntArray(offsets));
   }
 
-  private static int collectTimeZoneTransitionsByScanning(
+  static int collectTimeZoneTransitionsByScanning(
       TimeZone tz,
       long scanStartMs,
       long scanEndMs,
@@ -260,15 +274,34 @@ class OrcTimezoneInfo {
     long cursor = scanStartMs;
     int currentOffset = startOffset;
     while (cursor < scanEndMs) {
-      // Exponentially expand the probe step while the offset stays equal to
-      // currentOffset. This collapses long no-transition stretches (e.g. the
-      // year-0001-to-first-historical-transition gap, ~1880 years for typical
-      // IANA zones) from O(N) day probes to O(log N). Once the probe lands on
-      // a different offset, the [lo, hi] bracket contains a transition and we
-      // hand it to binarySearchTransition. The bracket may be wider than the
-      // base 6h step, so this assumes at most one offset transition lives in
-      // the expanded window — which holds for real IANA data; A->B->A pairs
-      // narrower than the base step are addressed separately by the step size.
+      long lo = cursor;
+      long hi = Math.min(lo + HISTORICAL_TRANSITION_SCAN_STEP_MILLIS, scanEndMs);
+      int hiOffset = tz.getOffset(hi);
+      if (hiOffset == currentOffset) {
+        cursor = hi;
+        continue;
+      }
+
+      long exactTransition = binarySearchTransition(tz, lo, hi);
+      int offsetAfterTransition = tz.getOffset(exactTransition);
+      transitions.add(exactTransition);
+      offsets.add(offsetAfterTransition);
+      currentOffset = offsetAfterTransition;
+      cursor = exactTransition;
+    }
+    return currentOffset;
+  }
+
+  private static int collectInitialTimeZoneTransitions(
+      TimeZone tz,
+      long scanStartMs,
+      long scanEndMs,
+      int startOffset,
+      List<Long> transitions,
+      List<Integer> offsets) {
+    long cursor = scanStartMs;
+    int currentOffset = startOffset;
+    while (cursor < scanEndMs) {
       long lo = cursor;
       long step = HISTORICAL_TRANSITION_SCAN_STEP_MILLIS;
       long hi = Math.min(lo + step, scanEndMs);
@@ -280,7 +313,6 @@ class OrcTimezoneInfo {
         hiOffset = tz.getOffset(hi);
       }
       if (hiOffset == currentOffset) {
-        // Reached scanEndMs without seeing any transition.
         cursor = hi;
         continue;
       }

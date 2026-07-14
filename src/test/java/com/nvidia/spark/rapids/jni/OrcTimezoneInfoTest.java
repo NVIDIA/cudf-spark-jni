@@ -29,6 +29,7 @@ import java.time.ZoneOffset;
 import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneOffsetTransitionRule;
 import java.time.zone.ZoneRules;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -172,6 +173,70 @@ public class OrcTimezoneInfoTest {
     assertNotNull(info.transitions);
     assertNotNull(info.offsets);
     assertNotNull(info.dstRule);
+  }
+
+  @Test
+  void testScannerRetainsPairedTransitionsBetweenEqualEndpoints() {
+    long firstTransition = 8L * 3_600_000L;
+    long secondTransition = 16L * 3_600_000L;
+    TimeZone pairedTransitions = new TimeZone() {
+      private int rawOffset;
+
+      @Override
+      public int getOffset(long date) {
+        return date >= firstTransition && date < secondTransition ? 3_600_000 : 0;
+      }
+
+      @Override
+      public int getOffset(int era, int year, int month, int day,
+          int dayOfWeek, int milliseconds) {
+        return rawOffset;
+      }
+
+      @Override
+      public void setRawOffset(int offsetMillis) {
+        rawOffset = offsetMillis;
+      }
+
+      @Override
+      public int getRawOffset() {
+        return rawOffset;
+      }
+
+      @Override
+      public boolean useDaylightTime() {
+        return true;
+      }
+
+      @Override
+      public boolean inDaylightTime(Date date) {
+        return getOffset(date.getTime()) != rawOffset;
+      }
+    };
+
+    List<Long> transitions = new ArrayList<>();
+    List<Integer> offsets = new ArrayList<>();
+    int finalOffset = OrcTimezoneInfo.collectTimeZoneTransitionsByScanning(
+        pairedTransitions, 0L, 24L * 3_600_000L, 0, transitions, offsets);
+
+    assertEquals(Arrays.asList(firstTransition, secondTransition), transitions);
+    assertEquals(Arrays.asList(3_600_000, 0), offsets);
+    assertEquals(0, finalOffset);
+  }
+
+  @Test
+  void testAsiaGazaRetainsImmediateOffsetReturn() {
+    OrcTimezoneInfo info = OrcTimezoneInfo.get("Asia/Gaza");
+    long transition = ZoneOffsetTransition.of(
+        LocalDateTime.of(2037, 10, 10, 2, 0),
+        ZoneOffset.ofHours(3),
+        ZoneOffset.ofHours(2)).getInstant().toEpochMilli();
+    int index = Arrays.binarySearch(info.transitions, transition);
+
+    assertTrue(index >= 0, "expected the ZoneRules candidate in the transition table");
+    assertEquals(7_200_000, info.offsets[index]);
+    assertEquals(transition + 1, info.transitions[index + 1]);
+    assertEquals(10_800_000, info.offsets[index + 1]);
   }
 
   // ---- DST rule extraction ----

@@ -242,4 +242,29 @@ public class GpuTimeZoneDBTest {
       }
     }
   }
+
+  @Test
+  void testConvertOrcTimezonesAsiaGazaPairedTransitions() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    long[] microseconds = {
+        LocalDateTime.of(2037, 10, 15, 0, 0)
+            .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1)
+    };
+    String[][] cases = {
+        {"Asia/Gaza", "UTC"},
+        {"UTC", "Asia/Gaza"}
+    };
+
+    for (String[] timezones : cases) {
+      try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
+          ColumnVector expected =
+              convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
+          ColumnVector actual =
+              GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
 }
