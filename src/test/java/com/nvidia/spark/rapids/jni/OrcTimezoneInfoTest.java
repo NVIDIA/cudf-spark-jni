@@ -76,9 +76,11 @@ public class OrcTimezoneInfoTest {
     // would silently map "+05:30" to GMT). +05:30 == 19_800_000 ms.
     OrcTimezoneInfo info = OrcTimezoneInfo.get("+05:30");
     assertNotNull(info);
+    assertEquals(19_800_000, info.initialOffset);
     assertEquals(19_800_000, info.rawOffset);
     assertNull(info.transitions);
     assertNull(info.offsets);
+    assertNull(info.dstRule);
   }
 
   @Test
@@ -89,9 +91,11 @@ public class OrcTimezoneInfoTest {
     // TimeZone.getTimeZone — is caught. rawOffset must be 0.
     OrcTimezoneInfo info = OrcTimezoneInfo.get("UTC");
     assertNotNull(info);
+    assertEquals(0, info.initialOffset);
     assertEquals(0, info.rawOffset);
     assertNull(info.transitions);
     assertNull(info.offsets);
+    assertNull(info.dstRule);
   }
 
   @Test
@@ -147,6 +151,7 @@ public class OrcTimezoneInfoTest {
     assertNotNull(info);
     assertNotNull(info.transitions, "Asia/Shanghai should have historical transitions");
     assertNotNull(info.offsets);
+    assertNull(info.dstRule);
     assertEquals(info.transitions.length, info.offsets.length,
         "transitions and offsets must be the same length");
     // Transitions must be strictly increasing so the GPU binary search is well-defined.
@@ -156,7 +161,20 @@ public class OrcTimezoneInfoTest {
     }
   }
 
-  // ---- DST rule extraction (Part 2 — not wired into production yet) ----
+  @Test
+  void testGetDstZoneIncludesKernelMetadata() {
+    String timezoneId = "America/New_York";
+    OrcTimezoneInfo info = OrcTimezoneInfo.get(timezoneId);
+    TimeZone tz = TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId).getId());
+
+    assertEquals(tz.getOffset(OrcTimezoneInfo.utcMillisForDate(1, 1, 1)), info.initialOffset);
+    assertEquals(tz.getRawOffset(), info.rawOffset);
+    assertNotNull(info.transitions);
+    assertNotNull(info.offsets);
+    assertNotNull(info.dstRule);
+  }
+
+  // ---- DST rule extraction ----
 
   @Test
   void testExtractDstRuleNorthernHemisphere() {

@@ -31,8 +31,8 @@ import java.util.concurrent.ConcurrentMap;
 
 /**
  * Holds ORC timezone metadata generated at runtime from public java.time/java.util APIs.
- * Historical transitions come from ZoneRules, while offsets before the first transition are
- * derived from java.util.TimeZone so ORC rebasing matches
+ * Historical transitions come from ZoneRules, while offsets before the first transition and
+ * future recurring DST behavior are derived from java.util.TimeZone so ORC rebasing matches
  * SerializationUtils.convertBetweenTimezones semantics without relying on non-public ZoneInfo APIs.
  *
  * <p><b>Runtime dependency:</b> because the metadata is generated on the fly from
@@ -43,11 +43,17 @@ import java.util.concurrent.ConcurrentMap;
  * debugging cross-environment differences should first check the JVM's {@code tzdata} version.
  */
 class OrcTimezoneInfo {
-  public OrcTimezoneInfo(int rawOffset, long[] transitions, int[] offsets) {
+  public OrcTimezoneInfo(int initialOffset, int rawOffset, long[] transitions, int[] offsets,
+      OrcDstRuleExtractor.DstRule dstRule) {
+    this.initialOffset = initialOffset;
     this.rawOffset = rawOffset;
     this.transitions = transitions;
     this.offsets = offsets;
+    this.dstRule = dstRule;
   }
+
+  // Historical offset before the first transition, in milliseconds.
+  final int initialOffset;
 
   // in milliseconds
   final int rawOffset;
@@ -57,6 +63,9 @@ class OrcTimezoneInfo {
 
   // in milliseconds
   final int[] offsets;
+
+  // Recurring rule used after the historical transition table, or null for no DST.
+  final OrcDstRuleExtractor.DstRule dstRule;
 
   // Lower bound of the range ORC supports (year 0001-01-01 UTC). Computed via
   // java.time.LocalDate, which uses the proleptic Gregorian calendar, whereas
@@ -86,9 +95,11 @@ class OrcTimezoneInfo {
   @Override
   public String toString() {
     return "OrcTimezoneInfo{" +
-        "rawOffset=" + rawOffset +
+        "initialOffset=" + initialOffset +
+        ", rawOffset=" + rawOffset +
         ", transitions=" + Arrays.toString(transitions) +
         ", offsets=" + Arrays.toString(offsets) +
+        ", dstRule=" + dstRule +
         '}';
   }
 
@@ -134,7 +145,7 @@ class OrcTimezoneInfo {
       // maps them to GMT (offset 0). Derive the offset from ZoneRules instead so
       // the GPU path doesn't treat them as UTC.
       int fixedOffsetMs = rules.getOffset(Instant.EPOCH).getTotalSeconds() * 1000;
-      return new OrcTimezoneInfo(fixedOffsetMs, null, null);
+      return new OrcTimezoneInfo(fixedOffsetMs, fixedOffsetMs, null, null, null);
     }
     // Use the canonical ID from the resolved ZoneId (e.g. "Asia/Kolkata" for
     // input "IST") so that TimeZone and ZoneRules always refer to the same
@@ -144,13 +155,17 @@ class OrcTimezoneInfo {
     // zone on some JVM distributions, which would silently produce mixed
     // offset data with no exception.
     TimeZone tz = TimeZone.getTimeZone(zoneId.getId());
+    int initialOffset = getInitialOffset(tz);
+    OrcDstRuleExtractor.DstRule dstRule =
+        OrcDstRuleExtractor.extractDstRule(timezoneId, tz, rules);
     List<ZoneOffsetTransition> transitionList = rules.getTransitions();
     HistoricalTransitions historicalTransitions = buildHistoricalTransitions(tz, transitionList);
     if (historicalTransitions.transitions == null) {
-      return new OrcTimezoneInfo(tz.getRawOffset(), null, null);
+      return new OrcTimezoneInfo(initialOffset, tz.getRawOffset(), null, null, dstRule);
     }
-    return new OrcTimezoneInfo(tz.getRawOffset(),
-        historicalTransitions.transitions, historicalTransitions.offsets);
+    return new OrcTimezoneInfo(initialOffset,
+        tz.getRawOffset(), historicalTransitions.transitions, historicalTransitions.offsets,
+        dstRule);
   }
 
   /**
