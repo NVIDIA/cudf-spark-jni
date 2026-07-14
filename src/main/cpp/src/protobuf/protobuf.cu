@@ -437,12 +437,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   }
 
   rmm::device_uvector<device_nested_field_descriptor> d_schema(num_fields, stream, scratch_mr);
-  if (num_fields > 0) {
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_schema.data(),
-                                             h_device_schema.data(),
-                                             num_fields * sizeof(device_nested_field_descriptor),
-                                             stream));
-  }
+  CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_schema.data(),
+                                           h_device_schema.data(),
+                                           num_fields * sizeof(device_nested_field_descriptor),
+                                           stream));
 
   auto d_in = cudf::column_device_view::create(binary_input, stream);
   // Identify repeated and nested fields at depth 0
@@ -462,9 +460,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
   }
 
-  int const num_repeated = static_cast<int>(repeated_field_indices.size());
-  int const num_nested   = static_cast<int>(nested_field_indices.size());
-  int const num_scalar   = static_cast<int>(scalar_field_indices.size());
+  int const num_repeated    = static_cast<int>(repeated_field_indices.size());
+  int const num_nested      = static_cast<int>(nested_field_indices.size());
+  int const num_scalar      = static_cast<int>(scalar_field_indices.size());
+  bool const run_count_scan = num_repeated > 0 || num_nested > 0;
+  // Validate empty schemas through the field scan without rescanning repeated-only schemas.
+  bool const run_field_scan = num_scalar > 0 || !run_count_scan;
 
   auto d_error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(
     1, stream, cudf::get_current_device_resource_ref());
@@ -478,23 +479,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.value()));
   }
   auto const decode_ctx = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
-
-  // Spark still parses unknown fields before producing an empty struct.
-  if (num_fields == 0) {
-    // The zero-width kernel still forms a row pointer; one element keeps it valid, and no
-    // locations are written.
-    rmm::device_uvector<field_location> d_unused_location(1, stream, scratch_mr);
-    launch_scan_all_fields(*d_in,
-                           nullptr,
-                           0,
-                           nullptr,
-                           0,
-                           d_unused_location.data(),
-                           d_error.data(),
-                           track_permissive_null_rows ? d_row_force_null.data() : nullptr,
-                           num_rows,
-                           stream);
-  }
 
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
@@ -525,7 +509,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   rmm::device_uvector<int> d_fn_to_rep(0, stream, scratch_mr);
   rmm::device_uvector<int> d_fn_to_nested(0, stream, scratch_mr);
 
-  if (num_repeated > 0 || num_nested > 0) {
+  if (run_count_scan) {
     auto h_fn_to_rep =
       build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated, stream);
     auto h_fn_to_nested =
@@ -566,7 +550,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   std::vector<std::unique_ptr<cudf::column>> column_map(num_fields);
 
   // Process scalar fields using scan + extract infrastructure
-  if (num_scalar > 0) {
+  if (run_field_scan) {
     auto h_field_descs =
       cudf::detail::make_pinned_vector_async<field_descriptor>(num_scalar, stream);
     for (int i = 0; i < num_scalar; i++) {

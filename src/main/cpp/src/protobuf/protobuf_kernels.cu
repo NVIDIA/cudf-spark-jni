@@ -140,7 +140,7 @@ CUDF_KERNEL void scan_all_fields_kernel(
   int num_fields,
   int const* field_lookup,    // direct-mapped lookup table (nullable)
   int field_lookup_size,      // size of lookup table (0 if null)
-  field_location* locations,  // [num_rows * num_fields] row-major
+  field_location* locations,  // [num_rows * num_fields] row-major; nullable when num_fields is 0
   protobuf_error* error_flag,
   bool* row_has_invalid_data)
 {
@@ -152,7 +152,7 @@ CUDF_KERNEL void scan_all_fields_kernel(
     if (row_has_invalid_data != nullptr) { row_has_invalid_data[row] = true; }
   };
 
-  field_location* field_locations = locations + flat_index(row, num_fields, 0);
+  auto* field_locations = num_fields > 0 ? locations + flat_index(row, num_fields, 0) : nullptr;
   for (int f = 0; f < num_fields; f++) {
     field_locations[f] = {-1, 0};
   }

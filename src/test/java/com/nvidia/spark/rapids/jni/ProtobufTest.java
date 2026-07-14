@@ -1783,6 +1783,30 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedNestedLengthBeforeRepeatedField_Permissive() {
+    // The oversized nested length makes the trailing repeated-looking bytes unreachable.
+    Byte[] malformed = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(5)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] valid = concat(box(tag(2, WT_VARINT)), box(encodeVarint(8)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).isOutput(false)
+        .addField(2, DType.INT32).repeated()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed, valid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(8)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void testRepeatedUint32() {
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(1)),

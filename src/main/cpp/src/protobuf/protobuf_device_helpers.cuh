@@ -299,7 +299,7 @@ __device__ inline uint64_t load_le<uint64_t>(uint8_t const* p)
 
 /**
  * O(1) lookup of field_number -> field_index using a direct-mapped table.
- * Falls back to linear search when the table is empty (field numbers too large).
+ * Falls back to linear search when the table is empty.
  *
  * `match(int candidate, int field_number) -> bool` decides whether the candidate index
  * actually corresponds to `field_number` (and any other criteria the caller wants to
