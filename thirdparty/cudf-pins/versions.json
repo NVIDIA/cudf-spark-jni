@@ -57,7 +57,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "72f51b1afde57c2053a92a80df09affe1cfad3da",
+      "git_tag" : "f3b115b587747a1ec563e15ef309378164461e0b",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
@@ -89,10 +89,18 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a5037ca70e0a85d1e06205347a06ec3acd171a13",
+      "git_tag" : "921daa2748602712466eb4a173a387715bec4d7e",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.08"
+    },
+    "rtcx" : 
+    {
+      "always_download" : true,
+      "git_shallow" : false,
+      "git_tag" : "efad266c1fd9de6d8486c6ba71bfa74df063eb1f",
+      "git_url" : "https://github.com/rapidsai/librtcx.git",
+      "version" : "0.1"
     },
     "spdlog" : 
     {
