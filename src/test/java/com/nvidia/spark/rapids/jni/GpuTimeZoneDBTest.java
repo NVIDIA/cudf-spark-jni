@@ -21,12 +21,16 @@ import ai.rapids.cudf.*;
 import org.junit.jupiter.api.Test;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.zone.ZoneOffsetTransition;
+import java.time.zone.ZoneOffsetTransitionRule;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -72,6 +76,22 @@ public class GpuTimeZoneDBTest {
     boolean apacheAppliesBorrow = adjustedUnborrowedUs < 0 && hasBorrowableFraction;
 
     return adjustedUnborrowedUs - (apacheAppliesBorrow ? MICROS_PER_SECOND : 0L);
+  }
+
+  private static long[] getFutureDstBoundaryMicros(String timezoneId) {
+    List<ZoneOffsetTransitionRule> rules =
+        ZoneId.of(timezoneId).getRules().getTransitionRules();
+    assertEquals(2, rules.size(), "expected two recurring DST rules for " + timezoneId);
+    long[] microseconds = new long[rules.size() * 3];
+    int index = 0;
+    for (ZoneOffsetTransitionRule rule : rules) {
+      ZoneOffsetTransition transition = rule.createTransition(9999);
+      long transitionMillis = transition.getInstant().toEpochMilli();
+      microseconds[index++] = (transitionMillis - 1) * microsPerMillis;
+      microseconds[index++] = transitionMillis * microsPerMillis;
+      microseconds[index++] = (transitionMillis + 1) * microsPerMillis;
+    }
+    return microseconds;
   }
 
   /**
@@ -219,26 +239,21 @@ public class GpuTimeZoneDBTest {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
 
-    long[] microseconds = {
-        LocalDateTime.of(9999, 1, 15, 12, 0, 0)
-            .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1),
-        LocalDateTime.of(9999, 7, 15, 12, 0, 0)
-            .toEpochSecond(ZoneOffset.UTC) * TimeUnit.SECONDS.toMicros(1)
-    };
-    String[][] cases = {
-        {"America/Los_Angeles", "UTC"},
-        {"UTC", "America/Los_Angeles"},
-        {"Australia/Sydney", "UTC"},
-        {"UTC", "Australia/Sydney"}
-    };
+    for (String timezoneId : Arrays.asList("America/Los_Angeles", "Australia/Sydney")) {
+      long[] microseconds = getFutureDstBoundaryMicros(timezoneId);
+      String[][] cases = {
+          {timezoneId, "UTC"},
+          {"UTC", timezoneId}
+      };
 
-    for (String[] timezones : cases) {
-      try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
-          ColumnVector expected =
-              convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
-          ColumnVector actual =
-              GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
-        assertColumnsAreEqual(expected, actual);
+      for (String[] timezones : cases) {
+        try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
+            ColumnVector expected =
+                convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
+            ColumnVector actual =
+                GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
+          assertColumnsAreEqual(expected, actual);
+        }
       }
     }
   }
