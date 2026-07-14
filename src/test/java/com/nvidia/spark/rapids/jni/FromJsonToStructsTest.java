@@ -54,6 +54,14 @@ public class FromJsonToStructsTest {
     return root.build();
   }
 
+  private static HostColumnVector.StructData nestedRow(int value) {
+    return new HostColumnVector.StructData(
+        new HostColumnVector.StructData(
+            value,
+            Collections.singletonList(new HostColumnVector.StructData(value, "x"))),
+        value);
+  }
+
   @Test
   void testEmbeddedNulIsNotUsedAsRowDelimiter() {
     String malformedBanner =
@@ -113,6 +121,75 @@ public class FromJsonToStructsTest {
          ColumnView c2 = data.getChildColumnView(1)) {
       assertColumnsAreEqual(expected, actual);
       assertFalse(c2.hasNonEmptyNulls(), "mismatched row must have an empty null LIST");
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsAssociatesMismatchRowsByColumnName() {
+    Schema.Builder root = Schema.builder();
+    root.addColumn(DType.STRUCT, "a").column(DType.INT32, "value");
+    root.addColumn(DType.STRUCT, "b").column(DType.INT32, "value");
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":1,\"b\":{\"value\":10}}",
+             "{\"a\":{\"value\":20},\"b\":2}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData(
+                 Arrays.asList(null, new HostColumnVector.StructData(10))),
+             new HostColumnVector.StructData(
+                 Arrays.asList(new HostColumnVector.StructData(20), null)))) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsGroupedMaskUpdatesAcrossWordBoundaries() {
+    int[] mismatchRows = {0, 1, 2, 31, 32, 63, 64};
+    String[] inputRows = new String[65];
+    HostColumnVector.StructData[] expectedRows = new HostColumnVector.StructData[65];
+    for (int row = 0; row < inputRows.length; ++row) {
+      boolean mismatched = Arrays.binarySearch(mismatchRows, row) >= 0;
+      inputRows[row] = mismatched
+          ? String.format("{\"data\":{\"c2\":[%d],\"c1\":%d},\"id\":%d}", row, row, row)
+          : String.format(
+              "{\"data\":{\"c2\":[{\"c3\":%d,\"c4\":\"x\"}],\"c1\":%d},\"id\":%d}",
+              row, row, row);
+      expectedRows[row] = mismatched
+          ? new HostColumnVector.StructData(Arrays.asList(null, row))
+          : nestedRow(row);
+    }
+    Schema schema = mixedNestedTypesSchema();
+
+    try (ColumnVector input = ColumnVector.fromStrings(inputRows);
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(), expectedRows)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsSanitizesTopLevelListMismatch() {
+    Schema.Builder root = Schema.builder();
+    Schema.Builder items = root.addColumn(DType.LIST, "items");
+    items.addColumn(DType.STRUCT, "element").column(DType.INT32, "value");
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"items\":[{\"value\":1}]}",
+             "{\"items\":[2]}",
+             "{\"items\":[{\"value\":3}]}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData(
+                 (Object) Collections.singletonList(new HostColumnVector.StructData(1))),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData(
+                 (Object) Collections.singletonList(new HostColumnVector.StructData(3))));
+         ColumnView actualItems = actual.getChildColumnView(0)) {
+      assertColumnsAreEqual(expected, actual);
+      assertFalse(actualItems.hasNonEmptyNulls(), "mismatched row must have an empty null LIST");
     }
   }
 }

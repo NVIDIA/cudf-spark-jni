@@ -247,6 +247,9 @@ public class JSONUtils {
    * - {@code KeepQuotes: true}<br>
    * - {@code StrictValidation: true}<br>
    * - {@code Experimental: true}
+   * <p/>
+   * If a descendant JSON value has a category that does not match the schema, only its affected
+   * depth-one parent is null for that input row. Other top-level fields in the row are preserved.
    *
    * @param input The input strings column in which each row specifies a json object
    * @param schema The schema of the output struct column

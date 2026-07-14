@@ -52,6 +52,7 @@
 #include <thrust/uninitialized_fill.h>
 
 #include <map>
+#include <span>
 #include <unordered_map>
 
 namespace spark_rapids_jni {
@@ -154,7 +155,7 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> generate_stru
 }
 
 void nullify_rows(cudf::column& input,
-                  std::vector<cudf::size_type> const& row_indices,
+                  std::span<cudf::size_type const> row_indices,
                   rmm::cuda_stream_view stream,
                   rmm::device_async_resource_ref mr)
 {
@@ -169,8 +170,10 @@ void nullify_rows(cudf::column& input,
                                               : static_cast<cudf::bitmask_type*>(null_mask.data());
 
   // Diagnostic row indices are sorted and unique, so updates to one mask word are adjacent.
-  std::vector<mask_word_update> word_updates;
-  word_updates.reserve(row_indices.size());
+  auto word_updates = cudf::detail::make_empty_pinned_vector<mask_word_update>(
+    std::min(row_indices.size(),
+             static_cast<std::size_t>(cudf::num_bitmask_words(input_view.size()))),
+    stream);
   for (auto const row : row_indices) {
     auto const word_index = cudf::word_index(row);
     auto const bit        = cudf::bitmask_type{1} << cudf::intra_word_index(row);
@@ -193,8 +196,11 @@ void nullify_rows(cudf::column& input,
                        mask_ptr[update.word_index] &= ~update.bits_to_clear;
                      });
   } else {
+    auto h_row_indices =
+      cudf::detail::make_empty_pinned_vector<cudf::size_type>(row_indices.size(), stream);
+    h_row_indices.insert(h_row_indices.end(), row_indices.begin(), row_indices.end());
     auto d_row_indices = cudf::detail::make_device_uvector_async(
-      row_indices, stream, cudf::get_current_device_resource_ref());
+      h_row_indices, stream, cudf::get_current_device_resource_ref());
     thrust::for_each(rmm::exec_policy_nosync(stream),
                      d_row_indices.begin(),
                      d_row_indices.end(),
@@ -971,10 +977,10 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
 
   auto const& mismatch_diagnostics =
     parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows;
-  std::unordered_map<std::string, std::vector<cudf::size_type> const*> mismatch_rows_by_column;
+  std::unordered_map<std::string, std::span<cudf::size_type const>> mismatch_rows_by_column;
   mismatch_rows_by_column.reserve(mismatch_diagnostics.size());
   for (auto const& mismatch : mismatch_diagnostics) {
-    mismatch_rows_by_column.emplace(mismatch.column_name, &mismatch.row_indices);
+    mismatch_rows_by_column.emplace(mismatch.column_name, mismatch.row_indices);
   }
 
   std::vector<std::unique_ptr<cudf::column>> converted_cols;
@@ -989,10 +995,8 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
     CUDF_EXPECTS(parsed_meta.schema_info[i].name == col_name, "Mismatched column name.");
     auto const mismatch_rows = mismatch_rows_by_column.find(col_name);
     auto const has_rows_nullified =
-      mismatch_rows != mismatch_rows_by_column.end() && !mismatch_rows->second->empty();
-    if (has_rows_nullified) {
-      nullify_rows(*parsed_columns[i], *mismatch_rows->second, stream, mr);
-    }
+      mismatch_rows != mismatch_rows_by_column.end() && !mismatch_rows->second.empty();
+    if (has_rows_nullified) { nullify_rows(*parsed_columns[i], mismatch_rows->second, stream, mr); }
     converted_cols.emplace_back(convert_data_type(std::move(parsed_columns[i]),
                                                   col_schema,
                                                   allow_nonnumeric_numbers,
