@@ -85,12 +85,15 @@ public class FromJsonToStructsTest {
   @Test
   void testFromJsonToStructsNullsOnlyMismatchedRowsForDepthOneParent() {
     String valid = "{\"data\":{\"c2\":[{\"c3\":19,\"c4\":\"x\"}],\"c1\":1},\"id\":10}";
-    String mismatched = "{\"data\":{\"c2\":[19],\"c1\":2},\"id\":20}";
+    String preExistingNull = "{\"data\":null,\"id\":15}";
+    String firstMismatch = "{\"data\":{\"c2\":[19],\"c1\":2},\"id\":20}";
+    String secondMismatch = "{\"data\":{\"c2\":[29],\"c1\":3},\"id\":25}";
     String validAfterMismatch =
-        "{\"data\":{\"c2\":[{\"c3\":39,\"c4\":\"z\"}],\"c1\":3},\"id\":30}";
+        "{\"data\":{\"c2\":[{\"c3\":39,\"c4\":\"z\"}],\"c1\":4},\"id\":30}";
     Schema schema = mixedNestedTypesSchema();
 
-    try (ColumnVector input = ColumnVector.fromStrings(valid, mismatched, validAfterMismatch);
+    try (ColumnVector input = ColumnVector.fromStrings(
+             valid, preExistingNull, firstMismatch, secondMismatch, validAfterMismatch);
          ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
          ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
              new HostColumnVector.StructData(
@@ -98,10 +101,12 @@ public class FromJsonToStructsTest {
                      1,
                      Collections.singletonList(new HostColumnVector.StructData(19, "x"))),
                  10),
+             new HostColumnVector.StructData(Arrays.asList(null, 15)),
              new HostColumnVector.StructData(Arrays.asList(null, 20)),
+             new HostColumnVector.StructData(Arrays.asList(null, 25)),
              new HostColumnVector.StructData(
                  new HostColumnVector.StructData(
-                     3,
+                     4,
                      Collections.singletonList(new HostColumnVector.StructData(39, "z"))),
                  30));
          ColumnView data = actual.getChildColumnView(0);

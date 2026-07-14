@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+#include "json_utils.hpp"
+
 #include <cudf_test/column_wrapper.hpp>
 
+#include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
 
-#include <json_utils.hpp>
 #include <nvbench/nvbench.cuh>
 
 #include <memory>
@@ -28,7 +30,8 @@
 
 namespace {
 
-std::unique_ptr<cudf::column> make_input(cudf::size_type num_rows, cudf::size_type mismatch_percent)
+[[nodiscard]] std::unique_ptr<cudf::column> make_input(cudf::size_type num_rows,
+                                                       cudf::size_type mismatch_percent)
 {
   std::string const valid      = R"({"data":{"c2":[{"c3":19,"c4":"x"}],"c1":1},"id":10})";
   std::string const mismatched = R"({"data":{"c2":[19],"c1":2},"id":20})";
@@ -84,11 +87,11 @@ void BM_from_json_to_structs(nvbench::state& state)
                                                          types,
                                                          scales,
                                                          precisions,
-                                                         true,
-                                                         true,
-                                                         true,
-                                                         true,
-                                                         true);
+                                                         /*normalize_single_quotes=*/true,
+                                                         /*allow_leading_zeros=*/true,
+                                                         /*allow_nonnumeric_numbers=*/true,
+                                                         /*allow_unquoted_control=*/true,
+                                                         /*is_us_locale=*/true);
   });
 
   state.add_buffer_size(num_rows, "rows", "Rows");
@@ -96,5 +99,5 @@ void BM_from_json_to_structs(nvbench::state& state)
 
 NVBENCH_BENCH(BM_from_json_to_structs)
   .set_name("from_json_to_structs")
-  .add_int64_axis("num_rows", {10000, 100000})
-  .add_int64_axis("mismatch_percent", {0, 1});
+  .add_int64_axis("num_rows", {10'000, 100'000})
+  .add_int64_axis("mismatch_percent", {0, 1, 10, 50, 100});
