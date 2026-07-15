@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
+import ai.rapids.cudf.CloseableArray;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
@@ -3724,15 +3725,11 @@ public class ProtobufTest {
              .column(new Byte[][]{sentinel, null, malformed, valid, sentinel})
              .build();
          ColumnVector expected = ColumnVector.fromStructs(
-             outputType, (StructData) null, (StructData) null, struct(42))) {
-      ColumnView[] views = input.getColumn(0).splitAsViews(1, 4);
-      try (ColumnVector actual = Protobuf.decodeToStruct(views[1], schema, false)) {
-        AssertUtils.assertStructColumnsAreEqual(expected, actual);
-      } finally {
-        for (ColumnView view : views) {
-          view.close();
-        }
-      }
+             outputType, (StructData) null, (StructData) null, struct(42));
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(1, 4));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(1), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -3756,15 +3753,11 @@ public class ProtobufTest {
              .build();
          ColumnVector expectedName = ColumnVector.fromStrings("left", "right");
          ColumnVector expectedInner = ColumnVector.makeStruct(expectedName);
-         ColumnVector expected = ColumnVector.makeStruct(expectedInner)) {
-      ColumnView[] views = input.getColumn(0).splitAsViews(1, 3);
-      try (ColumnVector actual = Protobuf.decodeToStruct(views[1], schema, true)) {
-        AssertUtils.assertStructColumnsAreEqual(expected, actual);
-      } finally {
-        for (ColumnView view : views) {
-          view.close();
-        }
-      }
+         ColumnVector expected = ColumnVector.makeStruct(expectedInner);
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(1, 3));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(1), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -3781,15 +3774,11 @@ public class ProtobufTest {
              .column(new Byte[][]{first, second, trailingMalformed})
              .build();
          ColumnVector expectedValue = ColumnVector.fromBoxedInts(7, 42);
-         ColumnVector expected = ColumnVector.makeStruct(expectedValue)) {
-      ColumnView[] views = input.getColumn(0).splitAsViews(2);
-      try (ColumnVector actual = Protobuf.decodeToStruct(views[0], schema, true)) {
-        AssertUtils.assertStructColumnsAreEqual(expected, actual);
-      } finally {
-        for (ColumnView view : views) {
-          view.close();
-        }
-      }
+         ColumnVector expected = ColumnVector.makeStruct(expectedValue);
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(2));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
