@@ -120,16 +120,19 @@ final class OrcDstRuleExtractor {
     // Sanity-check that tz and rules describe the same zone. Both Path A and
     // Path B assume this, but the two-argument signature lets a caller pass
     // mismatched objects (the silent-GMT trap above is one way this can
-    // happen). Compare standard offsets at a recent reference instant -- the
+    // happen). Compare actual offsets at a recent reference instant -- the
     // epoch is unsafe because some zones (e.g. Europe/London) were on a
-    // different standard offset in 1970 (British Standard Time experiment).
+    // different standard offset in 1970 (British Standard Time experiment),
+    // while the current raw offset is unsafe because a zone's standard offset
+    // may have changed after the reference instant.
     Instant ref = Instant.parse("2024-01-15T00:00:00Z");
-    int rulesStandardOffsetMillis = rules.getStandardOffset(ref).getTotalSeconds() * 1000;
-    if (tz.getRawOffset() != rulesStandardOffsetMillis) {
+    int timeZoneOffsetMillis = tz.getOffset(ref.toEpochMilli());
+    int rulesOffsetMillis = rules.getOffset(ref).getTotalSeconds() * 1000;
+    if (timeZoneOffsetMillis != rulesOffsetMillis) {
       throw new IllegalStateException(
           "TimeZone and ZoneRules describe different zones for timezone: " + timezoneId
-              + " (tz.rawOffset=" + tz.getRawOffset()
-              + ", rules.standardOffset=" + rulesStandardOffsetMillis + ")");
+              + " (tz.offset=" + timeZoneOffsetMillis
+              + ", rules.offset=" + rulesOffsetMillis + ")");
     }
     DstRule rule = extractDstRuleByProbing(tz);
     if (rule != null) {

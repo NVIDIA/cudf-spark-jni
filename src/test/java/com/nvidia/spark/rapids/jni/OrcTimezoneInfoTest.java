@@ -295,6 +295,14 @@ public class OrcTimezoneInfoTest {
   }
 
   @Test
+  void testExtractDstRuleAfterHistoricalStandardOffsetChange() {
+    // America/Scoresbysund changed its standard offset after the validation reference instant.
+    // TimeZone.getRawOffset() reports the current standard offset, so it cannot be compared with
+    // ZoneRules at that historical instant. The two APIs' actual offsets still agree there.
+    assertNotNull(extractDstRuleFor("America/Scoresbysund"));
+  }
+
+  @Test
   void testExtractDstRuleSouthernHemisphere() {
     // Australia/Sydney: DST starts 1st Sunday of October, ends 1st Sunday of April.
     // Southern hemisphere — start month numerically > end month.
@@ -445,12 +453,16 @@ public class OrcTimezoneInfoTest {
   // across any anchor year and returns null, so extractDstRuleFromZoneRules is
   // invoked with the hand-crafted ZoneRules in each test below.
   private static TimeZone newConstantOffsetWithDstFlag(String id) {
+    return newConstantOffsetWithDstFlag(id, 0);
+  }
+
+  private static TimeZone newConstantOffsetWithDstFlag(String id, int offset) {
     TimeZone tz = new TimeZone() {
-      @Override public int getOffset(long instant) { return 0; }
+      @Override public int getOffset(long instant) { return offset; }
       @Override public int getOffset(int era, int year, int month, int day, int dow, int ms) {
-        return 0;
+        return offset;
       }
-      @Override public int getRawOffset() { return 0; }
+      @Override public int getRawOffset() { return offset; }
       @Override public void setRawOffset(int offsetMillis) {}
       @Override public boolean useDaylightTime() { return true; }
       @Override public boolean inDaylightTime(Date date) { return false; }
@@ -510,9 +522,9 @@ public class OrcTimezoneInfoTest {
 
   @Test
   void testExtractDstRuleThrowsWhenTzAndRulesDescribeDifferentZones() {
-    // The sanity-check in extractDstRule compares tz.getRawOffset() against
-    // rules.getStandardOffset(ref). Pair a constant-zero TimeZone with
-    // ZoneRules for America/New_York (rawOffset = -18_000_000 ms at the
+    // The sanity-check in extractDstRule compares actual offsets at the same
+    // reference instant. Pair a constant-zero TimeZone with ZoneRules for
+    // America/New_York (offset = -18_000_000 ms at the
     // 2024 reference instant) so the check fires before either extraction
     // path runs.
     TimeZone zeroOffsetTz = newConstantOffsetWithDstFlag("Synthetic/OffsetMismatch");
@@ -530,7 +542,8 @@ public class OrcTimezoneInfoTest {
     // both with negative delta — startTransitionRule stays null. Pins the
     // startTransitionRule == null sub-case of the || at line 157 so a future
     // change from || to && cannot slip through.
-    TimeZone tz = newConstantOffsetWithDstFlag("Synthetic/BothNegative");
+    // These malformed rules leave the recurring period at +1h at the validation instant.
+    TimeZone tz = newConstantOffsetWithDstFlag("Synthetic/BothNegative", 3_600_000);
     ZoneOffset base = ZoneOffset.UTC;
     ZoneOffset plus1 = ZoneOffset.ofHours(1);
     ZoneOffsetTransitionRule ruleA = ZoneOffsetTransitionRule.of(
