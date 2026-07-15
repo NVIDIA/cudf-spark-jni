@@ -464,6 +464,7 @@ struct tz_side_info {
   int32_t initial_offset;
   int32_t raw_offset;
   spark_rapids_jni::dst_rule dst;
+  bool is_fixed;
 };
 
 struct orc_base_offset_info {
@@ -483,6 +484,7 @@ struct orc_tz_side_kernel_args {
   int32_t initial_offset;
   int32_t raw_offset;
   spark_rapids_jni::dst_rule dst;
+  bool is_fixed;
 };
 
 __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info const& side)
@@ -508,15 +510,6 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
   }
 
   return side.offsets_begin[index - 1];
-}
-
-/**
- * @brief Get the fixed offset for a timezone with no transitions and no DST.
- * Returns true if the timezone is a simple fixed-offset timezone (constant offset).
- */
-__device__ static bool is_fixed_offset_tz(tz_side_info const& side)
-{
-  return (side.trans_begin == side.trans_end) && !side.dst.has_dst;
 }
 
 /**
@@ -599,18 +592,15 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
   int64_t const epoch_millis =
     spark_rapids_jni::integer_utils::floor_div(adjusted_us, MICROS_PER_MILLI);
 
-  bool const writer_fixed = is_fixed_offset_tz(writer);
-  bool const reader_fixed = is_fixed_offset_tz(reader);
-
   int32_t writer_offset_millis =
-    writer_fixed ? writer.raw_offset : get_transition_index(epoch_millis, writer);
+    writer.is_fixed ? writer.raw_offset : get_transition_index(epoch_millis, writer);
   int32_t reader_offset_millis =
-    reader_fixed ? reader.raw_offset : get_transition_index(epoch_millis, reader);
+    reader.is_fixed ? reader.raw_offset : get_transition_index(epoch_millis, reader);
 
   int64_t adjusted_milliseconds = epoch_millis + (writer_offset_millis - reader_offset_millis);
 
   int32_t reader_adjusted_offset =
-    reader_fixed ? reader.raw_offset : get_transition_index(adjusted_milliseconds, reader);
+    reader.is_fixed ? reader.raw_offset : get_transition_index(adjusted_milliseconds, reader);
 
   int32_t final_offset_millis = writer_offset_millis - reader_adjusted_offset;
   int64_t final_result = adjusted_us + static_cast<int64_t>(final_offset_millis) * MICROS_PER_MILLI;
@@ -707,13 +697,15 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               wo_begin,
                               writer_args.initial_offset,
                               writer_args.raw_offset,
-                              writer_args.dst};
+                              writer_args.dst,
+                              writer_args.is_fixed};
     tz_side_info const reader{rt_begin,
                               rt_end,
                               ro_begin,
                               reader_args.initial_offset,
                               reader_args.raw_offset,
-                              reader_args.dst};
+                              reader_args.dst,
+                              reader_args.is_fixed};
     output[idx] =
       convert_timestamp_between_timezones(input[idx], writer_2015_year_base_offset, writer, reader);
   }
@@ -772,13 +764,15 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                                    writer_trans_count,
                                                    writer.initial_offset,
                                                    writer.raw_offset,
-                                                   writer.dst};
+                                                   writer.dst,
+                                                   writer_trans_count == 0 && !writer.dst.has_dst};
   auto const reader_args = orc_tz_side_kernel_args{reader_trans_ptr,
                                                    reader_offsets_ptr,
                                                    reader_trans_count,
                                                    reader.initial_offset,
                                                    reader.raw_offset,
-                                                   reader.dst};
+                                                   reader.dst,
+                                                   reader_trans_count == 0 && !reader.dst.has_dst};
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
