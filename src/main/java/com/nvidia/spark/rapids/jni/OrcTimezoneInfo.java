@@ -201,7 +201,7 @@ class OrcTimezoneInfo {
     return tz.getOffset(MIN_SUPPORTED_ORC_UTC_MILLIS);
   }
 
-  private static HistoricalTransitions buildHistoricalTransitions(
+  static HistoricalTransitions buildHistoricalTransitions(
       TimeZone tz,
       List<ZoneOffsetTransition> transitionList) {
     if (transitionList.isEmpty()) {
@@ -358,7 +358,7 @@ class OrcTimezoneInfo {
     return result;
   }
 
-  private static final class HistoricalTransitions {
+  static final class HistoricalTransitions {
     static final HistoricalTransitions EMPTY = new HistoricalTransitions(null, null);
 
     final long[] transitions;

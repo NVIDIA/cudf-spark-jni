@@ -36,6 +36,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.TimeZone;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -222,6 +223,58 @@ public class OrcTimezoneInfoTest {
     assertEquals(Arrays.asList(firstTransition, secondTransition), transitions);
     assertEquals(Arrays.asList(3_600_000, 0), offsets);
     assertEquals(0, finalOffset);
+  }
+
+  @Test
+  void testBuilderScansPairedTransitionsBetweenEqualCandidateEndpoints() {
+    long firstHiddenTransition = 8L * 3_600_000L;
+    long secondHiddenTransition = 16L * 3_600_000L;
+    TimeZone pairedTransitions = new TimeZone() {
+      private int rawOffset;
+
+      @Override
+      public int getOffset(long date) {
+        return date >= firstHiddenTransition && date < secondHiddenTransition ? 3_600_000 : 0;
+      }
+
+      @Override
+      public int getOffset(int era, int year, int month, int day,
+          int dayOfWeek, int milliseconds) {
+        return rawOffset;
+      }
+
+      @Override
+      public void setRawOffset(int offsetMillis) {
+        rawOffset = offsetMillis;
+      }
+
+      @Override
+      public int getRawOffset() {
+        return rawOffset;
+      }
+
+      @Override
+      public boolean useDaylightTime() {
+        return true;
+      }
+
+      @Override
+      public boolean inDaylightTime(Date date) {
+        return getOffset(date.getTime()) != rawOffset;
+      }
+    };
+    List<ZoneOffsetTransition> candidates = Arrays.asList(
+        ZoneOffsetTransition.of(LocalDateTime.of(1970, 1, 1, 4, 0),
+            ZoneOffset.UTC, ZoneOffset.ofHours(1)),
+        ZoneOffsetTransition.of(LocalDateTime.of(1970, 1, 1, 20, 0),
+            ZoneOffset.UTC, ZoneOffset.ofHours(1)));
+
+    OrcTimezoneInfo.HistoricalTransitions actual =
+        OrcTimezoneInfo.buildHistoricalTransitions(pairedTransitions, candidates);
+
+    assertArrayEquals(new long[] {firstHiddenTransition, secondHiddenTransition},
+        actual.transitions);
+    assertArrayEquals(new int[] {3_600_000, 0}, actual.offsets);
   }
 
   @Test
