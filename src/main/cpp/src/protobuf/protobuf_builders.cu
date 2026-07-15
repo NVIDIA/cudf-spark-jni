@@ -680,12 +680,9 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   launch_scan_nested_message_fields(
     input,
     parent,
-    {child_field_descs.device.data(),
-     num_child_fields,
-     nullptr,
-     0,
-     d_child_locations.data(),
-     d_repeated_info.data()},
+    {d_child_locations.data(),
+     d_repeated_info.data(),
+     {child_field_descs.device.data(), num_child_fields}},
     decode_ctx.error->data(),
     !decode_ctx.row_force_null->is_empty() ? decode_ctx.row_force_null->data() : nullptr,
     stream);

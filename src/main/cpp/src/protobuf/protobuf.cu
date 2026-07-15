@@ -349,6 +349,13 @@ protobuf_schema::protobuf_schema(protobuf_decode_context const& context) : conte
 {
   validate_decode_context(context);
   children_by_parent_.resize(context.schema.size() + 1);
+  std::vector<size_t> child_counts(children_by_parent_.size());
+  for (auto const& field : context.schema) {
+    ++child_counts[field.parent_idx + 1];
+  }
+  for (size_t parent_idx = 0; parent_idx < children_by_parent_.size(); ++parent_idx) {
+    children_by_parent_[parent_idx].reserve(child_counts[parent_idx]);
+  }
   for (int schema_idx = 0; schema_idx < static_cast<int>(context.schema.size()); ++schema_idx) {
     children_by_parent_[context.schema[schema_idx].parent_idx + 1].push_back(schema_idx);
   }
@@ -357,14 +364,14 @@ protobuf_schema::protobuf_schema(protobuf_decode_context const& context) : conte
 protobuf_field_meta_view protobuf_schema::field(int schema_idx) const
 {
   auto const idx = static_cast<size_t>(schema_idx);
-  return protobuf_field_meta_view{context_.schema.at(idx),
-                                  cudf::data_type{context_.schema.at(idx).output_type},
-                                  context_.default_ints.at(idx),
-                                  context_.default_floats.at(idx),
-                                  context_.default_bools.at(idx),
-                                  context_.default_strings.at(idx),
-                                  context_.enum_valid_values.at(idx),
-                                  context_.enum_names.at(idx)};
+  return {context_.schema.at(idx),
+          cudf::data_type{context_.schema.at(idx).output_type},
+          context_.default_ints.at(idx),
+          context_.default_floats.at(idx),
+          context_.default_bools.at(idx),
+          context_.default_strings.at(idx),
+          context_.enum_valid_values.at(idx),
+          context_.enum_names.at(idx)};
 }
 
 std::vector<int> const& protobuf_schema::children(int parent_schema_idx) const
@@ -540,15 +547,15 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     launch_count_repeated_fields(*d_in,
                                  {d_schema.data(), 0},
                                  {d_repeated_info.data(),
-                                  d_repeated_indices.data(),
-                                  num_repeated,
-                                  d_fn_to_rep.data(),
-                                  static_cast<int>(d_fn_to_rep.size())},
+                                  {d_repeated_indices.data(),
+                                   num_repeated,
+                                   d_fn_to_rep.data(),
+                                   static_cast<int>(d_fn_to_rep.size())}},
                                  {d_nested_locations.data(),
-                                  d_nested_indices.data(),
-                                  num_nested,
-                                  d_fn_to_nested.data(),
-                                  static_cast<int>(d_fn_to_nested.size())},
+                                  {d_nested_indices.data(),
+                                   num_nested,
+                                   d_fn_to_nested.data(),
+                                   static_cast<int>(d_fn_to_nested.size())}},
                                  d_error.data(),
                                  num_rows,
                                  stream);
@@ -574,12 +581,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
 
     launch_scan_all_fields(*d_in,
-                           {field_descs.device.data(),
-                            num_scalar,
-                            h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
-                            static_cast<int>(h_field_lookup.size()),
-                            d_locations.data(),
-                            nullptr},
+                           {d_locations.data(),
+                            nullptr,
+                            {field_descs.device.data(),
+                             num_scalar,
+                             h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
+                             static_cast<int>(h_field_lookup.size())}},
                            d_error.data(),
                            track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                            num_rows,
