@@ -432,10 +432,11 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
         if (!checked_add_int32(data_offset, len_bytes, data_location)) {
           set_error_once(error_flag, protobuf_error::OVERFLOW);
           mark_row_error();
-          return;
+          // The occurrence pass can still skip this field, so keep the scans aligned.
+        } else {
+          nested_locations[flat_index(row, num_nested_fields, f)] = {data_location,
+                                                                     static_cast<int32_t>(len)};
         }
-        nested_locations[flat_index(row, num_nested_fields, f)] = {data_location,
-                                                                   static_cast<int32_t>(len)};
       }
     }
 
