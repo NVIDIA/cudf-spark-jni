@@ -943,8 +943,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
 
     buffer_slices[i] = buffer_slice(base_ptr + buffer_offsets[i], size, buffer_offsets[i]);
 
-    bool const zero_validity =
-      buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity;
+    bool const zero_validity = buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity;
     bool const zero_empty_offsets =
       buf_type == 1 && size > 0 && h_column_info[col_idx].num_rows == 0;
     if (zero_validity || zero_empty_offsets) {
@@ -958,7 +957,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   // Batch memset all collected buffers at once for better performance with many columns
   if (!spans_to_zero.empty()) {
     cudf::host_span<cudf::device_span<cudf::bitmask_type> const> host_spans(spans_to_zero.data(),
-                                                                           spans_to_zero.size());
+                                                                            spans_to_zero.size());
     cudf::detail::batched_memset<cudf::bitmask_type>(host_spans, cudf::bitmask_type{0}, stream);
   }
 
