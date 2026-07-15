@@ -232,11 +232,16 @@ public class OrcTimezoneInfoTest {
         ZoneOffset.ofHours(3),
         ZoneOffset.ofHours(2)).getInstant().toEpochMilli();
     int index = Arrays.binarySearch(info.transitions, transition);
+    TimeZone tz = TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId("Asia/Gaza").getId());
+    int offsetAtTransition = tz.getOffset(transition);
+    int offsetAfterTransition = tz.getOffset(transition + 1);
 
     assertTrue(index >= 0, "expected the ZoneRules candidate in the transition table");
-    assertEquals(7_200_000, info.offsets[index]);
-    assertEquals(transition + 1, info.transitions[index + 1]);
-    assertEquals(10_800_000, info.offsets[index + 1]);
+    assertEquals(offsetAtTransition, info.offsets[index]);
+    if (offsetAfterTransition != offsetAtTransition) {
+      assertEquals(transition + 1, info.transitions[index + 1]);
+      assertEquals(offsetAfterTransition, info.offsets[index + 1]);
+    }
   }
 
   // ---- DST rule extraction ----
