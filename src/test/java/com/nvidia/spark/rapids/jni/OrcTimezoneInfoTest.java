@@ -47,6 +47,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class OrcTimezoneInfoTest {
 
+  @Test
+  void testDstRuleModeNativeValues() {
+    assertEquals(0, OrcDstRuleExtractor.DstRuleMode.DOM_MODE.nativeValue());
+    assertEquals(1, OrcDstRuleExtractor.DstRuleMode.DOW_IN_MONTH_MODE.nativeValue());
+    assertEquals(2, OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE.nativeValue());
+    assertEquals(3, OrcDstRuleExtractor.DstRuleMode.DOW_LE_DOM_MODE.nativeValue());
+    assertEquals(0, OrcDstRuleExtractor.DstTimeMode.WALL_TIME.nativeValue());
+    assertEquals(1, OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME.nativeValue());
+    assertEquals(2, OrcDstRuleExtractor.DstTimeMode.UTC_TIME.nativeValue());
+  }
+
   /**
    * An inert historical transition for synthetic {@link ZoneRules} fixtures.
    *
@@ -309,8 +320,8 @@ public class OrcTimezoneInfoTest {
     assertEquals(3_600_000, rule.dstSavings);
     assertEquals(2, rule.startMonth);
     assertEquals(10, rule.endMonth);
-    assertEquals(2, rule.startMode);
-    assertEquals(2, rule.endMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.startMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.endMode);
     // Day-of-week 1 == Sunday in Calendar's 1=Sun..7=Sat convention.
     assertEquals(1, rule.startDayOfWeek);
     assertEquals(1, rule.endDayOfWeek);
@@ -321,8 +332,10 @@ public class OrcTimezoneInfoTest {
     // the wall-clock instants 02:00 (DST start) and 01:00 (DST end). Lock
     // these so a regression that flips timeMode to WALL would shift the
     // computed UTC transitions by dstSavings and fail verifyDstRule silently.
-    assertEquals(1, rule.startTimeMode, "DST start should be STANDARD time mode");
-    assertEquals(1, rule.endTimeMode, "DST end should be STANDARD time mode");
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.startTimeMode,
+        "DST start should be STANDARD time mode");
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.endTimeMode,
+        "DST end should be STANDARD time mode");
     assertEquals(2 * 3_600_000, rule.startTime, "DST start at 02:00 standard");
     assertEquals(1 * 3_600_000, rule.endTime, "DST end at 01:00 standard");
   }
@@ -344,10 +357,10 @@ public class OrcTimezoneInfoTest {
     // Probing path encodes both ends as DOW_GE_DOM (mode=2) on STANDARD time
     // (timeMode=1). BST flips on at 01:00 standard in March and off at 01:00
     // standard in October.
-    assertEquals(2, rule.startMode);
-    assertEquals(2, rule.endMode);
-    assertEquals(1, rule.startTimeMode);
-    assertEquals(1, rule.endTimeMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.startMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.endMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.startTimeMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.endTimeMode);
     assertEquals(1 * 3_600_000, rule.startTime, "DST start at 01:00 standard");
     assertEquals(1 * 3_600_000, rule.endTime, "DST end at 01:00 standard");
   }
@@ -376,10 +389,10 @@ public class OrcTimezoneInfoTest {
     assertEquals(1, rule.endDay);
     assertEquals(1, rule.startDayOfWeek);
     assertEquals(1, rule.endDayOfWeek);
-    assertEquals(2, rule.startMode);
-    assertEquals(2, rule.endMode);
-    assertEquals(1, rule.startTimeMode);
-    assertEquals(1, rule.endTimeMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.startMode);
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.endMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.startTimeMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.endTimeMode);
     assertEquals(2 * 3_600_000, rule.startTime, "DST start at 02:00 standard");
     assertEquals(2 * 3_600_000, rule.endTime, "DST end at 02:00 standard");
   }
@@ -992,14 +1005,14 @@ public class OrcTimezoneInfoTest {
     assertEquals(2, rule.startMonth);
     assertEquals(8, rule.startDay);
     assertEquals(1, rule.startDayOfWeek);
-    assertEquals(2, rule.startMode);
-    assertEquals(1, rule.startTimeMode);  // STANDARD
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.startMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.startTimeMode);
     assertEquals(2 * 3_600_000, rule.startTime);
     assertEquals(10, rule.endMonth);
     assertEquals(1, rule.endDay);
     assertEquals(1, rule.endDayOfWeek);
-    assertEquals(2, rule.endMode);
-    assertEquals(2, rule.endTimeMode);  // UTC — covers TIME_MODE_UTC branch
+    assertEquals(OrcDstRuleExtractor.DstRuleMode.DOW_GE_DOM_MODE, rule.endMode);
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.UTC_TIME, rule.endTimeMode);
     assertEquals(2 * 3_600_000, rule.endTime);
   }
 
@@ -1099,9 +1112,9 @@ public class OrcTimezoneInfoTest {
     OrcDstRuleExtractor.DstRule rule = OrcDstRuleExtractor.extractDstRule(
         "Synthetic/WallMode", tz, rules);
     assertNotNull(rule, "Path A with WALL start rule must succeed");
-    assertEquals(0, rule.startTimeMode,
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.WALL_TIME, rule.startTimeMode,
         "TimeDefinition.WALL must produce TIME_MODE_WALL (0)");
-    assertEquals(1, rule.endTimeMode,
+    assertEquals(OrcDstRuleExtractor.DstTimeMode.STANDARD_TIME, rule.endTimeMode,
         "TimeDefinition.STANDARD must produce TIME_MODE_STANDARD (1)");
   }
 }

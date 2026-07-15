@@ -681,14 +681,14 @@ public class GpuTimeZoneDB {
         rule.startDay,
         rule.startDayOfWeek,
         rule.startTime,
-        rule.startTimeMode,
-        rule.startMode,
+        rule.startTimeMode.nativeValue(),
+        rule.startMode.nativeValue(),
         rule.endMonth,
         rule.endDay,
         rule.endDayOfWeek,
         rule.endTime,
-        rule.endTimeMode,
-        rule.endMode
+        rule.endTimeMode.nativeValue(),
+        rule.endMode.nativeValue()
     };
   }
 
