@@ -759,20 +759,22 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
   auto const writer_2015_year_base_offset =
     make_orc_base_offset_info(writer_2015_year_base_offset_us);
-  auto const writer_args = orc_tz_side_kernel_args{writer_trans_ptr,
+  auto const is_writer_fixed = writer_trans_count == 0 && !writer.dst.has_dst;
+  auto const is_reader_fixed = reader_trans_count == 0 && !reader.dst.has_dst;
+  auto const writer_args     = orc_tz_side_kernel_args{writer_trans_ptr,
                                                    writer_offsets_ptr,
                                                    writer_trans_count,
                                                    writer.initial_offset,
                                                    writer.raw_offset,
                                                    writer.dst,
-                                                   writer_trans_count == 0 && !writer.dst.has_dst};
-  auto const reader_args = orc_tz_side_kernel_args{reader_trans_ptr,
+                                                   is_writer_fixed};
+  auto const reader_args     = orc_tz_side_kernel_args{reader_trans_ptr,
                                                    reader_offsets_ptr,
                                                    reader_trans_count,
                                                    reader.initial_offset,
                                                    reader.raw_offset,
                                                    reader.dst,
-                                                   reader_trans_count == 0 && !reader.dst.has_dst};
+                                                   is_reader_fixed};
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
