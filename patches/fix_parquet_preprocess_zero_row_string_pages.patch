@@ -1,0 +1,397 @@
+diff --git a/cpp/src/io/parquet/decode_preprocess.cu b/cpp/src/io/parquet/decode_preprocess.cu
+index 13dad751c9c..946861671a0 100644
+--- a/cpp/src/io/parquet/decode_preprocess.cu
++++ b/cpp/src/io/parquet/decode_preprocess.cu
+@@ -287,7 +287,8 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
+ 
+   // in the trim pass, for anything with lists, we only need to fully process bounding pages (those
+   // at the beginning or the end of the row bounds)
+-  if (!is_base_pass && !is_bounds_page(s, min_row, num_rows, has_repetition)) {
++  if (!is_base_pass &&
++      !is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition)) {
+     int depth = 0;
+     while (depth < s->page.num_output_nesting_levels) {
+       auto const thread_depth = depth + t;
+@@ -295,7 +296,7 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
+         // if we are not a bounding page (as checked above) then we are either
+         // returning all rows/values from this page, or 0 of them
+         pp->nesting[thread_depth].batch_size =
+-          (s->num_rows == 0 && !is_page_contained(s, min_row, num_rows))
++          (s->num_rows == 0 && !is_page_contained(s->page, s->col.start_row, min_row, num_rows))
+             ? 0
+             : pp->nesting[thread_depth].size;
+       }
+diff --git a/cpp/src/io/parquet/page_decode.cuh b/cpp/src/io/parquet/page_decode.cuh
+index 9d03f3f7e4f..ef0a8f9e502 100644
+--- a/cpp/src/io/parquet/page_decode.cuh
++++ b/cpp/src/io/parquet/page_decode.cuh
+@@ -180,20 +180,22 @@ __device__ constexpr bool is_string_col(PageInfo const& page,
+  * @brief Returns whether or not a page spans either the beginning or the end of the
+  * specified row bounds
+  *
+- * @param s The page to be checked
++ * @param page The page to be checked
++ * @param chunk_start_row Absolute row index of the first row in the page's column chunk
+  * @param start_row The starting row index
+  * @param num_rows The number of rows
+  * @param has_repetition True if the schema has nesting
+  *
+  * @return True if the page spans the beginning or the end of the row bounds
+  */
+-inline __device__ bool is_bounds_page(page_state_s* const s,
++inline __device__ bool is_bounds_page(PageInfo const& page,
++                                      size_t chunk_start_row,
+                                       size_t start_row,
+                                       size_t num_rows,
+                                       bool has_repetition)
+ {
+-  size_t const page_begin = s->col.start_row + s->page.chunk_row;
+-  size_t const page_end   = page_begin + s->page.num_rows;
++  size_t const page_begin = chunk_start_row + page.chunk_row;
++  size_t const page_end   = page_begin + page.num_rows;
+   size_t const begin      = start_row;
+   size_t const end        = start_row + num_rows;
+ 
+@@ -205,8 +207,7 @@ inline __device__ bool is_bounds_page(page_state_s* const s,
+   // relax the test for `page_end` if we adjusted the `num_rows` for the last page to compensate
+   // for list row size estimates in `generate_list_column_row_count_estimates()` when chunked
+   // read mode.
+-  auto const test_page_end_nonlists =
+-    s->page.is_num_rows_adjusted ? page_end >= end : page_end > end;
++  auto const test_page_end_nonlists = page.is_num_rows_adjusted ? page_end >= end : page_end > end;
+ 
+   auto const is_bounds_page_nonlists =
+     (page_begin < begin and page_end > begin) or (page_begin < end and test_page_end_nonlists);
+@@ -218,22 +219,65 @@ inline __device__ bool is_bounds_page(page_state_s* const s,
+  * @brief Returns whether or not a page is completely contained within the specified
+  * row bounds
+  *
+- * @param s The page to be checked
++ * @param page The page to be checked
++ * @param chunk_start_row Absolute row index of the first row in the page's column chunk
+  * @param start_row The starting row index
+  * @param num_rows The number of rows
+  *
+  * @return True if the page is completely contained within the row bounds
+  */
+-inline __device__ bool is_page_contained(page_state_s* const s, size_t start_row, size_t num_rows)
++inline __device__ bool is_page_contained(PageInfo const& page,
++                                         size_t chunk_start_row,
++                                         size_t start_row,
++                                         size_t num_rows)
+ {
+-  size_t const page_begin = s->col.start_row + s->page.chunk_row;
+-  size_t const page_end   = page_begin + s->page.num_rows;
++  size_t const page_begin = chunk_start_row + page.chunk_row;
++  size_t const page_end   = page_begin + page.num_rows;
+   size_t const begin      = start_row;
+   size_t const end        = start_row + num_rows;
+ 
+   return page_begin >= begin && page_end <= end;
+ }
+ 
++/**
++ * @brief Determine whether a page contains work to do for the requested row bounds.
++ *
++ * A page normally has work to do when its row range [page_start_row, page_start_row +
++ * page_num_rows) intersects the requested range [min_row, min_row + num_rows).
++ *
++ * For list schemas a single row can span multiple pages, so a page may legitimately
++ * carry values while containing zero of its own rows. Such a page must still be processed when
++ * it spans (is a "bounds" page for) or is fully contained within the requested range.
++ *
++ * @param page The page to be checked
++ * @param chunk_start_row Absolute row index of the first row in the page's column chunk
++ * @param min_row Absolute index of the first requested row
++ * @param num_rows Number of requested rows
++ * @param has_repetition True if the schema has nesting (list) columns
++ *
++ * @return True if the page has rows/values to process for the requested range
++ */
++inline __device__ bool page_has_rows_to_process(PageInfo const& page,
++                                                size_t chunk_start_row,
++                                                size_t min_row,
++                                                size_t num_rows,
++                                                bool has_repetition)
++{
++  size_t const page_start_row = chunk_start_row + page.chunk_row;
++  size_t const page_end_row   = page_start_row + page.num_rows;
++  size_t const end_row        = min_row + num_rows;
++
++  // A page has rows to read when its row range intersects the requested range.
++  bool const has_rows =
++    (page.num_rows > 0) && (page_start_row < end_row) && (page_end_row > min_row);
++  if (has_rows || !has_repetition) { return has_rows; }
++
++  // A single list row can span pages, so a list page can carry values (and offsets) with 0 rows;
++  // such a page carries no rows of its own but must still be processed.
++  return is_bounds_page(page, chunk_start_row, min_row, num_rows, has_repetition) ||
++         is_page_contained(page, chunk_start_row, min_row, num_rows);
++}
++
+ /**
+  * @brief Retrieves string information for a string at the specified source position
+  *
+@@ -1158,9 +1202,7 @@ inline __device__ bool setup_local_page_info(page_state_s* const s,
+   // NOTE: this check needs to be done after the null counts have been zeroed out
+   bool const has_repetition = s->col.max_level[level_type::REPETITION] > 0;
+   if ((stage == page_processing_stage::STRING_BOUNDS || stage == page_processing_stage::DECODE) &&
+-      s->num_rows == 0 &&
+-      !(has_repetition && (is_bounds_page(s, min_row, num_rows, has_repetition) ||
+-                           is_page_contained(s, min_row, num_rows)))) {
++      !page_has_rows_to_process(s->page, s->col.start_row, min_row, num_rows, has_repetition)) {
+     return false;
+   }
+ 
+diff --git a/cpp/src/io/parquet/page_delta_decode.cu b/cpp/src/io/parquet/page_delta_decode.cu
+index acdb0840f01..85bf383bb43 100644
+--- a/cpp/src/io/parquet/page_delta_decode.cu
++++ b/cpp/src/io/parquet/page_delta_decode.cu
+@@ -1,5 +1,5 @@
+ /*
+- * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
++ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+@@ -582,8 +582,9 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
+ 
+   // if this is a bounds page and nested, then we need to skip up front. non-nested will work
+   // its way through the page.
+-  int string_pos          = has_repetition ? s->page.start_val : 0;
+-  auto const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++  int string_pos = has_repetition ? s->page.start_val : 0;
++  auto const is_bounds_pg =
++    is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+   if (is_bounds_pg && string_pos > 0) { dba->skip(use_char_ll); }
+ 
+   while (!s->error && (s->input_value_count < s->num_input_values || s->src_pos < s->nz_count)) {
+@@ -789,7 +790,8 @@ CUDF_KERNEL void __launch_bounds__(decode_block_size)
+   // if this is a bounds page, then we need to decode up to the first mini-block
+   // that has a value we need, and set string_offset to the position of the first value in the
+   // string data block.
+-  auto const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++  auto const is_bounds_pg =
++    is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+   if (is_bounds_pg && s->page.start_val > 0) {
+     if (warp.meta_group_rank() == 0) {
+       // string_off is only valid on thread 0
+diff --git a/cpp/src/io/parquet/page_string_decode.cu b/cpp/src/io/parquet/page_string_decode.cu
+index c0abf04ff86..4a53c717cbc 100644
+--- a/cpp/src/io/parquet/page_string_decode.cu
++++ b/cpp/src/io/parquet/page_string_decode.cu
+@@ -549,7 +549,8 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
+     return;
+   }
+ 
+-  bool const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++  bool const is_bounds_pg =
++    is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+ 
+   // if we have size info, then we only need to do this for bounds pages
+   if (pp->has_page_index && !is_bounds_pg) { return; }
+@@ -641,12 +642,13 @@ CUDF_KERNEL void __launch_bounds__(delta_preproc_block_size)
+       }
+     }
+   } else {
+-    bool const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++    bool const is_bounds_pg =
++      is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+ 
+     // if we have size info, then we only need to do this for bounds pages
+     if (pp->has_page_index && !is_bounds_pg) {
+       // check if we need to store values from the index
+-      if (t == 0 && is_page_contained(s, min_row, num_rows)) {
++      if (t == 0 && is_page_contained(s->page, s->col.start_row, min_row, num_rows)) {
+         pp->str_bytes = pp->str_bytes_from_index;
+       }
+       return;
+@@ -722,12 +724,13 @@ CUDF_KERNEL void __launch_bounds__(delta_length_block_size)
+     return;
+   }
+ 
+-  bool const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++  bool const is_bounds_pg =
++    is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+ 
+   // if we have size info, then we only need to do this for bounds pages
+   if (pp->has_page_index && !is_bounds_pg) {
+     // check if we need to store values from the index
+-    if (t == 0 && is_page_contained(s, min_row, num_rows)) {
++    if (t == 0 && is_page_contained(s->page, s->col.start_row, min_row, num_rows)) {
+       pp->str_bytes = pp->str_bytes_from_index;
+     }
+     return;
+@@ -835,12 +838,13 @@ CUDF_KERNEL void __launch_bounds__(preprocess_block_size)
+     return;
+   }
+ 
+-  bool const is_bounds_pg = is_bounds_page(s, min_row, num_rows, has_repetition);
++  bool const is_bounds_pg =
++    is_bounds_page(s->page, s->col.start_row, min_row, num_rows, has_repetition);
+ 
+   // if we have size info, then we only need to do this for bounds pages
+   if (pp->has_page_index && !is_bounds_pg) {
+     // check if we need to store values from the index
+-    if (t == 0 && is_page_contained(s, min_row, num_rows)) {
++    if (t == 0 && is_page_contained(s->page, s->col.start_row, min_row, num_rows)) {
+       pp->str_bytes = pp->str_bytes_from_index;
+     }
+     return;
+diff --git a/cpp/src/io/parquet/reader_impl_preprocess.cu b/cpp/src/io/parquet/reader_impl_preprocess.cu
+index db0ec7c4758..3eddddf8d0c 100644
+--- a/cpp/src/io/parquet/reader_impl_preprocess.cu
++++ b/cpp/src/io/parquet/reader_impl_preprocess.cu
+@@ -5,6 +5,7 @@
+ 
+ #include "error.hpp"
+ #include "io/comp/common.hpp"
++#include "page_decode.cuh"
+ #include "reader_impl.hpp"
+ #include "reader_impl_chunking_utils.cuh"
+ #include "reader_impl_preprocess_utils.cuh"
+@@ -369,10 +370,6 @@ struct compute_page_offset_count {
+             decode_kernel_mask::STRING_STREAM_SPLIT_NESTED,
+             decode_kernel_mask::STRING_STREAM_SPLIT_LIST);
+ 
+-    // Mask for pages with lists (repetition levels)
+-    constexpr uint32_t STRINGS_WITH_LISTS_MASK =
+-      BitOr(decode_kernel_mask::STRING_LIST, decode_kernel_mask::STRING_STREAM_SPLIT_LIST);
+-
+     auto const& page  = pages[page_idx];
+     auto const& chunk = chunks[page.chunk_idx];
+ 
+@@ -382,18 +379,14 @@ struct compute_page_offset_count {
+     // Fixed length byte array: Offsets are fixed, no need to preprocess
+     if (chunk.physical_type == Type::FIXED_LEN_BYTE_ARRAY) { return 0; }
+ 
+-    auto const page_start_row    = chunk.start_row + page.chunk_row;
+-    auto const page_end_row      = page_start_row + page.num_rows;
+-    auto const subpass_start_row = skip_rows;
+-    auto const subpass_end_row   = subpass_start_row + num_rows;
++    auto const page_start_row = chunk.start_row + page.chunk_row;
++    auto const page_end_row   = page_start_row + page.num_rows;
+ 
+-    if ((page_end_row <= subpass_start_row) || (page_start_row >= subpass_end_row)) {
+-      return 0;  // will skip the page
++    bool const is_list_col = chunk.max_level[level_type::REPETITION] > 0;
++    if (!page_has_rows_to_process(page, chunk.start_row, skip_rows, num_rows, is_list_col)) {
++      return 0;
+     }
+ 
+-    // Check if this column is a list type
+-    bool const is_list_col = BitAnd(page.kernel_mask, STRINGS_WITH_LISTS_MASK) != 0;
+-
+     size_t page_num_values;
+     if (is_list_col) {
+       // For list columns, use batch_size computed during preprocessing
+@@ -403,7 +396,7 @@ struct compute_page_offset_count {
+     } else {
+       // For non-list columns, we don't know how many values we'll read, because we don't know
+       // how many nulls we'll skip. So we have to read through the skipped rows on the page.
+-      auto const read_end_row = min(page_end_row, subpass_end_row);
++      auto const read_end_row = min(page_end_row, skip_rows + num_rows);
+       page_num_values         = read_end_row - page_start_row;
+     }
+ 
+diff --git a/cpp/tests/io/parquet_chunked_reader_test.cu b/cpp/tests/io/parquet_chunked_reader_test.cu
+index 0b4910ef4ee..c131a9983e0 100644
+--- a/cpp/tests/io/parquet_chunked_reader_test.cu
++++ b/cpp/tests/io/parquet_chunked_reader_test.cu
+@@ -518,6 +518,96 @@ TEST_F(ParquetChunkedReaderTest, TestChunkedReadWithString)
+   }
+ }
+ 
++// Regression test for an out-of-bounds write in the Parquet string-offset preprocessing
++// (preprocess_string_offsets_kernel / compute_page_offset_count). For plain-encoded (non-
++// dictionary) list<string> columns, a single list row can span multiple data pages, producing
++// data pages that contain 0 rows. When a subpass row-boundary fell exactly on such a 0-row page,
++// the host-side offset-buffer sizing skipped the page while the decode-side kernels still wrote
++// its offsets, writing one element past the end of the string offset buffer.
++//
++// This test induces page-spanning list rows (0-row pages) and reads across subpass boundaries
++// that land on them, using both chunked reads and skip_rows/num_rows windows. It validates output
++// correctness and is especially effective under compute-sanitizer (memcheck).
++TEST_F(ParquetChunkedReaderTest, TestChunkedReadWithPlainListOfStringSpanningPages)
++{
++  auto constexpr num_rows   = 2'000;
++  auto constexpr giant_row  = 1'000;
++  auto constexpr giant_size = 40'000;  // list length of the page-spanning row
++  auto constexpr small_size = 3;
++
++  // Build a list<string> column where one row is large enough to span many small data pages.
++  std::vector<cudf::size_type> list_sizes(num_rows, small_size);
++  list_sizes[giant_row] = giant_size;
++
++  std::vector<cudf::size_type> offsets(num_rows + 1, 0);
++  for (int i = 0; i < num_rows; ++i) {
++    offsets[i + 1] = offsets[i] + list_sizes[i];
++  }
++  auto const num_children = offsets.back();
++
++  // Distinct strings so the writer uses PLAIN (not dictionary) encoding.
++  std::vector<std::string> child_strings(num_children);
++  for (int i = 0; i < num_children; ++i) {
++    child_strings[i] = "str_" + std::to_string(i);
++  }
++
++  auto child_col   = strings_col(child_strings.begin(), child_strings.end()).release();
++  auto offsets_col = int32s_col(offsets.begin(), offsets.end()).release();
++  auto list_col    = cudf::make_lists_column(
++    num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
++
++  std::vector<std::unique_ptr<cudf::column>> cols;
++  cols.push_back(std::move(list_col));
++  auto const expected = std::make_unique<cudf::table>(std::move(cols));
++
++  // Write plain-encoded (no dictionary, no delta/v2) with small pages so the giant row spans
++  // multiple pages, forcing 0-row continuation pages.
++  auto const filepath = temp_env->get_temp_filepath("chunked_plain_list_string_spanning.parquet");
++  auto const write_opts =
++    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, expected->view())
++      .dictionary_policy(cudf::io::dictionary_policy::NEVER)
++      .write_v2_headers(false)
++      .compression(cudf::io::compression_type::NONE)
++      .max_page_size_bytes(4 * 1024)
++      .max_page_size_rows(128)
++      .build();
++  cudf::io::write_parquet(write_opts);
++
++  // Full read baseline.
++  {
++    auto const opts =
++      cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath}).build();
++    auto const result = cudf::io::read_parquet(opts);
++    CUDF_TEST_EXPECT_TABLES_EQUAL(expected->view(), result.tbl->view());
++  }
++
++  // Chunked reads with small byte limits create subpass boundaries that can fall on the giant
++  // row's 0-row pages.
++  for (auto const output_limit : std::vector<std::size_t>{1, 1'000, 50'000, 500'000}) {
++    auto const [result, num_chunks] = chunked_read(filepath, output_limit);
++    CUDF_TEST_EXPECT_TABLES_EQUAL(expected->view(), *result);
++  }
++
++  // Non-chunked reads whose skip_rows/num_rows window starts or ends inside the page-spanning
++  // row, so the subpass boundary lands on a 0-row page (both the start- and end-boundary cases).
++  auto const check_bounds = [&](cudf::size_type skip, cudf::size_type num) {
++    auto const opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
++                        .skip_rows(skip)
++                        .num_rows(num)
++                        .build();
++    auto const result = cudf::io::read_parquet(opts);
++    auto const expected_slice =
++      cudf::slice(expected->view(), std::vector<cudf::size_type>{skip, skip + num});
++    CUDF_TEST_EXPECT_TABLES_EQUAL(expected_slice.front(), result.tbl->view());
++  };
++
++  for (cudf::size_type skip = giant_row - 2; skip <= giant_row + 2; ++skip) {
++    for (cudf::size_type end = giant_row - 1; end <= giant_row + 3; ++end) {
++      if (end > skip && end <= num_rows) { check_bounds(skip, end - skip); }
++    }
++  }
++}
++
+ TEST_F(ParquetChunkedReaderTest, TestChunkedReadWithStringPrecise)
+ {
+   auto constexpr num_rows = 60'000;
