@@ -407,6 +407,7 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   repeated_field_count_view repeated,
                                   nested_field_location_view nested,
                                   protobuf_error* error_flag,
+                                  bool* row_has_invalid_data,
                                   int num_rows,
                                   rmm::cuda_stream_view stream);
 

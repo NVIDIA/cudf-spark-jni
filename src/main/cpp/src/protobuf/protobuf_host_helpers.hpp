@@ -179,13 +179,15 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
  * Build a host-side direct-mapped lookup table: field_number -> index.
  * @param get_field_number Callable: (int i) -> field_number for the i-th entry.
  * @param num_entries Number of entries.
- * @return Empty vector if the max field number exceeds the threshold.
+ * @return Empty vector if there are no entries or the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
 inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field_number,
                                                          int num_entries,
                                                          rmm::cuda_stream_view stream)
 {
+  if (num_entries == 0) { return cudf::detail::make_pinned_vector_async<int>(0, stream); }
+
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
     max_fn = std::max(max_fn, get_field_number(i));

@@ -405,16 +405,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   auto const num_rows   = binary_input.size();
   auto const num_fields = static_cast<int>(schema.size());
 
-  if (num_fields == 0) {
-    auto const input_null_count = binary_input.null_count();
-    if (input_null_count > 0) {
-      auto null_mask = cudf::copy_bitmask(binary_input, stream, mr);
-      return cudf::make_structs_column(
-        num_rows, {}, input_null_count, std::move(null_mask), stream, mr);
-    }
-    return cudf::make_structs_column(num_rows, {}, 0, rmm::device_buffer{}, stream, mr);
-  }
-
   if (num_rows == 0) {
     std::vector<std::unique_ptr<cudf::column>> empty_children;
     for (int i = 0; i < num_fields; i++) {
@@ -434,16 +424,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Extract shared input data pointers (used by scalar, repeated, and nested sections)
   cudf::lists_column_view const in_list_view(binary_input);
-  auto const* message_data = reinterpret_cast<uint8_t const*>(in_list_view.child().data<int8_t>());
-  auto const message_data_size = in_list_view.child().size();
-  auto const* list_offsets     = in_list_view.offsets().data<cudf::size_type>();
-
-  // Stage list_offsets[0] through pinned host memory so the D2H stays truly async.
-  auto h_base_offset = cudf::detail::make_pinned_vector_async<cudf::size_type>(1, stream);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-    h_base_offset.data(), list_offsets, sizeof(cudf::size_type), stream));
-  stream.synchronize();
-  cudf::size_type base_offset = h_base_offset[0];
+  auto const message_bytes     = in_list_view.get_sliced_child(stream);
+  auto const* message_data     = message_bytes.data<uint8_t>();
+  auto const message_data_size = message_bytes.size();
+  auto const* list_offsets     = in_list_view.offsets_begin();
+  auto const base_offset       = message_bytes.offset() - in_list_view.child().offset();
   auto const input =
     protobuf_input_view{message_data, message_data_size, list_offsets, base_offset, num_rows};
 
@@ -481,9 +466,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
   }
 
-  int const num_repeated = static_cast<int>(repeated_field_indices.size());
-  int const num_nested   = static_cast<int>(nested_field_indices.size());
-  int const num_scalar   = static_cast<int>(scalar_field_indices.size());
+  int const num_repeated    = static_cast<int>(repeated_field_indices.size());
+  int const num_nested      = static_cast<int>(nested_field_indices.size());
+  int const num_scalar      = static_cast<int>(scalar_field_indices.size());
+  bool const run_count_scan = num_repeated > 0 || num_nested > 0;
+  // Validate empty schemas through the field scan without rescanning repeated-only schemas.
+  bool const run_field_scan = num_scalar > 0 || !run_count_scan;
 
   auto d_error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(
     1, stream, cudf::get_current_device_resource_ref());
@@ -527,7 +515,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   rmm::device_uvector<int> d_fn_to_rep(0, stream, scratch_mr);
   rmm::device_uvector<int> d_fn_to_nested(0, stream, scratch_mr);
 
-  if (num_repeated > 0 || num_nested > 0) {
+  if (run_count_scan) {
     auto h_fn_to_rep =
       build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated, stream);
     auto h_fn_to_nested =
@@ -557,6 +545,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                    d_fn_to_nested.data(),
                                    static_cast<int>(d_fn_to_nested.size())}},
                                  d_error.data(),
+                                 track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                  num_rows,
                                  stream);
   }
@@ -565,7 +554,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   std::vector<std::unique_ptr<cudf::column>> column_map(num_fields);
 
   // Process scalar fields using scan + extract infrastructure
-  if (num_scalar > 0) {
+  if (run_field_scan) {
     auto field_descs =
       make_field_descriptors(scalar_field_indices, schema_context, stream, scratch_mr);
 

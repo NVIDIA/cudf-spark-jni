@@ -1,4 +1,5 @@
-/* Copyright (c) 2023-2025, NVIDIA CORPORATION.
+/*
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +16,8 @@
 
 #include "cudf_jni_apis.hpp"
 #include "timezones.hpp"
+
+#include <cstdint>
 
 extern "C" {
 
@@ -97,14 +100,47 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertTimestampColumnToUTCWithTz
   JNI_CATCH(env, 0);
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezones(JNIEnv* env,
-                                                                   jclass,
-                                                                   jlong input_handle,
-                                                                   jlong writer_tz_info_table,
-                                                                   jint writer_tz_raw_offset,
-                                                                   jlong reader_tz_info_table,
-                                                                   jint reader_tz_raw_offset)
+static spark_rapids_jni::dst_rule parse_dst_rule(JNIEnv* env, jintArray java_rule)
+{
+  spark_rapids_jni::dst_rule rule{};
+  if (java_rule == nullptr) { return rule; }
+
+  cudf::jni::native_jintArray const values(env, java_rule);
+  constexpr int32_t expected_rule_size = 13;
+  JNI_ARG_CHECK(
+    env, values.size() == expected_rule_size, "ORC DST rule array must contain 13 integers", rule);
+
+  // Keep this field order synchronized with GpuTimeZoneDB.dstRuleToArray.
+  rule.has_dst         = true;
+  rule.dst_savings     = values[0];
+  rule.start_month     = values[1];
+  rule.start_day       = values[2];
+  rule.start_dow       = values[3];
+  rule.start_time      = values[4];
+  rule.start_time_mode = values[5];
+  rule.start_mode      = values[6];
+  rule.end_month       = values[7];
+  rule.end_day         = values[8];
+  rule.end_dow         = values[9];
+  rule.end_time        = values[10];
+  rule.end_time_mode   = values[11];
+  rule.end_mode        = values[12];
+  return rule;
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezonesWithRules(
+  JNIEnv* env,
+  jclass,
+  jlong input_handle,
+  jlong writer_tz_offset_at_orc_2015_base_us,
+  jlong writer_tz_info_table,
+  jint writer_tz_initial_offset,
+  jint writer_tz_raw_offset,
+  jintArray writer_dst_rule,
+  jlong reader_tz_info_table,
+  jint reader_tz_initial_offset,
+  jint reader_tz_raw_offset,
+  jintArray reader_dst_rule)
 {
   JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
 
@@ -114,10 +150,17 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcTimezones(JNIEnv* env,
     auto const input              = reinterpret_cast<cudf::column_view const*>(input_handle);
     auto const writer_tz_info_tab = reinterpret_cast<cudf::table_view const*>(writer_tz_info_table);
     auto const reader_tz_info_tab = reinterpret_cast<cudf::table_view const*>(reader_tz_info_table);
-    return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::convert_orc_writer_reader_timezones(
-        *input, writer_tz_info_tab, writer_tz_raw_offset, reader_tz_info_tab, reader_tz_raw_offset)
-        .release());
+    auto const writer_dst         = parse_dst_rule(env, writer_dst_rule);
+    cudf::jni::check_java_exception(env);
+    auto const reader_dst = parse_dst_rule(env, reader_dst_rule);
+    cudf::jni::check_java_exception(env);
+
+    auto const writer = spark_rapids_jni::orc_tz_side{
+      writer_tz_info_tab, writer_tz_initial_offset, writer_tz_raw_offset, writer_dst};
+    auto const reader = spark_rapids_jni::orc_tz_side{
+      reader_tz_info_tab, reader_tz_initial_offset, reader_tz_raw_offset, reader_dst};
+    return cudf::jni::release_as_jlong(spark_rapids_jni::convert_orc_writer_reader_timezones(
+      *input, static_cast<int64_t>(writer_tz_offset_at_orc_2015_base_us), writer, reader));
   }
   JNI_CATCH(env, 0);
 }

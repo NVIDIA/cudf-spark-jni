@@ -26,6 +26,7 @@ import ai.rapids.cudf.JSONOptions;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
@@ -187,6 +188,41 @@ public class FromJsonToRawMapTest {
          ColumnVector result = JSONUtils.extractRawMapFromJsonString(input, getOptions(),
              JSONUtils.MapValueType.ARRAY_OF_STRING);
          ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0)) {
+      assertColumnsAreEqual(expected, result);
+      assertKeyAndStructNonNullable(result);
+    }
+  }
+
+  // The delimiter used to concatenate rows must not split an embedded NUL in an array element.
+  @Test
+  void testExtractRawMapArrayEmbeddedNul() {
+    String valueWithNul = "a\u0000b";
+    List<HostColumnVector.StructData> row0 =
+        Arrays.asList(pair("k", Arrays.asList(valueWithNul)));
+    try (ColumnVector input =
+             ColumnVector.fromStrings("{\"k\":[\"" + valueWithNul + "\"]}");
+         ColumnVector result = JSONUtils.extractRawMapFromJsonString(input, getOptions(),
+             JSONUtils.MapValueType.ARRAY_OF_STRING);
+         ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0)) {
+      assertColumnsAreEqual(expected, result);
+      assertKeyAndStructNonNullable(result);
+    }
+  }
+
+  // Empty keys, lists, and strings are valid values and must remain distinct from JSON null.
+  @Test
+  void testExtractRawMapArrayEmptyBoundaries() {
+    List<HostColumnVector.StructData> row0 =
+        Arrays.asList(pair("", Collections.emptyList()));
+    List<HostColumnVector.StructData> row1 =
+        Arrays.asList(pair("k", Collections.emptyList()));
+    List<HostColumnVector.StructData> row2 =
+        Arrays.asList(pair("k", Arrays.asList("", "null", null)));
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"\":[]}", "{\"k\":[]}", "{\"k\":[\"\",\"null\",null]}");
+         ColumnVector result = JSONUtils.extractRawMapFromJsonString(input, getOptions(),
+             JSONUtils.MapValueType.ARRAY_OF_STRING);
+         ColumnVector expected = ColumnVector.fromLists(LIST_TYPE, row0, row1, row2)) {
       assertColumnsAreEqual(expected, result);
       assertKeyAndStructNonNullable(result);
     }
