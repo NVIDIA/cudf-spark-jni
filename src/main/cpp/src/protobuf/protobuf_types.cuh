@@ -184,7 +184,7 @@ struct nested_field_location_view {
 struct field_scan_view {
   field_location* locations;
   field_occurrence_count* repeated_info;
-  lookup_view<field_descriptor> field_lookup;
+  lookup_view<field_descriptor> lookup;
 };
 
 }  // namespace spark_rapids_jni::protobuf::detail
