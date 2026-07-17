@@ -97,16 +97,16 @@ struct field_descriptor {
 };
 
 /**
- * Information about repeated field occurrences in a row.
+ * Number of selected field occurrences in a row.
  */
-struct repeated_field_info {
+struct field_occurrence_count {
   int32_t count;  // Number of occurrences in this row
 };
 
 /**
- * Location of a single occurrence of a repeated field.
+ * Location of a single field occurrence.
  */
-struct repeated_occurrence {
+struct field_occurrence {
   int32_t row_idx;  // Which row this occurrence belongs to
   int32_t offset;   // Offset within the message
   int32_t length;   // Length of the field data
@@ -116,12 +116,22 @@ struct repeated_occurrence {
  * Per-field descriptor passed to the combined occurrence scan kernel.
  * Contains device pointers so the kernel can write to each field's output.
  */
-struct repeated_field_scan_desc {
+struct field_occurrence_scan_desc {
   int field_number;
   int wire_type;
-  int32_t const* row_offsets;        // Pre-computed prefix-sum offsets [num_rows + 1]
-  repeated_occurrence* occurrences;  // Output buffer [total_count]
+  int32_t const* row_offsets;     // Pre-computed prefix-sum offsets [num_rows + 1]
+  field_occurrence* occurrences;  // Output buffer [total_count]
 };
+
+template <typename T>
+struct lookup_view {
+  T const* data;
+  int size;
+  int const* direct;
+  int direct_size;
+};
+
+using field_occurrence_scan_view = lookup_view<field_occurrence_scan_desc>;
 
 /**
  * Device-side descriptor for nested schema fields.
@@ -154,6 +164,27 @@ struct device_nested_field_descriptor {
       has_default_value(src.has_default_value)
   {
   }
+};
+
+struct device_schema_view {
+  device_nested_field_descriptor const* fields;
+  int depth;
+};
+
+struct repeated_field_count_view {
+  field_occurrence_count* info;
+  lookup_view<int> schema_lookup;
+};
+
+struct nested_field_location_view {
+  field_location* locations;
+  lookup_view<int> schema_lookup;
+};
+
+struct field_scan_view {
+  field_location* locations;
+  field_occurrence_count* repeated_info;
+  lookup_view<field_descriptor> lookup;
 };
 
 }  // namespace spark_rapids_jni::protobuf::detail

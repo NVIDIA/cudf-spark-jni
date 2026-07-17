@@ -104,9 +104,6 @@ bool is_encoding_compatible(nested_field_descriptor const& field, cudf::data_typ
 
 void validate_decode_context(protobuf_decode_context const& context);
 
-protobuf_field_meta_view make_field_meta_view(protobuf_decode_context const& context,
-                                              int schema_idx);
-
 }  // namespace detail
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,

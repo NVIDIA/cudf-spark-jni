@@ -45,24 +45,49 @@
 
 namespace spark_rapids_jni::protobuf::detail {
 
-// ============================================================================
-// Schema-context bundle
-// ============================================================================
+class protobuf_schema {
+ public:
+  explicit protobuf_schema(protobuf_decode_context const& context);
+  protobuf_schema(protobuf_decode_context&&)       = delete;
+  protobuf_schema(protobuf_decode_context const&&) = delete;
 
-/**
- * View of the per-decode default-value and enum metadata. Reduces parameter pressure on the
- * recursive nested/repeated builders, which all consume the same six host vectors. Holds
- * non-owning references and is cheap to copy, so it is passed by value; the referenced vectors
- * must outlive every call that takes the view.
- */
-struct schema_context_view {
-  std::vector<int64_t> const& default_ints;
-  std::vector<double> const& default_floats;
-  std::vector<bool> const& default_bools;
-  std::vector<cudf::detail::host_vector<uint8_t>> const& default_strings;
-  std::vector<cudf::detail::host_vector<int32_t>> const& enum_valid_values;
-  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> const& enum_names;
+  protobuf_schema(protobuf_schema const&)            = delete;
+  protobuf_schema& operator=(protobuf_schema const&) = delete;
+  protobuf_schema(protobuf_schema&&)                 = delete;
+  protobuf_schema& operator=(protobuf_schema&&)      = delete;
+
+  [[nodiscard]] std::vector<nested_field_descriptor> const& fields() const
+  {
+    return context_.schema;
+  }
+
+  [[nodiscard]] nested_field_descriptor const& operator[](int schema_idx) const
+  {
+    return context_.schema.at(static_cast<size_t>(schema_idx));
+  }
+
+  [[nodiscard]] size_t size() const { return context_.schema.size(); }
+
+  [[nodiscard]] protobuf_field_meta_view field(int schema_idx) const;
+  [[nodiscard]] std::vector<int> const& children(int parent_schema_idx) const;
+  [[nodiscard]] bool is_output(int schema_idx) const;
+
+ private:
+  // Avoid copying pinned metadata; the decode context outlives this stack-scoped facade.
+  protobuf_decode_context const& context_;
+  std::vector<std::vector<int>> children_by_parent_;
 };
+
+// Keep pinned staging alive alongside its device copy until queued H2D work completes.
+struct field_descriptor_bundle {
+  cudf::detail::host_vector<field_descriptor> host;
+  rmm::device_uvector<field_descriptor> device;
+};
+
+field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
+                                               protobuf_schema const& schema,
+                                               rmm::cuda_stream_view stream,
+                                               rmm::device_async_resource_ref mr);
 
 // ============================================================================
 // Nested decode view bundles
@@ -88,6 +113,11 @@ struct protobuf_decode_runtime_context {
   bool propagate_invalid_enum_rows = true;
 };
 
+struct recursive_decode_context {
+  protobuf_schema const& schema;
+  protobuf_decode_runtime_context runtime;
+};
+
 struct list_offsets_from_counts_result {
   int32_t total_count;
   rmm::device_uvector<int32_t> offsets;
@@ -98,7 +128,7 @@ struct repeated_field_work {
   int schema_idx;
   int32_t total_count;
   rmm::device_uvector<int32_t> offsets;
-  std::unique_ptr<rmm::device_uvector<repeated_occurrence>> occurrences;
+  std::unique_ptr<rmm::device_uvector<field_occurrence>> occurrences;
 
   repeated_field_work(int schema_index, list_offsets_from_counts_result offsets_result)
     : schema_idx(schema_index),
@@ -149,13 +179,15 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
  * Build a host-side direct-mapped lookup table: field_number -> index.
  * @param get_field_number Callable: (int i) -> field_number for the i-th entry.
  * @param num_entries Number of entries.
- * @return Empty vector if the max field number exceeds the threshold.
+ * @return Empty vector if there are no entries or the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
 inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field_number,
                                                          int num_entries,
                                                          rmm::cuda_stream_view stream)
 {
+  if (num_entries == 0) { return cudf::detail::make_pinned_vector_async<int>(0, stream); }
+
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
     max_fn = std::max(max_fn, get_field_number(i));
@@ -189,24 +221,56 @@ inline cudf::detail::host_vector<int> build_field_lookup_table(FieldDesc const* 
   return build_lookup_table([&](int i) { return descs[i].field_number; }, num_fields, stream);
 }
 
+struct field_occurrence_scan_bundle {
+  rmm::device_uvector<field_occurrence_scan_desc> descriptors;
+  rmm::device_uvector<int> field_number_lookup;
+
+  field_occurrence_scan_view view() const
+  {
+    auto const lookup_size = static_cast<int>(field_number_lookup.size());
+    return {descriptors.data(),
+            static_cast<int>(descriptors.size()),
+            lookup_size > 0 ? field_number_lookup.data() : nullptr,
+            lookup_size};
+  }
+};
+
+inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
+  cudf::detail::host_vector<field_occurrence_scan_desc> const& host_descriptors,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto descriptors = cudf::detail::make_device_uvector_async(host_descriptors, stream, mr);
+  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
+  auto host_lookup = build_field_lookup_table(
+    host_descriptors.data(), static_cast<int>(host_descriptors.size()), stream);
+  auto lookup = cudf::detail::make_device_uvector_async(host_lookup, stream, mr);
+  return {std::move(descriptors), std::move(lookup)};
+}
+
 /**
  * Find all child field indices for a given parent index in the schema.
  * This is a commonly used pattern throughout the codebase.
  *
  * @param schema The schema vector (either nested_field_descriptor or
  * device_nested_field_descriptor)
- * @param num_fields Number of fields in the schema
  * @param parent_idx The parent index to search for
  * @return Vector of child field indices
  */
 template <typename SchemaT>
-std::vector<int> find_child_field_indices(SchemaT const& schema, int num_fields, int parent_idx)
+std::vector<int> find_child_field_indices(SchemaT const& schema, int parent_idx)
 {
   std::vector<int> child_indices;
-  for (int i = 0; i < num_fields; i++) {
+  for (int i = 0; i < static_cast<int>(schema.size()); i++) {
     if (schema[i].parent_idx == parent_idx) { child_indices.push_back(i); }
   }
   return child_indices;
+}
+
+inline std::vector<int> const& find_child_field_indices(protobuf_schema const& schema,
+                                                        int parent_idx)
+{
+  return schema.children(parent_idx);
 }
 
 // Forward declarations needed by make_empty_struct_column_with_schema
@@ -237,7 +301,6 @@ template <typename SchemaT>
 std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
   SchemaT const& schema,
   int parent_idx,
-  int num_fields,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
@@ -248,7 +311,6 @@ template <typename SchemaT>
 std::unique_ptr<cudf::column> make_empty_struct_column_from_children(
   SchemaT const& schema,
   std::vector<int> const& child_indices,
-  int num_fields,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -258,7 +320,7 @@ std::unique_ptr<cudf::column> make_empty_struct_column_from_children(
 
     std::unique_ptr<cudf::column> child_col;
     if (child_type.id() == cudf::type_id::STRUCT) {
-      child_col = make_empty_struct_column_with_schema(schema, child_idx, num_fields, stream, mr);
+      child_col = make_empty_struct_column_with_schema(schema, child_idx, stream, mr);
     } else {
       child_col = make_empty_column_safe(child_type, stream, mr);
     }
@@ -277,12 +339,11 @@ template <typename SchemaT>
 std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
   SchemaT const& schema,
   int parent_idx,
-  int num_fields,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  auto child_indices = find_child_field_indices(schema, num_fields, parent_idx);
-  return make_empty_struct_column_from_children(schema, child_indices, num_fields, stream, mr);
+  auto const& child_indices = find_child_field_indices(schema, parent_idx);
+  return make_empty_struct_column_from_children(schema, child_indices, stream, mr);
 }
 
 void maybe_check_required_fields(field_location const* locations,
@@ -325,13 +386,11 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
 // Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
 // in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce
 // but with `num_rows` all-null rows.
-std::unique_ptr<cudf::column> make_null_column_with_schema(
-  std::vector<nested_field_descriptor> const& schema,
-  int schema_idx,
-  int num_fields,
-  cudf::size_type num_rows,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const& schema,
+                                                           int schema_idx,
+                                                           cudf::size_type num_rows,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> make_null_list_column_with_child(
   std::unique_ptr<cudf::column> child_col,
@@ -367,7 +426,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
@@ -379,7 +438,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
   rmm::device_uvector<int32_t> d_field_offsets,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
+  rmm::device_uvector<field_occurrence>& d_occurrences,
   int total_count,
   bool is_bytes,
   rmm::device_uvector<protobuf_error>& d_error,
@@ -390,41 +449,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   protobuf_input_view input,
   nested_parent_view parent,
   std::vector<int> const& child_field_indices,
-  std::vector<nested_field_descriptor> const& schema,
-  int num_fields,
-  schema_context_view schema_ctx,
-  protobuf_decode_runtime_context decode_ctx,
+  recursive_decode_context context,
   int depth,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> build_repeated_child_list_column(
-  protobuf_input_view input,
-  nested_parent_view parent,
-  std::vector<nested_field_descriptor> const& schema,
-  schema_context_view schema_ctx,
-  protobuf_decode_runtime_context decode_ctx,
-  repeated_field_work work,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
-
-std::unique_ptr<cudf::column> build_repeated_struct_column(
-  cudf::column_view const& binary_input,
-  uint8_t const* message_data,
-  cudf::size_type message_data_size,
-  cudf::size_type const* list_offsets,
-  cudf::size_type base_offset,
-  rmm::device_uvector<int32_t> const& d_field_counts,
-  rmm::device_uvector<repeated_occurrence>& d_occurrences,
-  int total_count,
-  int num_rows,
-  std::vector<device_nested_field_descriptor> const& h_device_schema,
-  std::vector<int> const& child_field_indices,
-  std::vector<nested_field_descriptor> const& schema,
-  schema_context_view ctx,
-  rmm::device_uvector<bool>& d_row_force_null,
-  rmm::device_uvector<protobuf_error>& d_error_top,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_view input,
+                                                               nested_parent_view parent,
+                                                               recursive_decode_context context,
+                                                               repeated_field_work work,
+                                                               rmm::cuda_stream_view stream,
+                                                               rmm::device_async_resource_ref mr);
 
 }  // namespace spark_rapids_jni::protobuf::detail
