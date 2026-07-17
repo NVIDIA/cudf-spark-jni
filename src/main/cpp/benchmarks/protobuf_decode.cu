@@ -1332,14 +1332,12 @@ static void BM_protobuf_repeated_child_string_count_scan(nvbench::state& state)
     message_data, message_data_size, row_offsets, 0, num_rows};
   protobuf_detail::nested_parent_view parent{
     parent_locations.data(), parent_locations.size(), nullptr};
-  protobuf_detail::field_scan_view field_scan{field_descriptors.device.data(),
-                                              num_repeated_children,
-                                              nullptr,
-                                              0,
-                                              field_locations.data(),
-                                              occurrence_counts.data(),
-                                              nullptr,
-                                              nullptr};
+  protobuf_detail::field_scan_view field_scan{
+    field_locations.data(),
+    occurrence_counts.data(),
+    nullptr,
+    nullptr,
+    {field_descriptors.device.data(), num_repeated_children, nullptr, 0}};
 
   size_t total_bytes = 0;
   for (auto const& message : data.messages) {

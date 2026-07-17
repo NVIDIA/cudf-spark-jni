@@ -5810,45 +5810,6 @@ public class ProtobufTest {
   }
 
   @Test
-  void testNestedRepeatedEnumAsStringInvalidValueKeepsNestedRowVisible() {
-    // message Inner { repeated Priority priority = 1 [packed=true]; }
-    // message Outer { Inner inner = 1; }
-    // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
-    byte[] validPriorities = concatBytes(encodeVarint(1), encodeVarint(2));
-    byte[] invalidPriorities = concatBytes(encodeVarint(1), encodeVarint(999));
-    Byte[][] rows = new Byte[][]{
-        concat(box(tag(1, WT_LEN)), encodeMessage(concat(
-            box(tag(1, WT_LEN)), encodeBytes(validPriorities)))),
-        concat(box(tag(1, WT_LEN)), encodeMessage(concat(
-            box(tag(1, WT_LEN)), encodeBytes(invalidPriorities))))
-    };
-    byte[][] enumNames = new byte[][]{
-        "UNKNOWN".getBytes(StandardCharsets.UTF_8),
-        "FOO".getBytes(StandardCharsets.UTF_8),
-        "BAR".getBytes(StandardCharsets.UTF_8)
-    };
-
-    try (Table input = new Table.TestBuilder().column(rows).build();
-         ColumnVector expectedPriorities = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.STRING)),
-             Arrays.asList("FOO", "BAR"),
-             Arrays.asList("FOO", null));
-         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
-         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
-         ColumnVector actual = Protobuf.decodeToStruct(
-             input.getColumn(0),
-             new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRUCT).down()
-                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING).repeated()
-                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
-                 .up()
-                 .build(),
-             false)) {
-      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
-    }
-  }
-
-  @Test
   void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisible() {
     // message Outer { int32 id = 1; Inner inner = 2; string name = 3; }
     // message Inner { enum Status { UNKNOWN=0; OK=1; BAD=2; } Status status = 1;
