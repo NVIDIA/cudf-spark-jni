@@ -31,8 +31,8 @@ import java.util.concurrent.ConcurrentMap;
 
 /**
  * Holds ORC timezone metadata generated at runtime from public java.time/java.util APIs.
- * Historical transitions come from ZoneRules, while offsets before the first transition are
- * derived from java.util.TimeZone so ORC rebasing matches
+ * Historical transitions come from ZoneRules, while offsets before the first transition and
+ * future recurring DST behavior are derived from java.util.TimeZone so ORC rebasing matches
  * SerializationUtils.convertBetweenTimezones semantics without relying on non-public ZoneInfo APIs.
  *
  * <p><b>Runtime dependency:</b> because the metadata is generated on the fly from
@@ -43,11 +43,17 @@ import java.util.concurrent.ConcurrentMap;
  * debugging cross-environment differences should first check the JVM's {@code tzdata} version.
  */
 class OrcTimezoneInfo {
-  public OrcTimezoneInfo(int rawOffset, long[] transitions, int[] offsets) {
+  public OrcTimezoneInfo(int initialOffset, int rawOffset, long[] transitions, int[] offsets,
+      OrcDstRuleExtractor.DstRule dstRule) {
+    this.initialOffset = initialOffset;
     this.rawOffset = rawOffset;
     this.transitions = transitions;
     this.offsets = offsets;
+    this.dstRule = dstRule;
   }
+
+  // Historical offset before the first transition, in milliseconds.
+  final int initialOffset;
 
   // in milliseconds
   final int rawOffset;
@@ -57,6 +63,9 @@ class OrcTimezoneInfo {
 
   // in milliseconds
   final int[] offsets;
+
+  // Recurring rule used after the historical transition table, or null for no DST.
+  final OrcDstRuleExtractor.DstRule dstRule;
 
   // Lower bound of the range ORC supports (year 0001-01-01 UTC). Computed via
   // java.time.LocalDate, which uses the proleptic Gregorian calendar, whereas
@@ -86,9 +95,11 @@ class OrcTimezoneInfo {
   @Override
   public String toString() {
     return "OrcTimezoneInfo{" +
-        "rawOffset=" + rawOffset +
+        "initialOffset=" + initialOffset +
+        ", rawOffset=" + rawOffset +
         ", transitions=" + Arrays.toString(transitions) +
         ", offsets=" + Arrays.toString(offsets) +
+        ", dstRule=" + dstRule +
         '}';
   }
 
@@ -134,7 +145,7 @@ class OrcTimezoneInfo {
       // maps them to GMT (offset 0). Derive the offset from ZoneRules instead so
       // the GPU path doesn't treat them as UTC.
       int fixedOffsetMs = rules.getOffset(Instant.EPOCH).getTotalSeconds() * 1000;
-      return new OrcTimezoneInfo(fixedOffsetMs, null, null);
+      return new OrcTimezoneInfo(fixedOffsetMs, fixedOffsetMs, null, null, null);
     }
     // Use the canonical ID from the resolved ZoneId (e.g. "Asia/Kolkata" for
     // input "IST") so that TimeZone and ZoneRules always refer to the same
@@ -144,13 +155,17 @@ class OrcTimezoneInfo {
     // zone on some JVM distributions, which would silently produce mixed
     // offset data with no exception.
     TimeZone tz = TimeZone.getTimeZone(zoneId.getId());
+    int initialOffset = getInitialOffset(tz);
+    OrcDstRuleExtractor.DstRule dstRule =
+        OrcDstRuleExtractor.extractDstRule(timezoneId, tz, rules);
     List<ZoneOffsetTransition> transitionList = rules.getTransitions();
     HistoricalTransitions historicalTransitions = buildHistoricalTransitions(tz, transitionList);
     if (historicalTransitions.transitions == null) {
-      return new OrcTimezoneInfo(tz.getRawOffset(), null, null);
+      return new OrcTimezoneInfo(initialOffset, tz.getRawOffset(), null, null, dstRule);
     }
-    return new OrcTimezoneInfo(tz.getRawOffset(),
-        historicalTransitions.transitions, historicalTransitions.offsets);
+    return new OrcTimezoneInfo(initialOffset,
+        tz.getRawOffset(), historicalTransitions.transitions, historicalTransitions.offsets,
+        dstRule);
   }
 
   /**
@@ -186,7 +201,7 @@ class OrcTimezoneInfo {
     return tz.getOffset(MIN_SUPPORTED_ORC_UTC_MILLIS);
   }
 
-  private static HistoricalTransitions buildHistoricalTransitions(
+  static HistoricalTransitions buildHistoricalTransitions(
       TimeZone tz,
       List<ZoneOffsetTransition> transitionList) {
     if (transitionList.isEmpty()) {
@@ -197,6 +212,7 @@ class OrcTimezoneInfo {
     List<Integer> offsets = new ArrayList<>();
     long scanCursor = MIN_SUPPORTED_ORC_UTC_MILLIS;
     int currentOffset = getInitialOffset(tz);
+    boolean hasPreviousCandidate = false;
 
     for (ZoneOffsetTransition transition : transitionList) {
       long transitionMs = transition.getInstant().toEpochMilli();
@@ -206,17 +222,19 @@ class OrcTimezoneInfo {
 
       long beforeTransitionMs = transitionMs - 1;
       int offsetBeforeTransition = tz.getOffset(beforeTransitionMs);
-      // Invariant: between two consecutive entries returned by
-      // ZoneRules.getTransitions(), the wall offset is constant — no hidden
-      // paired round-trips (e.g. A->B->A) net to zero between entries. If
-      // that ever breaks (DST zones, future tzdata revisions), the guard
-      // below will not fire and both transitions in the pair will be
-      // silently dropped. The DST guard in
-      // GpuTimeZoneDB.convertOrcTimezones currently keeps this dormant;
-      // any follow-up that relaxes it must revisit this code.
-      if (beforeTransitionMs >= scanCursor && offsetBeforeTransition != currentOffset) {
-        currentOffset = collectTimeZoneTransitionsByScanning(
-            tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+      if (beforeTransitionMs >= scanCursor) {
+        if (hasPreviousCandidate) {
+          // Reconcile every interval between ZoneRules candidates. Endpoints with the same
+          // offset do not prove that the interval is transition-free: TimeZone may contain an
+          // A -> B -> A round trip that ZoneRules does not expose.
+          currentOffset = collectTimeZoneTransitionsByScanning(
+              tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+        } else if (offsetBeforeTransition != currentOffset) {
+          // Keep the year-0001-to-first-candidate path logarithmic. ZoneRules has no candidate
+          // in this interval, which is typically about 1,900 years long.
+          currentOffset = collectInitialTimeZoneTransitions(
+              tz, scanCursor, beforeTransitionMs, currentOffset, transitions, offsets);
+        }
       }
 
       int offsetAtTransition = tz.getOffset(transitionMs);
@@ -225,7 +243,19 @@ class OrcTimezoneInfo {
         offsets.add(offsetAtTransition);
         currentOffset = offsetAtTransition;
       }
-      scanCursor = transitionMs;
+
+      // Some JDK tzdata versions expose a ZoneRules candidate that TimeZone observes for only
+      // one millisecond. Sampling T+1 catches that immediate return and anchors the following
+      // bounded scan with the correct running offset.
+      long afterTransitionMs = transitionMs + 1;
+      int offsetAfterTransition = tz.getOffset(afterTransitionMs);
+      if (offsetAfterTransition != currentOffset) {
+        transitions.add(afterTransitionMs);
+        offsets.add(offsetAfterTransition);
+        currentOffset = offsetAfterTransition;
+      }
+      scanCursor = afterTransitionMs;
+      hasPreviousCandidate = true;
     }
 
     if (transitions.isEmpty()) {
@@ -234,7 +264,7 @@ class OrcTimezoneInfo {
     return new HistoricalTransitions(toLongArray(transitions), toIntArray(offsets));
   }
 
-  private static int collectTimeZoneTransitionsByScanning(
+  static int collectTimeZoneTransitionsByScanning(
       TimeZone tz,
       long scanStartMs,
       long scanEndMs,
@@ -244,15 +274,34 @@ class OrcTimezoneInfo {
     long cursor = scanStartMs;
     int currentOffset = startOffset;
     while (cursor < scanEndMs) {
-      // Exponentially expand the probe step while the offset stays equal to
-      // currentOffset. This collapses long no-transition stretches (e.g. the
-      // year-0001-to-first-historical-transition gap, ~1880 years for typical
-      // IANA zones) from O(N) day probes to O(log N). Once the probe lands on
-      // a different offset, the [lo, hi] bracket contains a transition and we
-      // hand it to binarySearchTransition. The bracket may be wider than the
-      // base 6h step, so this assumes at most one offset transition lives in
-      // the expanded window — which holds for real IANA data; A->B->A pairs
-      // narrower than the base step are addressed separately by the step size.
+      long lo = cursor;
+      long hi = Math.min(lo + HISTORICAL_TRANSITION_SCAN_STEP_MILLIS, scanEndMs);
+      int hiOffset = tz.getOffset(hi);
+      if (hiOffset == currentOffset) {
+        cursor = hi;
+        continue;
+      }
+
+      long exactTransition = binarySearchTransition(tz, lo, hi);
+      int offsetAfterTransition = tz.getOffset(exactTransition);
+      transitions.add(exactTransition);
+      offsets.add(offsetAfterTransition);
+      currentOffset = offsetAfterTransition;
+      cursor = exactTransition;
+    }
+    return currentOffset;
+  }
+
+  private static int collectInitialTimeZoneTransitions(
+      TimeZone tz,
+      long scanStartMs,
+      long scanEndMs,
+      int startOffset,
+      List<Long> transitions,
+      List<Integer> offsets) {
+    long cursor = scanStartMs;
+    int currentOffset = startOffset;
+    while (cursor < scanEndMs) {
       long lo = cursor;
       long step = HISTORICAL_TRANSITION_SCAN_STEP_MILLIS;
       long hi = Math.min(lo + step, scanEndMs);
@@ -264,7 +313,6 @@ class OrcTimezoneInfo {
         hiOffset = tz.getOffset(hi);
       }
       if (hiOffset == currentOffset) {
-        // Reached scanEndMs without seeing any transition.
         cursor = hi;
         continue;
       }
@@ -310,7 +358,7 @@ class OrcTimezoneInfo {
     return result;
   }
 
-  private static final class HistoricalTransitions {
+  static final class HistoricalTransitions {
     static final HistoricalTransitions EMPTY = new HistoricalTransitions(null, null);
 
     final long[] transitions;

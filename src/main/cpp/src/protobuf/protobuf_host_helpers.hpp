@@ -64,6 +64,8 @@ struct enum_string_lookup_tables {
 class protobuf_schema {
  public:
   explicit protobuf_schema(protobuf_decode_context const& context);
+  protobuf_schema(protobuf_decode_context&&)       = delete;
+  protobuf_schema(protobuf_decode_context const&&) = delete;
 
   protobuf_schema(protobuf_schema const&)            = delete;
   protobuf_schema& operator=(protobuf_schema const&) = delete;
@@ -89,10 +91,12 @@ class protobuf_schema {
                                                       rmm::cuda_stream_view stream) const;
 
  private:
+  // Avoid copying pinned metadata; the decode context outlives this stack-scoped facade.
   protobuf_decode_context const& context_;
   std::vector<std::vector<int>> children_by_parent_;
 };
 
+// Keep pinned staging alive alongside its device copy until queued H2D work completes.
 struct field_descriptor_bundle {
   cudf::detail::host_vector<field_descriptor> host;
   rmm::device_uvector<field_descriptor> device;
@@ -281,13 +285,15 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
  * Build a host-side direct-mapped lookup table: field_number -> index.
  * @param get_field_number Callable: (int i) -> field_number for the i-th entry.
  * @param num_entries Number of entries.
- * @return Empty vector if the max field number exceeds the threshold.
+ * @return Empty vector if there are no entries or the max field number exceeds the threshold.
  */
 template <typename FieldNumberFn>
 inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field_number,
                                                          int num_entries,
                                                          rmm::cuda_stream_view stream)
 {
+  if (num_entries == 0) { return cudf::detail::make_pinned_vector_async<int>(0, stream); }
+
   int max_fn = 0;
   for (int i = 0; i < num_entries; i++) {
     max_fn = std::max(max_fn, get_field_number(i));
@@ -327,10 +333,11 @@ struct field_occurrence_scan_bundle {
 
   field_occurrence_scan_view view() const
   {
+    auto const lookup_size = static_cast<int>(field_number_lookup.size());
     return {descriptors.data(),
             static_cast<int>(descriptors.size()),
-            field_number_lookup.is_empty() ? nullptr : field_number_lookup.data(),
-            static_cast<int>(field_number_lookup.size())};
+            lookup_size > 0 ? field_number_lookup.data() : nullptr,
+            lookup_size};
   }
 };
 
@@ -340,6 +347,7 @@ inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
   rmm::device_async_resource_ref mr)
 {
   auto descriptors = cudf::detail::make_device_uvector_async(host_descriptors, stream, mr);
+  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
   auto host_lookup = build_field_lookup_table(
     host_descriptors.data(), static_cast<int>(host_descriptors.size()), stream);
   auto lookup = cudf::detail::make_device_uvector_async(host_lookup, stream, mr);

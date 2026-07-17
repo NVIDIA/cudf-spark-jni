@@ -197,8 +197,9 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
 
   auto mark_row_error = [&]() { set_row_invalid(row_has_invalid_data, row); };
 
-  field_location* field_locations = fields.locations + flat_index(row, fields.size, 0);
-  for (int f = 0; f < fields.size; f++) {
+  auto* field_locations =
+    fields.lookup.size > 0 ? fields.locations + flat_index(row, fields.lookup.size, 0) : nullptr;
+  for (int f = 0; f < fields.lookup.size; f++) {
     field_locations[f] = {-1, 0};
   }
 
@@ -218,17 +219,12 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
   uint8_t const* const msg_base = bytes + start;
   uint8_t const* const msg_end  = bytes + end;
 
-  auto lookup_desc_idx = [&](int fn) {
-    return lookup_field(
-      fn, fields.field_number_lookup, fields.lookup_size, fields.size, [&](int f, int n) {
-        return fields.descriptors[f].field_number == n;
-      });
-  };
-  auto is_repeated_field      = [&](int f) { return fields.descriptors[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].expected_wire_type; };
+  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
+  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
+  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
   auto record_singular =
     [&](int f, uint8_t const* value_start, uint8_t const* value_end, field_location location) {
-      auto const& descriptor = fields.descriptors[f];
+      auto const& descriptor = fields.lookup.data[f];
       bool recognized;
       if (!is_recognized_enum_value(descriptor, value_start, value_end, error_flag, recognized)) {
         return false;
@@ -409,14 +405,9 @@ CUDF_KERNEL void validate_message_fragments_kernel(message_fragment_location_pro
     return;
   }
 
-  auto lookup_desc_idx = [&](int fn) {
-    return lookup_field(
-      fn, fields.field_number_lookup, fields.lookup_size, fields.size, [&](int f, int n) {
-        return fields.descriptors[f].field_number == n;
-      });
-  };
-  auto is_repeated_field      = [&](int f) { return fields.descriptors[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].expected_wire_type; };
+  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
+  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
+  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
   auto record_singular        = []([[maybe_unused]] int f,
                             [[maybe_unused]] uint8_t const* value_start,
                             [[maybe_unused]] uint8_t const* value_end,
@@ -450,8 +441,8 @@ CUDF_KERNEL void validate_message_fragments_kernel(message_fragment_location_pro
  * Count occurrences of repeated fields in each row.
  * Also records locations of nested message fields for hierarchical processing.
  *
- * Optional lookup tables (fn_to_rep_idx, fn_to_nested_idx) provide O(1) field_number
- * to local index mapping. When nullptr, falls back to linear search.
+ * Optional lookup tables in the repeated and nested views provide O(1) field-number mapping.
+ * A null lookup pointer falls back to linear search.
  */
 CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_in,
                                               device_schema_view schema,
@@ -466,14 +457,14 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   auto mark_row_error = [&]() { set_row_invalid(row_has_invalid_data, row); };
 
   // Initialize repeated counts to 0
-  for (int f = 0; f < repeated.size; f++) {
-    repeated.info[flat_index(row, repeated.size, f)] = {0};
+  for (int f = 0; f < repeated.schema_lookup.size; f++) {
+    repeated.info[flat_index(row, repeated.schema_lookup.size, f)] = {0};
   }
 
   // Initialize nested locations and occurrence counts.
-  for (int f = 0; f < nested.size; f++) {
-    nested.locations[flat_index(row, nested.size, f)]       = {-1, 0};
-    nested.occurrence_info[flat_index(row, nested.size, f)] = {0};
+  for (int f = 0; f < nested.schema_lookup.size; f++) {
+    nested.locations[flat_index(row, nested.schema_lookup.size, f)]       = {-1, 0};
+    nested.occurrence_info[flat_index(row, nested.schema_lookup.size, f)] = {0};
   }
 
   if (in.nullable() && in.is_null(row)) return;
@@ -495,13 +486,9 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   // predicate that follows the `field_indices` indirection into `schema` and also filters
   // by `depth_level`, since this kernel processes nested schemas where the same field
   // number can appear at multiple depths.
-  auto lookup_field_idx = [&](int fn,
-                              int const* fn_to_idx,
-                              int fn_tbl_size,
-                              int const* field_indices,
-                              int num_fields_at_depth) -> int {
-    return lookup_field(fn, fn_to_idx, fn_tbl_size, num_fields_at_depth, [&](int local_i, int fn) {
-      auto const& field_schema = schema.fields[field_indices[local_i]];
+  auto lookup_field_idx = [&](int fn, lookup_view<int> table) {
+    return lookup_field(fn, table, [&](int local_i, int fn) {
+      auto const& field_schema = schema.fields[table.data[local_i]];
       return field_schema.field_number == fn && field_schema.depth == schema.depth;
     });
   };
@@ -509,34 +496,29 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   // Use one descriptor-index space for the shared scanner: repeated fields first, then nested
   // message fields. A top-level field belongs to exactly one of these groups.
   auto lookup_desc_idx = [&](int fn) {
-    int const repeated_idx = lookup_field_idx(fn,
-                                              repeated.field_number_lookup,
-                                              repeated.lookup_size,
-                                              repeated.schema_indices,
-                                              repeated.size);
+    int const repeated_idx = lookup_field_idx(fn, repeated.schema_lookup);
     if (repeated_idx >= 0) { return repeated_idx; }
-    int const nested_idx = lookup_field_idx(
-      fn, nested.field_number_lookup, nested.lookup_size, nested.schema_indices, nested.size);
-    return nested_idx >= 0 ? repeated.size + nested_idx : -1;
+    int const nested_idx = lookup_field_idx(fn, nested.schema_lookup);
+    return nested_idx >= 0 ? repeated.schema_lookup.size + nested_idx : -1;
   };
-  auto is_repeated_field      = [&](int f) { return f < repeated.size; };
+  auto is_repeated_field      = [&](int f) { return f < repeated.schema_lookup.size; };
   auto get_expected_wire_type = [&](int f) {
-    return f < repeated.size ? schema.fields[repeated.schema_indices[f]].wire_type
-                             : wire_type_value(proto_wire_type::LEN);
+    return f < repeated.schema_lookup.size ? schema.fields[repeated.schema_lookup.data[f]].wire_type
+                                           : wire_type_value(proto_wire_type::LEN);
   };
   auto record_nested = [&](int f,
                            [[maybe_unused]] uint8_t const* value_start,
                            [[maybe_unused]] uint8_t const* value_end,
                            field_location location) {
-    int const nested_idx                                       = f - repeated.size;
-    nested.locations[flat_index(row, nested.size, nested_idx)] = location;
-    auto& info = nested.occurrence_info[flat_index(row, nested.size, nested_idx)];
+    int const nested_idx = f - repeated.schema_lookup.size;
+    nested.locations[flat_index(row, nested.schema_lookup.size, nested_idx)] = location;
+    auto& info = nested.occurrence_info[flat_index(row, nested.schema_lookup.size, nested_idx)];
     if (++info.count == 2) { atomicExch(nested.multiple_message_fields + nested_idx, 1); }
     return true;
   };
   auto count_repeated =
     [&](int f, uint8_t const* cur, uint8_t const* end, uint8_t const* base, int wire_type) {
-      auto& info        = repeated.info[flat_index(row, repeated.size, f)];
+      auto& info        = repeated.info[flat_index(row, repeated.schema_lookup.size, f)];
       auto count_action = [&info]([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) {
         info.count++;
         return true;
@@ -577,17 +559,12 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
 
   int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL];
   for (int f = 0; f < fields.size; f++) {
-    write_idx[f] = fields.descriptors[f].row_offsets[row];
+    write_idx[f] = fields.data[f].row_offsets[row];
   }
 
-  auto lookup_by_fn = [&](int fn) {
-    return lookup_field(
-      fn, fields.field_number_lookup, fields.lookup_size, fields.size, [&](int f, int) {
-        return fields.descriptors[f].field_number == fn;
-      });
-  };
+  auto lookup_by_fn           = [&](int fn) { return lookup_field(fn, fields); };
   auto is_repeated_field      = []([[maybe_unused]] int f) { return true; };
-  auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].wire_type; };
+  auto get_expected_wire_type = [&](int f) { return fields.data[f].wire_type; };
   auto unreachable_singular   = []([[maybe_unused]] int f,
                                  [[maybe_unused]] uint8_t const* value_start,
                                  [[maybe_unused]] uint8_t const* value_end,
@@ -596,9 +573,9 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
   auto const row_i32 = static_cast<int32_t>(row);
   auto on_repeated_scan =
     [&](int f, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
-      auto* occs       = fields.descriptors[f].occurrences;
+      auto* occs       = fields.data[f].occurrences;
       int& wi          = write_idx[f];
-      int const we     = fields.descriptors[f].row_offsets[row + 1];
+      int const we     = fields.data[f].row_offsets[row + 1];
       auto scan_action = [&](int32_t off, int32_t len) {
         if (wi >= we) {
           set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
@@ -623,7 +600,7 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
   }
 
   for (int f = 0; f < fields.size; f++) {
-    if (write_idx[f] != fields.descriptors[f].row_offsets[row + 1]) {
+    if (write_idx[f] != fields.data[f].row_offsets[row + 1]) {
       set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
       return false;
     }
@@ -677,11 +654,11 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
     parent.top_row_indices != nullptr ? parent.top_row_indices[row] : static_cast<int32_t>(row);
   auto mark_row_error = [&]() { set_row_invalid(row_has_invalid_data, top_row); };
 
-  field_location* field_locations = fields.locations + flat_index(row, fields.size, 0);
-  for (int f = 0; f < fields.size; f++) {
+  field_location* field_locations = fields.locations + flat_index(row, fields.lookup.size, 0);
+  for (int f = 0; f < fields.lookup.size; f++) {
     field_locations[f] = {-1, 0};
-    if (fields.occurrence_info != nullptr) {
-      fields.occurrence_info[flat_index(row, fields.size, f)] = {0};
+    if (fields.repeated_info != nullptr) {
+      fields.repeated_info[flat_index(row, fields.lookup.size, f)] = {0};
     }
   }
 
@@ -701,17 +678,12 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   uint8_t const* const nested_start = input.message_data + nested_start_off;
   uint8_t const* const nested_end   = input.message_data + nested_end_off;
 
-  auto lookup_desc_idx = [&](int fn) {
-    return lookup_field(
-      fn, fields.field_number_lookup, fields.lookup_size, fields.size, [&](int f, int n) {
-        return fields.descriptors[f].field_number == n;
-      });
-  };
-  auto is_repeated_field      = [&](int f) { return fields.descriptors[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.descriptors[f].expected_wire_type; };
+  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
+  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
+  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
   auto record_singular =
     [&](int f, uint8_t const* value_start, uint8_t const* value_end, field_location location) {
-      auto const& descriptor = fields.descriptors[f];
+      auto const& descriptor = fields.lookup.data[f];
       bool recognized;
       if (!is_recognized_enum_value(descriptor, value_start, value_end, error_flag, recognized)) {
         return false;
@@ -719,7 +691,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
       if (recognized) {
         field_locations[f] = location;
         if (descriptor.is_message) {
-          auto& info = fields.occurrence_info[flat_index(row, fields.size, f)];
+          auto& info = fields.repeated_info[flat_index(row, fields.lookup.size, f)];
           if (++info.count == 2) { atomicExch(fields.multiple_message_fields + f, 1); }
         }
       }
@@ -729,8 +701,8 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
     [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
       auto const expected_wire_type = get_expected_wire_type(f);
       auto count_occurrence = [&]([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) {
-        if (fields.occurrence_info != nullptr) {
-          fields.occurrence_info[flat_index(row, fields.size, f)].count++;
+        if (fields.repeated_info != nullptr) {
+          fields.repeated_info[flat_index(row, fields.lookup.size, f)].count++;
         }
         return true;
       };

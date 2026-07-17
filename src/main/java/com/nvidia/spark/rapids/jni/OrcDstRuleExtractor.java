@@ -53,9 +53,9 @@ final class OrcDstRuleExtractor {
   private static final int[] DST_RULE_VALIDATION_YEARS = {2060, 2400, 9997};
 
   /**
-   * Recurring DST rule for a single zone, encoded in the same shape that
-   * {@link java.util.SimpleTimeZone} stores internally and that the GPU side
-   * consumes. {@code month} is 0-based (Calendar.JANUARY=0), {@code dayOfWeek}
+   * Recurring DST rule for a single zone, containing the fields needed to represent
+   * the same rule categories as {@link java.util.SimpleTimeZone} and consumed by the
+   * GPU side. {@code month} is 0-based (Calendar.JANUARY=0), {@code dayOfWeek}
    * follows Calendar's 1=Sun..7=Sat convention, and {@code dstSavings} /
    * {@code time} are in milliseconds.
    *
@@ -64,8 +64,8 @@ final class OrcDstRuleExtractor {
    * the time-of-day basis — see the {@code TIME_MODE_*} constants.
    */
   static final class DstRule {
-    // Day-rule modes for {start,end}Mode — matches SimpleTimeZone's internal
-    // encoding so the GPU side can consume the values directly.
+    // Day-rule modes for {start,end}Mode. This encoding represents the same four rule
+    // categories as SimpleTimeZone, numbered 0..3 for the GPU side.
     static final int MODE_DOM          = 0;
     static final int MODE_DOW_IN_MONTH = 1;
     static final int MODE_DOW_GE_DOM   = 2;
@@ -120,16 +120,19 @@ final class OrcDstRuleExtractor {
     // Sanity-check that tz and rules describe the same zone. Both Path A and
     // Path B assume this, but the two-argument signature lets a caller pass
     // mismatched objects (the silent-GMT trap above is one way this can
-    // happen). Compare standard offsets at a recent reference instant -- the
+    // happen). Compare actual offsets at a recent reference instant -- the
     // epoch is unsafe because some zones (e.g. Europe/London) were on a
-    // different standard offset in 1970 (British Standard Time experiment).
+    // different standard offset in 1970 (British Standard Time experiment),
+    // while the current raw offset is unsafe because a zone's standard offset
+    // may have changed after the reference instant.
     Instant ref = Instant.parse("2024-01-15T00:00:00Z");
-    int rulesStandardOffsetMillis = rules.getStandardOffset(ref).getTotalSeconds() * 1000;
-    if (tz.getRawOffset() != rulesStandardOffsetMillis) {
+    int timeZoneOffsetMillis = tz.getOffset(ref.toEpochMilli());
+    int rulesOffsetMillis = rules.getOffset(ref).getTotalSeconds() * 1000;
+    if (timeZoneOffsetMillis != rulesOffsetMillis) {
       throw new IllegalStateException(
           "TimeZone and ZoneRules describe different zones for timezone: " + timezoneId
-              + " (tz.rawOffset=" + tz.getRawOffset()
-              + ", rules.standardOffset=" + rulesStandardOffsetMillis + ")");
+              + " (tz.offset=" + timeZoneOffsetMillis
+              + ", rules.offset=" + rulesOffsetMillis + ")");
     }
     DstRule rule = extractDstRuleByProbing(tz);
     if (rule != null) {

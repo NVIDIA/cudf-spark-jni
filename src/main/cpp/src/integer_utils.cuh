@@ -38,6 +38,17 @@ __device__ Type floor_div(Type x, Type y)
   return quotient - mixed_sign * nonzero_remainder;
 }
 
+/**
+ * @brief floor modulo for positive divisors.
+ */
+template <typename Type>
+__device__ Type floor_mod(Type x, Type y)
+  requires(cuda::std::is_integral_v<Type> and cuda::std::is_signed_v<Type>)
+{
+  auto const remainder = x % y;
+  return remainder < 0 ? remainder + y : remainder;
+}
+
 }  // namespace integer_utils
 
 }  // namespace spark_rapids_jni

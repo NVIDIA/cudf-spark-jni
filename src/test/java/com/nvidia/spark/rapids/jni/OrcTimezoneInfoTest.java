@@ -29,12 +29,14 @@ import java.time.ZoneOffset;
 import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneOffsetTransitionRule;
 import java.time.zone.ZoneRules;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.TimeZone;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -76,9 +78,11 @@ public class OrcTimezoneInfoTest {
     // would silently map "+05:30" to GMT). +05:30 == 19_800_000 ms.
     OrcTimezoneInfo info = OrcTimezoneInfo.get("+05:30");
     assertNotNull(info);
+    assertEquals(19_800_000, info.initialOffset);
     assertEquals(19_800_000, info.rawOffset);
     assertNull(info.transitions);
     assertNull(info.offsets);
+    assertNull(info.dstRule);
   }
 
   @Test
@@ -89,9 +93,11 @@ public class OrcTimezoneInfoTest {
     // TimeZone.getTimeZone — is caught. rawOffset must be 0.
     OrcTimezoneInfo info = OrcTimezoneInfo.get("UTC");
     assertNotNull(info);
+    assertEquals(0, info.initialOffset);
     assertEquals(0, info.rawOffset);
     assertNull(info.transitions);
     assertNull(info.offsets);
+    assertNull(info.dstRule);
   }
 
   @Test
@@ -147,6 +153,7 @@ public class OrcTimezoneInfoTest {
     assertNotNull(info);
     assertNotNull(info.transitions, "Asia/Shanghai should have historical transitions");
     assertNotNull(info.offsets);
+    assertNull(info.dstRule);
     assertEquals(info.transitions.length, info.offsets.length,
         "transitions and offsets must be the same length");
     // Transitions must be strictly increasing so the GPU binary search is well-defined.
@@ -156,7 +163,141 @@ public class OrcTimezoneInfoTest {
     }
   }
 
-  // ---- DST rule extraction (Part 2 — not wired into production yet) ----
+  @Test
+  void testGetDstZoneIncludesKernelMetadata() {
+    String timezoneId = "America/New_York";
+    OrcTimezoneInfo info = OrcTimezoneInfo.get(timezoneId);
+    TimeZone tz = TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId).getId());
+
+    assertEquals(tz.getOffset(OrcTimezoneInfo.utcMillisForDate(1, 1, 1)), info.initialOffset);
+    assertEquals(tz.getRawOffset(), info.rawOffset);
+    assertNotNull(info.transitions);
+    assertNotNull(info.offsets);
+    assertNotNull(info.dstRule);
+  }
+
+  @Test
+  void testScannerRetainsPairedTransitionsBetweenEqualEndpoints() {
+    long firstTransition = 8L * 3_600_000L;
+    long secondTransition = 16L * 3_600_000L;
+    TimeZone pairedTransitions = new TimeZone() {
+      private int rawOffset;
+
+      @Override
+      public int getOffset(long date) {
+        return date >= firstTransition && date < secondTransition ? 3_600_000 : 0;
+      }
+
+      @Override
+      public int getOffset(int era, int year, int month, int day,
+          int dayOfWeek, int milliseconds) {
+        return rawOffset;
+      }
+
+      @Override
+      public void setRawOffset(int offsetMillis) {
+        rawOffset = offsetMillis;
+      }
+
+      @Override
+      public int getRawOffset() {
+        return rawOffset;
+      }
+
+      @Override
+      public boolean useDaylightTime() {
+        return true;
+      }
+
+      @Override
+      public boolean inDaylightTime(Date date) {
+        return getOffset(date.getTime()) != rawOffset;
+      }
+    };
+
+    List<Long> transitions = new ArrayList<>();
+    List<Integer> offsets = new ArrayList<>();
+    int finalOffset = OrcTimezoneInfo.collectTimeZoneTransitionsByScanning(
+        pairedTransitions, 0L, 24L * 3_600_000L, 0, transitions, offsets);
+
+    assertEquals(Arrays.asList(firstTransition, secondTransition), transitions);
+    assertEquals(Arrays.asList(3_600_000, 0), offsets);
+    assertEquals(0, finalOffset);
+  }
+
+  @Test
+  void testBuilderScansPairedTransitionsBetweenEqualCandidateEndpoints() {
+    long firstHiddenTransition = 8L * 3_600_000L;
+    long secondHiddenTransition = 16L * 3_600_000L;
+    TimeZone pairedTransitions = new TimeZone() {
+      private int rawOffset;
+
+      @Override
+      public int getOffset(long date) {
+        return date >= firstHiddenTransition && date < secondHiddenTransition ? 3_600_000 : 0;
+      }
+
+      @Override
+      public int getOffset(int era, int year, int month, int day,
+          int dayOfWeek, int milliseconds) {
+        return rawOffset;
+      }
+
+      @Override
+      public void setRawOffset(int offsetMillis) {
+        rawOffset = offsetMillis;
+      }
+
+      @Override
+      public int getRawOffset() {
+        return rawOffset;
+      }
+
+      @Override
+      public boolean useDaylightTime() {
+        return true;
+      }
+
+      @Override
+      public boolean inDaylightTime(Date date) {
+        return getOffset(date.getTime()) != rawOffset;
+      }
+    };
+    List<ZoneOffsetTransition> candidates = Arrays.asList(
+        ZoneOffsetTransition.of(LocalDateTime.of(1970, 1, 1, 4, 0),
+            ZoneOffset.UTC, ZoneOffset.ofHours(1)),
+        ZoneOffsetTransition.of(LocalDateTime.of(1970, 1, 1, 20, 0),
+            ZoneOffset.UTC, ZoneOffset.ofHours(1)));
+
+    OrcTimezoneInfo.HistoricalTransitions actual =
+        OrcTimezoneInfo.buildHistoricalTransitions(pairedTransitions, candidates);
+
+    assertArrayEquals(new long[] {firstHiddenTransition, secondHiddenTransition},
+        actual.transitions);
+    assertArrayEquals(new int[] {3_600_000, 0}, actual.offsets);
+  }
+
+  @Test
+  void testAsiaGazaRetainsImmediateOffsetReturn() {
+    OrcTimezoneInfo info = OrcTimezoneInfo.get("Asia/Gaza");
+    long transition = ZoneOffsetTransition.of(
+        LocalDateTime.of(2037, 10, 10, 2, 0),
+        ZoneOffset.ofHours(3),
+        ZoneOffset.ofHours(2)).getInstant().toEpochMilli();
+    int index = Arrays.binarySearch(info.transitions, transition);
+    TimeZone tz = TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId("Asia/Gaza").getId());
+    int offsetAtTransition = tz.getOffset(transition);
+    int offsetAfterTransition = tz.getOffset(transition + 1);
+
+    assertTrue(index >= 0, "expected the ZoneRules candidate in the transition table");
+    assertEquals(offsetAtTransition, info.offsets[index]);
+    if (offsetAfterTransition != offsetAtTransition) {
+      assertEquals(transition + 1, info.transitions[index + 1]);
+      assertEquals(offsetAfterTransition, info.offsets[index + 1]);
+    }
+  }
+
+  // ---- DST rule extraction ----
 
   @Test
   void testExtractDstRuleNorthernHemisphere() {
@@ -209,6 +350,14 @@ public class OrcTimezoneInfoTest {
     assertEquals(1, rule.endTimeMode);
     assertEquals(1 * 3_600_000, rule.startTime, "DST start at 01:00 standard");
     assertEquals(1 * 3_600_000, rule.endTime, "DST end at 01:00 standard");
+  }
+
+  @Test
+  void testExtractDstRuleAfterHistoricalStandardOffsetChange() {
+    // America/Scoresbysund changed its standard offset after the validation reference instant.
+    // TimeZone.getRawOffset() reports the current standard offset, so it cannot be compared with
+    // ZoneRules at that historical instant. The two APIs' actual offsets still agree there.
+    assertNotNull(extractDstRuleFor("America/Scoresbysund"));
   }
 
   @Test
@@ -362,12 +511,16 @@ public class OrcTimezoneInfoTest {
   // across any anchor year and returns null, so extractDstRuleFromZoneRules is
   // invoked with the hand-crafted ZoneRules in each test below.
   private static TimeZone newConstantOffsetWithDstFlag(String id) {
+    return newConstantOffsetWithDstFlag(id, 0);
+  }
+
+  private static TimeZone newConstantOffsetWithDstFlag(String id, int offset) {
     TimeZone tz = new TimeZone() {
-      @Override public int getOffset(long instant) { return 0; }
+      @Override public int getOffset(long instant) { return offset; }
       @Override public int getOffset(int era, int year, int month, int day, int dow, int ms) {
-        return 0;
+        return offset;
       }
-      @Override public int getRawOffset() { return 0; }
+      @Override public int getRawOffset() { return offset; }
       @Override public void setRawOffset(int offsetMillis) {}
       @Override public boolean useDaylightTime() { return true; }
       @Override public boolean inDaylightTime(Date date) { return false; }
@@ -427,9 +580,9 @@ public class OrcTimezoneInfoTest {
 
   @Test
   void testExtractDstRuleThrowsWhenTzAndRulesDescribeDifferentZones() {
-    // The sanity-check in extractDstRule compares tz.getRawOffset() against
-    // rules.getStandardOffset(ref). Pair a constant-zero TimeZone with
-    // ZoneRules for America/New_York (rawOffset = -18_000_000 ms at the
+    // The sanity-check in extractDstRule compares actual offsets at the same
+    // reference instant. Pair a constant-zero TimeZone with ZoneRules for
+    // America/New_York (offset = -18_000_000 ms at the
     // 2024 reference instant) so the check fires before either extraction
     // path runs.
     TimeZone zeroOffsetTz = newConstantOffsetWithDstFlag("Synthetic/OffsetMismatch");
@@ -447,7 +600,8 @@ public class OrcTimezoneInfoTest {
     // both with negative delta — startTransitionRule stays null. Pins the
     // startTransitionRule == null sub-case of the || at line 157 so a future
     // change from || to && cannot slip through.
-    TimeZone tz = newConstantOffsetWithDstFlag("Synthetic/BothNegative");
+    // These malformed rules leave the recurring period at +1h at the validation instant.
+    TimeZone tz = newConstantOffsetWithDstFlag("Synthetic/BothNegative", 3_600_000);
     ZoneOffset base = ZoneOffset.UTC;
     ZoneOffset plus1 = ZoneOffset.ofHours(1);
     ZoneOffsetTransitionRule ruleA = ZoneOffsetTransitionRule.of(

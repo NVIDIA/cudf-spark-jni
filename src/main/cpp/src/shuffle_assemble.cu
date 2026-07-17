@@ -922,8 +922,17 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   // for better memory management and reduced allocation overhead.
   std::vector<buffer_slice> buffer_slices(num_dst_buffers);
 
-  // Collect validity buffers that need zero-initialization
-  std::vector<cudf::device_span<cudf::bitmask_type>> validity_spans_to_zero;
+  // Collect buffers that need zero-initialization. Two cases:
+  //  - validity buffers (partially rewritten by copy_validity via atomicOr, so must start zeroed)
+  //  - offset buffers of zero-row list/string columns: with num_rows == 0 the output still
+  //    reserves a single terminating offset (get_output_offsets_size uses num_rows + 1), but there
+  //    are no source bytes to copy (assemble_src_buffer_size_functor returns 0 for empty offsets)
+  //    and copy_offsets skips zero-size batches. Without this the lone terminal offset is left
+  //    uninitialized, which surfaces as garbage list/string offsets after shuffle reassembly.
+  // Both are zeroed with a single word-granularity batched_memset. This is valid because
+  // split_align (64) guarantees every slice size is a multiple of sizeof(bitmask_type) and every
+  // slice base is 4-byte aligned; an offset value is itself a 4-byte word, so no sub-word writes.
+  std::vector<cudf::device_span<cudf::bitmask_type>> spans_to_zero;
 
   for (size_t i = 0; i < num_dst_buffers; i++) {
     size_t col_idx  = i / 3;
@@ -934,19 +943,21 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
 
     buffer_slices[i] = buffer_slice(base_ptr + buffer_offsets[i], size, buffer_offsets[i]);
 
-    // Collect validity buffers that need zero-initialization
-    if (buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity) {
+    bool const zero_validity = buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity;
+    bool const zero_empty_offsets =
+      buf_type == 1 && size > 0 && h_column_info[col_idx].num_rows == 0;
+    if (zero_validity || zero_empty_offsets) {
       // Convert byte size to element count for bitmask_type (uint32_t) span
       size_t num_elements = size / sizeof(cudf::bitmask_type);
-      validity_spans_to_zero.emplace_back(
-        reinterpret_cast<cudf::bitmask_type*>(buffer_slices[i].data), num_elements);
+      spans_to_zero.emplace_back(reinterpret_cast<cudf::bitmask_type*>(buffer_slices[i].data),
+                                 num_elements);
     }
   }
 
-  // Batch memset all validity buffers at once for better performance with many columns
-  if (!validity_spans_to_zero.empty()) {
-    cudf::host_span<cudf::device_span<cudf::bitmask_type> const> host_spans(
-      validity_spans_to_zero.data(), validity_spans_to_zero.size());
+  // Batch memset all collected buffers at once for better performance with many columns
+  if (!spans_to_zero.empty()) {
+    cudf::host_span<cudf::device_span<cudf::bitmask_type> const> host_spans(spans_to_zero.data(),
+                                                                            spans_to_zero.size());
     cudf::detail::batched_memset<cudf::bitmask_type>(host_spans, cudf::bitmask_type{0}, stream);
   }
 
@@ -1333,8 +1344,8 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     stream,
     mr);
 
-  // Drain the async H2D uploads above before h_dst_buffers and validity_spans_to_zero (uploaded
-  // by batched_memset) go out of scope: CUDA 13+ may read the host source only when the stream
+  // Drain the async H2D uploads above before h_dst_buffers and the batched_memset span vector
+  // (spans_to_zero) go out of scope: CUDA 13+ may read the host source only when the stream
   // executes the copy.
   stream.synchronize();
 

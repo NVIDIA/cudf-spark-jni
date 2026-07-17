@@ -86,7 +86,14 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
     enum_offset += enum_size;
   }
 
-  auto d_descriptors = cudf::detail::make_device_uvector_async(h_descriptors, stream, mr);
+  rmm::device_uvector<field_descriptor> d_descriptors(
+    std::max(h_descriptors.size(), size_t{1}), stream, mr);
+  if (!h_descriptors.empty()) {
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_descriptors.data(),
+                                             h_descriptors.data(),
+                                             h_descriptors.size() * sizeof(field_descriptor),
+                                             stream));
+  }
   return {std::move(h_descriptors), std::move(d_descriptors), std::move(d_enum_values)};
 }
 
@@ -661,10 +668,10 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
   message_fragment_location_provider fragment_locations{input, source, work.fragments.data()};
   launch_validate_message_fragments(
     fragment_locations,
-    {validation_fields.device.data(),
-     static_cast<int>(validation_fields.device.size()),
-     d_field_lookup.is_empty() ? nullptr : d_field_lookup.data(),
-     static_cast<int>(d_field_lookup.size())},
+    {{validation_fields.device.data(),
+      static_cast<int>(validation_fields.device.size()),
+      d_field_lookup.is_empty() ? nullptr : d_field_lookup.data(),
+      static_cast<int>(d_field_lookup.size())}},
     work.total_fragments,
     invalid_rows.data(),
     context.runtime.row_force_null->is_empty() ? nullptr : context.runtime.row_force_null->data(),
@@ -833,14 +840,11 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   launch_scan_nested_message_fields(
     input,
     parent,
-    {d_child_field_descs.data(),
-     num_child_fields,
-     nullptr,
-     0,
-     d_child_locations.data(),
+    {d_child_locations.data(),
      d_occurrence_info.data(),
      nullptr,
-     d_multiple_message_fields.data()},
+     d_multiple_message_fields.data(),
+     {d_child_field_descs.data(), num_child_fields, nullptr, 0}},
     decode_ctx.error->data(),
     !decode_ctx.row_force_null->is_empty() ? decode_ctx.row_force_null->data() : nullptr,
     depth + 1,

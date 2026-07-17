@@ -148,6 +148,16 @@ struct field_occurrence_scan_desc {
   field_occurrence* occurrences;  // Output buffer [total_count]
 };
 
+template <typename T>
+struct lookup_view {
+  T const* data;
+  int size;
+  int const* direct;
+  int direct_size;
+};
+
+using field_occurrence_scan_view = lookup_view<field_occurrence_scan_desc>;
+
 /**
  * Device-side descriptor for nested schema fields.
  */
@@ -188,45 +198,26 @@ struct device_schema_view {
 
 struct repeated_field_count_view {
   field_occurrence_count* info;
-  int const* schema_indices;
-  int size;
-  int const* field_number_lookup;
-  int lookup_size;
+  lookup_view<int> schema_lookup;
 };
 
 struct nested_field_location_view {
   field_location* locations;
   field_occurrence_count* occurrence_info;
-  int const* schema_indices;
-  int size;
-  int const* field_number_lookup;
-  int lookup_size;
   int* multiple_message_fields;
+  lookup_view<int> schema_lookup;
 };
 
 struct field_scan_view {
-  field_descriptor const* descriptors;
-  int size;
-  int const* field_number_lookup;
-  int lookup_size;
   field_location* locations;
-  field_occurrence_count* occurrence_info;
+  field_occurrence_count* repeated_info;
   protobuf_error* deferred_enum_error;
   int* multiple_message_fields;
+  lookup_view<field_descriptor> lookup;
 };
 
 struct message_validation_view {
-  field_descriptor const* descriptors;
-  int size;
-  int const* field_number_lookup;
-  int lookup_size;
-};
-
-struct field_occurrence_scan_view {
-  field_occurrence_scan_desc const* descriptors;
-  int size;
-  int const* field_number_lookup;
-  int lookup_size;
+  lookup_view<field_descriptor> lookup;
 };
 
 }  // namespace spark_rapids_jni::protobuf::detail
