@@ -14,28 +14,24 @@
  * limitations under the License.
  */
 
-#include <cwctype>
-#include <limits>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <vector>
-
-// TCompactProtocol requires some #defines to work right.
-// This came from the parquet code itself...
-#define SIGNED_RIGHT_SHIFT_IS  1
-#define ARITHMETIC_RIGHT_SHIFT 1
 #include "cudf_jni_apis.hpp"
 #include "jni_utils.hpp"
 #include "nvtx_ranges.hpp"
 
-#include <generated/parquet_types.h>
-#include <thrift/TApplicationException.h>
-#include <thrift/protocol/TCompactProtocol.h>
-#include <thrift/transport/TBufferTransports.h>
+#include <cudf/io/parquet_metadata.hpp>
+#include <cudf/io/parquet_schema.hpp>
+#include <cudf/utilities/span.hpp>
+
+#include <cwctype>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace rapids {
 namespace jni {
+
+namespace pq = cudf::io::parquet;
 
 /**
  * Convert a string to lower case. It uses std::tolower per character which has limitations
@@ -107,7 +103,7 @@ struct column_pruning_maps {
  * correct even when the footer contains only a subset of the file's row groups.
  */
 struct parquet_footer_with_row_group_offsets {
-  std::unique_ptr<parquet::format::FileMetaData> meta;
+  std::unique_ptr<pq::FileMetaData> meta;
   std::vector<int64_t> row_index_offsets;  // one per row group in meta
 };
 
@@ -147,7 +143,7 @@ class column_pruner {
    * Given a schema from a parquet file create a set of pruning maps to prune columns from the rest
    * of the footer
    */
-  column_pruning_maps filter_schema(std::vector<parquet::format::SchemaElement> const& schema,
+  column_pruning_maps filter_schema(std::vector<pq::SchemaElement> const& schema,
                                     bool const ignore_case) const
   {
     SRJ_FUNC_RANGE();
@@ -172,18 +168,14 @@ class column_pruner {
   }
 
  private:
-  std::string get_name(parquet::format::SchemaElement& elem,
-                       bool const normalize_case = false) const
+  std::string get_name(pq::SchemaElement& elem, bool const normalize_case = false) const
   {
     return normalize_case ? unicode_to_lower(elem.name) : elem.name;
   }
 
-  int get_num_children(parquet::format::SchemaElement& elem) const
-  {
-    return elem.__isset.num_children ? elem.num_children : 0;
-  }
+  int get_num_children(pq::SchemaElement& elem) const { return elem.num_children; }
 
-  void skip(std::vector<parquet::format::SchemaElement> const& schema,
+  void skip(std::vector<pq::SchemaElement> const& schema,
             std::size_t& current_input_schema_index,
             std::size_t& next_input_chunk_index) const
   {
@@ -192,12 +184,10 @@ class column_pruner {
     int num_to_skip = 1;
     while (num_to_skip > 0 && current_input_schema_index < schema.size()) {
       auto schema_item = schema[current_input_schema_index];
-      bool is_leaf     = schema_item.__isset.type;
+      bool is_leaf     = schema_item.type != pq::Type::UNDEFINED;
       if (is_leaf) { ++next_input_chunk_index; }
 
-      if (schema_item.__isset.num_children) {
-        num_to_skip = num_to_skip + schema_item.num_children;
-      }
+      num_to_skip = num_to_skip + schema_item.num_children;
 
       --num_to_skip;
       ++current_input_schema_index;
@@ -207,7 +197,7 @@ class column_pruner {
   /**
    * filter_schema, but specific to Tag::STRUCT.
    */
-  void filter_schema_struct(std::vector<parquet::format::SchemaElement> const& schema,
+  void filter_schema_struct(std::vector<pq::SchemaElement> const& schema,
                             bool const ignore_case,
                             std::size_t& current_input_schema_index,
                             std::size_t& next_input_chunk_index,
@@ -217,7 +207,7 @@ class column_pruner {
   {
     // First verify that we found a struct, like we expected to find.
     auto struct_schema_item = schema.at(current_input_schema_index);
-    bool is_leaf            = struct_schema_item.__isset.type;
+    bool is_leaf            = struct_schema_item.type != pq::Type::UNDEFINED;
     if (is_leaf) { throw std::runtime_error("Found a leaf node, but expected to find a struct"); }
 
     int num_children = get_num_children(struct_schema_item);
@@ -283,7 +273,7 @@ class column_pruner {
   /**
    * filter_schema, but specific to Tag::VALUE.
    */
-  void filter_schema_value(std::vector<parquet::format::SchemaElement> const& schema,
+  void filter_schema_value(std::vector<pq::SchemaElement> const& schema,
                            std::size_t& current_input_schema_index,
                            std::size_t& next_input_chunk_index,
                            std::vector<int>& chunk_map,
@@ -291,7 +281,7 @@ class column_pruner {
                            std::vector<int>& schema_num_children) const
   {
     auto schema_item = schema.at(current_input_schema_index);
-    bool is_leaf     = schema_item.__isset.type;
+    bool is_leaf     = schema_item.type != pq::Type::UNDEFINED;
     if (!is_leaf) { throw std::runtime_error("found a non-leaf entry when reading a leaf value"); }
     if (get_num_children(schema_item) != 0) {
       throw std::runtime_error("found an entry with children when reading a leaf value");
@@ -306,7 +296,7 @@ class column_pruner {
   /**
    * filter_schema, but specific to Tag::LIST.
    */
-  void filter_schema_list(std::vector<parquet::format::SchemaElement> const& schema,
+  void filter_schema_list(std::vector<pq::SchemaElement> const& schema,
                           bool const ignore_case,
                           std::size_t& current_input_schema_index,
                           std::size_t& next_input_chunk_index,
@@ -320,7 +310,7 @@ class column_pruner {
     // Under it will be a repeated element
     auto list_schema_item = schema.at(current_input_schema_index);
     std::string list_name = list_schema_item.name;
-    bool is_group         = !list_schema_item.__isset.type;
+    bool is_group         = list_schema_item.type == pq::Type::UNDEFINED;
 
     // Rules for how to parse lists from the parquet format docs
     // 1. If the repeated field is not a group, then its type is the element type and elements are
@@ -333,8 +323,7 @@ class column_pruner {
     // 4. Otherwise, the repeated field's type is the element type with the repeated field's
     // repetition.
     if (!is_group) {
-      if (!list_schema_item.__isset.repetition_type ||
-          list_schema_item.repetition_type != parquet::format::FieldRepetitionType::REPEATED) {
+      if (list_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
         throw std::runtime_error("expected list item to be repeating");
       }
       return filter_schema_value(schema,
@@ -346,8 +335,7 @@ class column_pruner {
     }
     auto num_list_children = get_num_children(list_schema_item);
     if (num_list_children > 1) {
-      if (!list_schema_item.__isset.repetition_type ||
-          list_schema_item.repetition_type != parquet::format::FieldRepetitionType::REPEATED) {
+      if (list_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
         throw std::runtime_error("expected list item to be repeating");
       }
       return found.filter_schema(schema,
@@ -369,13 +357,11 @@ class column_pruner {
     ++current_input_schema_index;
 
     auto repeated_field_schema_item = schema.at(current_input_schema_index);
-    if (!repeated_field_schema_item.__isset.repetition_type ||
-        repeated_field_schema_item.repetition_type !=
-          parquet::format::FieldRepetitionType::REPEATED) {
+    if (repeated_field_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
       throw std::runtime_error("the structure of the list's child is not standard (non repeating)");
     }
 
-    bool repeated_field_is_group    = !repeated_field_schema_item.__isset.type;
+    bool repeated_field_is_group    = repeated_field_schema_item.type == pq::Type::UNDEFINED;
     int repeated_field_num_children = get_num_children(repeated_field_schema_item);
     std::string repeated_field_name = repeated_field_schema_item.name;
     if (repeated_field_is_group && repeated_field_num_children == 1 &&
@@ -409,7 +395,7 @@ class column_pruner {
   /**
    * filter_schema, but specific to Tag::MAP.
    */
-  void filter_schema_map(std::vector<parquet::format::SchemaElement> const& schema,
+  void filter_schema_map(std::vector<pq::SchemaElement> const& schema,
                          bool const ignore_case,
                          std::size_t& current_input_schema_index,
                          std::size_t& next_input_chunk_index,
@@ -426,13 +412,13 @@ class column_pruner {
     // and then an inner group that has two fields a key (that is required) and a value, that is
     // optional.
 
-    bool is_map_group = !map_schema_item.__isset.type;
+    bool is_map_group = map_schema_item.type == pq::Type::UNDEFINED;
     if (!is_map_group) {
       throw std::runtime_error("expected a map item, but found a single value");
     }
-    if (!map_schema_item.__isset.converted_type ||
-        (map_schema_item.converted_type != parquet::format::ConvertedType::MAP &&
-         map_schema_item.converted_type != parquet::format::ConvertedType::MAP_KEY_VALUE)) {
+    if (!map_schema_item.converted_type.has_value() ||
+        (map_schema_item.converted_type != pq::ConvertedType::MAP &&
+         map_schema_item.converted_type != pq::ConvertedType::MAP_KEY_VALUE)) {
       throw std::runtime_error("expected a map type, but it was not found.");
     }
     if (get_num_children(map_schema_item) != 1) {
@@ -446,9 +432,7 @@ class column_pruner {
 
     // Now lets look at the repeated child.
     auto repeated_field_schema_item = schema.at(current_input_schema_index);
-    if (!repeated_field_schema_item.__isset.repetition_type ||
-        repeated_field_schema_item.repetition_type !=
-          parquet::format::FieldRepetitionType::REPEATED) {
+    if (repeated_field_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
       throw std::runtime_error("found non repeating map child");
     }
 
@@ -489,7 +473,7 @@ class column_pruner {
    * current_input_schema_index and next_input_chunk_index are also outputs but are state that is
    * passed to each child and returned when it consumes something.
    */
-  void filter_schema(std::vector<parquet::format::SchemaElement> const& schema,
+  void filter_schema(std::vector<pq::SchemaElement> const& schema,
                      bool const ignore_case,
                      std::size_t& current_input_schema_index,
                      std::size_t& next_input_chunk_index,
@@ -612,11 +596,11 @@ static bool invalid_file_offset(long start_index, long pre_start_index, long pre
   return invalid;
 }
 
-static int64_t get_offset(parquet::format::ColumnChunk const& column_chunk)
+static int64_t get_offset(pq::ColumnChunk const& column_chunk)
 {
   auto md        = column_chunk.meta_data;
   int64_t offset = md.data_page_offset;
-  if (md.__isset.dictionary_page_offset && offset > md.dictionary_page_offset) {
+  if (md.dictionary_page_offset != 0 && offset > md.dictionary_page_offset) {
     offset = md.dictionary_page_offset;
   }
   return offset;
@@ -630,11 +614,11 @@ static int64_t get_offset(parquet::format::ColumnChunk const& column_chunk)
  * only a subset survives.
  */
 struct row_groups {
-  std::vector<parquet::format::RowGroup> groups;
+  std::vector<pq::RowGroup> groups;
   std::vector<int64_t> row_index_offsets;
 };
 
-static row_groups filter_groups(parquet::format::FileMetaData const& meta,
+static row_groups filter_groups(pq::FileMetaData const& meta,
                                 int64_t part_offset,
                                 int64_t part_length)
 {
@@ -645,14 +629,16 @@ static row_groups filter_groups(parquet::format::FileMetaData const& meta,
   int64_t pre_compressed_size     = 0;
   bool first_column_with_metadata = true;
   if (num_row_groups > 0) {
-    first_column_with_metadata = meta.row_groups[0].columns[0].__isset.meta_data;
+    // A real data_page_offset is >= 4, and cudf's meta_data is non-optional, so a value of 0
+    // means the source footer carried no inline column metadata for the first column.
+    first_column_with_metadata = meta.row_groups[0].columns[0].meta_data.data_page_offset != 0;
   }
 
   row_groups result;
   int64_t cumulative_rows = 0;
   for (uint64_t rg_i = 0; rg_i < num_row_groups; ++rg_i) {
-    parquet::format::RowGroup const& row_group = meta.row_groups[rg_i];
-    int64_t total_size                         = 0;
+    pq::RowGroup const& row_group = meta.row_groups[rg_i];
+    int64_t total_size            = 0;
     int64_t start_index;
     auto column_chunk = row_group.columns[0];
     if (first_column_with_metadata) {
@@ -660,21 +646,21 @@ static row_groups filter_groups(parquet::format::FileMetaData const& meta,
     } else {
       // the file_offset of first block always holds the truth, while other blocks don't :
       // see PARQUET-2078 for details
-      start_index = row_group.file_offset;
+      start_index = row_group.file_offset.value_or(0);
       if (invalid_file_offset(start_index, pre_start_index, pre_compressed_size)) {
         // first row group's offset is always 4, else
         // use minStartIndex(imprecise in case of padding, but good enough for filtering)
         start_index = (pre_start_index == 0) ? 4 : pre_start_index + pre_compressed_size;
       }
       pre_start_index     = start_index;
-      pre_compressed_size = row_group.total_compressed_size;
+      pre_compressed_size = row_group.total_compressed_size.value_or(0);
     }
-    if (row_group.__isset.total_compressed_size) {
-      total_size = row_group.total_compressed_size;
+    if (row_group.total_compressed_size.has_value()) {
+      total_size = row_group.total_compressed_size.value();
     } else {
       auto num_columns = row_group.columns.size();
       for (uint64_t cc_i = 0; cc_i < num_columns; ++cc_i) {
-        parquet::format::ColumnChunk const& col = row_group.columns[cc_i];
+        pq::ColumnChunk const& col = row_group.columns[cc_i];
         total_size += col.meta_data.total_compressed_size;
       }
     }
@@ -689,43 +675,12 @@ static row_groups filter_groups(parquet::format::FileMetaData const& meta,
   return result;
 }
 
-void deserialize_parquet_footer(uint8_t* buffer, uint32_t len, parquet::format::FileMetaData* meta)
-{
-  using ThriftBuffer = apache::thrift::transport::TMemoryBuffer;
-
-  SRJ_FUNC_RANGE();
-// A lot of this came from the parquet source code...
-// Deserialize msg bytes into c++ thrift msg using memory transport.
-#if PARQUET_THRIFT_VERSION_MAJOR > 0 || PARQUET_THRIFT_VERSION_MINOR >= 14
-  auto conf = std::make_shared<apache::thrift::TConfiguration>();
-  conf->setMaxMessageSize(std::numeric_limits<int>::max());
-  auto tmem_transport = std::make_shared<ThriftBuffer>(buffer, len, ThriftBuffer::OBSERVE, conf);
-#else
-  auto tmem_transport = std::make_shared<ThriftBuffer>(buffer, len);
-#endif
-
-  apache::thrift::protocol::TCompactProtocolFactoryT<ThriftBuffer> tproto_factory;
-  // Protect against CPU and memory bombs
-  tproto_factory.setStringSizeLimit(100 * 1000 * 1000);
-  // Structs in the thrift definition are relatively large (at least 300 bytes).
-  // This limits total memory to the same order of magnitude as stringSize.
-  tproto_factory.setContainerSizeLimit(1000 * 1000);
-  std::shared_ptr<apache::thrift::protocol::TProtocol> tproto =
-    tproto_factory.getProtocol(tmem_transport);
-  try {
-    meta->read(tproto.get());
-  } catch (std::exception& e) {
-    std::stringstream ss;
-    ss << "Couldn't deserialize thrift: " << e.what() << "\n";
-    throw std::runtime_error(ss.str());
-  }
-}
-
-void filter_columns(std::vector<parquet::format::RowGroup>& groups, std::vector<int>& chunk_filter)
+void filter_columns(std::vector<pq::RowGroup>& groups, std::vector<int>& chunk_filter)
 {
   SRJ_FUNC_RANGE();
   for (auto group_it = groups.begin(); group_it != groups.end(); ++group_it) {
-    std::vector<parquet::format::ColumnChunk> new_chunks;
+    std::vector<pq::ColumnChunk> new_chunks;
+    new_chunks.reserve(chunk_filter.size());
     for (auto it = chunk_filter.begin(); it != chunk_filter.end(); ++it) {
       new_chunks.push_back(group_it->columns[*it]);
     }
@@ -754,10 +709,13 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
   SRJ_FUNC_RANGE();
   JNI_TRY
   {
-    auto meta    = std::make_unique<parquet::format::FileMetaData>();
     uint32_t len = static_cast<uint32_t>(buffer_length);
     // We don't support encrypted parquet...
-    rapids::jni::deserialize_parquet_footer(reinterpret_cast<uint8_t*>(buffer), len, meta.get());
+    // Parse leniently (throw_if_type_mismatch::NO): skip a known field whose wire type does not
+    // match cudf's schema (Thrift forward-compat) rather than rejecting real files that use it.
+    auto meta = std::make_unique<rapids::jni::pq::FileMetaData>(cudf::io::read_parquet_footer_bytes(
+      cudf::host_span<uint8_t const>(reinterpret_cast<uint8_t const*>(buffer), len),
+      rapids::jni::pq::throw_if_type_mismatch::NO));
 
     // Get the filter for the columns first...
     cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
@@ -777,7 +735,7 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
 
     // start by filtering the schema and the chunks
     std::size_t new_schema_size = filter.schema_map.size();
-    std::vector<parquet::format::SchemaElement> new_schema(new_schema_size);
+    std::vector<rapids::jni::pq::SchemaElement> new_schema(new_schema_size);
     for (std::size_t i = 0; i < new_schema_size; ++i) {
       int orig_index             = filter.schema_map[i];
       int new_num_children       = filter.schema_num_children[i];
@@ -785,10 +743,10 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
       new_schema[i].num_children = new_num_children;
     }
     meta->schema = std::move(new_schema);
-    if (meta->__isset.column_orders) {
-      std::vector<parquet::format::ColumnOrder> new_order;
+    if (meta->column_orders.has_value()) {
+      std::vector<rapids::jni::pq::ColumnOrder> new_order;
       for (auto it = filter.chunk_map.begin(); it != filter.chunk_map.end(); ++it) {
-        new_order.push_back(meta->column_orders[*it]);
+        new_order.push_back((*meta->column_orders)[*it]);
       }
       meta->column_orders = std::move(new_order);
     }
@@ -852,11 +810,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_getNumCol
   {
     auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     int ret      = 0;
-    if (footer->meta->schema.size() > 0) {
-      if (footer->meta->schema[0].__isset.num_children) {
-        ret = footer->meta->schema[0].num_children;
-      }
-    }
+    if (footer->meta->schema.size() > 0) { ret = footer->meta->schema[0].num_children; }
     return ret;
   }
   JNI_CATCH(env, -1);
@@ -869,15 +823,13 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
   JNI_TRY
   {
     auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
-    std::shared_ptr<apache::thrift::transport::TMemoryBuffer> transportOut(
-      new apache::thrift::transport::TMemoryBuffer());
-    apache::thrift::protocol::TCompactProtocolFactoryT<apache::thrift::transport::TMemoryBuffer>
-      factory;
-    auto protocolOut = factory.getProtocol(transportOut);
-    footer->meta->write(protocolOut.get());
-    uint8_t* buf_ptr;
-    uint32_t buf_size;
-    transportOut->getBuffer(&buf_ptr, &buf_size);
+    // cudf's writer always emits an inline ColumnChunk.meta_data (the field is non-optional), so a
+    // chunk whose source footer omitted it (PARQUET-2078) round-trips with a default-valued
+    // meta_data instead of staying absent; downstream readers must locate those columns via the
+    // preserved RowGroup.file_offset, not this fabricated inline metadata.
+    std::vector<uint8_t> serialized = cudf::io::write_parquet_footer_bytes(*footer->meta);
+    uint8_t* buf_ptr                = serialized.data();
+    uint32_t buf_size               = static_cast<uint32_t>(serialized.size());
 
     // 12 extra is for the MAGIC thrift_footer length MAGIC
     jobject ret = cudf::jni::allocate_host_buffer(env, buf_size + 12, false, host_memory_allocator);
