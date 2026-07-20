@@ -3434,6 +3434,58 @@ public class ProtobufTest {
   }
 
   @Test
+  void testNestedSingularWrongWireType_FailfastSkipsMismatchedField() {
+    // Java protobuf retains a wrong-wire nested field as unknown, and Spark only checks root
+    // unknown fields for schema mismatches.
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedX = ColumnVector.fromBoxedInts((Integer) null);
+         ColumnVector expectedY = ColumnVector.fromBoxedInts(42);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedX, expectedY);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedSingularWrongWireType_PermissiveSkipsMismatchedField() {
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedX = ColumnVector.fromBoxedInts((Integer) null);
+         ColumnVector expectedY = ColumnVector.fromBoxedInts(42);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedX, expectedY);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
   void testNestedRepeatedWrongWireType_FailfastSkipsMismatchedOccurrence() {
     // message Inner { repeated int32 x = 1; }
     // message Outer { Inner inner = 1; }
