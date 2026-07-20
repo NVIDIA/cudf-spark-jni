@@ -43,7 +43,7 @@ import java.util.concurrent.ConcurrentMap;
  * debugging cross-environment differences should first check the JVM's {@code tzdata} version.
  */
 class OrcTimezoneInfo {
-  public OrcTimezoneInfo(int initialOffset, int rawOffset, long[] transitions, int[] offsets,
+  OrcTimezoneInfo(int initialOffset, int rawOffset, long[] transitions, int[] offsets,
       OrcDstRuleExtractor.DstRule dstRule) {
     this.initialOffset = initialOffset;
     this.rawOffset = rawOffset;

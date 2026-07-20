@@ -60,35 +60,70 @@ final class OrcDstRuleExtractor {
    * {@code time} are in milliseconds.
    *
    * <p>The {@code *Mode} fields encode how {@code *Day}/{@code *DayOfWeek}
-   * combine — see the {@code MODE_*} constants. {@code *TimeMode} selects
-   * the time-of-day basis — see the {@code TIME_MODE_*} constants.
+   * combine. {@code *TimeMode} selects the time-of-day basis.
    */
+  enum DstRuleMode {
+    DOM_MODE(0),
+    DOW_IN_MONTH_MODE(1),
+    DOW_GE_DOM_MODE(2),
+    DOW_LE_DOM_MODE(3);
+
+    private final int nativeValue;
+
+    DstRuleMode(int nativeValue) {
+      this.nativeValue = nativeValue;
+    }
+
+    int nativeValue() {
+      return nativeValue;
+    }
+
+    static DstRuleMode fromNativeValue(int nativeValue) {
+      switch (nativeValue) {
+      case 0:
+        return DOM_MODE;
+      case 1:
+        return DOW_IN_MONTH_MODE;
+      case 2:
+        return DOW_GE_DOM_MODE;
+      case 3:
+        return DOW_LE_DOM_MODE;
+      default:
+        throw new IllegalArgumentException("Unsupported DST rule mode: " + nativeValue);
+      }
+    }
+  }
+
+  enum DstTimeMode {
+    WALL_TIME(0),
+    STANDARD_TIME(1),
+    UTC_TIME(2);
+
+    private final int nativeValue;
+
+    DstTimeMode(int nativeValue) {
+      this.nativeValue = nativeValue;
+    }
+
+    int nativeValue() {
+      return nativeValue;
+    }
+  }
+
   static final class DstRule {
-    // Day-rule modes for {start,end}Mode. This encoding represents the same four rule
-    // categories as SimpleTimeZone, numbered 0..3 for the GPU side.
-    static final int MODE_DOM          = 0;
-    static final int MODE_DOW_IN_MONTH = 1;
-    static final int MODE_DOW_GE_DOM   = 2;
-    static final int MODE_DOW_LE_DOM   = 3;
-
-    // Time-of-day basis for {start,end}TimeMode.
-    static final int TIME_MODE_WALL     = 0;
-    static final int TIME_MODE_STANDARD = 1;
-    static final int TIME_MODE_UTC      = 2;
-
     int dstSavings;
     int startMonth;
     int startDay;
     int startDayOfWeek;
     int startTime;
-    int startTimeMode;
-    int startMode;
+    DstTimeMode startTimeMode;
+    DstRuleMode startMode;
     int endMonth;
     int endDay;
     int endDayOfWeek;
     int endTime;
-    int endTimeMode;
-    int endMode;
+    DstTimeMode endTimeMode;
+    DstRuleMode endMode;
   }
 
   /**
@@ -212,9 +247,9 @@ final class OrcDstRuleExtractor {
     int day = transitionRule.getDayOfMonthIndicator();
     int dayOfWeek = toCalendarDayOfWeek(transitionRule.getDayOfWeek().getValue());
     int time = getTransitionRuleTimeMillis(transitionRule);
-    int timeMode = getTransitionRuleTimeMode(transitionRule);
+    DstTimeMode timeMode = getTransitionRuleTimeMode(transitionRule);
     // Guaranteed by the precondition above (DayOfMonthIndicator > 0).
-    int mode = DstRule.MODE_DOW_GE_DOM;
+    DstRuleMode mode = DstRuleMode.DOW_GE_DOM_MODE;
 
     if (isStartRule) {
       rule.startMonth = month;
@@ -240,14 +275,15 @@ final class OrcDstRuleExtractor {
     return secondOfDay * 1000;
   }
 
-  private static int getTransitionRuleTimeMode(ZoneOffsetTransitionRule transitionRule) {
+  private static DstTimeMode getTransitionRuleTimeMode(
+      ZoneOffsetTransitionRule transitionRule) {
     ZoneOffsetTransitionRule.TimeDefinition timeDef = transitionRule.getTimeDefinition();
     if (ZoneOffsetTransitionRule.TimeDefinition.UTC == timeDef) {
-      return DstRule.TIME_MODE_UTC;
+      return DstTimeMode.UTC_TIME;
     } else if (ZoneOffsetTransitionRule.TimeDefinition.STANDARD == timeDef) {
-      return DstRule.TIME_MODE_STANDARD;
+      return DstTimeMode.STANDARD_TIME;
     } else {
-      return DstRule.TIME_MODE_WALL;
+      return DstTimeMode.WALL_TIME;
     }
   }
 
@@ -323,16 +359,16 @@ final class OrcDstRuleExtractor {
     rule.startDayOfWeek = startFields[2];
     rule.startTime = startFields[3];
     // decodeTransition converts to standard local time.
-    rule.startTimeMode = DstRule.TIME_MODE_STANDARD;
-    rule.startMode = startFields[4];
+    rule.startTimeMode = DstTimeMode.STANDARD_TIME;
+    rule.startMode = DstRuleMode.fromNativeValue(startFields[4]);
 
     int[] endFields = decodeTransition(transitions.dstOffTransition, tz.getRawOffset());
     rule.endMonth = endFields[0];
     rule.endDay = endFields[1];
     rule.endDayOfWeek = endFields[2];
     rule.endTime = endFields[3];
-    rule.endTimeMode = DstRule.TIME_MODE_STANDARD;
-    rule.endMode = endFields[4];
+    rule.endTimeMode = DstTimeMode.STANDARD_TIME;
+    rule.endMode = DstRuleMode.fromNativeValue(endFields[4]);
 
     return rule;
   }
@@ -422,7 +458,8 @@ final class OrcDstRuleExtractor {
         ? monthLength - 6
         : 1 + (dayOfWeekInMonth - 1) * 7;
 
-    return new int[]{month, baseDayOfMonth, dayOfWeek, timeInDay, DstRule.MODE_DOW_GE_DOM};
+    return new int[]{month, baseDayOfMonth, dayOfWeek, timeInDay,
+        DstRuleMode.DOW_GE_DOM_MODE.nativeValue()};
   }
 
   // ---- Verification: ensure the extracted rule matches tz.getOffset ----
@@ -499,25 +536,25 @@ final class OrcDstRuleExtractor {
   }
 
   private static long computeTransitionUtcMillis(int year, int ruleMonth, int ruleDay,
-      int ruleDayOfWeek, int ruleTime, int ruleTimeMode, int ruleMode, int rawOffsetMs,
-      int dstSavingsMs, boolean isStartRule) {
+      int ruleDayOfWeek, int ruleTime, DstTimeMode ruleTimeMode, DstRuleMode ruleMode,
+      int rawOffsetMs, int dstSavingsMs, boolean isStartRule) {
     int actualDay = computeRuleDay(ruleMode, ruleDay, ruleDayOfWeek, year, ruleMonth);
     long utcMs = OrcTimezoneInfo.utcMillisForDate(year, ruleMonth + 1, actualDay) + ruleTime;
-    if (ruleTimeMode == DstRule.TIME_MODE_WALL) {
+    if (ruleTimeMode == DstTimeMode.WALL_TIME) {
       // WALL time: subtract raw offset and (for end transitions) also DST savings.
       utcMs -= rawOffsetMs;
       if (!isStartRule) {
         utcMs -= dstSavingsMs;
       }
-    } else if (ruleTimeMode == DstRule.TIME_MODE_STANDARD) {
+    } else if (ruleTimeMode == DstTimeMode.STANDARD_TIME) {
       utcMs -= rawOffsetMs;
     }
     // TIME_MODE_UTC is already in UTC.
     return utcMs;
   }
 
-  private static int computeRuleDay(int ruleMode, int ruleDay, int ruleDayOfWeek, int year,
-      int month) {
+  private static int computeRuleDay(DstRuleMode ruleMode, int ruleDay, int ruleDayOfWeek,
+      int year, int month) {
     LocalDate firstOfMonth = LocalDate.of(year, month + 1, 1);
     int monthLength = firstOfMonth.lengthOfMonth();
     int firstDayOfWeek = toCalendarDayOfWeek(firstOfMonth.getDayOfWeek().getValue());
@@ -529,7 +566,7 @@ final class OrcDstRuleExtractor {
     // caller exists they are not reachable from any test; add coverage when
     // one appears.
     switch (ruleMode) {
-      case DstRule.MODE_DOW_IN_MONTH: {
+      case DOW_IN_MONTH_MODE: {
         // Clamp the result into [1, monthLength] so a "Nth occurrence" that
         // overflows the month (e.g. 5th Sunday in a 28-day February) or
         // underflows (e.g. -5th occurrence in a 28-day month) collapses to a
@@ -548,7 +585,7 @@ final class OrcDstRuleExtractor {
           return Math.max(monthLength - diff + (ruleDay + 1) * 7, 1);
         }
       }
-      case DstRule.MODE_DOW_GE_DOM: {
+      case DOW_GE_DOM_MODE: {
         // Per ZoneOffsetTransitionRule.getDayOfMonthIndicator(), the indicator
         // may exceed monthLength (e.g. Feb 29 in a non-leap year, treated as
         // Mar 1). Clamp the anchor before LocalDate.of so it never throws, and
@@ -563,7 +600,7 @@ final class OrcDstRuleExtractor {
         if (diff < 0) diff += 7;
         return Math.min(anchorDay + diff, monthLength);
       }
-      case DstRule.MODE_DOW_LE_DOM: {
+      case DOW_LE_DOM_MODE: {
         // Mirrors the MODE_DOW_GE_DOM clamp above: the day-of-month indicator
         // can exceed monthLength (e.g. 31 in February). Clamp the anchor
         // before LocalDate.of so it never throws, and clamp the result to a
@@ -575,7 +612,7 @@ final class OrcDstRuleExtractor {
         if (diff < 0) diff += 7;
         return Math.max(anchorDay - diff, 1);
       }
-      case DstRule.MODE_DOM:
+      case DOM_MODE:
       default:
         return ruleDay;
     }
