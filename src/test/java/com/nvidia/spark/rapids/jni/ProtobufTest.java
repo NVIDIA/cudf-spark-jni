@@ -3365,10 +3365,10 @@ public class ProtobufTest {
     }
   }
 
+  // Both modes match protobuf-java by treating nested singular wire-type mismatches as unknown
+  // fields; Spark only checks root unknown fields for schema mismatches.
   @Test
   void testNestedSingularWrongWireType_FailfastSkipsMismatchedField() {
-    // Java protobuf retains a wrong-wire nested field as unknown, and Spark only checks root
-    // unknown fields for schema mismatches.
     Byte[] innerMessage = concat(
         box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
         box(tag(2, WT_VARINT)), box(encodeVarint(42)));
