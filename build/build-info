@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 #
-# Copyright (c) 2022-2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 # Arguments:
 #   version  - The current version of the project
 #   git_path - The path to the repository
-#   libcudf_path - The path to the libcudf library
+#   libcudf_path - The libcudf library file, or an install tree containing lib{64,}/libcudf.a
 set -e
 set -o pipefail
 
@@ -29,6 +29,14 @@ echo_build_properties() {
   git_path=$2
   libcudf_path=$3
   shift 3
+  # A dir is a libcudf install tree: use its lib{64,}/libcudf.a; a file passes through unchanged.
+  if [[ -d "$libcudf_path" ]]; then
+    lib_in_tree="$libcudf_path/lib64/libcudf.a"
+    [[ -f "$lib_in_tree" ]] || lib_in_tree="$libcudf_path/lib/libcudf.a"
+    [[ -f "$lib_in_tree" ]] \
+      || { echo "ERROR: no prebuilt lib{64,}/libcudf.a under $libcudf_path" >&2; exit 1; }
+    libcudf_path="$lib_in_tree"
+  fi
   echo version=$version
   echo user=$(whoami)
   echo revision=$(cd "$git_path" && git rev-parse HEAD)

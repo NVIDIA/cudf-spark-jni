@@ -62,6 +62,8 @@ LIBCUDF_BUILD_CONFIGURE=${LIBCUDF_BUILD_CONFIGURE:-false}
 LIBCUDF_BUILD_PATH=${LIBCUDF_BUILD_PATH:-$PROJECT_BUILD_DIR/libcudf/cmake-build}
 LIBCUDF_DEPENDENCY_MODE=${LIBCUDF_DEPENDENCY_MODE:-pinned}
 LIBCUDF_INSTALL_PATH=${LIBCUDF_INSTALL_PATH:-$PROJECT_BUILD_DIR/libcudf-install}
+LIBCUDF_REUSE_FORCE=${LIBCUDF_REUSE_FORCE:-false}
+LIBCUDF_REUSE_PREBUILT=${LIBCUDF_REUSE_PREBUILT:-false}
 LIBCUDFJNI_BUILD_PATH=${LIBCUDFJNI_BUILD_PATH:-$PROJECT_BUILD_DIR/libcudfjni}
 SPARK_JNI_BUILD_PATH=${SPARK_JNI_BUILD_PATH:-$PROJECT_BUILD_DIR/jni/cmake-build}
 RMM_LOGGING_LEVEL=${RMM_LOGGING_LEVEL:-OFF}
@@ -93,72 +95,257 @@ create_compile_commands_symlink() {
   ln -sf "$compile_commands_file" "$compile_commands_link"
 }
 
+# Generated ONCE per run and stamped into BOTH prebuilt-fingerprint manifests below: equal nonces
+# prove the install/libcudfjni pair came from the SAME seed run. Robust where a git-less cudf
+# source records cudf_sha=unknown on both sides (unknown==unknown would pass vacuously).
+SEED_NONCE="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
+
+# Dependency-skew guard rationale: a dimension is ENFORCED (a cmp. key, diffed on reuse) iff the
+# consumer's phase-3 build can silently DIVERGE from the prebuilt libs on it (ODR/ABI corruption).
+#   cmp.pins_sha256  - the four tracked thirdparty/cudf-pins files (versions.json, setup.cmake,
+#                      add_dependency_pins.cmake, rapids-cmake.sha), hashed by explicit name so a
+#                      stray untracked file cannot cause spurious skew. Phase 3 fetches these
+#                      pinned dependencies ITSELF, so pin skew compiles against different dep
+#                      versions than the ones inside the prebuilt libs.
+#   cmp.ptds         - CUDF_USE_PER_THREAD_DEFAULT_STREAM is a PUBLIC compile definition; mixing
+#                      per-thread and legacy default-stream objects splits stream semantics.
+#   cmp.cuda_archs   - device code built for different real archs cannot link/run reliably.
+#   cmp.use_gds      - gates the cuFile code paths and the libcufilejni.a link.
+#   cmp.rmm_logging  - a macro baked into the rmm/cudf headers that phase 3 recompiles.
+#   cmp.build_type   - the prebuilt libcudf's CMAKE_BUILD_TYPE (phase 3 itself defaults to
+#                      Release).
+#   cmp.dep_mode     - reuse requires pinned dependencies; "latest" resolves differently per day.
+#   cmp.cuda_toolkit - the CUDA toolkit drives device ABI and the statically linked CUDA runtime.
+# NOT enforced: the cudf source/commit - a skew fails LOUDLY at phase-3 link or as a test-runtime
+# UnsatisfiedLinkError, so reuse only WARNS on it (the cudf_sha warning in the reuse validation);
+# nvcomp - baked into the prebuilt install's cmake export, consumed wholesale, cannot diverge;
+# Arrow/Parquet - linked wholesale from the one prebuilt _deps tree. Everything else in the
+# manifest (seed_nonce, cudf_sha, toolchain versions, date) is RECORD-only provenance.
+cudf_fingerprint_compare_lines() {
+  local pins_sha cuda_toolkit
+  # Hash only the per-file digest column: sha256sum's raw output embeds absolute paths, which
+  # differ between the seed and consumer trees and would fake skew on identical pin contents.
+  pins_sha="$(set -o pipefail; sha256sum \
+    "$CUDF_PIN_PATH/versions.json" \
+    "$CUDF_PIN_PATH/setup.cmake" \
+    "$CUDF_PIN_PATH/add_dependency_pins.cmake" \
+    "$CUDF_PIN_PATH/rapids-cmake.sha" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1)" \
+    || { echo "ERROR: cannot hash the tracked cudf-pins files under $CUDF_PIN_PATH" >&2; exit 1; }
+  cuda_toolkit="${CUDA_VERSION:-}"
+  if [[ -z "$cuda_toolkit" ]]; then
+    cuda_toolkit="$(set -o pipefail; nvcc --version | grep -o 'release [0-9][0-9.]*' | head -1)" \
+      || { echo "ERROR: cannot determine CUDA toolkit (no CUDA_VERSION, no nvcc)" >&2; exit 1; }
+    cuda_toolkit="${cuda_toolkit#release }"
+  fi
+  echo "cmp.pins_sha256=$pins_sha"
+  echo "cmp.ptds=$CUDF_USE_PER_THREAD_DEFAULT_STREAM"
+  echo "cmp.cuda_archs=$CMAKE_CUDA_ARCHITECTURES"
+  echo "cmp.use_gds=$USE_GDS"
+  echo "cmp.rmm_logging=$RMM_LOGGING_LEVEL"
+  echo "cmp.build_type=$CUDF_BUILD_TYPE"
+  echo "cmp.dep_mode=$LIBCUDF_DEPENDENCY_MODE"
+  echo "cmp.cuda_toolkit=$cuda_toolkit"
+}
+
+# Write one prebuilt-fingerprint manifest: the enforced cmp. lines plus RECORD-only provenance.
+# Single-shot overwrite (one printf, ">"): rebuilding a tree REPLACES its manifest; appending
+# would duplicate cmp./seed_nonce lines and break the reuse check's single-line greps.
+cudf_fingerprint_stamp() {
+  local manifest="$1" content cudf_sha gcc_ver nvcc_ver
+  cudf_sha="$(git -C "$CUDF_PATH" rev-parse HEAD 2>/dev/null)" || cudf_sha=unknown
+  gcc_ver="$(gcc -dumpfullversion 2>/dev/null)" || gcc_ver=unknown
+  nvcc_ver="$(set -o pipefail; nvcc --version 2>/dev/null | grep -o 'V[0-9][0-9.]*' | head -1)" \
+    || nvcc_ver=unknown
+  content="$(
+    cudf_fingerprint_compare_lines
+    echo "seed_nonce=$SEED_NONCE"
+    echo "cudf_sha=$cudf_sha"
+    echo "gcc=$gcc_ver"
+    echo "nvcc=$nvcc_ver"
+    echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  )" || { echo "ERROR: fingerprint generation failed for $manifest" >&2; exit 1; }
+  printf '%s\n' "$content" > "$manifest"
+}
+
+# Reuse validation: when skipping phases 1+2, fail fast (here, not at phase-3 link) if the
+# prebuilt trees are incomplete for this build config or fingerprint-skewed vs this worktree.
+if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+  LIBCUDF_A="$LIBCUDF_INSTALL_PATH/lib64/libcudf.a"
+  [[ -f "$LIBCUDF_A" ]] || LIBCUDF_A="$LIBCUDF_INSTALL_PATH/lib/libcudf.a"
+  LIBDIR="$(dirname "$LIBCUDF_A")"
+  [[ -f "$LIBCUDF_A" ]] \
+    || { echo "ERROR: no prebuilt lib{64,}/libcudf.a under $LIBCUDF_INSTALL_PATH" >&2; exit 1; }
+  [[ -f "$LIBCUDFJNI_BUILD_PATH/libcudfjni.a" ]] \
+    || { echo "ERROR: no prebuilt libcudfjni.a at $LIBCUDFJNI_BUILD_PATH" >&2; exit 1; }
+  [[ -f "$LIBCUDFJNI_BUILD_PATH/_deps/arrow-build/release/libarrow.a" ]] \
+    || { echo "ERROR: incomplete libcudfjni _deps (arrow)" >&2; exit 1; }
+  # jar packaging copies libnvcomp*.so from the libcudfjni tree (pom.xml copy-native-libs);
+  # copy-resources does NOT fail on absent includes, so a trimmed prebuilt would ship a jar
+  # silently lacking nvcomp.
+  [[ -f "$LIBCUDFJNI_BUILD_PATH/libnvcomp.so" ]] \
+    || { echo "ERROR: prebuilt libcudfjni missing libnvcomp.so (jar packaging)" >&2; exit 1; }
+  if [[ "$BUILD_TESTS" == "ON" || "$BUILD_BENCHMARKS" == "ON" ]]; then
+    [[ -d "$LIBCUDF_INSTALL_PATH/src/cudftestutil" ]] \
+      || { echo "ERROR: test/bench reuse needs installed testutil (src/cudftestutil); re-seed" >&2
+           exit 1; }
+    [[ -f "$LIBDIR/libcudftest_default_stream.a" ]] \
+      || { echo "ERROR: test/bench reuse needs cudftest_default_stream; re-seed with testutil" >&2
+           exit 1; }
+  fi
+  [[ "$LIBCUDF_DEPENDENCY_MODE" == "pinned" ]] \
+    || { echo "ERROR: reuse requires pinned deps; got $LIBCUDF_DEPENDENCY_MODE" >&2; exit 1; }
+  m1="$LIBCUDF_INSTALL_PATH/cudf-prebuilt-fingerprint.txt"
+  m2="$LIBCUDFJNI_BUILD_PATH/cudf-prebuilt-fingerprint.txt"
+  want="$(cudf_fingerprint_compare_lines)"
+  want="$(LC_ALL=C sort <<<"$want")" # capture, THEN sort (set -e without pipefail)
+  for m in "$m1" "$m2"; do
+    [[ -f "$m" ]] || { echo "ERROR: prebuilt not stamped ($m); re-seed" >&2; exit 1; }
+    if ! diff <(grep '^cmp\.' "$m" | LC_ALL=C sort) <(printf '%s\n' "$want"); then
+      if [[ "$LIBCUDF_REUSE_FORCE" == "true" ]]; then
+        echo "WARNING: cudf skew in $m overridden" >&2
+      else
+        echo "ERROR: prebuilt does not match this worktree (skew in $m)." \
+          "Re-seed or -Dlibcudf.reuse.force=true." >&2
+        exit 1
+      fi
+    fi
+  done
+  # Mismatched-pair guard: the two trees must come from the SAME seed run, else libcudfjni.a was
+  # built against different cudf headers than libcudf.a (the silent ODR class this guard exists
+  # for). Compare seed_nonce, NOT cudf_sha: a copied git-less source makes cudf_sha "unknown" in
+  # both trees and unknown==unknown would pass vacuously; a per-run nonce cannot collide across
+  # seed runs. The "|| { ...; exit 1; }" on each grep is required: under set -e a bare
+  # n=$(grep ...) that matches nothing aborts messagelessly; a manifest lacking seed_nonce is
+  # corrupt/old, so error explicitly instead.
+  n1="$(grep '^seed_nonce=' "$m1")" \
+    || { echo "ERROR: $m1 missing seed_nonce (corrupt/old manifest); re-seed" >&2; exit 1; }
+  n2="$(grep '^seed_nonce=' "$m2")" \
+    || { echo "ERROR: $m2 missing seed_nonce (corrupt/old manifest); re-seed" >&2; exit 1; }
+  if [[ "$n1" != "$n2" ]]; then
+    if [[ "$LIBCUDF_REUSE_FORCE" == "true" ]]; then
+      echo "WARNING: install/libcudfjni from different seed runs ($n1 vs $n2)" >&2
+    else
+      echo "ERROR: install ($n1) and libcudfjni ($n2) prebuilt from different seed runs" \
+        "(mismatched pair). Re-seed both, or -Dlibcudf.reuse.force=true." >&2
+      exit 1
+    fi
+  fi
+  # Non-enforcing cudf-SOURCE skew WARNING (enforce jni pins, not cudf): the Maven jar compiles
+  # cudf Java and phase 3 compiles JNI/bench TUs from CUDF_PATH; if its commit differs from the
+  # prebuilt's recorded cudf_sha, the native/JNI surface can diverge from the prebuilt libs,
+  # surfacing loudly later (phase-3 link error, or a test-runtime UnsatisfiedLinkError). Warn
+  # EARLY; never block.
+  consumer_sha="$(git -C "$CUDF_PATH" rev-parse HEAD 2>/dev/null || echo unknown)"
+  prebuilt_sha="$(grep '^cudf_sha=' "$m1" | head -1)"
+  prebuilt_sha="${prebuilt_sha#cudf_sha=}"
+  if [[ "$consumer_sha" != unknown && -n "$prebuilt_sha" && "$prebuilt_sha" != unknown \
+        && "$consumer_sha" != "$prebuilt_sha" ]]; then
+    echo "WARNING: cudf.path HEAD ($consumer_sha) != prebuilt cudf ($prebuilt_sha);" \
+      "native/JNI skew may fail at phase-3 link or test runtime." >&2
+  fi
+fi
+
 #
 # libcudf build
 #
-mkdir -p "$LIBCUDF_INSTALL_PATH" "$LIBCUDF_BUILD_PATH"
-cd "$LIBCUDF_BUILD_PATH"
+if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+  # Also bypasses the legacy LIBCUDF_CONFIGURE_ONLY early-exit below - intended: in reuse there
+  # is no cudf build to configure.
+  echo "Skipping libcudf build; reusing $LIBCUDF_INSTALL_PATH"
+else
+  mkdir -p "$LIBCUDF_INSTALL_PATH" "$LIBCUDF_BUILD_PATH"
+  cd "$LIBCUDF_BUILD_PATH"
 
-# Skip explicit cudf cmake configuration if it appears it has already configured
-if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.txt ]]; then
-  echo "Configuring cudf native libs"
-  cmake "$CUDF_PATH/cpp" \
-    -DBUILD_BENCHMARKS="$BUILD_CUDF_BENCHMARKS" \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DBUILD_TESTS="$BUILD_CUDF_TESTS" \
-    -DCMAKE_BUILD_TYPE="$CUDF_BUILD_TYPE" \
-    -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
-    -DCMAKE_INSTALL_PREFIX="$LIBCUDF_INSTALL_PATH" \
-    -DCUDF_DEPENDENCY_PIN_MODE="$LIBCUDF_DEPENDENCY_MODE" \
-    -DCUDA_STATIC_CUFILE=ON \
-    -DCUDA_STATIC_RUNTIME=ON \
-    -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
-    -DCUDF_KVIKIO_REMOTE_IO=OFF \
-    -DCUDF_LARGE_STRINGS_DISABLED=ON \
-    -DCUDF_BUILD_STATIC_DEPS=FORCE \
-    -DLIBCUDF_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
-    -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
-    -C="$CUDF_PIN_PATH/setup.cmake"
+  # Skip explicit cudf cmake configuration if it appears it has already configured
+  if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.txt ]]; then
+    echo "Configuring cudf native libs"
+    cmake "$CUDF_PATH/cpp" \
+      -DBUILD_BENCHMARKS="$BUILD_CUDF_BENCHMARKS" \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DBUILD_TESTS="$BUILD_CUDF_TESTS" \
+      -DCMAKE_BUILD_TYPE="$CUDF_BUILD_TYPE" \
+      -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
+      -DCMAKE_INSTALL_PREFIX="$LIBCUDF_INSTALL_PATH" \
+      -DCUDF_DEPENDENCY_PIN_MODE="$LIBCUDF_DEPENDENCY_MODE" \
+      -DCUDA_STATIC_CUFILE=ON \
+      -DCUDA_STATIC_RUNTIME=ON \
+      -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
+      -DCUDF_KVIKIO_REMOTE_IO=OFF \
+      -DCUDF_LARGE_STRINGS_DISABLED=ON \
+      -DCUDF_BUILD_STATIC_DEPS=FORCE \
+      -DLIBCUDF_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
+      -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
+      -C="$CUDF_PIN_PATH/setup.cmake"
+  fi
+  # submodule-sync.sh phase 1 calls this script with LIBCUDF_CONFIGURE_ONLY=ON
+  if [[ $LIBCUDF_CONFIGURE_ONLY == ON ]]; then
+    echo "Skip build..."
+    exit 0
+  fi
+  echo "Building cudf native libs"
+  cmake --build "$LIBCUDF_BUILD_PATH" --target install "-j$CPP_PARALLEL_LEVEL"
+  cudf_fingerprint_stamp "$LIBCUDF_INSTALL_PATH/cudf-prebuilt-fingerprint.txt"
 fi
-if [[ $LIBCUDF_CONFIGURE_ONLY == ON ]]; then # submodule-sync.sh phase 1 call this script with LIBCUDF_CONFIGURE_ONLY=ON
-  echo "Skip build..."
-  exit 0
-fi
-echo "Building cudf native libs"
-cmake --build "$LIBCUDF_BUILD_PATH" --target install "-j$CPP_PARALLEL_LEVEL"
 
 #
 # libcudfjni build
 #
-mkdir -p "$LIBCUDFJNI_BUILD_PATH"
-cd "$LIBCUDFJNI_BUILD_PATH"
-echo "Configuring cudfjni native libs"
-CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
-  "$CUDF_PATH/java/src/main/native" \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
-  -DCUDA_STATIC_CUFILE=ON \
-  -DCUDA_STATIC_RUNTIME=ON \
-  -DCUDF_DEPENDENCY_PIN_MODE=pinned \
-  -DCUDF_JNI_LIBCUDF_STATIC=ON \
-  -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
-  -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
-  -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
-  -DUSE_GDS="$USE_GDS" \
-  -C="$CUDF_PIN_PATH/setup.cmake"
+if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+  echo "Skipping libcudfjni build; reusing $LIBCUDFJNI_BUILD_PATH"
+else
+  mkdir -p "$LIBCUDFJNI_BUILD_PATH"
+  cd "$LIBCUDFJNI_BUILD_PATH"
+  echo "Configuring cudfjni native libs"
+  CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
+    "$CUDF_PATH/java/src/main/native" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
+    -DCUDA_STATIC_CUFILE=ON \
+    -DCUDA_STATIC_RUNTIME=ON \
+    -DCUDF_DEPENDENCY_PIN_MODE=pinned \
+    -DCUDF_JNI_LIBCUDF_STATIC=ON \
+    -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
+    -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
+    -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
+    -DUSE_GDS="$USE_GDS" \
+    -C="$CUDF_PIN_PATH/setup.cmake"
 
-create_compile_commands_symlink "$LIBCUDFJNI_BUILD_PATH" "$CUDF_PATH/java/src/main/native"
+  create_compile_commands_symlink "$LIBCUDFJNI_BUILD_PATH" "$CUDF_PATH/java/src/main/native"
 
-echo "Building cudfjni native libs"
-cmake --build "$LIBCUDFJNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"
+  echo "Building cudfjni native libs"
+  cmake --build "$LIBCUDFJNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"
+  cudf_fingerprint_stamp "$LIBCUDFJNI_BUILD_PATH/cudf-prebuilt-fingerprint.txt"
+fi
 
 #
 # sparkjni build
 #
+# Persisted phase-3 build dirs (target/ survives across dispatches) pin stale trees: CMake never
+# re-runs a find_library/find_package whose cache entry already holds a valid path, so on a
+# CUDF_DIR/CUDF_INSTALL_DIR/CUDFJNI_BUILD_DIR change EVERY find_library output (CUDFJNI_LIB,
+# ARROW_LIB/PARQUET_LIB, CUFILEJNI_LIB, et al.), the find_package dirs, and other derived cache
+# entries would keep resolving the OLD trees. Wipe the build dir on any trio mismatch so the
+# configure below re-derives them all; no cache file (first build) means nothing stale to wipe.
+SPARK_JNI_CACHE="$SPARK_JNI_BUILD_PATH/CMakeCache.txt"
+if [[ -f "$SPARK_JNI_CACHE" ]]; then
+  cached_cudf_dir="$(grep '^CUDF_DIR:' "$SPARK_JNI_CACHE" | cut -d= -f2-)" || cached_cudf_dir=""
+  cached_install_dir="$(grep '^CUDF_INSTALL_DIR:' "$SPARK_JNI_CACHE" | cut -d= -f2-)" \
+    || cached_install_dir=""
+  cached_cudfjni_dir="$(grep '^CUDFJNI_BUILD_DIR:' "$SPARK_JNI_CACHE" | cut -d= -f2-)" \
+    || cached_cudfjni_dir=""
+  if [[ "$cached_cudf_dir" != "$CUDF_PATH" || "$cached_install_dir" != "$LIBCUDF_INSTALL_PATH" \
+        || "$cached_cudfjni_dir" != "$LIBCUDFJNI_BUILD_PATH" ]]; then
+    echo "cudf tree paths changed since the last cudf-spark-jni configure;" \
+      "wiping $SPARK_JNI_BUILD_PATH"
+    rm -rf "$SPARK_JNI_BUILD_PATH"
+  fi
+fi
 mkdir -p "$SPARK_JNI_BUILD_PATH"
 cd "$SPARK_JNI_BUILD_PATH"
 echo "Configuring spark-rapids-jni native libs"
+# The trio -D below pre-creates the env-seeded set(CACHE) entries (which never overwrite an
+# existing cache value), so the current paths always win over a persisted CMakeCache.txt.
 CUDF_ROOT="$CUDF_PATH" \
   CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" \
   CUDFJNI_BUILD_DIR="$LIBCUDFJNI_BUILD_PATH" \
@@ -169,6 +356,9 @@ CUDF_ROOT="$CUDF_PATH" \
     -DBUILD_FAULTINJ="$BUILD_FAULTINJ" \
     -DBUILD_PROFILER="$BUILD_PROFILER" \
     -DBUILD_TESTS="$BUILD_TESTS" \
+    -DCUDF_DIR="$CUDF_PATH" \
+    -DCUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" \
+    -DCUDFJNI_BUILD_DIR="$LIBCUDFJNI_BUILD_PATH" \
     -DCUDF_DEPENDENCY_PIN_MODE=pinned \
     -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
     -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \

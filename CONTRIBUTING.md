@@ -88,18 +88,114 @@ settings. If an explicit reconfigure of libcudf is needed (e.g.: when changing c
 The following build properties can be set on the Maven command-line (e.g.: `-DCPP_PARALLEL_LEVEL=4`)
 to control aspects of the build:
 
-| Property Name                        | Description                             | Default |
-|--------------------------------------|-----------------------------------------|---------|
-| `CPP_PARALLEL_LEVEL`                 | Parallelism of the C++ builds           | 10      |
-| `CMAKE_CUDA_ARCHITECTURES`           | CUDA architectures to target            | RAPIDS  |
-| `CUDF_USE_PER_THREAD_DEFAULT_STREAM` | CUDA per-thread default stream          | ON      |
-| `RMM_LOGGING_LEVEL`                  | RMM logging control                     | OFF     |
-| `USE_GDS`                            | Compile with GPU Direct Storage support | OFF     |
-| `BUILD_TESTS`                        | Compile tests                           | OFF     |
-| `BUILD_BENCHMARKS`                   | Compile benchmarks                      | OFF     |
-| `BUILD_FAULTINJ`                     | Compile fault injection                 | ON      |
-| `libcudf.build.configure`            | Force libcudf build to configure        | false   |
-| `submodule.check.skip`               | Whether to skip checking git submodules | false   |
+| Property Name                        | Description                               | Default                |
+|--------------------------------------|-------------------------------------------|------------------------|
+| `CPP_PARALLEL_LEVEL`                 | Parallelism of the C++ builds             | 10                     |
+| `CMAKE_CUDA_ARCHITECTURES`           | CUDA architectures to target              | RAPIDS                 |
+| `CUDF_USE_PER_THREAD_DEFAULT_STREAM` | CUDA per-thread default stream            | ON                     |
+| `RMM_LOGGING_LEVEL`                  | RMM logging control                       | OFF                    |
+| `USE_GDS`                            | Compile with GPU Direct Storage support   | OFF                    |
+| `BUILD_TESTS`                        | Compile tests                             | OFF                    |
+| `BUILD_BENCHMARKS`                   | Compile benchmarks                        | OFF                    |
+| `BUILD_FAULTINJ`                     | Compile fault injection                   | ON                     |
+| `libcudf.build.configure`            | Force libcudf build to configure          | false                  |
+| `cudf.path`                          | Path to the cudf source tree              | thirdparty/cudf        |
+| `libcudf.install.path`               | Path to the libcudf install tree          | target/libcudf-install |
+| `libcudfjni.build.path`              | Path to the libcudfjni build tree         | target/libcudfjni      |
+| `libcudf.reuse.prebuilt`             | Reuse a pre-built libcudf and libcudfjni  | false                  |
+| `libcudf.reuse.force`                | Override the reuse dependency-skew guard  | false                  |
+| `submodule.check.skip`               | Whether to skip checking git submodules   | false                  |
+
+### Reusing a pre-built libcudf
+
+Building this project normally rebuilds libcudf and libcudfjni from the cudf source on every
+build — the slow part. When several local checkouts build the same cudf commit, one checkout can
+build them once and the others can reuse the result with `-Dlibcudf.reuse.prebuilt=true`, so that
+only the cudf-spark-jni native code and the jar are rebuilt. Reuse takes BOTH the cudf source
+and the cudf prebuilt:
+
+* **cudf source** — `-Dcudf.path=<dir>`: a populated `thirdparty/cudf` submodule or any cudf
+  checkout. The Maven build compiles cudf's Java classes from it, and the native build reads its
+  CMake configuration and headers.
+* **cudf prebuilt** — `-Dlibcudf.install.path=<dir>` (a libcudf install tree) plus
+  `-Dlibcudfjni.build.path=<dir>` (a libcudfjni build tree), both produced together by a previous
+  normal build.
+
+```bash
+mvn package -Dlibcudf.reuse.prebuilt=true \
+    -Dcudf.path=/path/to/cudf \
+    -Dlibcudf.install.path=/path/to/prebuilt/libcudf-install \
+    -Dlibcudfjni.build.path=/path/to/prebuilt/libcudfjni
+```
+
+Reuse automatically skips the git submodule check and the cudf patch steps, so no
+`-Dsubmodule.check.skip` or patch-skip flags are needed — the build works even when the
+`thirdparty/cudf` submodule is empty, because in reuse the submodule is never built from (the
+source named by `-Dcudf.path` is what is read).
+
+Reuse recompiles no cudf code. It links the pre-built `libcudf.a` and `libcudfjni.a` (plus the
+Arrow/Parquet libraries and nvcomp shipped inside the prebuilt trees). With `-DBUILD_TESTS=ON` or
+`-DBUILD_BENCHMARKS=ON` it compiles the test-utility sources installed in the prebuilt
+(`src/cudftestutil/`) and links `libcudftest_default_stream.a`; benchmarks compile this
+repository's own vendored data generator, never cudf's.
+
+Notes:
+
+* **Matching the cudf source to the prebuilt is your responsibility.** `-Dcudf.path` may point at
+  any cudf commit, but it must be the commit the prebuilt was built from. A mismatch is never
+  silent: reuse warns early (without failing) when the `cudf.path` HEAD differs from the cudf
+  commit recorded in the prebuilt, and a real divergence fails loudly at the cudf-spark-jni link
+  step (undefined symbols) or at test runtime with an `UnsatisfiedLinkError`.
+* **Tests and benchmarks need a test-enabled prebuilt.** If the prebuilt was built without them, a
+  reuse build that requests tests or benchmarks stops with a clear error asking for the prebuilt
+  to be rebuilt with tests enabled — not with a confusing link failure.
+* **No `mvn clean` is needed when toggling reuse on or off.** `build/buildcpp.sh` detects when the
+  cudf source or prebuilt paths differ from the previous build's CMake cache and automatically
+  wipes and reconfigures the cudf-spark-jni build directory.
+* **Trimming a prebuilt by hand:** from the install tree keep `libcudf.a`, the `lib*/cmake/cudf`
+  CMake exports, the `include/cudf`, `include/cudf_test`, and `include/nvtext` headers, and (for
+  tests/benchmarks) `libcudftest_default_stream.a` plus the installed `src/cudftestutil/` sources.
+  Keep the libcudfjni tree wholesale: `libcudfjni.a`, the static libraries under its `lib/`, its
+  `_deps` directory, `libnvcomp*.so`, and `libcufilejni.a` when built with `USE_GDS=ON`.
+  Over-trimming any of these fails loudly at the cudf-spark-jni configure or link step
+  (`find_library` / `find_package(cudf)`), never silently.
+
+#### Dependency-skew guard
+
+The CMake `find_package(cudf)` request carries no version requirement, so CMake alone would not
+catch a prebuilt built from different dependency pins or ABI-affecting options. Instead, every
+normal build stamps a `cudf-prebuilt-fingerprint.txt` manifest into both prebuilt trees, and a
+reuse build recomputes the fingerprint from the current checkout and refuses a prebuilt that does
+not match. The two trees must also come from the same build — a libcudf/libcudfjni pair spliced
+from different builds is refused, since its `libcudfjni.a` was built against different cudf
+headers than its `libcudf.a`. The rule, also documented alongside the fingerprint code in
+`build/buildcpp.sh`: a dimension is enforced only if this build could silently diverge from the
+prebuilt on it (an ODR/ABI hazard); anything consumed wholesale from the prebuilt, or anything
+that already fails loudly, is not enforced.
+
+| Enforced dimension | Build input | Why it must match |
+|--------------------|-------------|-------------------|
+| `pins_sha256` | the four tracked `thirdparty/cudf-pins` files | the build fetches its own dependencies from these pins; a pin skew against the prebuilt's dependencies is a silent ODR violation |
+| `ptds` | `CUDF_USE_PER_THREAD_DEFAULT_STREAM` | public compile definition; code compiled here must use the same stream mode as the prebuilt |
+| `cuda_archs` | `CMAKE_CUDA_ARCHITECTURES` | the prebuilt's device code must cover the GPU architectures this build targets |
+| `use_gds` | `USE_GDS` | gates whether `libcufilejni.a` exists in the prebuilt and is linked |
+| `rmm_logging` | `RMM_LOGGING_LEVEL` | logging macro compiled into code through the installed RMM headers |
+| `build_type` | `CUDF_BUILD_TYPE` | build type is ABI-affecting; the prebuilt libcudf must have the type this build requests |
+| `dep_mode` | `LIBCUDF_DEPENDENCY_MODE` | reuse requires `pinned` so the pins fingerprint actually describes the dependencies; `latest` is refused |
+| `cuda_toolkit` | CUDA toolkit (`nvcc`) version | objects compiled by a different CUDA toolkit are not guaranteed ABI-compatible with the prebuilt |
+
+Deliberately NOT enforced:
+
+* **cudf source/commit** — a source-vs-prebuilt mismatch already fails loudly (a link error or an
+  `UnsatisfiedLinkError`) and triggers the early warning above.
+* **nvcomp** — baked into the prebuilt install's CMake export; a reuse build cannot diverge from
+  it.
+* **Arrow/Parquet** — consumed wholesale from the single prebuilt `_deps` tree; a reuse build
+  cannot diverge from them.
+
+**Warning:** `-Dlibcudf.reuse.force=true` downgrades a fingerprint or pair mismatch to a warning
+and builds anyway (reuse still requires `pinned` dependency mode and stamped manifests); the
+result is then entirely your responsibility.
 
 
 ### Local testing of cross-repo contributions cudf, spark-rapids-jni, and spark-rapids

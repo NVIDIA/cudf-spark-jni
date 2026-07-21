@@ -104,6 +104,9 @@
     <libcudf.clean.skip>false</libcudf.clean.skip>
     <libcudf.install.path>${project.build.directory}/libcudf-install</libcudf.install.path>
     <libcudf.dependency.mode>pinned</libcudf.dependency.mode>
+    <!-- Reuse a prebuilt libcudf/libcudfjni (skip their builds); force overrides the skew guard -->
+    <libcudf.reuse.prebuilt>false</libcudf.reuse.prebuilt>
+    <libcudf.reuse.force>false</libcudf.reuse.force>
     <libcudfjni.build.path>${project.build.directory}/libcudfjni</libcudfjni.build.path>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
@@ -393,6 +396,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/submodule-check">
+                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -422,6 +426,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/apply-patches">
+                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -438,6 +443,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/unapply-patches">
+                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -472,6 +478,8 @@
                   <env key="LIBCUDF_BUILD_PATH" value="${libcudf.build.path}"/>
                   <env key="LIBCUDF_DEPENDENCY_MODE" value="${libcudf.dependency.mode}"/>
                   <env key="LIBCUDF_INSTALL_PATH" value="${libcudf.install.path}"/>
+                  <env key="LIBCUDF_REUSE_FORCE" value="${libcudf.reuse.force}"/>
+                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
                   <env key="LIBCUDFJNI_BUILD_PATH" value="${libcudfjni.build.path}"/>
                   <env key="PROJECT_BASE_DIR" value="${project.basedir}"/>
                   <env key="PROJECT_BUILD_DIR" value="${project.build.directory}"/>
@@ -498,7 +506,7 @@
                   <arg value="${project.basedir}/build/build-info"/>
                   <arg value="${project.version}"/>
                   <arg value="${cudf.path}"/>
-                  <arg value="${libcudf.build.path}/libcudf.a"/>
+                  <arg value="${libcudf.install.path}"/>
                 </exec>
                 <exec executable="bash"
                       output="${project.build.directory}/extra-resources/spark-rapids-jni-version-info.properties"
