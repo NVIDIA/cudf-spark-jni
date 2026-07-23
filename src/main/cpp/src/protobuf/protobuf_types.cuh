@@ -19,14 +19,29 @@
 #include "protobuf/protobuf.hpp"
 
 #include <string>
+#include <type_traits>
 
 namespace spark_rapids_jni::protobuf::detail {
 
 // Protobuf varint encoding uses at most 10 bytes to represent a 64-bit value.
 constexpr int MAX_VARINT_BYTES = 10;
 
+// Match protobuf-java's shared embedded-message/group recursion limit.
+constexpr int PROTOBUF_JAVA_RECURSION_LIMIT = 100;
+
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
+
+// Threshold for using a direct-mapped lookup table for field_number -> field_index.
+// Field numbers above this threshold fall back to linear search.
+constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
+
+// Maximum number of repeated fields in one message the combined occurrence-scan kernel can process
+// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
+// array on the stack; raising the limit pushes the array into local memory, which would otherwise
+// cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
+// error surface depends on the schema, not on which fields happen to have data in a given batch.
+constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
 
 enum class protobuf_error : int {
   NONE = 0,
@@ -38,21 +53,11 @@ enum class protobuf_error : int {
   FIELD_SIZE,
   SKIP,
   FIXED_LEN,
+  INVALID_ENUM,
   REQUIRED,
   SCHEMA_TOO_LARGE,
   REPEATED_COUNT_MISMATCH,
 };
-
-// Threshold for using a direct-mapped lookup table for field_number -> field_index.
-// Field numbers above this threshold fall back to linear search.
-constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
-
-// Maximum number of top-level repeated fields the combined occurrence-scan kernel can process
-// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
-// array on the stack; raising the limit pushes the array into local memory, which would otherwise
-// cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
-// error surface depends on the schema, not on which fields happen to have data in a given batch.
-constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
 
 inline std::string error_message(protobuf_error error)
 {
@@ -67,6 +72,7 @@ inline std::string error_message(protobuf_error error)
     case FIELD_SIZE: return "Protobuf decode error: invalid field size";
     case SKIP: return "Protobuf decode error: unable to skip unknown field";
     case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
+    case INVALID_ENUM: return "Protobuf decode error: unknown enum value";
     case REQUIRED: return "Protobuf decode error: missing required field";
     case SCHEMA_TOO_LARGE:
       return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
@@ -87,13 +93,32 @@ struct field_location {
   int32_t length;  // Length of field data in bytes
 };
 
+struct enum_domain_device_view {
+  int32_t const* valid_values;
+  int size;
+};
+
+struct enum_string_lookup_device_view {
+  enum_domain_device_view domain;
+  int32_t const* name_offsets;
+  uint8_t const* name_chars;
+};
+
+static_assert(std::is_trivially_copyable_v<enum_domain_device_view>);
+static_assert(std::is_standard_layout_v<enum_domain_device_view>);
+static_assert(std::is_trivially_copyable_v<enum_string_lookup_device_view>);
+static_assert(std::is_standard_layout_v<enum_string_lookup_device_view>);
+
 /**
  * Field descriptor passed to the scanning kernel.
  */
 struct field_descriptor {
-  int field_number;        // Protobuf field number
-  int expected_wire_type;  // Expected wire type for this field
-  bool is_repeated;        // Repeated children are scanned via count/scan kernels
+  int field_number;                  // Protobuf field number
+  int expected_wire_type;            // Expected wire type for this field
+  bool is_repeated;                  // Repeated children use count/scan kernels
+  bool is_message;                   // Singular messages may need occurrence merging
+  int32_t const* valid_enum_values;  // Sorted closed-enum values, or nullptr
+  int num_valid_enum_values;         // Size of valid_enum_values
 };
 
 /**
@@ -178,12 +203,20 @@ struct repeated_field_count_view {
 
 struct nested_field_location_view {
   field_location* locations;
+  field_occurrence_count* occurrence_info;
+  int* multiple_message_fields;
   lookup_view<int> schema_lookup;
 };
 
 struct field_scan_view {
   field_location* locations;
   field_occurrence_count* repeated_info;
+  protobuf_error* deferred_enum_error;
+  int* multiple_message_fields;
+  lookup_view<field_descriptor> lookup;
+};
+
+struct message_validation_view {
   lookup_view<field_descriptor> lookup;
 };
 

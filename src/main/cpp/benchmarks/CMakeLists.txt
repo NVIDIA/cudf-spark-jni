@@ -87,5 +87,8 @@ ConfigureBench(GET_JSON_OBJECT_BENCH
 ConfigureBench(PARSE_URI_BENCH
   parse_uri.cpp)
 
+ConfigureBench(PROTOBUF_DECODE_BENCH
+  protobuf_decode.cu)
+
 ConfigureBench(FROM_JSON_BENCH
   from_json.cu)
