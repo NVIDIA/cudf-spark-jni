@@ -96,6 +96,9 @@
     <jni.classifier>${cuda.version}</jni.classifier>
     <cudf.path>${project.basedir}/thirdparty/cudf</cudf.path>
     <cudf.pin.path>${project.basedir}/thirdparty/cudf-pins/</cudf.pin.path>
+    <!-- Reuse a prebuilt libcudf/libcudfjni (skip their builds); force overrides the skew guard -->
+    <cudf.reuse.prebuilt>false</cudf.reuse.prebuilt>
+    <cudf.reuse.force>false</cudf.reuse.force>
     <guava.version>14.0.1</guava.version>
     <hadoop.version>3.4.0</hadoop.version>
     <junit.version>5.8.1</junit.version>
@@ -104,9 +107,6 @@
     <libcudf.clean.skip>false</libcudf.clean.skip>
     <libcudf.install.path>${project.build.directory}/libcudf-install</libcudf.install.path>
     <libcudf.dependency.mode>pinned</libcudf.dependency.mode>
-    <!-- Reuse a prebuilt libcudf/libcudfjni (skip their builds); force overrides the skew guard -->
-    <libcudf.reuse.prebuilt>false</libcudf.reuse.prebuilt>
-    <libcudf.reuse.force>false</libcudf.reuse.force>
     <libcudfjni.build.path>${project.build.directory}/libcudfjni</libcudfjni.build.path>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
@@ -396,7 +396,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/submodule-check">
-                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -426,7 +426,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/apply-patches">
-                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -443,7 +443,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/unapply-patches">
-                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -470,6 +470,8 @@
                   <env key="CUDF_BUILD_TYPE" value="${CUDF_BUILD_TYPE}"/>
                   <env key="CUDF_PATH" value="${cudf.path}"/>
                   <env key="CUDF_PIN_PATH" value="${cudf.pin.path}"/>
+                  <env key="CUDF_REUSE_FORCE" value="${cudf.reuse.force}"/>
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                   <env key="CUDF_USE_PER_THREAD_DEFAULT_STREAM" value="${CUDF_USE_PER_THREAD_DEFAULT_STREAM}"/>
                   <env key="FROM_MAVEN" value="true"/>
                   <env key="GPU_ARCHS" value="${GPU_ARCHS}"/>
@@ -478,8 +480,6 @@
                   <env key="LIBCUDF_BUILD_PATH" value="${libcudf.build.path}"/>
                   <env key="LIBCUDF_DEPENDENCY_MODE" value="${libcudf.dependency.mode}"/>
                   <env key="LIBCUDF_INSTALL_PATH" value="${libcudf.install.path}"/>
-                  <env key="LIBCUDF_REUSE_FORCE" value="${libcudf.reuse.force}"/>
-                  <env key="LIBCUDF_REUSE_PREBUILT" value="${libcudf.reuse.prebuilt}"/>
                   <env key="LIBCUDFJNI_BUILD_PATH" value="${libcudfjni.build.path}"/>
                   <env key="PROJECT_BASE_DIR" value="${project.basedir}"/>
                   <env key="PROJECT_BUILD_DIR" value="${project.build.directory}"/>

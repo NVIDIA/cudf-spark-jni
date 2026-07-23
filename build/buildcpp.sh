@@ -55,6 +55,8 @@ CPP_PARALLEL_LEVEL=${CPP_PARALLEL_LEVEL:-10}
 CUDF_BUILD_TYPE=${CUDF_BUILD_TYPE:-Release}
 CUDF_PATH=${CUDF_PATH:-$PROJECT_BASE_DIR/thirdparty/cudf}
 CUDF_PIN_PATH=${CUDF_PIN_PATH:-$PROJECT_BASE_DIR/thirdparty/cudf-pins}
+CUDF_REUSE_FORCE=${CUDF_REUSE_FORCE:-false}
+CUDF_REUSE_PREBUILT=${CUDF_REUSE_PREBUILT:-false}
 CUDF_USE_PER_THREAD_DEFAULT_STREAM=${CUDF_USE_PER_THREAD_DEFAULT_STREAM:-ON}
 GPU_ARCHS=${GPU_ARCHS:-DEPRECATED}
 CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES:-RAPIDS}
@@ -62,8 +64,6 @@ LIBCUDF_BUILD_CONFIGURE=${LIBCUDF_BUILD_CONFIGURE:-false}
 LIBCUDF_BUILD_PATH=${LIBCUDF_BUILD_PATH:-$PROJECT_BUILD_DIR/libcudf/cmake-build}
 LIBCUDF_DEPENDENCY_MODE=${LIBCUDF_DEPENDENCY_MODE:-pinned}
 LIBCUDF_INSTALL_PATH=${LIBCUDF_INSTALL_PATH:-$PROJECT_BUILD_DIR/libcudf-install}
-LIBCUDF_REUSE_FORCE=${LIBCUDF_REUSE_FORCE:-false}
-LIBCUDF_REUSE_PREBUILT=${LIBCUDF_REUSE_PREBUILT:-false}
 LIBCUDFJNI_BUILD_PATH=${LIBCUDFJNI_BUILD_PATH:-$PROJECT_BUILD_DIR/libcudfjni}
 SPARK_JNI_BUILD_PATH=${SPARK_JNI_BUILD_PATH:-$PROJECT_BUILD_DIR/jni/cmake-build}
 RMM_LOGGING_LEVEL=${RMM_LOGGING_LEVEL:-OFF}
@@ -156,7 +156,7 @@ cudf_fingerprint_stamp() {
 
 # Reuse validation: fail fast here (not at phase-3 link) if the prebuilt trees are incomplete for
 # this build config or fingerprint-skewed vs this worktree.
-if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+if [[ "$CUDF_REUSE_PREBUILT" == "true" ]]; then
   LIBCUDF_A="$LIBCUDF_INSTALL_PATH/lib64/libcudf.a"
   [[ -f "$LIBCUDF_A" ]] || LIBCUDF_A="$LIBCUDF_INSTALL_PATH/lib/libcudf.a"
   LIBDIR="$(dirname "$LIBCUDF_A")"
@@ -187,11 +187,11 @@ if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
   for m in "$m1" "$m2"; do
     [[ -f "$m" ]] || { echo "ERROR: prebuilt not stamped ($m); re-seed" >&2; exit 1; }
     if ! diff <(grep '^cmp\.' "$m" | LC_ALL=C sort) <(printf '%s\n' "$want"); then
-      if [[ "$LIBCUDF_REUSE_FORCE" == "true" ]]; then
+      if [[ "$CUDF_REUSE_FORCE" == "true" ]]; then
         echo "WARNING: cudf skew in $m overridden" >&2
       else
         echo "ERROR: prebuilt does not match this worktree (skew in $m)." \
-          "Re-seed or -Dlibcudf.reuse.force=true." >&2
+          "Re-seed or -Dcudf.reuse.force=true." >&2
         exit 1
       fi
     fi
@@ -206,11 +206,11 @@ if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
   n2="$(grep '^seed_nonce=' "$m2")" \
     || { echo "ERROR: $m2 missing seed_nonce (corrupt/old manifest); re-seed" >&2; exit 1; }
   if [[ "$n1" != "$n2" ]]; then
-    if [[ "$LIBCUDF_REUSE_FORCE" == "true" ]]; then
+    if [[ "$CUDF_REUSE_FORCE" == "true" ]]; then
       echo "WARNING: install/libcudfjni from different seed runs ($n1 vs $n2)" >&2
     else
       echo "ERROR: install ($n1) and libcudfjni ($n2) prebuilt from different seed runs" \
-        "(mismatched pair). Re-seed both, or -Dlibcudf.reuse.force=true." >&2
+        "(mismatched pair). Re-seed both, or -Dcudf.reuse.force=true." >&2
       exit 1
     fi
   fi
@@ -230,7 +230,7 @@ fi
 #
 # libcudf build
 #
-if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+if [[ "$CUDF_REUSE_PREBUILT" == "true" ]]; then
   # Reuse also bypasses the legacy LIBCUDF_CONFIGURE_ONLY early-exit: no cudf build to configure.
   echo "Skipping libcudf build; reusing $LIBCUDF_INSTALL_PATH"
 else
@@ -272,7 +272,7 @@ fi
 #
 # libcudfjni build
 #
-if [[ "$LIBCUDF_REUSE_PREBUILT" == "true" ]]; then
+if [[ "$CUDF_REUSE_PREBUILT" == "true" ]]; then
   echo "Skipping libcudfjni build; reusing $LIBCUDFJNI_BUILD_PATH"
 else
   mkdir -p "$LIBCUDFJNI_BUILD_PATH"

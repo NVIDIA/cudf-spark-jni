@@ -19,7 +19,7 @@
 set -e
 
 # Prebuilt-cudf reuse never builds from the submodule; skip un-patching an empty/stale checkout.
-[[ "${LIBCUDF_REUSE_PREBUILT:-false}" == "true" ]] && exit 0
+[[ "${CUDF_REUSE_PREBUILT:-false}" == "true" ]] && exit 0
 
 BASE_DIR=$( git rev-parse --show-toplevel )
 

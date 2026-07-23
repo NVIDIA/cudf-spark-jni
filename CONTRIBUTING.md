@@ -100,17 +100,17 @@ to control aspects of the build:
 | `BUILD_FAULTINJ`                     | Compile fault injection                   | ON                     |
 | `libcudf.build.configure`            | Force libcudf build to configure          | false                  |
 | `cudf.path`                          | Path to the cudf source tree              | thirdparty/cudf        |
+| `cudf.reuse.prebuilt`                | Reuse a pre-built libcudf and libcudfjni  | false                  |
+| `cudf.reuse.force`                   | Override the reuse dependency-skew guard  | false                  |
 | `libcudf.install.path`               | Path to the libcudf install tree          | target/libcudf-install |
 | `libcudfjni.build.path`              | Path to the libcudfjni build tree         | target/libcudfjni      |
-| `libcudf.reuse.prebuilt`             | Reuse a pre-built libcudf and libcudfjni  | false                  |
-| `libcudf.reuse.force`                | Override the reuse dependency-skew guard  | false                  |
 | `submodule.check.skip`               | Whether to skip checking git submodules   | false                  |
 
 ### Reusing a pre-built libcudf
 
 Building this project normally rebuilds libcudf and libcudfjni from cudf source on every
 build. When several local checkouts build the same cudf commit, one checkout can
-build them once and the others can reuse the result with `-Dlibcudf.reuse.prebuilt=true`, which
+build them once and the others can reuse the result with `-Dcudf.reuse.prebuilt=true`, which
 can significantly reduce the total build time. Reuse requires BOTH the cudf source and the prebuilt:
 
 * **cudf source** — `-Dcudf.path=<dir>`: a populated `thirdparty/cudf` submodule or any cudf
@@ -121,7 +121,7 @@ can significantly reduce the total build time. Reuse requires BOTH the cudf sour
   sources), both produced together by a previous normal build.
 
 ```bash
-mvn package -Dlibcudf.reuse.prebuilt=true \
+mvn package -Dcudf.reuse.prebuilt=true \
     -Dcudf.path=/path/to/cudf \
     -Dlibcudf.install.path=/path/to/prebuilt/libcudf-install \
     -Dlibcudfjni.build.path=/path/to/prebuilt/libcudfjni
@@ -166,7 +166,7 @@ The build parameters enforced in fingerprints include:
 Note that a reuse build requires `LIBCUDF_DEPENDENCY_MODE` set to `pinned` so the dependencies stay
 consistent over time.
 
-**Warning:** `-Dlibcudf.reuse.force=true` downgrades any dependency mismatch to a warning
+**Warning:** `-Dcudf.reuse.force=true` downgrades any dependency mismatch to a warning
 and builds anyway (still requires dependency mode to set to `pinned` and stamped manifests
 exist).
 
