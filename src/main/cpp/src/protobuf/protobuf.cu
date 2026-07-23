@@ -443,12 +443,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     h_device_schema[i] = device_nested_field_descriptor{schema[i]};
   }
 
-  rmm::device_uvector<device_nested_field_descriptor> d_schema(num_fields, stream, scratch_mr);
-  CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_schema.data(),
-                                           h_device_schema.data(),
-                                           num_fields * sizeof(device_nested_field_descriptor),
-                                           stream));
-
   auto d_in = cudf::column_device_view::create(binary_input, stream);
   // Identify repeated and nested fields at depth 0
   std::vector<int> repeated_field_indices;
@@ -497,54 +491,38 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   rmm::device_uvector<field_location> d_nested_locations(
     std::max<size_t>(static_cast<size_t>(num_rows) * num_nested, 1), stream, scratch_mr);
 
-  rmm::device_uvector<int> d_repeated_indices(
-    std::max<size_t>(num_repeated, 1), stream, scratch_mr);
-  rmm::device_uvector<int> d_nested_indices(std::max<size_t>(num_nested, 1), stream, scratch_mr);
-
-  if (num_repeated > 0) {
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(d_repeated_indices.data(),
-                                             repeated_field_indices.data(),
-                                             num_repeated * sizeof(int),
-                                             stream));
-  }
-  if (num_nested > 0) {
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-      d_nested_indices.data(), nested_field_indices.data(), num_nested * sizeof(int), stream));
-  }
-
-  // Count repeated fields at depth 0 (with O(1) field_number lookup tables)
-  rmm::device_uvector<int> d_fn_to_rep(0, stream, scratch_mr);
-  rmm::device_uvector<int> d_fn_to_nested(0, stream, scratch_mr);
-
   if (run_count_scan) {
-    auto h_fn_to_rep =
-      build_index_lookup_table(schema.data(), repeated_field_indices.data(), num_repeated, stream);
-    auto h_fn_to_nested =
-      build_index_lookup_table(schema.data(), nested_field_indices.data(), num_nested, stream);
-
-    if (!h_fn_to_rep.empty()) {
-      d_fn_to_rep = rmm::device_uvector<int>(h_fn_to_rep.size(), stream, scratch_mr);
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_fn_to_rep.data(), h_fn_to_rep.data(), h_fn_to_rep.size() * sizeof(int), stream));
+    std::vector<int> count_field_indices = repeated_field_indices;
+    count_field_indices.insert(
+      count_field_indices.end(), nested_field_indices.begin(), nested_field_indices.end());
+    std::vector<int> output_indices;
+    output_indices.reserve(count_field_indices.size());
+    for (int i = 0; i < num_repeated; ++i) {
+      output_indices.push_back(i);
     }
-    if (!h_fn_to_nested.empty()) {
-      d_fn_to_nested = rmm::device_uvector<int>(h_fn_to_nested.size(), stream, scratch_mr);
+    for (int i = 0; i < num_nested; ++i) {
+      output_indices.push_back(i);
+    }
+
+    auto field_descs = make_field_descriptors(
+      count_field_indices, schema_context, stream, scratch_mr, output_indices);
+    auto h_field_lookup = build_field_lookup_table(
+      field_descs.host.data(), static_cast<int>(field_descs.host.size()), stream);
+    rmm::device_uvector<int> d_field_lookup(h_field_lookup.size(), stream, scratch_mr);
+    if (!h_field_lookup.empty()) {
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_fn_to_nested.data(), h_fn_to_nested.data(), h_fn_to_nested.size() * sizeof(int), stream));
+        d_field_lookup.data(), h_field_lookup.data(), h_field_lookup.size() * sizeof(int), stream));
     }
 
     launch_count_repeated_fields(*d_in,
-                                 {d_schema.data(), 0},
-                                 {d_repeated_info.data(),
-                                  {d_repeated_indices.data(),
-                                   num_repeated,
-                                   d_fn_to_rep.data(),
-                                   static_cast<int>(d_fn_to_rep.size())}},
                                  {d_nested_locations.data(),
-                                  {d_nested_indices.data(),
-                                   num_nested,
-                                   d_fn_to_nested.data(),
-                                   static_cast<int>(d_fn_to_nested.size())}},
+                                  num_nested,
+                                  d_repeated_info.data(),
+                                  num_repeated,
+                                  {field_descs.device.data(),
+                                   static_cast<int>(field_descs.host.size()),
+                                   h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
+                                   static_cast<int>(h_field_lookup.size())}},
                                  d_error.data(),
                                  track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                  stream);
@@ -571,7 +549,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     launch_scan_all_fields(*d_in,
                            {d_locations.data(),
+                            num_scalar,
                             nullptr,
+                            0,
                             {field_descs.device.data(),
                              num_scalar,
                              h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
@@ -582,10 +562,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
     // Required-field validation applies to all scalar leaves, not just top-level numerics.
     maybe_check_required_fields({d_locations.data(),
-                                 num_rows,
+                                 {num_rows, nullptr},
                                  binary_input.null_count() > 0 ? binary_input.null_mask() : nullptr,
                                  binary_input.offset(),
-                                 nullptr,
                                  nullptr},
                                 scalar_field_indices,
                                 schema,
@@ -617,7 +596,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         fixed32,
         fixed64,
         fallback,
-        count
+        count,
       };
       constexpr auto group_index = [](scalar_group group) { return static_cast<size_t>(group); };
       std::array<std::vector<int>, group_index(scalar_group::count)> group_lists;
@@ -719,15 +698,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         kernel_fn(grid,
                   threads,
                   stream.value(),
-                  batched_scalar_input_view{message_data,
-                                            list_offsets,
-                                            base_offset,
-                                            d_locations.data(),
-                                            num_scalar,
-                                            d_descs.data(),
-                                            nf,
-                                            num_rows,
-                                            d_error.data()});
+                  batched_scalar_input_view{
+                    input, d_locations.data(), num_scalar, d_descs.data(), nf, d_error.data()});
       };
 
       auto launch_varint_group = [&]<typename T, bool Zigzag>(scalar_group group) {
@@ -738,11 +710,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             buffers,
             sizeof(T),
             [](dim3 grid, int block, cudaStream_t cuda_stream, batched_scalar_input_view input) {
-              extract_varint_batched_kernel<T, Zigzag><<<grid, block, 0, cuda_stream>>>(input);
+              extract_scalar_batched_kernel<T, scalar_encoding::varint, Zigzag>
+                <<<grid, block, 0, cuda_stream>>>(input);
             });
         });
       };
-      auto launch_fixed_group = [&]<typename T, int WireType>(scalar_group group) {
+      auto launch_fixed_group = [&]<typename T>(scalar_group group) {
         do_batch(group_lists[group_index(group)], [&](int nf, auto& descs, auto& buffers) {
           launch_batched_kernel(
             nf,
@@ -750,7 +723,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             buffers,
             sizeof(T),
             [](dim3 grid, int block, cudaStream_t cuda_stream, batched_scalar_input_view input) {
-              extract_fixed_batched_kernel<T, WireType><<<grid, block, 0, cuda_stream>>>(input);
+              extract_scalar_batched_kernel<T, scalar_encoding::fixed, false>
+                <<<grid, block, 0, cuda_stream>>>(input);
             });
         });
       };
@@ -762,14 +736,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       launch_varint_group.template operator()<uint8_t, false>(scalar_group::boolean);
       launch_varint_group.template operator()<int32_t, true>(scalar_group::zigzag_int32);
       launch_varint_group.template operator()<int64_t, true>(scalar_group::zigzag_int64);
-      launch_fixed_group.template operator()<float, wire_type_value(proto_wire_type::I32BIT)>(
-        scalar_group::float32);
-      launch_fixed_group.template operator()<double, wire_type_value(proto_wire_type::I64BIT)>(
-        scalar_group::float64);
-      launch_fixed_group.template operator()<int32_t, wire_type_value(proto_wire_type::I32BIT)>(
-        scalar_group::fixed32);
-      launch_fixed_group.template operator()<int64_t, wire_type_value(proto_wire_type::I64BIT)>(
-        scalar_group::fixed64);
+      launch_fixed_group.template operator()<float>(scalar_group::float32);
+      launch_fixed_group.template operator()<double>(scalar_group::float64);
+      launch_fixed_group.template operator()<int32_t>(scalar_group::fixed32);
+      launch_fixed_group.template operator()<int64_t>(scalar_group::fixed64);
 
       // Per-field fallback (INT32 with enum, etc.)
       for (int i : group_lists[group_index(scalar_group::fallback)]) {
@@ -777,7 +747,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         top_level_location_provider loc_provider{
           list_offsets, base_offset, d_locations.data(), i, num_scalar};
         column_map[schema_idx] =
-          extract_typed_column({schema_context, message_data, schema_idx, decode_ctx, {num_rows}},
+          extract_typed_column({{schema_context, decode_ctx}, message_data, schema_idx, {num_rows}},
                                loc_provider,
                                stream,
                                mr);
@@ -804,10 +774,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
               num_rows, stream, cudf::get_current_device_resource_ref());
             rmm::device_uvector<bool> valid(
               num_rows, stream, cudf::get_current_device_resource_ref());
-            int64_t def_int = field_meta.default_int;
+            int32_t def_int = static_cast<int32_t>(field_meta.default_int);
             top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
-            extract_varint_kernel<int32_t, false, top_level_location_provider>
+            extract_scalar_kernel<int32_t,
+                                  scalar_encoding::varint,
+                                  false,
+                                  top_level_location_provider>
               <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                        loc_provider,
                                                        num_rows,
@@ -824,7 +797,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             column_map[schema_idx] = build_enum_string_column(
               out,
               valid,
-              {schema_context, message_data, schema_idx, decode_ctx, {num_rows}},
+              {{schema_context, decode_ctx}, message_data, schema_idx, {num_rows}},
               stream,
               mr);
           } else {
@@ -992,7 +965,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                          "Protobuf decode error: missing or mismatched enum metadata for "
                          "enum-as-string field");
             column_map[schema_idx] = build_repeated_enum_string_column(
-              binary_input, input, schema_context, decode_ctx, std::move(w), stream, mr);
+              binary_input, input, {schema_context, decode_ctx}, std::move(w), stream, mr);
           } else {
             column_map[schema_idx] = build_repeated_string_column(
               binary_input, input, std::move(w), false, d_error, stream, mr);

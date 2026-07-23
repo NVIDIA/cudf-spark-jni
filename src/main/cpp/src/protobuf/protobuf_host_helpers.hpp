@@ -40,6 +40,7 @@
 #include <limits>
 #include <memory>
 #include <source_location>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,34 +89,12 @@ struct field_descriptor_bundle {
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
                                                protobuf_schema const& schema,
                                                rmm::cuda_stream_view stream,
-                                               rmm::device_async_resource_ref mr);
+                                               rmm::device_async_resource_ref mr,
+                                               std::span<int const> output_indices = {});
 
 // ============================================================================
 // Nested decode view bundles
 // ============================================================================
-
-struct protobuf_input_view {
-  uint8_t const* message_data;
-  cudf::size_type message_data_size;
-  cudf::size_type const* row_offsets;
-  cudf::size_type base_offset;
-  int num_rows;
-};
-
-struct nested_parent_view {
-  field_location const* locations;
-  std::size_t location_count;
-  int32_t const* top_row_indices;
-};
-
-struct required_field_input_view {
-  field_location const* locations;
-  int num_rows;
-  cudf::bitmask_type const* input_null_mask;
-  cudf::size_type input_offset;
-  field_location const* parent_locations;
-  int32_t const* top_row_indices;
-};
 
 struct protobuf_decode_runtime_context {
   rmm::device_uvector<bool>* row_force_null;
@@ -123,22 +102,16 @@ struct protobuf_decode_runtime_context {
   bool propagate_invalid_enum_rows = true;
 };
 
-struct protobuf_value_domain_view {
-  int size;
-  int32_t const* top_row_indices = nullptr;
-};
-
-struct protobuf_field_decode_request {
-  protobuf_schema const& schema;
-  uint8_t const* message_data;
-  int schema_idx;
-  protobuf_decode_runtime_context runtime;
-  protobuf_value_domain_view values;
-};
-
 struct recursive_decode_context {
   protobuf_schema const& schema;
   protobuf_decode_runtime_context runtime;
+};
+
+struct protobuf_field_decode_request {
+  recursive_decode_context context;
+  uint8_t const* message_data;
+  int schema_idx;
+  protobuf_value_domain_view values;
 };
 
 struct list_offsets_from_counts_result {
@@ -239,16 +212,6 @@ inline cudf::detail::host_vector<int> build_lookup_table(FieldNumberFn get_field
     table[get_field_number(i)] = i;
   }
   return table;
-}
-
-inline cudf::detail::host_vector<int> build_index_lookup_table(
-  nested_field_descriptor const* schema,
-  int const* field_indices,
-  int num_indices,
-  rmm::cuda_stream_view stream)
-{
-  return build_lookup_table(
-    [&](int i) { return schema[field_indices[i]].field_number; }, num_indices, stream);
 }
 
 template <typename FieldDesc>
@@ -453,8 +416,7 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
 std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  protobuf_schema const& schema,
-  protobuf_decode_runtime_context decode_ctx,
+  recursive_decode_context context,
   repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
