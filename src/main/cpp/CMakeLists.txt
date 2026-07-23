@@ -254,6 +254,7 @@ add_library(
   src/datetime_truncate.cu
   src/decimal_utils.cu
   src/exception_with_row_index_utilities.cu
+  src/find_in_set.cu
   src/format_float.cu
   src/from_json_to_raw_map.cu
   src/from_json_to_structs.cu
