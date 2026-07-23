@@ -90,6 +90,7 @@
     <BUILD_FAULTINJ>ON</BUILD_FAULTINJ>
     <BUILD_PROFILER>ON</BUILD_PROFILER>
     <CMAKE_EXPORT_COMPILE_COMMANDS>ON</CMAKE_EXPORT_COMPILE_COMMANDS>
+    <CUDF_NVCOMP_LINKAGE>SHARED</CUDF_NVCOMP_LINKAGE>
     <ai.rapids.cudf.nvtx.enabled>false</ai.rapids.cudf.nvtx.enabled>
     <ai.rapids.refcount.debug>false</ai.rapids.refcount.debug>
     <cuda.version>cuda12</cuda.version>
@@ -462,6 +463,7 @@
                   <env key="CMAKE_EXPORT_COMPILE_COMMANDS" value="${CMAKE_EXPORT_COMPILE_COMMANDS}"/>
                   <env key="CPP_PARALLEL_LEVEL" value="${CPP_PARALLEL_LEVEL}"/>
                   <env key="CUDF_BUILD_TYPE" value="${CUDF_BUILD_TYPE}"/>
+                  <env key="CUDF_NVCOMP_LINKAGE" value="${CUDF_NVCOMP_LINKAGE}"/>
                   <env key="CUDF_PATH" value="${cudf.path}"/>
                   <env key="CUDF_PIN_PATH" value="${cudf.pin.path}"/>
                   <env key="CUDF_USE_PER_THREAD_DEFAULT_STREAM" value="${CUDF_USE_PER_THREAD_DEFAULT_STREAM}"/>
