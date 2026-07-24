@@ -136,3 +136,6 @@ ConfigureTest(MULTIPLY
 
 ConfigureTest(FROM_JSON
     from_json.cpp)
+
+ConfigureTest(PAGEABLE_POOL
+    pageable_pool.cpp)
