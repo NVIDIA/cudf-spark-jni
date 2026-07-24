@@ -62,6 +62,7 @@ option(BUILD_TESTS "Configure CMake to build tests" OFF)
 option(BUILD_BENCHMARKS "Configure CMake to build (google) benchmarks" OFF)
 option(BUILD_FAULTINJ "Configure CMake to build fault injection" ON)
 option(BUILD_PROFILER "Configure CMake to build profiler" ON)
+option(HIDE_PRIVATE_CUDA_SYMBOLS "Hide private symbols from static CUDA compiler libraries" ON)
 
 message(
   VERBOSE "SPARK_RAPIDS_JNI: Build with per-thread default stream:
@@ -70,6 +71,9 @@ message(
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build tests: ${BUILD_TESTS}")
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build (nvbench) benchmarks: ${BUILD_BENCHMARKS}")
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build fault injection: ${BUILD_FAULTINJ}")
+message(VERBOSE
+        "SPARK_RAPIDS_JNI: Hide private static CUDA compiler symbols: ${HIDE_PRIVATE_CUDA_SYMBOLS}"
+)
 
 set(SPARK_RAPIDS_JNI_BUILD_TESTS ${BUILD_TESTS})
 set(SPARK_RAPIDS_JNI_BUILD_BENCHMARKS ${BUILD_BENCHMARKS})
@@ -349,6 +353,18 @@ target_link_libraries(
     ${PARQUET_LIB}
     ${THRIFT_LIB}
 )
+if(HIDE_PRIVATE_CUDA_SYMBOLS)
+  # These toolkit implementation symbols are not part of the cuDF or JNI ABI. Localizing them keeps
+  # the regular ELF symbol table for diagnostics while removing them from the dynamic export table.
+  target_link_options(
+    spark_rapids_jni
+    PRIVATE "LINKER:--exclude-libs,libnvrtc_static.a"
+            "LINKER:--exclude-libs,libnvrtc-builtins_static.a"
+            "LINKER:--exclude-libs,libnvptxcompiler_static.a"
+            "LINKER:--exclude-libs,libnvJitLink_static.a"
+            "LINKER:--exclude-libs,libnvcomp_static.a"
+  )
+endif()
 rapids_cuda_set_runtime(spark_rapids_jni USE_STATIC ON)
 set_target_properties(spark_rapids_jni PROPERTIES LINK_LANGUAGE "CXX")
 # For backwards-compatibility with the cudf Java bindings and RAPIDS accelerated UDFs,
