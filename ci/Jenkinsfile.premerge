@@ -228,7 +228,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                     def jniVer = readMavenPom(file: 'pom.xml').version
                                     common.restoreJniCcache(this, jniVer, 'cuda12', 'ART_CREDS')
                                     try {
-                                        sh 'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
+                                        runPremergeBuild()
                                         sh 'bash ci/fuzz-test.sh'
                                     } catch (e) {
                                         common.printJVMCoreDumps(this)
@@ -266,7 +266,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                     def jniVer = readMavenPom(file: 'pom.xml').version
                                     common.restoreJniCcache(this, jniVer, 'cuda13', 'ART_CREDS')
                                     try {
-                                        sh 'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
+                                        runPremergeBuild()
                                         sh 'bash ci/fuzz-test.sh'
                                     } catch (e) {
                                         common.printJVMCoreDumps(this)
@@ -311,6 +311,16 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
         }
     }
 } // end of pipeline
+
+void runPremergeBuild() {
+    common.prepareArtNetrc(this)
+    withEnv([
+        "ARROW_THRIFT_MIRROR_URL=https://${env.ARTIFACTORY_NAME}/artifactory/apache-remote",
+        "CMAKE_NETRC=OPTIONAL",
+    ]) {
+        sh 'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
+    }
+}
 
 void uploadDocker(String IMAGE_NAME) {
     def DOCKER_CMD = "docker --config $WORKSPACE/.docker"
