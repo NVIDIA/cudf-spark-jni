@@ -211,24 +211,19 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Provide enum-as-string metadata for the current field (also sets ENC_ENUM_STRING). */
-  public ProtobufSchemaDescriptorBuilder enumMetadata(int[] validValues, byte[][] names) {
+  /** Provide zero-based enum-as-string metadata for the current field. */
+  public ProtobufSchemaDescriptorBuilder enumMetadata(String... names) {
     Field f = current();
     f.encoding = Protobuf.ENC_ENUM_STRING;
-    f.enumValidValues = validValues;
-    f.enumNames = names;
-    return this;
-  }
-
-  /** Short form for the common zero-based enum fixtures. */
-  public ProtobufSchemaDescriptorBuilder enumMetadata(String... names) {
     int[] validValues = new int[names.length];
     byte[][] encodedNames = new byte[names.length][];
     for (int i = 0; i < names.length; i++) {
       validValues[i] = i;
       encodedNames[i] = names[i].getBytes(StandardCharsets.UTF_8);
     }
-    return enumMetadata(validValues, encodedNames);
+    f.enumValidValues = validValues;
+    f.enumNames = encodedNames;
+    return this;
   }
 
   /** Attach raw enum metadata without forcing the encoding (for validation-only tests). */

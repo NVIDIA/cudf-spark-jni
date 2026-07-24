@@ -169,7 +169,7 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
         auto const scratch_mr = cudf::get_current_device_resource_ref();
         rmm::device_uvector<int32_t> values(num_values, stream, scratch_mr);
         rmm::device_uvector<bool> valid(num_values, stream, scratch_mr);
-        extract_scalar_kernel<int32_t, scalar_encoding::varint, false, LocationProvider>
+        extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>, LocationProvider>
           <<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
             message_data,
             loc_provider,
@@ -451,7 +451,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   rmm::device_uvector<bool> elem_valid(total_count, stream, scratch_mr);
   repeated_location_provider rep_loc{
     input.row_offsets, input.base_offset, work.occurrences->data()};
-  extract_scalar_kernel<int32_t, scalar_encoding::varint, false>
+  extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>>
     <<<rep_blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
       input.message_data,
       rep_loc,

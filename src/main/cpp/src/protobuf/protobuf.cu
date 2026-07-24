@@ -508,11 +508,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       count_field_indices, schema_context, stream, scratch_mr, output_indices);
     auto h_field_lookup = build_field_lookup_table(
       field_descs.host.data(), static_cast<int>(field_descs.host.size()), stream);
-    rmm::device_uvector<int> d_field_lookup(h_field_lookup.size(), stream, scratch_mr);
-    if (!h_field_lookup.empty()) {
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_field_lookup.data(), h_field_lookup.data(), h_field_lookup.size() * sizeof(int), stream));
-    }
+    auto d_field_lookup =
+      cudf::detail::make_device_uvector_async(h_field_lookup, stream, scratch_mr);
 
     launch_count_repeated_fields(*d_in,
                                  {d_nested_locations.data(),
@@ -540,12 +537,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       static_cast<size_t>(num_rows) * num_scalar, stream, cudf::get_current_device_resource_ref());
 
     auto h_field_lookup = build_field_lookup_table(field_descs.host.data(), num_scalar, stream);
-    rmm::device_uvector<int> d_field_lookup(
-      h_field_lookup.size(), stream, cudf::get_current_device_resource_ref());
-    if (!h_field_lookup.empty()) {
-      CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-        d_field_lookup.data(), h_field_lookup.data(), h_field_lookup.size() * sizeof(int), stream));
-    }
+    auto d_field_lookup = cudf::detail::make_device_uvector_async(
+      h_field_lookup, stream, cudf::get_current_device_resource_ref());
 
     launch_scan_all_fields(*d_in,
                            {d_locations.data(),
@@ -574,15 +567,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     // Batched scalar extraction: group non-special fixed-width fields by extraction
     // category and extract all fields of each category with a single 2D kernel launch.
     {
-      struct scalar_buf_pair {
-        rmm::device_uvector<uint8_t> out_bytes;
-        rmm::device_uvector<bool> valid;
-        scalar_buf_pair(rmm::cuda_stream_view s, rmm::device_async_resource_ref m)
-          : out_bytes(0, s, m), valid(0, s, m)
-        {
-        }
-      };
-
       enum class scalar_group : size_t {
         int32,
         uint32,
@@ -593,8 +577,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         zigzag_int64,
         float32,
         float64,
-        fixed32,
-        fixed64,
+        fixed_int32,
+        fixed_uint32,
+        fixed_int64,
+        fixed_uint64,
         fallback,
         count,
       };
@@ -620,10 +606,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
 
         auto group = scalar_group::fallback;
-        if ((tid == cudf::type_id::INT32 || tid == cudf::type_id::UINT32) && is_fixed) {
-          group = scalar_group::fixed32;
-        } else if ((tid == cudf::type_id::INT64 || tid == cudf::type_id::UINT64) && is_fixed) {
-          group = scalar_group::fixed64;
+        if (tid == cudf::type_id::INT32 && is_fixed) {
+          group = scalar_group::fixed_int32;
+        } else if (tid == cudf::type_id::UINT32 && is_fixed) {
+          group = scalar_group::fixed_uint32;
+        } else if (tid == cudf::type_id::INT64 && is_fixed) {
+          group = scalar_group::fixed_int64;
+        } else if (tid == cudf::type_id::UINT64 && is_fixed) {
+          group = scalar_group::fixed_uint64;
         } else if (tid == cudf::type_id::INT32 && !zz) {
           group = scalar_group::int32;
         } else if (tid == cudf::type_id::UINT32) {
@@ -646,100 +636,70 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         group_lists[group_index(group)].push_back(i);
       }
 
-      // Helper: batch-extract one group using a 2D kernel, then build columns.
-      auto do_batch = [&](std::vector<int> const& idxs, auto kernel_launcher) {
-        int nf = static_cast<int>(idxs.size());
+      auto launch_group = [&]<typename T, auto DecodeFn>(scalar_group group) {
+        auto const& indices = group_lists[group_index(group)];
+        int const nf        = static_cast<int>(indices.size());
         if (nf == 0) return;
 
-        std::vector<scalar_buf_pair> bufs;
-        bufs.reserve(nf);
-        auto h_descs = cudf::detail::make_pinned_vector_async<batched_scalar_desc>(nf, stream);
+        std::vector<rmm::device_uvector<T>> outputs;
+        std::vector<rmm::device_uvector<bool>> valid;
+        outputs.reserve(nf);
+        valid.reserve(nf);
+        auto h_descs = cudf::detail::make_pinned_vector_async<batched_scalar_desc<T>>(nf, stream);
 
         for (int j = 0; j < nf; j++) {
-          int li           = idxs[j];
+          int const li     = indices[j];
           int si           = scalar_field_indices[li];
           auto const field = schema_context.field(si);
-          bool hd          = field.schema.has_default_value;
-          auto& bp         = bufs.emplace_back(stream, mr);
-          bp.valid =
-            rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
-          // BOOL8 default comes from default_bools (converted to 0/1 int)
-          bool is_bool  = field.output_type.id() == cudf::type_id::BOOL8;
-          int64_t def_i = is_bool ? (field.default_bool ? 1 : 0) : field.default_int;
-          h_descs[j]    = {li, nullptr, bp.valid.data(), hd, def_i, field.default_float};
+          outputs.emplace_back(num_rows, stream, mr);
+          valid.emplace_back(num_rows, stream, cudf::get_current_device_resource_ref());
+          h_descs[j] = {
+            li, outputs.back().data(), valid.back().data(), make_scalar_decode_options<T>(field)};
         }
 
-        // kernel_launcher allocates out_bytes, sets h_descs[j].output, and launches kernel
-        kernel_launcher(nf, h_descs, bufs);
+        if (num_rows > 0) {
+          auto d_descs = cudf::detail::make_device_uvector_async(
+            h_descs, stream, cudf::get_current_device_resource_ref());
+          dim3 grid((num_rows + threads - 1u) / threads, nf);
+          auto const batch_input = batched_scalar_input_view<T>{
+            input, d_locations.data(), num_scalar, d_descs.data(), nf, d_error.data()};
+          extract_scalar_batched_kernel<T, DecodeFn>
+            <<<grid, threads, 0, stream.value()>>>(batch_input);
+        }
 
-        // Build columns
         for (int j = 0; j < nf; j++) {
-          int si                  = scalar_field_indices[idxs[j]];
+          int const si            = scalar_field_indices[indices[j]];
           auto dt                 = cudf::data_type{schema[si].output_type};
-          auto& bp                = bufs[j];
-          auto [mask, null_count] = make_null_mask_from_valid(bp.valid, num_rows, stream, mr);
+          auto [mask, null_count] = make_null_mask_from_valid(valid[j], num_rows, stream, mr);
           column_map[si]          = std::make_unique<cudf::column>(
-            dt, num_rows, bp.out_bytes.release(), std::move(mask), null_count);
+            dt, num_rows, outputs[j].release(), std::move(mask), null_count);
         }
       };
 
-      auto launch_batched_kernel = [&](int nf,
-                                       auto& h_descs,
-                                       std::vector<scalar_buf_pair>& bufs,
-                                       size_t elem_size,
-                                       auto kernel_fn) {
-        for (int j = 0; j < nf; j++) {
-          bufs[j].out_bytes = rmm::device_uvector<uint8_t>(num_rows * elem_size, stream, mr);
-          h_descs[j].output = bufs[j].out_bytes.data();
-        }
-        auto d_descs = cudf::detail::make_device_uvector_async(
-          h_descs, stream, cudf::get_current_device_resource_ref());
-        dim3 grid((num_rows + threads - 1u) / threads, nf);
-        kernel_fn(grid,
-                  threads,
-                  stream.value(),
-                  batched_scalar_input_view{
-                    input, d_locations.data(), num_scalar, d_descs.data(), nf, d_error.data()});
-      };
-
-      auto launch_varint_group = [&]<typename T, bool Zigzag>(scalar_group group) {
-        do_batch(group_lists[group_index(group)], [&](int nf, auto& descs, auto& buffers) {
-          launch_batched_kernel(
-            nf,
-            descs,
-            buffers,
-            sizeof(T),
-            [](dim3 grid, int block, cudaStream_t cuda_stream, batched_scalar_input_view input) {
-              extract_scalar_batched_kernel<T, scalar_encoding::varint, Zigzag>
-                <<<grid, block, 0, cuda_stream>>>(input);
-            });
-        });
-      };
-      auto launch_fixed_group = [&]<typename T>(scalar_group group) {
-        do_batch(group_lists[group_index(group)], [&](int nf, auto& descs, auto& buffers) {
-          launch_batched_kernel(
-            nf,
-            descs,
-            buffers,
-            sizeof(T),
-            [](dim3 grid, int block, cudaStream_t cuda_stream, batched_scalar_input_view input) {
-              extract_scalar_batched_kernel<T, scalar_encoding::fixed, false>
-                <<<grid, block, 0, cuda_stream>>>(input);
-            });
-        });
-      };
-
-      launch_varint_group.template operator()<int32_t, false>(scalar_group::int32);
-      launch_varint_group.template operator()<uint32_t, false>(scalar_group::uint32);
-      launch_varint_group.template operator()<int64_t, false>(scalar_group::int64);
-      launch_varint_group.template operator()<uint64_t, false>(scalar_group::uint64);
-      launch_varint_group.template operator()<uint8_t, false>(scalar_group::boolean);
-      launch_varint_group.template operator()<int32_t, true>(scalar_group::zigzag_int32);
-      launch_varint_group.template operator()<int64_t, true>(scalar_group::zigzag_int64);
-      launch_fixed_group.template operator()<float>(scalar_group::float32);
-      launch_fixed_group.template operator()<double>(scalar_group::float64);
-      launch_fixed_group.template operator()<int32_t>(scalar_group::fixed32);
-      launch_fixed_group.template operator()<int64_t>(scalar_group::fixed64);
+      launch_group.template operator()<int32_t, decode_varint_value<int32_t, false>>(
+        scalar_group::int32);
+      launch_group.template operator()<uint32_t, decode_varint_value<uint32_t, false>>(
+        scalar_group::uint32);
+      launch_group.template operator()<int64_t, decode_varint_value<int64_t, false>>(
+        scalar_group::int64);
+      launch_group.template operator()<uint64_t, decode_varint_value<uint64_t, false>>(
+        scalar_group::uint64);
+      launch_group.template operator()<uint8_t, decode_varint_value<uint8_t, false>>(
+        scalar_group::boolean);
+      launch_group.template operator()<int32_t, decode_varint_value<int32_t, true>>(
+        scalar_group::zigzag_int32);
+      launch_group.template operator()<int64_t, decode_varint_value<int64_t, true>>(
+        scalar_group::zigzag_int64);
+      launch_group.template operator()<float, decode_fixed_value<float>>(scalar_group::float32);
+      launch_group.template operator()<double, decode_fixed_value<double>>(scalar_group::float64);
+      launch_group.template operator()<int32_t, decode_fixed_value<int32_t>>(
+        scalar_group::fixed_int32);
+      launch_group.template operator()<uint32_t, decode_fixed_value<uint32_t>>(
+        scalar_group::fixed_uint32);
+      launch_group.template operator()<int64_t, decode_fixed_value<int64_t>>(
+        scalar_group::fixed_int64);
+      launch_group.template operator()<uint64_t, decode_fixed_value<uint64_t>>(
+        scalar_group::fixed_uint64);
 
       // Per-field fallback (INT32 with enum, etc.)
       for (int i : group_lists[group_index(scalar_group::fallback)]) {
@@ -778,8 +738,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
             extract_scalar_kernel<int32_t,
-                                  scalar_encoding::varint,
-                                  false,
+                                  decode_varint_value<int32_t, false>,
                                   top_level_location_provider>
               <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                        loc_provider,

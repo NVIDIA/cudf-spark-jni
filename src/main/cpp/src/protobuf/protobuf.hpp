@@ -37,11 +37,6 @@ enum class proto_encoding : int {
   ENUM_STRING = 3,
 };
 
-CUDF_HOST_DEVICE constexpr int encoding_value(proto_encoding encoding)
-{
-  return static_cast<int>(encoding);
-}
-
 constexpr int MAX_FIELD_NUMBER = (1 << 29) - 1;
 
 enum class proto_wire_type : int {

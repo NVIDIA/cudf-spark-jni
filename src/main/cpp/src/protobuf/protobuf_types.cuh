@@ -120,7 +120,8 @@ struct field_occurrence {
  */
 struct field_occurrence_scan_desc {
   int field_number;
-  int wire_type;
+  int expected_wire_type;
+  static constexpr bool is_repeated = true;
   int32_t const* row_offsets;     // Pre-computed prefix-sum offsets [num_rows + 1]
   field_occurrence* occurrences;  // Output buffer [total_count]
 };
@@ -144,23 +145,21 @@ struct device_nested_field_descriptor {
   int depth;
   int wire_type;
   int output_type_id;
-  int encoding;
+  proto_encoding encoding;
   bool is_repeated;
   bool is_required;
   bool has_default_value;
 
   device_nested_field_descriptor() = default;
 
-  // Wire type and encoding are stored as int (not typed enums) because CUDA device code
-  // historically had limited constexpr enum support, and the kernel comparison sites use
-  // int-typed wire_type_value()/encoding_value() helpers throughout.
+  // Wire type remains an int because device comparisons use wire_type_value() throughout.
   explicit device_nested_field_descriptor(nested_field_descriptor const& src)
     : field_number(src.field_number),
       parent_idx(src.parent_idx),
       depth(src.depth),
       wire_type(static_cast<int>(src.wire_type)),
       output_type_id(static_cast<int>(src.output_type)),
-      encoding(static_cast<int>(src.encoding)),
+      encoding(src.encoding),
       is_repeated(src.is_repeated),
       is_required(src.is_required),
       has_default_value(src.has_default_value)
@@ -187,8 +186,8 @@ struct nested_parent_view {
 };
 
 struct protobuf_value_domain_view {
-  int size                       = 0;
-  int32_t const* top_row_indices = nullptr;
+  int size;
+  int32_t const* top_row_indices;
 };
 
 struct required_field_input_view {
@@ -224,20 +223,20 @@ struct scalar_decode_options {
   T default_value;
 };
 
+template <typename T>
 struct batched_scalar_desc {
   int loc_field_idx;
-  void* output;
+  T* output;
   bool* valid;
-  bool has_default;
-  int64_t default_int;
-  double default_float;
+  scalar_decode_options<T> options;
 };
 
+template <typename T>
 struct batched_scalar_input_view {
   protobuf_input_view input;
   field_location const* locations;
   int num_location_fields;
-  batched_scalar_desc const* descriptors;
+  batched_scalar_desc<T> const* descriptors;
   int num_descriptors;
   protobuf_error* error;
 };
@@ -277,8 +276,10 @@ static_assert(device_layout_compatible<scalar_value_input>);
 static_assert(device_layout_compatible<enum_value_device_view>);
 static_assert(device_layout_compatible<scalar_value_output<int32_t>>);
 static_assert(device_layout_compatible<scalar_decode_options<int64_t>>);
-static_assert(device_layout_compatible<batched_scalar_desc>);
-static_assert(device_layout_compatible<batched_scalar_input_view>);
+static_assert(device_layout_compatible<batched_scalar_desc<int32_t>>);
+static_assert(device_layout_compatible<batched_scalar_input_view<int32_t>>);
+static_assert(device_layout_compatible<batched_scalar_desc<double>>);
+static_assert(device_layout_compatible<batched_scalar_input_view<double>>);
 static_assert(device_layout_compatible<enum_domain_device_view>);
 static_assert(device_layout_compatible<enum_string_lookup_device_view>);
 static_assert(device_layout_compatible<field_scan_view>);

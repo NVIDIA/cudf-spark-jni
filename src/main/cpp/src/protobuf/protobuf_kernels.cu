@@ -49,10 +49,6 @@ enum class wire_type_mismatch_policy {
   continue_silently,
 };
 
-/**
- * Share one message walk across top-level, nested, and occurrence scanners while leaving lookup,
- * output layout, and mismatch policy with each caller. Either callback returns false to abort.
- */
 struct message_scan_context {
   uint8_t const* begin;
   uint8_t const* end;
@@ -60,78 +56,101 @@ struct message_scan_context {
   bool* row_invalid;
 };
 
-template <wire_type_mismatch_policy MismatchPolicy>
+__device__ __forceinline__ bool advance_to_next_field(uint8_t const*& cur,
+                                                      uint8_t const* end,
+                                                      int wire_type,
+                                                      protobuf_error* error)
+{
+  uint8_t const* next;
+  if (!skip_field(cur, end, wire_type, next)) {
+    set_error_once(error, protobuf_error::SKIP);
+    return false;
+  }
+  cur = next;
+  return true;
+}
+
+/**
+ * Scan one message and dispatch selected fields to singular or repeated handlers.
+ *
+ * `fields` owns the field-number lookup and descriptor attributes used by every scanner.
+ * `on_singular(index, descriptor, location)` receives the last-one-wins location of a matching
+ * singular field. `on_repeated(index, descriptor, cur, end, begin, wire_type)` handles repeated
+ * values. Either handler may return false to abort the scan.
+ *
+ * The mismatch policy applies to singular fields. Repeated handlers validate their own wire types
+ * because they also accept packed encoding.
+ */
+template <wire_type_mismatch_policy MismatchPolicy, typename Descriptor>
 __device__ bool scan_message_field_locations(message_scan_context context,
-                                             auto&& lookup_desc_idx,
-                                             auto&& is_repeated_field,
-                                             auto&& get_expected_wire_type,
+                                             lookup_view<Descriptor> fields,
                                              auto&& on_singular,
                                              auto&& on_repeated)
 {
   auto const* msg_base = context.begin;
   auto const* msg_end  = context.end;
   auto* error_flag     = context.error;
-  for (uint8_t const* cur = msg_base; cur < msg_end;) {
+  uint8_t const* cur   = msg_base;
+  int wt               = 0;
+  bool advance_succeeded;
+  for (advance_succeeded = true; advance_succeeded && cur < msg_end;
+       advance_succeeded = advance_to_next_field(cur, msg_end, wt, error_flag)) {
     proto_tag tag;
     if (!decode_tag(cur, msg_end, tag, error_flag)) return false;
-    int const wt = tag.wire_type;
+    wt = tag.wire_type;
 
-    if (int f = lookup_desc_idx(tag.field_number); f >= 0) {
-      if (is_repeated_field(f)) {
-        if (!on_repeated(f, cur, msg_end, msg_base, wt)) { return false; }
-      } else if (wt != get_expected_wire_type(f)) {
-        if constexpr (MismatchPolicy == wire_type_mismatch_policy::report_error_and_abort) {
-          set_error_once(error_flag, protobuf_error::WIRE_TYPE);
-          return false;
-        } else if constexpr (MismatchPolicy ==
-                             wire_type_mismatch_policy::report_error_and_continue) {
-          set_error_once(error_flag, protobuf_error::WIRE_TYPE);
-          if (context.row_invalid != nullptr) { *context.row_invalid = true; }
-        }
-      } else {
-        int const data_offset = static_cast<int>(cur - msg_base);
-        field_location location;
-        if (wt == wire_type_value(proto_wire_type::LEN)) {
-          // Length-delimited: skip past the length prefix and record (data offset, data length).
-          uint64_t len;
-          int len_bytes;
-          if (!read_varint(cur, msg_end, len, len_bytes)) {
-            set_error_once(error_flag, protobuf_error::VARINT);
-            return false;
-          }
-          if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
-              len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
-            set_error_once(error_flag, protobuf_error::OVERFLOW);
-            return false;
-          }
-          int32_t data_location;
-          if (!checked_add_int32(data_offset, len_bytes, data_location)) {
-            set_error_once(error_flag, protobuf_error::OVERFLOW);
-            return false;
-          }
-          location = {data_location, static_cast<int32_t>(len)};
-        } else {
-          // Fixed-width / varint: record the offset and the wire-type-derived size.
-          int field_size = get_wire_type_size(wt, cur, msg_end);
-          if (field_size < 0) {
-            set_error_once(error_flag, protobuf_error::FIELD_SIZE);
-            return false;
-          }
-          location = {data_offset, field_size};
-        }
-        if (!on_singular(f, location)) { return false; }
+    int const f = lookup_field(tag.field_number, fields);
+    if (f < 0) continue;
+
+    auto const& field = fields.data[f];
+    if (field.is_repeated) {
+      if (!on_repeated(f, field, cur, msg_end, msg_base, wt)) { return false; }
+      continue;
+    }
+    if (wt != field.expected_wire_type) {
+      if constexpr (MismatchPolicy == wire_type_mismatch_policy::report_error_and_abort) {
+        set_error_once(error_flag, protobuf_error::WIRE_TYPE);
+        return false;
+      } else if constexpr (MismatchPolicy == wire_type_mismatch_policy::report_error_and_continue) {
+        set_error_once(error_flag, protobuf_error::WIRE_TYPE);
+        if (context.row_invalid != nullptr) { *context.row_invalid = true; }
       }
+      continue;
     }
 
-    // Advance to the next field regardless of whether this one matched the schema.
-    uint8_t const* next;
-    if (!skip_field(cur, msg_end, wt, next)) {
-      set_error_once(error_flag, protobuf_error::SKIP);
-      return false;
+    int const data_offset = static_cast<int>(cur - msg_base);
+    field_location location;
+    if (wt == wire_type_value(proto_wire_type::LEN)) {
+      // Length-delimited: skip past the length prefix and record (data offset, data length).
+      uint64_t len;
+      int len_bytes;
+      if (!read_varint(cur, msg_end, len, len_bytes)) {
+        set_error_once(error_flag, protobuf_error::VARINT);
+        return false;
+      }
+      if (len > static_cast<uint64_t>(msg_end - cur - len_bytes) ||
+          len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
+        set_error_once(error_flag, protobuf_error::OVERFLOW);
+        return false;
+      }
+      int32_t data_location;
+      if (!checked_add_int32(data_offset, len_bytes, data_location)) {
+        set_error_once(error_flag, protobuf_error::OVERFLOW);
+        return false;
+      }
+      location = {data_location, static_cast<int32_t>(len)};
+    } else {
+      // Fixed-width / varint: record the offset and the wire-type-derived size.
+      int field_size = get_wire_type_size(wt, cur, msg_end);
+      if (field_size < 0) {
+        set_error_once(error_flag, protobuf_error::FIELD_SIZE);
+        return false;
+      }
+      location = {data_offset, field_size};
     }
-    cur = next;
+    if (!on_singular(f, field, location)) { return false; }
   }
-  return true;
+  return advance_succeeded;
 }
 
 /**
@@ -175,22 +194,18 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
   uint8_t const* const msg_base = bytes + start;
   uint8_t const* const msg_end  = bytes + end;
 
-  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
-  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
-  auto record_singular        = [&](int f, field_location location) {
-    field_locations[fields.lookup.data[f].output_index] = location;
+  auto record_singular = [&](int f, field_descriptor const&, field_location location) {
+    field_locations[f] = location;
     return true;
   };
   // Top-level scalar descriptors are never repeated, so the repeated handler is unreachable.
-  auto unreachable_repeated = [](int, uint8_t const*, uint8_t const*, uint8_t const*, int) {
-    return true;
-  };
+  auto unreachable_repeated =
+    [](int, field_descriptor const&, uint8_t const*, uint8_t const*, uint8_t const*, int) {
+      return true;
+    };
   if (!scan_message_field_locations<wire_type_mismatch_policy::report_error_and_abort>(
         {msg_base, msg_end, error_flag, nullptr},
-        lookup_desc_idx,
-        is_repeated_field,
-        get_expected_wire_type,
+        fields.lookup,
         record_singular,
         unreachable_repeated)) {
     mark_row_error();
@@ -324,12 +339,17 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
     if (row_has_invalid_data != nullptr) { row_has_invalid_data[row] = true; }
   };
 
-  for (int f = 0; f < fields.repeated_stride; f++) {
-    fields.repeated_info[flat_index(row, fields.repeated_stride, f)] = {0};
-  }
-
+  auto* field_locations = fields.location_stride > 0
+                            ? fields.locations + flat_index(row, fields.location_stride, 0)
+                            : nullptr;
   for (int f = 0; f < fields.location_stride; f++) {
-    fields.locations[flat_index(row, fields.location_stride, f)] = {-1, 0};
+    field_locations[f] = {-1, 0};
+  }
+  auto* field_repeated_info = fields.repeated_stride > 0
+                                ? fields.repeated_info + flat_index(row, fields.repeated_stride, 0)
+                                : nullptr;
+  for (int f = 0; f < fields.repeated_stride; f++) {
+    field_repeated_info[f] = {0};
   }
 
   if (in.nullable() && in.is_null(row)) return;
@@ -347,32 +367,29 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   uint8_t const* const msg_base = bytes + start;
   uint8_t const* const msg_end  = bytes + end;
 
-  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
-  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
-  auto record_nested          = [&](int f, field_location location) {
-    auto const output_index = fields.lookup.data[f].output_index;
-    fields.locations[flat_index(row, fields.location_stride, output_index)] = location;
+  auto record_nested = [&](int, field_descriptor const& field, field_location location) {
+    field_locations[field.output_index] = location;
     return true;
   };
-  auto count_repeated =
-    [&](int f, uint8_t const* cur, uint8_t const* end, uint8_t const* base, int wire_type) {
-      auto const output_index = fields.lookup.data[f].output_index;
-      auto& info = fields.repeated_info[flat_index(row, fields.repeated_stride, output_index)];
-      auto count_action = [&info]([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) {
-        info.count++;
-        return true;
-      };
-      return walk_repeated_element<wire_type_mismatch_policy::report_error_and_abort>(
-        cur, end, base, wire_type, get_expected_wire_type(f), error_flag, count_action);
+  auto count_repeated = [&](int,
+                            field_descriptor const& field,
+                            uint8_t const* cur,
+                            uint8_t const* end,
+                            uint8_t const* base,
+                            int wire_type) {
+    auto& info        = field_repeated_info[field.output_index];
+    auto count_action = [&info](int32_t, int32_t) {
+      info.count++;
+      return true;
     };
+    return walk_repeated_element<wire_type_mismatch_policy::report_error_and_abort>(
+      cur, end, base, wire_type, field.expected_wire_type, error_flag, count_action);
+  };
 
   auto* row_invalid = row_has_invalid_data != nullptr ? row_has_invalid_data + row : nullptr;
   if (!scan_message_field_locations<wire_type_mismatch_policy::report_error_and_continue>(
         {msg_base, msg_end, error_flag, row_invalid},
-        lookup_desc_idx,
-        is_repeated_field,
-        get_expected_wire_type,
+        fields.lookup,
         record_nested,
         count_repeated)) {
     mark_row_error();
@@ -402,38 +419,35 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
     write_idx[f] = fields.data[f].row_offsets[row];
   }
 
-  auto lookup_by_fn           = [&](int fn) { return lookup_field(fn, fields); };
-  auto is_repeated_field      = []([[maybe_unused]] int f) { return true; };
-  auto get_expected_wire_type = [&](int f) { return fields.data[f].wire_type; };
-  auto ignore_singular = []([[maybe_unused]] int f, [[maybe_unused]] field_location location) {
+  auto ignore_singular = [](int, field_occurrence_scan_desc const&, field_location) {
     return true;
   };
 
-  auto const row_i32 = static_cast<int32_t>(row);
-  auto on_repeated_scan =
-    [&](int f, uint8_t const* cur, uint8_t const* me, uint8_t const* mb, int wt) {
-      auto* occs       = fields.data[f].occurrences;
-      int& wi          = write_idx[f];
-      int const we     = fields.data[f].row_offsets[row + 1];
-      auto scan_action = [&](int32_t off, int32_t len) {
-        if (wi >= we) {
-          set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
-          return false;
-        }
-        occs[wi] = {row_i32, off, len};
-        wi++;
-        return true;
-      };
-      return walk_repeated_element<MismatchPolicy>(
-        cur, me, mb, wt, get_expected_wire_type(f), error_flag, scan_action);
+  auto const row_i32    = static_cast<int32_t>(row);
+  auto on_repeated_scan = [&](int f,
+                              field_occurrence_scan_desc const& field,
+                              uint8_t const* cur,
+                              uint8_t const* me,
+                              uint8_t const* mb,
+                              int wt) {
+    auto* occs       = field.occurrences;
+    int& wi          = write_idx[f];
+    int const we     = field.row_offsets[row + 1];
+    auto scan_action = [&](int32_t off, int32_t len) {
+      if (wi >= we) {
+        set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
+        return false;
+      }
+      occs[wi] = {row_i32, off, len};
+      wi++;
+      return true;
     };
+    return walk_repeated_element<MismatchPolicy>(
+      cur, me, mb, wt, field.expected_wire_type, error_flag, scan_action);
+  };
 
-  if (!scan_message_field_locations<MismatchPolicy>({msg_base, msg_end, error_flag, nullptr},
-                                                    lookup_by_fn,
-                                                    is_repeated_field,
-                                                    get_expected_wire_type,
-                                                    ignore_singular,
-                                                    on_repeated_scan)) {
+  if (!scan_message_field_locations<MismatchPolicy>(
+        {msg_base, msg_end, error_flag, nullptr}, fields, ignore_singular, on_repeated_scan)) {
     return false;
   }
 
@@ -496,8 +510,11 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   for (int f = 0; f < fields.location_stride; f++) {
     field_locations[f] = {-1, 0};
   }
+  auto* field_repeated_info = fields.repeated_stride > 0
+                                ? fields.repeated_info + flat_index(row, fields.repeated_stride, 0)
+                                : nullptr;
   for (int f = 0; f < fields.repeated_stride; f++) {
-    fields.repeated_info[flat_index(row, fields.repeated_stride, f)] = {0};
+    field_repeated_info[f] = {0};
   }
 
   auto const& parent_loc = parent.locations[row];
@@ -516,32 +533,29 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   uint8_t const* const nested_start = input.message_data + nested_start_off;
   uint8_t const* const nested_end   = input.message_data + nested_end_off;
 
-  auto lookup_desc_idx        = [&](int fn) { return lookup_field(fn, fields.lookup); };
-  auto is_repeated_field      = [&](int f) { return fields.lookup.data[f].is_repeated; };
-  auto get_expected_wire_type = [&](int f) { return fields.lookup.data[f].expected_wire_type; };
-  auto record_singular        = [&](int f, field_location location) {
-    field_locations[fields.lookup.data[f].output_index] = location;
+  auto record_singular = [&](int, field_descriptor const& field, field_location location) {
+    field_locations[field.output_index] = location;
     return true;
   };
-  auto validate_repeated =
-    [&](int f, uint8_t const* cur, uint8_t const* msg_end, uint8_t const* msg_base, int wt) {
-      auto const expected_wire_type = get_expected_wire_type(f);
-      auto count_occurrence = [&]([[maybe_unused]] int32_t off, [[maybe_unused]] int32_t len) {
-        if (fields.repeated_info != nullptr) {
-          auto const output_index = fields.lookup.data[f].output_index;
-          fields.repeated_info[flat_index(row, fields.repeated_stride, output_index)].count++;
-        }
-        return true;
-      };
-      return walk_repeated_element<wire_type_mismatch_policy::continue_silently>(
-        cur, msg_end, msg_base, wt, expected_wire_type, error_flag, count_occurrence);
+  auto validate_repeated = [&](int,
+                               field_descriptor const& field,
+                               uint8_t const* cur,
+                               uint8_t const* msg_end,
+                               uint8_t const* msg_base,
+                               int wt) {
+    auto count_occurrence = [&](int32_t, int32_t) {
+      field_repeated_info[field.output_index].count++;
+      return true;
     };
+    return walk_repeated_element<wire_type_mismatch_policy::continue_silently>(
+      cur, msg_end, msg_base, wt, field.expected_wire_type, error_flag, count_occurrence);
+  };
 
+  // protobuf-java treats wrong-wire known fields as unknown; this projected API has no
+  // UnknownFieldSet-compatible output channel for nested fields.
   if (!scan_message_field_locations<wire_type_mismatch_policy::continue_silently>(
         {nested_start, nested_end, error_flag, nullptr},
-        lookup_desc_idx,
-        is_repeated_field,
-        get_expected_wire_type,
+        fields.lookup,
         record_singular,
         validate_repeated)) {
     mark_row_error();
