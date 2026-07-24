@@ -21,14 +21,17 @@
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/detail/iterator.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/detail/valid_if.cuh>
 #include <cudf/io/json.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -48,6 +51,10 @@
 #include <thrust/transform.h>
 #include <thrust/uninitialized_fill.h>
 
+#include <map>
+#include <span>
+#include <unordered_map>
+
 namespace spark_rapids_jni {
 
 namespace detail {
@@ -62,6 +69,11 @@ struct schema_element_with_precision {
   cudf::data_type type;
   int precision;
   std::vector<std::pair<std::string, schema_element_with_precision>> child_types;
+};
+
+struct mask_word_update {
+  cudf::size_type word_index;
+  cudf::bitmask_type bits_to_clear;
 };
 
 std::pair<cudf::io::schema_element, schema_element_with_precision> parse_schema_element(
@@ -140,6 +152,121 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> generate_stru
       cudf::data_type{cudf::type_id::STRUCT}, std::move(schema_cols), {std::move(name_order)}},
     schema_element_with_precision{
       cudf::data_type{cudf::type_id::STRUCT}, -1, std::move(schema_cols_with_precisions)}};
+}
+
+void nullify_rows(cudf::column& input,
+                  std::span<cudf::size_type const> row_indices,
+                  rmm::cuda_stream_view stream,
+                  rmm::device_async_resource_ref mr)
+{
+  if (row_indices.empty()) { return; }
+
+  auto const input_view = input.view();
+  auto null_mask =
+    input_view.nullable()
+      ? rmm::device_buffer{}
+      : cudf::create_null_mask(input_view.size(), cudf::mask_state::ALL_VALID, stream, mr);
+  auto const mask_ptr = input_view.nullable() ? input.mutable_view().null_mask()
+                                              : static_cast<cudf::bitmask_type*>(null_mask.data());
+
+  // Diagnostic row indices are sorted and unique, so updates to one mask word are adjacent.
+  auto word_updates = cudf::detail::make_empty_pinned_vector<mask_word_update>(
+    std::min(row_indices.size(),
+             static_cast<std::size_t>(cudf::num_bitmask_words(input_view.size()))),
+    stream);
+  for (auto const row : row_indices) {
+    auto const word_index = cudf::word_index(row);
+    auto const bit        = cudf::bitmask_type{1} << cudf::intra_word_index(row);
+    if (!word_updates.empty() && word_updates.back().word_index == word_index) {
+      word_updates.back().bits_to_clear |= bit;
+    } else {
+      word_updates.push_back({word_index, bit});
+    }
+  }
+
+  auto const use_word_updates =
+    word_updates.size() * sizeof(mask_word_update) < row_indices.size() * sizeof(cudf::size_type);
+  if (use_word_updates) {
+    auto d_word_updates = cudf::detail::make_device_uvector_async(
+      word_updates, stream, cudf::get_current_device_resource_ref());
+    thrust::for_each(rmm::exec_policy_nosync(stream),
+                     d_word_updates.begin(),
+                     d_word_updates.end(),
+                     [mask_ptr] __device__(auto const update) {
+                       mask_ptr[update.word_index] &= ~update.bits_to_clear;
+                     });
+  } else {
+    auto h_row_indices =
+      cudf::detail::make_empty_pinned_vector<cudf::size_type>(row_indices.size(), stream);
+    h_row_indices.insert(h_row_indices.end(), row_indices.begin(), row_indices.end());
+    auto d_row_indices = cudf::detail::make_device_uvector_async(
+      h_row_indices, stream, cudf::get_current_device_resource_ref());
+    thrust::for_each(rmm::exec_policy_nosync(stream),
+                     d_row_indices.begin(),
+                     d_row_indices.end(),
+                     [mask_ptr] __device__(auto const row) {
+                       // clear_bit uses atomicAnd, so concurrent updates to one mask word are safe.
+                       cudf::clear_bit(mask_ptr, row);
+                     });
+  }
+
+  auto const null_count = input_view.nullable()
+                            ? cudf::null_count(mask_ptr, 0, input_view.size(), stream)
+                            : static_cast<cudf::size_type>(row_indices.size());
+  if (input_view.nullable()) {
+    input.set_null_count(null_count);
+  } else {
+    input.set_null_mask(std::move(null_mask), null_count);
+  }
+}
+
+[[nodiscard]] std::unique_ptr<cudf::column> make_lists_column_with_null_sanitization(
+  cudf::size_type num_rows,
+  std::unique_ptr<cudf::column> offsets_column,
+  std::unique_ptr<cudf::column> child_column,
+  cudf::size_type null_count,
+  rmm::device_buffer&& null_mask,
+  bool has_rows_nullified,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  std::vector<std::unique_ptr<cudf::column>> children;
+  children.emplace_back(std::move(offsets_column));
+  children.emplace_back(std::move(child_column));
+  auto output = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
+                                               num_rows,
+                                               rmm::device_buffer{},
+                                               std::move(null_mask),
+                                               null_count,
+                                               std::move(children));
+  // Row-level schema mismatch nulls can leave child data under null parents; sanitize it here.
+  if (has_rows_nullified && null_count > 0 && cudf::has_nonempty_nulls(output->view(), stream)) {
+    output = cudf::purge_nonempty_nulls(output->view(), stream, mr);
+  }
+  return output;
+}
+
+[[nodiscard]] std::unique_ptr<cudf::column> make_structs_column_with_null_consistency(
+  cudf::size_type num_rows,
+  std::vector<std::unique_ptr<cudf::column>>&& children,
+  cudf::size_type null_count,
+  rmm::device_buffer&& null_mask,
+  bool has_rows_nullified,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  if (has_rows_nullified && null_count > 0) {
+    // make_structs_column superimposes parent nulls onto children for a consistent nested column.
+    return cudf::make_structs_column(
+      num_rows, std::move(children), null_count, std::move(null_mask), stream, mr);
+  }
+
+  return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRUCT},
+                                        num_rows,
+                                        rmm::device_buffer{},
+                                        std::move(null_mask),
+                                        null_count,
+                                        std::move(children));
 }
 
 using string_index_pair = cuda::std::pair<char const*, cudf::size_type>;
@@ -604,6 +731,7 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
                                                 schema_element_with_precision const& schema,
                                                 bool allow_nonnumeric_numbers,
                                                 bool is_us_locale,
+                                                bool has_rows_nullified,
                                                 rmm::cuda_stream_view stream,
                                                 rmm::device_async_resource_ref mr)
 {
@@ -709,16 +837,17 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
       new_children.emplace_back(
         std::move(input_content.children[cudf::lists_column_view::offsets_column_index]));
       new_children.emplace_back(convert_data_type(
-        std::move(child), child_schema, allow_nonnumeric_numbers, is_us_locale, stream, mr));
+        std::move(child), child_schema, allow_nonnumeric_numbers, is_us_locale, false, stream, mr));
 
-      // Do not use `cudf::make_lists_column` since we do not need to call `purge_nonempty_nulls`
-      // on the child column as it does not have non-empty nulls.
-      return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
-                                            num_rows,
-                                            rmm::device_buffer{},
-                                            std::move(*input_content.null_mask),
-                                            null_count,
-                                            std::move(new_children));
+      return make_lists_column_with_null_sanitization(
+        num_rows,
+        std::move(new_children[cudf::lists_column_view::offsets_column_index]),
+        std::move(new_children[cudf::lists_column_view::child_column_index]),
+        null_count,
+        std::move(*input_content.null_mask),
+        has_rows_nullified,
+        stream,
+        mr);
     }
 
     if (schema.type.id() == cudf::type_id::STRUCT) {
@@ -729,18 +858,18 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
                                                     schema.child_types[i].second,
                                                     allow_nonnumeric_numbers,
                                                     is_us_locale,
+                                                    false,
                                                     stream,
                                                     mr));
       }
 
-      // Do not use `cudf::make_structs_column` since we do not need to call `superimpose_nulls`
-      // on the children columns.
-      return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRUCT},
-                                            num_rows,
-                                            rmm::device_buffer{},
-                                            std::move(*input_content.null_mask),
-                                            null_count,
-                                            std::move(new_children));
+      return make_structs_column_with_null_consistency(num_rows,
+                                                       std::move(new_children),
+                                                       null_count,
+                                                       std::move(*input_content.null_mask),
+                                                       has_rows_nullified,
+                                                       stream,
+                                                       mr);
     }
   } else {  // input_is_const_cv
     auto const null_count   = input.null_count();
@@ -758,17 +887,18 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
       std::vector<std::unique_ptr<cudf::column>> new_children;
       new_children.emplace_back(
         std::make_unique<cudf::column>(input.child(cudf::lists_column_view::offsets_column_index)));
-      new_children.emplace_back(
-        convert_data_type(child, child_schema, allow_nonnumeric_numbers, is_us_locale, stream, mr));
+      new_children.emplace_back(convert_data_type(
+        child, child_schema, allow_nonnumeric_numbers, is_us_locale, false, stream, mr));
 
-      // Do not use `cudf::make_lists_column` since we do not need to call `purge_nonempty_nulls`
-      // on the child column as it does not have non-empty nulls.
-      return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
-                                            num_rows,
-                                            rmm::device_buffer{},
-                                            cudf::copy_bitmask(input, stream, mr),
-                                            null_count,
-                                            std::move(new_children));
+      return make_lists_column_with_null_sanitization(
+        num_rows,
+        std::move(new_children[cudf::lists_column_view::offsets_column_index]),
+        std::move(new_children[cudf::lists_column_view::child_column_index]),
+        null_count,
+        cudf::copy_bitmask(input, stream, mr),
+        has_rows_nullified,
+        stream,
+        mr);
     }
 
     if (schema.type.id() == cudf::type_id::STRUCT) {
@@ -779,18 +909,18 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
                                                     schema.child_types[i].second,
                                                     allow_nonnumeric_numbers,
                                                     is_us_locale,
+                                                    false,
                                                     stream,
                                                     mr));
       }
 
-      // Do not use `cudf::make_structs_column` since we do not need to call `superimpose_nulls`
-      // on the children columns.
-      return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRUCT},
-                                            num_rows,
-                                            rmm::device_buffer{},
-                                            cudf::copy_bitmask(input, stream, mr),
-                                            null_count,
-                                            std::move(new_children));
+      return make_structs_column_with_null_consistency(num_rows,
+                                                       std::move(new_children),
+                                                       null_count,
+                                                       cudf::copy_bitmask(input, stream, mr),
+                                                       has_rows_nullified,
+                                                       stream,
+                                                       mr);
     }
   }
 
@@ -838,12 +968,20 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
       .dtypes(schema)
       .prune_columns(schema.child_types.size() != 0);
 
-  auto const parsed_table_with_meta = cudf::io::read_json(opts_builder.build());
-  auto const& parsed_meta           = parsed_table_with_meta.metadata;
-  auto parsed_columns               = parsed_table_with_meta.tbl->release();
+  auto parsed_result = cudf::io::read_json_with_row_diagnostics(opts_builder.build(), stream, mr);
+  auto const& parsed_meta = parsed_result.data.metadata;
+  auto parsed_columns     = parsed_result.data.tbl->release();
 
   CUDF_EXPECTS(parsed_columns.size() == schema.child_types.size(),
                "Numbers of output columns is different from schema size.");
+
+  auto const& mismatch_diagnostics =
+    parsed_result.diagnostics.top_level_columns_with_schema_mismatch_rows;
+  std::unordered_map<std::string, std::span<cudf::size_type const>> mismatch_rows_by_column;
+  mismatch_rows_by_column.reserve(mismatch_diagnostics.size());
+  for (auto const& mismatch : mismatch_diagnostics) {
+    mismatch_rows_by_column.emplace(mismatch.column_name, mismatch.row_indices);
+  }
 
   std::vector<std::unique_ptr<cudf::column>> converted_cols;
   converted_cols.reserve(parsed_columns.size());
@@ -855,10 +993,15 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
 
     auto const& [col_name, col_schema] = schema_with_precision.child_types[i];
     CUDF_EXPECTS(parsed_meta.schema_info[i].name == col_name, "Mismatched column name.");
+    auto const mismatch_rows = mismatch_rows_by_column.find(col_name);
+    auto const has_rows_nullified =
+      mismatch_rows != mismatch_rows_by_column.end() && !mismatch_rows->second.empty();
+    if (has_rows_nullified) { nullify_rows(*parsed_columns[i], mismatch_rows->second, stream, mr); }
     converted_cols.emplace_back(convert_data_type(std::move(parsed_columns[i]),
                                                   col_schema,
                                                   allow_nonnumeric_numbers,
                                                   is_us_locale,
+                                                  has_rows_nullified,
                                                   stream,
                                                   mr));
   }
@@ -867,15 +1010,14 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
   auto [null_mask, null_count] = cudf::detail::valid_if(
     valid_it, valid_it + should_be_nullified->size(), thrust::logical_not<bool>{}, stream, mr);
 
-  // Do not use `cudf::make_structs_column` since we do not need to call `superimpose_nulls`
-  // on the children columns.
-  return std::make_unique<cudf::column>(
-    cudf::data_type{cudf::type_id::STRUCT},
+  return make_structs_column_with_null_consistency(
     input.size(),
-    rmm::device_buffer{},
-    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr},
+    std::move(converted_cols),
     null_count,
-    std::move(converted_cols));
+    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr},
+    false,
+    stream,
+    mr);
 }
 
 }  // namespace
@@ -939,6 +1081,7 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
                                    schema_with_precision.child_types.front().second,
                                    allow_nonnumeric_numbers,
                                    is_us_locale,
+                                   false,
                                    stream,
                                    mr);
 }
