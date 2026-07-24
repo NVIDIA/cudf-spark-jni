@@ -74,17 +74,6 @@ source "$PROJECT_BUILD_DIR/buildcpp-env.sh"
 CMAKE_NETRC=${CMAKE_NETRC:-IGNORED}
 CMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}
 
-ARROW_PROJECT_INCLUDE_ARGS=()
-if [[ -n "${ARROW_THRIFT_MIRROR_URL:-}" ]]; then
-  arrow_thrift_mirror_hook="$PROJECT_BASE_DIR/build/configure-arrow-dependency-mirror.cmake"
-  if [[ -n "${CMAKE_PROJECT_arrow_INCLUDE:-}" &&
-        "$CMAKE_PROJECT_arrow_INCLUDE" != "$arrow_thrift_mirror_hook" ]]; then
-    echo >&2 "ARROW_THRIFT_MIRROR_URL cannot be combined with an existing CMAKE_PROJECT_arrow_INCLUDE"
-    exit 1
-  fi
-  ARROW_PROJECT_INCLUDE_ARGS=("-DCMAKE_PROJECT_arrow_INCLUDE=$arrow_thrift_mirror_hook")
-fi
-
 if [[ "$GPU_ARCHS" != "DEPRECATED" ]]; then
     CMAKE_CUDA_ARCHITECTURES="$GPU_ARCHS"    
     echo "==========================================================================================
@@ -160,7 +149,6 @@ CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
   -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
   -DCMAKE_NETRC="$CMAKE_NETRC" \
   -DCMAKE_NETRC_FILE="$CMAKE_NETRC_FILE" \
-  "${ARROW_PROJECT_INCLUDE_ARGS[@]}" \
   -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
   -DUSE_GDS="$USE_GDS" \
   -C="$CUDF_PIN_PATH/setup.cmake"
