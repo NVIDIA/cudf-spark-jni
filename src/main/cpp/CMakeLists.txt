@@ -362,6 +362,7 @@ if(HIDE_PRIVATE_CUDA_SYMBOLS)
             "LINKER:--exclude-libs,libnvrtc-builtins_static.a"
             "LINKER:--exclude-libs,libnvptxcompiler_static.a"
             "LINKER:--exclude-libs,libnvJitLink_static.a"
+            "LINKER:--exclude-libs,libnvcomp_static.a"
   )
 endif()
 rapids_cuda_set_runtime(spark_rapids_jni USE_STATIC ON)
