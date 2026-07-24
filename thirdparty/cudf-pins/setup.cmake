@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+if(PROJECT_NAME STREQUAL arrow)
+  if(DEFINED ENV{ARROW_THRIFT_MIRROR_URL} AND NOT DEFINED ENV{ARROW_THRIFT_URL})
+    file(STRINGS "${PROJECT_SOURCE_DIR}/thirdparty/versions.txt" arrow_thrift_version
+      REGEX "^ARROW_THRIFT_BUILD_VERSION=")
+    string(REPLACE "ARROW_THRIFT_BUILD_VERSION=" "" arrow_thrift_version "${arrow_thrift_version}")
+    set(ENV{ARROW_THRIFT_URL}
+      "$ENV{ARROW_THRIFT_MIRROR_URL}/thrift/${arrow_thrift_version}/thrift-${arrow_thrift_version}.tar.gz")
+  endif()
+  return()
+endif()
 
 string(TOLOWER "${CUDF_DEPENDENCY_PIN_MODE}" CUDF_DEPENDENCY_PIN_MODE)
 if(NOT (CUDF_DEPENDENCY_PIN_MODE STREQUAL pinned OR
@@ -43,3 +54,4 @@ endif()
 # We need to use a project() call hook, since rapids-cmake cpm_init()
 # can't be called from a `-C` CMake file
 set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES "${CMAKE_CURRENT_LIST_DIR}/add_dependency_pins.cmake" CACHE FILEPATH "" )
+set(CMAKE_PROJECT_arrow_INCLUDE "${CMAKE_CURRENT_LIST_FILE}" CACHE FILEPATH "")
