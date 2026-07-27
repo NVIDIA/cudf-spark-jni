@@ -406,14 +406,12 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
   if constexpr (std::is_floating_point_v<T>) {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT || encoding == proto_encoding::FIXED,
                  "Floating-point protobuf extraction requires default or fixed encoding");
-    extract_scalar_kernel<T, decode_fixed_value<T>>
-      <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, num_rows, output, options);
+    extract_scalar_kernel<T, decode_fixed_value<T>><<<blocks, threads, 0, stream.value()>>>(
+      message_data, loc_provider, num_rows, output, options);
   } else if (encoding == proto_encoding::FIXED) {
     if constexpr (sizeof(T) == 4 || sizeof(T) == 8) {
-      extract_scalar_kernel<T, decode_fixed_value<T>>
-        <<<blocks, threads, 0, stream.value()>>>(
-          message_data, loc_provider, num_rows, output, options);
+      extract_scalar_kernel<T, decode_fixed_value<T>><<<blocks, threads, 0, stream.value()>>>(
+        message_data, loc_provider, num_rows, output, options);
     } else {
       CUDF_FAIL("Fixed-width protobuf extraction requires a 32-bit or 64-bit output type");
     }
@@ -432,9 +430,8 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
   } else {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT,
                  "Unsigned varint protobuf extraction requires default encoding");
-    extract_scalar_kernel<T, decode_varint_value<T, false>>
-      <<<blocks, threads, 0, stream.value()>>>(
-        message_data, loc_provider, num_rows, output, options);
+    extract_scalar_kernel<T, decode_varint_value<T, false>><<<blocks, threads, 0, stream.value()>>>(
+      message_data, loc_provider, num_rows, output, options);
   }
 }
 
@@ -621,14 +618,12 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         num_items,
         [&](uint8_t* out_ptr, bool* valid_ptr) {
           extract_scalar_kernel<uint8_t, decode_varint_value<uint8_t, false>>
-            <<<blocks, threads, 0, stream.value()>>>(message_data,
-                                                     loc_provider,
-                                                     num_items,
-                                                     scalar_value_output<uint8_t>{
-                                                       out_ptr,
-                                                       valid_ptr,
-                                                       decode_ctx.error->data()},
-                                                     make_scalar_decode_options<uint8_t>(field));
+            <<<blocks, threads, 0, stream.value()>>>(
+              message_data,
+              loc_provider,
+              num_items,
+              scalar_value_output<uint8_t>{out_ptr, valid_ptr, decode_ctx.error->data()},
+              make_scalar_decode_options<uint8_t>(field));
         },
         stream,
         mr);
@@ -670,14 +665,12 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         num_items,
         [&](float* out_ptr, bool* valid_ptr) {
           extract_scalar_kernel<float, decode_fixed_value<float>>
-            <<<blocks, threads, 0, stream.value()>>>(message_data,
-                                                     loc_provider,
-                                                     num_items,
-                                                     scalar_value_output<float>{
-                                                       out_ptr,
-                                                       valid_ptr,
-                                                       decode_ctx.error->data()},
-                                                     make_scalar_decode_options<float>(field));
+            <<<blocks, threads, 0, stream.value()>>>(
+              message_data,
+              loc_provider,
+              num_items,
+              scalar_value_output<float>{out_ptr, valid_ptr, decode_ctx.error->data()},
+              make_scalar_decode_options<float>(field));
         },
         stream,
         mr);
@@ -688,14 +681,12 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         num_items,
         [&](double* out_ptr, bool* valid_ptr) {
           extract_scalar_kernel<double, decode_fixed_value<double>>
-            <<<blocks, threads, 0, stream.value()>>>(message_data,
-                                                     loc_provider,
-                                                     num_items,
-                                                     scalar_value_output<double>{
-                                                       out_ptr,
-                                                       valid_ptr,
-                                                       decode_ctx.error->data()},
-                                                     make_scalar_decode_options<double>(field));
+            <<<blocks, threads, 0, stream.value()>>>(
+              message_data,
+              loc_provider,
+              num_items,
+              scalar_value_output<double>{out_ptr, valid_ptr, decode_ctx.error->data()},
+              make_scalar_decode_options<double>(field));
         },
         stream,
         mr);

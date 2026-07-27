@@ -174,10 +174,8 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
             message_data,
             loc_provider,
             num_values,
-            scalar_value_output<int32_t>{
-              values.data(), valid.data(), decode_ctx.error->data()},
-            scalar_decode_options<int32_t>{
-              has_default, static_cast<int32_t>(field.default_int)});
+            scalar_value_output<int32_t>{values.data(), valid.data(), decode_ctx.error->data()},
+            scalar_decode_options<int32_t>{has_default, static_cast<int32_t>(field.default_int)});
         auto enum_values = request.values;
         enum_values.top_row_indices =
           decode_ctx.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr;

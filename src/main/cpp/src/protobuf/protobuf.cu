@@ -712,15 +712,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
             extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>>
-              <<<blocks, threads, 0, stream.value()>>>(message_data,
-                                                       loc_provider,
-                                                       num_rows,
-                                                       scalar_value_output<int32_t>{
-                                                         out.data(),
-                                                         valid.data(),
-                                                         d_error.data()},
-                                                       scalar_decode_options<int32_t>{
-                                                         has_def, def_int});
+              <<<blocks, threads, 0, stream.value()>>>(
+                message_data,
+                loc_provider,
+                num_rows,
+                scalar_value_output<int32_t>{out.data(), valid.data(), d_error.data()},
+                scalar_decode_options<int32_t>{has_def, def_int});
 
             // Outer sizing is guaranteed by `validate_decode_context`; only the per-field
             // metadata-populated check remains.
