@@ -94,7 +94,7 @@ struct field_location {
 struct field_descriptor {
   int field_number;        // Protobuf field number
   int expected_wire_type;  // Expected wire type for this field
-  int output_index;        // Column within the matching output buffer
+  int output_index;        // Column within the matching output buffer, or -1 when unused
   bool is_repeated;        // Repeated children are scanned via count/scan kernels
 };
 
@@ -135,37 +135,6 @@ struct lookup_view {
 };
 
 using field_occurrence_scan_view = lookup_view<field_occurrence_scan_desc>;
-
-/**
- * Device-side descriptor for nested schema fields.
- */
-struct device_nested_field_descriptor {
-  int field_number;
-  int parent_idx;
-  int depth;
-  int wire_type;
-  int output_type_id;
-  proto_encoding encoding;
-  bool is_repeated;
-  bool is_required;
-  bool has_default_value;
-
-  device_nested_field_descriptor() = default;
-
-  // Wire type remains an int because device comparisons use wire_type_value() throughout.
-  explicit device_nested_field_descriptor(nested_field_descriptor const& src)
-    : field_number(src.field_number),
-      parent_idx(src.parent_idx),
-      depth(src.depth),
-      wire_type(static_cast<int>(src.wire_type)),
-      output_type_id(static_cast<int>(src.output_type)),
-      encoding(src.encoding),
-      is_repeated(src.is_repeated),
-      is_required(src.is_required),
-      has_default_value(src.has_default_value)
-  {
-  }
-};
 
 // ============================================================================
 // Device-facing views and scalar kernel arguments
@@ -268,7 +237,6 @@ static_assert(device_layout_compatible<field_descriptor>);
 static_assert(device_layout_compatible<field_occurrence_scan_desc>);
 static_assert(device_layout_compatible<field_occurrence_scan_view>);
 static_assert(device_layout_compatible<lookup_view<field_descriptor>>);
-static_assert(device_layout_compatible<device_nested_field_descriptor>);
 static_assert(device_layout_compatible<nested_parent_view>);
 static_assert(device_layout_compatible<protobuf_value_domain_view>);
 static_assert(device_layout_compatible<required_field_input_view>);

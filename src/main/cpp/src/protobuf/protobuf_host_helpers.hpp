@@ -253,8 +253,7 @@ inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
  * Find all child field indices for a given parent index in the schema.
  * This is a commonly used pattern throughout the codebase.
  *
- * @param schema The schema vector (either nested_field_descriptor or
- * device_nested_field_descriptor)
+ * @param schema The schema vector
  * @param parent_idx The parent index to search for
  * @return Vector of child field indices
  */
@@ -283,20 +282,6 @@ std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::colum
                                                      rmm::cuda_stream_view stream,
                                                      rmm::device_async_resource_ref mr);
 
-/**
- * Extract output type from either nested_field_descriptor (.output_type is cudf::type_id)
- * or device_nested_field_descriptor (.output_type_id is int).
- */
-template <typename FieldT>
-inline cudf::type_id get_output_type_id(FieldT const& field)
-{
-  if constexpr (std::is_same_v<FieldT, device_nested_field_descriptor>) {
-    return static_cast<cudf::type_id>(field.output_type_id);
-  } else {
-    return field.output_type;
-  }
-}
-
 // Forward declaration for the mutual recursion with make_empty_struct_column_from_children.
 template <typename SchemaT>
 std::unique_ptr<cudf::column> make_empty_struct_column_with_schema(
@@ -317,7 +302,7 @@ std::unique_ptr<cudf::column> make_empty_struct_column_from_children(
 {
   std::vector<std::unique_ptr<cudf::column>> children;
   for (int child_idx : child_indices) {
-    auto child_type = cudf::data_type{get_output_type_id(schema[child_idx])};
+    auto child_type = cudf::data_type{schema[child_idx].output_type};
 
     std::unique_ptr<cudf::column> child_col;
     if (child_type.id() == cudf::type_id::STRUCT) {

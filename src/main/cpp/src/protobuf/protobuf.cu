@@ -20,6 +20,7 @@
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/utilities/type_dispatcher.hpp>
 
 #include <thrust/binary_search.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -30,6 +31,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
@@ -437,12 +439,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // only buffers that flow into the returned column should use the caller-supplied `mr`.
   auto const scratch_mr = cudf::get_current_device_resource_ref();
 
-  // Copy schema to device
-  std::vector<device_nested_field_descriptor> h_device_schema(num_fields);
-  for (int i = 0; i < num_fields; i++) {
-    h_device_schema[i] = device_nested_field_descriptor{schema[i]};
-  }
-
   auto d_in = cudf::column_device_view::create(binary_input, stream);
   // Identify repeated and nested fields at depth 0
   std::vector<int> repeated_field_indices;
@@ -567,78 +563,62 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     // Batched scalar extraction: group non-special fixed-width fields by extraction
     // category and extract all fields of each category with a single 2D kernel launch.
     {
-      enum class scalar_group : size_t {
-        int32,
-        uint32,
-        int64,
-        uint64,
-        boolean,
-        zigzag_int32,
-        zigzag_int64,
-        float32,
-        float64,
-        fixed_int32,
-        fixed_uint32,
-        fixed_int64,
-        fixed_uint64,
-        fallback,
-        count,
+      enum class decode_kind : uint8_t { fixed, varint, zigzag };
+      struct scalar_kind {
+        cudf::type_id type;
+        decode_kind decode;
+        bool operator==(scalar_kind const&) const = default;
       };
-      constexpr auto group_index = [](scalar_group group) { return static_cast<size_t>(group); };
-      std::array<std::vector<int>, group_index(scalar_group::count)> group_lists;
+      static constexpr auto scalar_kinds = std::to_array<scalar_kind>({
+        {cudf::type_id::INT32, decode_kind::varint},
+        {cudf::type_id::UINT32, decode_kind::varint},
+        {cudf::type_id::INT64, decode_kind::varint},
+        {cudf::type_id::UINT64, decode_kind::varint},
+        {cudf::type_id::BOOL8, decode_kind::varint},
+        {cudf::type_id::INT32, decode_kind::zigzag},
+        {cudf::type_id::INT64, decode_kind::zigzag},
+        {cudf::type_id::FLOAT32, decode_kind::fixed},
+        {cudf::type_id::FLOAT64, decode_kind::fixed},
+        {cudf::type_id::INT32, decode_kind::fixed},
+        {cudf::type_id::UINT32, decode_kind::fixed},
+        {cudf::type_id::INT64, decode_kind::fixed},
+        {cudf::type_id::UINT64, decode_kind::fixed},
+      });
+      constexpr auto fallback            = scalar_kinds.size();
+      std::array<std::vector<int>, scalar_kinds.size() + 1> group_lists;
+      // Implied constexpr (https://en.cppreference.com/cpp/language/lambda).
+      auto find_group = [](cudf::type_id type, proto_encoding encoding) {
+        using enum cudf::type_id;
+        using enum proto_encoding;
+        auto const decode = type == FLOAT32 || type == FLOAT64 || encoding == FIXED
+                              ? decode_kind::fixed
+                            : encoding == ZIGZAG ? decode_kind::zigzag
+                                                 : decode_kind::varint;
+
+        auto const iter = std::ranges::find(scalar_kinds, scalar_kind{type, decode});
+        return static_cast<size_t>(iter - scalar_kinds.begin());
+      };
 
       for (int i = 0; i < num_scalar; i++) {
-        int si           = scalar_field_indices[i];
-        auto const field = schema_context.field(si);
-        auto tid         = field.output_type.id();
-        auto enc         = field.schema.encoding;
-        bool zz          = (enc == proto_encoding::ZIGZAG);
+        auto const field    = schema_context.field(scalar_field_indices[i]);
+        auto const type     = field.output_type.id();
+        auto const encoding = field.schema.encoding;
 
         // STRING, LIST, and enum-as-string go to per-field path
-        if (tid == cudf::type_id::STRING || tid == cudf::type_id::LIST) continue;
-
-        bool is_fixed = (enc == proto_encoding::FIXED);
+        if (type == cudf::type_id::STRING || type == cudf::type_id::LIST) continue;
 
         // INT32 with enum validation goes to fallback
-        if (tid == cudf::type_id::INT32 && !zz && !is_fixed && !field.enum_valid_values.empty()) {
-          group_lists[group_index(scalar_group::fallback)].push_back(i);
+        if (type == cudf::type_id::INT32 && encoding == proto_encoding::DEFAULT &&
+            !field.enum_valid_values.empty()) {
+          group_lists[fallback].push_back(i);
           continue;
         }
 
-        auto group = scalar_group::fallback;
-        if (tid == cudf::type_id::INT32 && is_fixed) {
-          group = scalar_group::fixed_int32;
-        } else if (tid == cudf::type_id::UINT32 && is_fixed) {
-          group = scalar_group::fixed_uint32;
-        } else if (tid == cudf::type_id::INT64 && is_fixed) {
-          group = scalar_group::fixed_int64;
-        } else if (tid == cudf::type_id::UINT64 && is_fixed) {
-          group = scalar_group::fixed_uint64;
-        } else if (tid == cudf::type_id::INT32 && !zz) {
-          group = scalar_group::int32;
-        } else if (tid == cudf::type_id::UINT32) {
-          group = scalar_group::uint32;
-        } else if (tid == cudf::type_id::INT64 && !zz) {
-          group = scalar_group::int64;
-        } else if (tid == cudf::type_id::UINT64) {
-          group = scalar_group::uint64;
-        } else if (tid == cudf::type_id::BOOL8) {
-          group = scalar_group::boolean;
-        } else if (tid == cudf::type_id::INT32 && zz) {
-          group = scalar_group::zigzag_int32;
-        } else if (tid == cudf::type_id::INT64 && zz) {
-          group = scalar_group::zigzag_int64;
-        } else if (tid == cudf::type_id::FLOAT32) {
-          group = scalar_group::float32;
-        } else if (tid == cudf::type_id::FLOAT64) {
-          group = scalar_group::float64;
-        }
-        group_lists[group_index(group)].push_back(i);
+        group_lists[find_group(type, encoding)].push_back(i);
       }
 
-      auto launch_group = [&]<typename T, auto DecodeFn>(scalar_group group) {
-        auto const& indices = group_lists[group_index(group)];
-        int const nf        = static_cast<int>(indices.size());
+      auto launch_decoder = [&]<typename T, auto DecodeFn>(auto const& indices) {
+        int const nf = static_cast<int>(indices.size());
         if (nf == 0) return;
 
         std::vector<rmm::device_uvector<T>> outputs;
@@ -676,33 +656,27 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
       };
 
-      launch_group.template operator()<int32_t, decode_varint_value<int32_t, false>>(
-        scalar_group::int32);
-      launch_group.template operator()<uint32_t, decode_varint_value<uint32_t, false>>(
-        scalar_group::uint32);
-      launch_group.template operator()<int64_t, decode_varint_value<int64_t, false>>(
-        scalar_group::int64);
-      launch_group.template operator()<uint64_t, decode_varint_value<uint64_t, false>>(
-        scalar_group::uint64);
-      launch_group.template operator()<uint8_t, decode_varint_value<uint8_t, false>>(
-        scalar_group::boolean);
-      launch_group.template operator()<int32_t, decode_varint_value<int32_t, true>>(
-        scalar_group::zigzag_int32);
-      launch_group.template operator()<int64_t, decode_varint_value<int64_t, true>>(
-        scalar_group::zigzag_int64);
-      launch_group.template operator()<float, decode_fixed_value<float>>(scalar_group::float32);
-      launch_group.template operator()<double, decode_fixed_value<double>>(scalar_group::float64);
-      launch_group.template operator()<int32_t, decode_fixed_value<int32_t>>(
-        scalar_group::fixed_int32);
-      launch_group.template operator()<uint32_t, decode_fixed_value<uint32_t>>(
-        scalar_group::fixed_uint32);
-      launch_group.template operator()<int64_t, decode_fixed_value<int64_t>>(
-        scalar_group::fixed_int64);
-      launch_group.template operator()<uint64_t, decode_fixed_value<uint64_t>>(
-        scalar_group::fixed_uint64);
+      auto launch_group = [&]<typename T, decode_kind Decode>(auto const& indices) {
+        if constexpr (Decode == decode_kind::fixed) {
+          launch_decoder.template operator()<T, decode_fixed_value<T>>(indices);
+        } else {
+          constexpr bool zigzag = Decode == decode_kind::zigzag;
+          launch_decoder.template operator()<T, decode_varint_value<T, zigzag>>(indices);
+        }
+      };
+      auto launch_index = [&](auto index_constant) {
+        constexpr auto index = decltype(index_constant)::value;
+        using T              = std::conditional_t<scalar_kinds[index].type == cudf::type_id::BOOL8,
+                                                  uint8_t,
+                                                  cudf::id_to_type<scalar_kinds[index].type>>;
+        launch_group.template operator()<T, scalar_kinds[index].decode>(group_lists[index]);
+      };
+      [&]<size_t... I>(std::index_sequence<I...>) {
+        (launch_index(std::integral_constant<size_t, I>{}), ...);
+      }(std::make_index_sequence<scalar_kinds.size()>{});
 
       // Per-field fallback (INT32 with enum, etc.)
-      for (int i : group_lists[group_index(scalar_group::fallback)]) {
+      for (int i : group_lists[fallback]) {
         int schema_idx = scalar_field_indices[i];
         top_level_location_provider loc_provider{
           list_offsets, base_offset, d_locations.data(), i, num_scalar};
@@ -737,14 +711,16 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
             int32_t def_int = static_cast<int32_t>(field_meta.default_int);
             top_level_location_provider loc_provider{
               list_offsets, base_offset, d_locations.data(), i, num_scalar};
-            extract_scalar_kernel<int32_t,
-                                  decode_varint_value<int32_t, false>,
-                                  top_level_location_provider>
+            extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>>
               <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                        loc_provider,
                                                        num_rows,
-                                                       {out.data(), valid.data(), d_error.data()},
-                                                       {has_def, def_int});
+                                                       scalar_value_output<int32_t>{
+                                                         out.data(),
+                                                         valid.data(),
+                                                         d_error.data()},
+                                                       scalar_decode_options<int32_t>{
+                                                         has_def, def_int});
 
             // Outer sizing is guaranteed by `validate_decode_context`; only the per-field
             // metadata-populated check remains.
@@ -884,38 +860,38 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       }
 
       // For repeated fields, schema[].output_type holds the element type (not the outer LIST).
+      auto const field_meta = schema_context.field(schema_idx);
       switch (element_type.id()) {
         case cudf::type_id::INT32:
           column_map[schema_idx] = build_repeated_scalar_column<int32_t>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::INT64:
           column_map[schema_idx] = build_repeated_scalar_column<int64_t>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::UINT32:
           column_map[schema_idx] = build_repeated_scalar_column<uint32_t>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::UINT64:
           column_map[schema_idx] = build_repeated_scalar_column<uint64_t>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::FLOAT32:
           column_map[schema_idx] = build_repeated_scalar_column<float>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::FLOAT64:
           column_map[schema_idx] = build_repeated_scalar_column<double>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::BOOL8:
           column_map[schema_idx] = build_repeated_scalar_column<uint8_t>(
-            binary_input, input, h_device_schema[schema_idx], std::move(w), d_error, stream, mr);
+            binary_input, input, field_meta, std::move(w), d_error, stream, mr);
           break;
         case cudf::type_id::STRING: {
-          auto const field_meta = schema_context.field(schema_idx);
-          auto enc              = field_meta.schema.encoding;
+          auto enc = field_meta.schema.encoding;
           if (enc == proto_encoding::ENUM_STRING) {
             // Same host-side schema check as the scalar enum path — fail loudly instead of
             // silently emitting a null column.

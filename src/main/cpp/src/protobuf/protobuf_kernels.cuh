@@ -38,6 +38,7 @@
 #include <cuda/std/bit>
 #include <cuda/std/limits>
 #include <cuda/std/type_traits>
+#include <cuda/std/utility>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/scan.h>
@@ -239,11 +240,11 @@ __device__ inline void decode_fixed_value(scalar_value_input input,
 }
 
 template <typename OutputType, auto DecodeFn, typename LocationProvider>
-CUDF_KERNEL void extract_scalar_kernel(uint8_t const* message_data,
-                                       LocationProvider loc_provider,
-                                       int total_items,
-                                       scalar_value_output<OutputType> output,
-                                       scalar_decode_options<OutputType> options)
+__device__ void extract_scalar_kernel_impl(uint8_t const* message_data,
+                                           LocationProvider loc_provider,
+                                           int total_items,
+                                           scalar_value_output<OutputType> output,
+                                           scalar_decode_options<OutputType> options)
 {
   auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (idx >= total_items) return;
@@ -253,6 +254,13 @@ CUDF_KERNEL void extract_scalar_kernel(uint8_t const* message_data,
   DecodeFn(resolve_scalar_value(message_data, loc, data_offset), idx, options, output);
 }
 
+// Kernel parameters stay by value because forwarding references preserve host lvalue references.
+template <typename OutputType, auto DecodeFn, typename... Args>
+CUDF_KERNEL void extract_scalar_kernel(Args... args)
+{
+  extract_scalar_kernel_impl<OutputType, DecodeFn>(cuda::std::forward<Args>(args)...);
+}
+
 // ============================================================================
 // Batched scalar extraction — one 2D kernel for N fields of the same type
 // ============================================================================
@@ -260,9 +268,8 @@ CUDF_KERNEL void extract_scalar_kernel(uint8_t const* message_data,
 template <typename OutputType, auto DecodeFn>
 CUDF_KERNEL void extract_scalar_batched_kernel(batched_scalar_input_view<OutputType> input)
 {
-  int row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  int fi  = static_cast<int>(blockIdx.y);
-  if (row >= input.input.num_rows || fi >= input.num_descriptors) return;
+  int fi = static_cast<int>(blockIdx.y);
+  if (fi >= input.num_descriptors) return;
 
   auto const& desc = input.descriptors[fi];
   top_level_location_provider loc_provider{input.input.row_offsets,
@@ -270,12 +277,11 @@ CUDF_KERNEL void extract_scalar_batched_kernel(batched_scalar_input_view<OutputT
                                            input.locations,
                                            desc.loc_field_idx,
                                            input.num_location_fields};
-  int32_t data_offset = 0;
-  auto loc            = loc_provider.get(row, data_offset);
-  DecodeFn(resolve_scalar_value(input.input.message_data, loc, data_offset),
-           row,
-           desc.options,
-           {desc.output, desc.valid, input.error});
+  extract_scalar_kernel_impl<OutputType, DecodeFn>(input.input.message_data,
+                                                   loc_provider,
+                                                   input.input.num_rows,
+                                                   {desc.output, desc.valid, input.error},
+                                                   desc.options);
 }
 
 // ============================================================================
@@ -400,12 +406,12 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
   if constexpr (std::is_floating_point_v<T>) {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT || encoding == proto_encoding::FIXED,
                  "Floating-point protobuf extraction requires default or fixed encoding");
-    extract_scalar_kernel<T, decode_fixed_value<T>, LocationProvider>
+    extract_scalar_kernel<T, decode_fixed_value<T>>
       <<<blocks, threads, 0, stream.value()>>>(
         message_data, loc_provider, num_rows, output, options);
   } else if (encoding == proto_encoding::FIXED) {
     if constexpr (sizeof(T) == 4 || sizeof(T) == 8) {
-      extract_scalar_kernel<T, decode_fixed_value<T>, LocationProvider>
+      extract_scalar_kernel<T, decode_fixed_value<T>>
         <<<blocks, threads, 0, stream.value()>>>(
           message_data, loc_provider, num_rows, output, options);
     } else {
@@ -415,18 +421,18 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT || encoding == proto_encoding::ZIGZAG,
                  "Signed varint protobuf extraction requires default or zigzag encoding");
     if (encoding == proto_encoding::ZIGZAG) {
-      extract_scalar_kernel<T, decode_varint_value<T, true>, LocationProvider>
+      extract_scalar_kernel<T, decode_varint_value<T, true>>
         <<<blocks, threads, 0, stream.value()>>>(
           message_data, loc_provider, num_rows, output, options);
     } else {
-      extract_scalar_kernel<T, decode_varint_value<T, false>, LocationProvider>
+      extract_scalar_kernel<T, decode_varint_value<T, false>>
         <<<blocks, threads, 0, stream.value()>>>(
           message_data, loc_provider, num_rows, output, options);
     }
   } else {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT,
                  "Unsigned varint protobuf extraction requires default encoding");
-    extract_scalar_kernel<T, decode_varint_value<T, false>, LocationProvider>
+    extract_scalar_kernel<T, decode_varint_value<T, false>>
       <<<blocks, threads, 0, stream.value()>>>(
         message_data, loc_provider, num_rows, output, options);
   }
@@ -614,11 +620,14 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         dt,
         num_items,
         [&](uint8_t* out_ptr, bool* valid_ptr) {
-          extract_scalar_kernel<uint8_t, decode_varint_value<uint8_t, false>, LocationProvider>
+          extract_scalar_kernel<uint8_t, decode_varint_value<uint8_t, false>>
             <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                      loc_provider,
                                                      num_items,
-                                                     {out_ptr, valid_ptr, decode_ctx.error->data()},
+                                                     scalar_value_output<uint8_t>{
+                                                       out_ptr,
+                                                       valid_ptr,
+                                                       decode_ctx.error->data()},
                                                      make_scalar_decode_options<uint8_t>(field));
         },
         stream,
@@ -660,11 +669,14 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         dt,
         num_items,
         [&](float* out_ptr, bool* valid_ptr) {
-          extract_scalar_kernel<float, decode_fixed_value<float>, LocationProvider>
+          extract_scalar_kernel<float, decode_fixed_value<float>>
             <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                      loc_provider,
                                                      num_items,
-                                                     {out_ptr, valid_ptr, decode_ctx.error->data()},
+                                                     scalar_value_output<float>{
+                                                       out_ptr,
+                                                       valid_ptr,
+                                                       decode_ctx.error->data()},
                                                      make_scalar_decode_options<float>(field));
         },
         stream,
@@ -675,11 +687,14 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
         dt,
         num_items,
         [&](double* out_ptr, bool* valid_ptr) {
-          extract_scalar_kernel<double, decode_fixed_value<double>, LocationProvider>
+          extract_scalar_kernel<double, decode_fixed_value<double>>
             <<<blocks, threads, 0, stream.value()>>>(message_data,
                                                      loc_provider,
                                                      num_items,
-                                                     {out_ptr, valid_ptr, decode_ctx.error->data()},
+                                                     scalar_value_output<double>{
+                                                       out_ptr,
+                                                       valid_ptr,
+                                                       decode_ctx.error->data()},
                                                      make_scalar_decode_options<double>(field));
         },
         stream,
@@ -693,14 +708,13 @@ template <typename T>
 inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  device_nested_field_descriptor const& field_desc,
+  protobuf_field_meta_view field,
   repeated_field_work work,
   rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
   auto const input_null_count = binary_input.null_count();
-  auto const field_type_id    = static_cast<cudf::type_id>(field_desc.output_type_id);
 
   validate_nonempty_repeated_field_work(work, input.num_rows);
 
@@ -711,7 +725,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
     input.message_data,
     loc_provider,
     work.total_count,
-    field_desc.encoding,
+    field.schema.encoding,
     {false, T{}},
     {values.data(), nullptr, d_error.data()},
     stream);
@@ -722,7 +736,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
                                                     rmm::device_buffer{},
                                                     0);
   auto child_col   = std::make_unique<cudf::column>(
-    cudf::data_type{field_type_id}, work.total_count, values.release(), rmm::device_buffer{}, 0);
+    field.output_type, work.total_count, values.release(), rmm::device_buffer{}, 0);
 
   if (input_null_count > 0) {
     auto null_mask = cudf::copy_bitmask(binary_input, stream, mr);

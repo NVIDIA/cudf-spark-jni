@@ -47,11 +47,11 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
   auto host =
     cudf::detail::make_pinned_vector_async<field_descriptor>(field_indices.size(), stream);
   for (size_t i = 0; i < field_indices.size(); ++i) {
-    auto const& field          = schema[field_indices[i]];
-    host[i].field_number       = field.field_number;
-    host[i].expected_wire_type = static_cast<int>(field.wire_type);
-    host[i].is_repeated        = field.is_repeated;
-    host[i].output_index       = output_indices.empty() ? static_cast<int>(i) : output_indices[i];
+    auto const& field = schema[field_indices[i]];
+    host[i]           = {field.field_number,
+                         static_cast<int>(field.wire_type),
+               output_indices.empty() ? -1 : output_indices[i],
+                         field.is_repeated};
   }
 
   rmm::device_uvector<field_descriptor> device(std::max(host.size(), size_t{1}), stream, mr);
@@ -169,13 +169,15 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
         auto const scratch_mr = cudf::get_current_device_resource_ref();
         rmm::device_uvector<int32_t> values(num_values, stream, scratch_mr);
         rmm::device_uvector<bool> valid(num_values, stream, scratch_mr);
-        extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>, LocationProvider>
+        extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>>
           <<<blocks, THREADS_PER_BLOCK, 0, stream.value()>>>(
             message_data,
             loc_provider,
             num_values,
-            {values.data(), valid.data(), decode_ctx.error->data()},
-            {has_default, static_cast<int32_t>(field.default_int)});
+            scalar_value_output<int32_t>{
+              values.data(), valid.data(), decode_ctx.error->data()},
+            scalar_decode_options<int32_t>{
+              has_default, static_cast<int32_t>(field.default_int)});
         auto enum_values = request.values;
         enum_values.top_row_indices =
           decode_ctx.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr;
@@ -456,8 +458,9 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
       input.message_data,
       rep_loc,
       total_count,
-      {enum_ints.data(), elem_valid.data(), context.runtime.error->data()},
-      {false, int32_t{0}});
+      scalar_value_output<int32_t>{
+        enum_ints.data(), elem_valid.data(), context.runtime.error->data()},
+      scalar_decode_options<int32_t>{false, int32_t{0}});
 
   // 2. Validate enum values — mark invalid as false in elem_valid
   // (elem_valid was already populated by extract_scalar_kernel: true for success, false for
