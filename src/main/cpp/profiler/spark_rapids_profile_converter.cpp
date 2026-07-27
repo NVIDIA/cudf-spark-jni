@@ -687,7 +687,12 @@ void convert_to_nvtxt(std::ifstream& in, std::ostream& out, program_options cons
               category = it->second->category();
             }
             marker_start ms{
-              m->timestamp(), process_id, thread_id, color, category, m->name()->str()};
+              m->timestamp(),
+              process_id,
+              thread_id,
+              color,
+              category,
+              m->name() ? m->name()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;
@@ -970,8 +975,8 @@ int convert_to_nvtxw(std::ifstream& in,
                             thread_id,
                             color,
                             category,
-                            m->name()->str(),
-                            m->domain()->str()};
+                            m->name() ? m->name()->str() : "",
+                            m->domain() ? m->domain()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;
