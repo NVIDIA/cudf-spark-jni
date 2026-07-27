@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+# Redirect Arrow's bundled Thrift download to an optional mirror without hard-coding its
+# pinned version or overriding an explicit ARROW_THRIFT_URL.
 if(PROJECT_NAME STREQUAL arrow)
   if(DEFINED ENV{ARROW_THRIFT_MIRROR_URL} AND NOT DEFINED ENV{ARROW_THRIFT_URL})
     file(STRINGS "${PROJECT_SOURCE_DIR}/thirdparty/versions.txt" arrow_thrift_version
