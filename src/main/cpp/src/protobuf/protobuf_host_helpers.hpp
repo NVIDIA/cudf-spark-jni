@@ -31,14 +31,19 @@
 #include <rmm/resource_ref.hpp>
 
 #include <thrust/fill.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
+#include <thrust/transform.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <source_location>
 #include <span>
 #include <string>
@@ -134,6 +139,22 @@ struct repeated_field_work {
   }
 };
 
+struct repeated_field_work_bundle {
+  std::vector<std::optional<repeated_field_work>> fields;
+  cudf::detail::host_vector<field_occurrence_scan_desc> scan_descriptors;
+};
+
+struct extract_strided_count {
+  field_occurrence_count const* info;
+  int field_position;
+  int num_fields;
+
+  __device__ int32_t operator()(int row) const
+  {
+    return info[flat_index(row, num_fields, field_position)].count;
+  }
+};
+
 inline void validate_nonempty_repeated_field_work(
   repeated_field_work const& work,
   int num_rows,
@@ -180,6 +201,82 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
   thrust::fill_n(
     rmm::exec_policy_nosync(stream, scratch_mr), offsets.data() + num_rows, 1, total_count);
   return {total_count, std::move(offsets)};
+}
+
+inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_rows,
+                                                         rmm::device_uvector<int32_t>&& offsets)
+{
+  CUDF_EXPECTS(offsets.size() == static_cast<size_t>(num_rows) + 1,
+               std::string{__func__} + ": offsets size must match row count");
+  return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                        num_rows + 1,
+                                        offsets.release(),
+                                        rmm::device_buffer{},
+                                        0);
+}
+
+template <typename PositionRange, typename SchemaIndexFn>
+inline repeated_field_work_bundle make_repeated_field_work_bundle(
+  PositionRange const& field_positions,
+  int num_fields,
+  SchemaIndexFn get_schema_index,
+  field_occurrence_count const* repeated_info,
+  int num_rows,
+  protobuf_schema const& schema,
+  char const* count_context,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref output_mr,
+  rmm::device_async_resource_ref scratch_mr)
+{
+  CUDF_EXPECTS(num_fields >= 0, std::string{__func__} + ": field count must be non-negative");
+  repeated_field_work_bundle result{
+    std::vector<std::optional<repeated_field_work>>(num_fields),
+    cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(0, stream)};
+  result.scan_descriptors.reserve(std::ranges::size(field_positions));
+
+  for (auto const field_position : field_positions) {
+    CUDF_EXPECTS(field_position >= 0 && field_position < num_fields,
+                 std::string{__func__} + ": field position is out of bounds");
+    CUDF_EXPECTS(repeated_info != nullptr,
+                 std::string{__func__} + ": repeated count buffer must be non-null");
+    auto const schema_idx = get_schema_index(field_position);
+    // The source is row-major; expose one field's counts without materializing another buffer.
+    auto counts_begin = thrust::make_transform_iterator(
+      thrust::make_counting_iterator<int>(0),
+      extract_strided_count{repeated_info, field_position, num_fields});
+    auto& work = result.fields[field_position].emplace(
+      schema_idx,
+      make_list_offsets_from_counts(
+        counts_begin, num_rows, count_context, stream, output_mr, scratch_mr));
+
+    if (work.total_count > 0) {
+      work.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
+        work.total_count, stream, scratch_mr);
+      auto const& field = schema[schema_idx];
+      result.scan_descriptors.push_back(field_occurrence_scan_desc{
+        field.field_number, field.wire_type, work.offsets.data(), work.occurrences->data()});
+    }
+  }
+  return result;
+}
+
+inline rmm::device_uvector<int32_t> make_top_row_indices(
+  rmm::device_uvector<field_occurrence> const& occurrences,
+  int32_t const* parent_top_row_indices,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  rmm::device_uvector<int32_t> result(occurrences.size(), stream, mr);
+  thrust::transform(rmm::exec_policy_nosync(stream, mr),
+                    occurrences.begin(),
+                    occurrences.end(),
+                    result.begin(),
+                    [parent_top_row_indices] __device__(field_occurrence const& occurrence) {
+                      return parent_top_row_indices != nullptr
+                               ? parent_top_row_indices[occurrence.row_idx]
+                               : occurrence.row_idx;
+                    });
+  return result;
 }
 
 // ============================================================================

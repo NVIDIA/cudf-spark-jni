@@ -77,7 +77,7 @@ __device__ bool scan_message_field_locations(message_scan_context context,
   auto const* msg_end   = context.end;
   auto* error_flag      = context.error;
   bool scan_succeeded   = true;
-  int wt                = -1;  // dummy value for capture
+  auto wt               = static_cast<proto_wire_type>(-1);  // dummy value for capture
   auto advance          = [&](uint8_t const* cur) {
     uint8_t const* next;
     if (!skip_field(cur, msg_end, wt, next)) {
@@ -113,7 +113,7 @@ __device__ bool scan_message_field_locations(message_scan_context context,
 
     int const data_offset = static_cast<int>(cur - msg_begin);
     field_location location;
-    if (wt == wire_type_value(proto_wire_type::LEN)) {
+    if (wt == proto_wire_type::LEN) {
       // Length-delimited: skip past the length prefix and record (data offset, data length).
       uint64_t len;
       int len_bytes;
@@ -192,7 +192,7 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
     return true;
   };
   // Top-level scalar descriptors are never repeated, so the repeated handler is unreachable.
-  auto unreachable_repeated = [](int, uint8_t const*, int) { return true; };
+  auto unreachable_repeated = [](int, uint8_t const*, proto_wire_type) { return true; };
   if (!scan_message_field_locations<wire_type_mismatch_policy::report_error_and_abort>(
         {msg_begin, msg_end, error_flag, nullptr},
         fields.lookup,
@@ -217,15 +217,14 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
 template <wire_type_mismatch_policy MismatchPolicy, typename F>
   requires std::is_invocable_r_v<bool, F, int32_t /*elem_offset*/, int32_t /*elem_len*/>
 __device__ bool walk_repeated_element(uint8_t const* cur,
-                                      uint8_t const* msg_end,
                                       uint8_t const* msg_base,
-                                      int wt,
-                                      int expected_wt,
+                                      uint8_t const* msg_end,
+                                      proto_wire_type wt,
+                                      proto_wire_type expected_wt,
                                       protobuf_error* error_flag,
                                       F&& f)
 {
-  bool is_packed = (wt == wire_type_value(proto_wire_type::LEN) &&
-                    expected_wt != wire_type_value(proto_wire_type::LEN));
+  bool is_packed = wt == proto_wire_type::LEN && expected_wt != proto_wire_type::LEN;
 
   if (!is_packed && wt != expected_wt) {
     if constexpr (MismatchPolicy == wire_type_mismatch_policy::continue_silently) {
@@ -251,7 +250,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     uint8_t const* packed_end = packed_start + packed_len;
 
     switch (expected_wt) {
-      case wire_type_value(proto_wire_type::VARINT): {
+      case proto_wire_type::VARINT: {
         // `vbytes` is set inside the loop body before `p += vbytes` runs (the advance step
         // happens after each body execution), but we initialize it defensively to silence a
         // potential "used before set" warning. `read_varint` validates the varint stays
@@ -269,9 +268,9 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
         }
         break;
       }
-      case wire_type_value(proto_wire_type::I32BIT):
-      case wire_type_value(proto_wire_type::I64BIT): {
-        int const width = (expected_wt == wire_type_value(proto_wire_type::I32BIT)) ? 4 : 8;
+      case proto_wire_type::I32BIT:
+      case proto_wire_type::I64BIT: {
+        int const width = expected_wt == proto_wire_type::I32BIT ? 4 : 8;
         if ((packed_len % width) != 0) {
           set_error_once(error_flag, protobuf_error::FIXED_LEN);
           return false;
@@ -362,7 +361,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
     field_locations[field.output_index] = location;
     return true;
   };
-  auto count_repeated = [&](int f, uint8_t const* cur, int wire_type) {
+  auto count_repeated = [&](int f, uint8_t const* cur, proto_wire_type wire_type) {
     auto const& field = fields.lookup.data[f];
     auto& info        = field_repeated_info[field.output_index];
     auto count_action = [&info](int32_t, int32_t) {
@@ -370,7 +369,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
       return true;
     };
     return walk_repeated_element<wire_type_mismatch_policy::report_error_and_abort>(
-      cur, msg_end, msg_begin, wire_type, field.expected_wire_type, error_flag, count_action);
+      cur, msg_begin, msg_end, wire_type, field.expected_wire_type, error_flag, count_action);
   };
 
   auto* row_invalid = row_has_invalid_data != nullptr ? row_has_invalid_data + row : nullptr;
@@ -409,7 +408,7 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_begin,
   auto ignore_singular = [](int, field_location) { return true; };
 
   auto const row_i32    = static_cast<int32_t>(row);
-  auto on_repeated_scan = [&](int f, uint8_t const* cur, int wt) {
+  auto on_repeated_scan = [&](int f, uint8_t const* cur, proto_wire_type wt) {
     auto const& field = fields.data[f];
     auto* occs        = field.occurrences;
     int& wi           = write_idx[f];
@@ -424,7 +423,7 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_begin,
       return true;
     };
     return walk_repeated_element<MismatchPolicy>(
-      cur, msg_end, msg_begin, wt, field.expected_wire_type, error_flag, scan_action);
+      cur, msg_begin, msg_end, wt, field.expected_wire_type, error_flag, scan_action);
   };
 
   if (!scan_message_field_locations<MismatchPolicy>(
@@ -518,14 +517,14 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
     field_locations[f] = location;
     return true;
   };
-  auto validate_repeated = [&](int f, uint8_t const* cur, int wt) {
+  auto validate_repeated = [&](int f, uint8_t const* cur, proto_wire_type wt) {
     auto const& field     = fields.lookup.data[f];
     auto count_occurrence = [&](int32_t, int32_t) {
       field_repeated_info[f].count++;
       return true;
     };
     return walk_repeated_element<wire_type_mismatch_policy::continue_silently>(
-      cur, nested_end, nested_start, wt, field.expected_wire_type, error_flag, count_occurrence);
+      cur, nested_start, nested_end, wt, field.expected_wire_type, error_flag, count_occurrence);
   };
 
   // protobuf-java treats wrong-wire known fields as unknown; this projected API has no

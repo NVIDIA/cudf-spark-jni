@@ -92,10 +92,10 @@ struct field_location {
  * Field descriptor passed to the scanning kernel.
  */
 struct field_descriptor {
-  int field_number;        // Protobuf field number
-  int expected_wire_type;  // Expected wire type for this field
-  int output_index;        // Column within the matching output buffer, or -1 when unused
-  bool is_repeated;        // Repeated children are scanned via count/scan kernels
+  int field_number;                    // Protobuf field number
+  proto_wire_type expected_wire_type;  // Expected wire type for this field
+  bool is_repeated;                    // Repeated children are scanned via count/scan kernels
+  int output_index = -1;  // Column within the matching output buffer, or -1 when unused
 };
 
 /**
@@ -120,7 +120,7 @@ struct field_occurrence {
  */
 struct field_occurrence_scan_desc {
   int field_number;
-  int expected_wire_type;
+  proto_wire_type expected_wire_type;
   static constexpr bool is_repeated = true;
   int32_t const* row_offsets;     // Pre-computed prefix-sum offsets [num_rows + 1]
   field_occurrence* occurrences;  // Output buffer [total_count]

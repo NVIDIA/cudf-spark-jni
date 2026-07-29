@@ -24,11 +24,10 @@
 
 #include <thrust/binary_search.h>
 #include <thrust/iterator/counting_iterator.h>
-#include <thrust/iterator/transform_iterator.h>
 
 #include <algorithm>
 #include <array>
-#include <limits>
+#include <ranges>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -312,6 +311,18 @@ void validate_decode_context(protobuf_decode_context const& context)
                    std::to_string(i),
                  std::invalid_argument);
 
+    auto const has_enum_metadata =
+      !(context.enum_valid_values[i].empty() && context.enum_names[i].empty());
+    auto const is_numeric_enum =
+      type.id() == cudf::type_id::INT32 && field.encoding == proto_encoding::DEFAULT;
+    auto const is_string_enum =
+      type.id() == cudf::type_id::STRING && field.encoding == proto_encoding::ENUM_STRING;
+    CUDF_EXPECTS(!has_enum_metadata || is_numeric_enum || is_string_enum,
+                 "protobuf decode context: enum metadata requires INT32/DEFAULT or "
+                 "STRING/ENUM_STRING at field " +
+                   std::to_string(i),
+                 std::invalid_argument);
+
     if (field.encoding == proto_encoding::ENUM_STRING) {
       CUDF_EXPECTS(
         !(context.enum_valid_values[i].empty() || context.enum_names[i].empty()),
@@ -478,7 +489,6 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   auto const decode_ctx = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
 
   auto const threads = THREADS_PER_BLOCK;
-  auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
 
   // Allocate for counting repeated fields. `std::max(..., 1)` keeps the device_uvector
   // non-empty when the corresponding field count is 0, so `.data()` remains a valid pointer.
@@ -563,40 +573,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     // Batched scalar extraction: group non-special fixed-width fields by extraction
     // category and extract all fields of each category with a single 2D kernel launch.
     {
-      enum class decode_kind : uint8_t { fixed, varint, zigzag };
-      struct scalar_kind {
-        cudf::type_id type;
-        decode_kind decode;
-        bool operator==(scalar_kind const&) const = default;
-      };
-      static constexpr auto scalar_kinds = std::to_array<scalar_kind>({
-        {cudf::type_id::INT32, decode_kind::varint},
-        {cudf::type_id::UINT32, decode_kind::varint},
-        {cudf::type_id::INT64, decode_kind::varint},
-        {cudf::type_id::UINT64, decode_kind::varint},
-        {cudf::type_id::BOOL8, decode_kind::varint},
-        {cudf::type_id::INT32, decode_kind::zigzag},
-        {cudf::type_id::INT64, decode_kind::zigzag},
-        {cudf::type_id::FLOAT32, decode_kind::fixed},
-        {cudf::type_id::FLOAT64, decode_kind::fixed},
-        {cudf::type_id::INT32, decode_kind::fixed},
-        {cudf::type_id::UINT32, decode_kind::fixed},
-        {cudf::type_id::INT64, decode_kind::fixed},
-        {cudf::type_id::UINT64, decode_kind::fixed},
-      });
-      constexpr auto fallback            = scalar_kinds.size();
+      static constexpr auto fallback = scalar_kinds.size();
       std::array<std::vector<int>, scalar_kinds.size() + 1> group_lists;
       // Implied constexpr (https://en.cppreference.com/cpp/language/lambda).
       auto find_group = [](cudf::type_id type, proto_encoding encoding) {
-        using enum cudf::type_id;
-        using enum proto_encoding;
-        auto const decode = type == FLOAT32 || type == FLOAT64 || encoding == FIXED
-                              ? decode_kind::fixed
-                            : encoding == ZIGZAG ? decode_kind::zigzag
-                                                 : decode_kind::varint;
-
-        auto const iter = std::ranges::find(scalar_kinds, scalar_kind{type, decode});
-        return static_cast<size_t>(iter - scalar_kinds.begin());
+        auto const decode = get_scalar_decode_kind(type, encoding);
+        auto const it     = std::ranges::find(scalar_kinds, scalar_kind{type, decode});
+        return static_cast<size_t>(it - scalar_kinds.begin());
       };
 
       for (int i = 0; i < num_scalar; i++) {
@@ -604,12 +587,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         auto const type     = field.output_type.id();
         auto const encoding = field.schema.encoding;
 
-        // STRING, LIST, and enum-as-string go to per-field path
+        // STRING (including enum-as-string) and LIST go to the per-field path.
         if (type == cudf::type_id::STRING || type == cudf::type_id::LIST) continue;
 
         // INT32 with enum validation goes to fallback
-        if (type == cudf::type_id::INT32 && encoding == proto_encoding::DEFAULT &&
-            !field.enum_valid_values.empty()) {
+        if (type == cudf::type_id::INT32 && !field.enum_valid_values.empty()) {
           group_lists[fallback].push_back(i);
           continue;
         }
@@ -656,20 +638,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
       };
 
-      auto launch_group = [&]<typename T, decode_kind Decode>(auto const& indices) {
-        if constexpr (Decode == decode_kind::fixed) {
-          launch_decoder.template operator()<T, decode_fixed_value<T>>(indices);
-        } else {
-          constexpr bool zigzag = Decode == decode_kind::zigzag;
-          launch_decoder.template operator()<T, decode_varint_value<T, zigzag>>(indices);
-        }
-      };
       auto launch_index = [&](auto index_constant) {
         constexpr auto index = decltype(index_constant)::value;
         using T              = std::conditional_t<scalar_kinds[index].type == cudf::type_id::BOOL8,
                                                   uint8_t,
                                                   cudf::id_to_type<scalar_kinds[index].type>>;
-        launch_group.template operator()<T, scalar_kinds[index].decode>(group_lists[index]);
+        dispatch_scalar_decoder<T>(scalar_kinds[index].decode, [&]<auto DecodeFn>() {
+          launch_decoder.template operator()<T, DecodeFn>(group_lists[index]);
+        });
       };
       [&]<size_t... I>(std::index_sequence<I...>) {
         (launch_index(std::integral_constant<size_t, I>{}), ...);
@@ -694,141 +670,50 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       auto const field_meta = schema_context.field(schema_idx);
       auto const dt         = field_meta.output_type;
       if (dt.id() != cudf::type_id::STRING && dt.id() != cudf::type_id::LIST) { continue; }
-      auto const enc = field_meta.schema.encoding;
-      bool has_def   = field_meta.schema.has_default_value;
-
-      switch (dt.id()) {
-        case cudf::type_id::STRING: {
-          if (enc == proto_encoding::ENUM_STRING) {
-            // ENUM-as-string path:
-            // 1. Decode enum numeric value as INT32 varint.
-            // 2. Validate against enum_valid_values.
-            // 3. Convert INT32 -> UTF-8 enum name bytes.
-            rmm::device_uvector<int32_t> out(
-              num_rows, stream, cudf::get_current_device_resource_ref());
-            rmm::device_uvector<bool> valid(
-              num_rows, stream, cudf::get_current_device_resource_ref());
-            int32_t def_int = static_cast<int32_t>(field_meta.default_int);
-            top_level_location_provider loc_provider{
-              list_offsets, base_offset, d_locations.data(), i, num_scalar};
-            extract_scalar_kernel<int32_t, decode_varint_value<int32_t, false>>
-              <<<blocks, threads, 0, stream.value()>>>(
-                message_data,
-                loc_provider,
-                num_rows,
-                scalar_value_output<int32_t>{out.data(), valid.data(), d_error.data()},
-                scalar_decode_options<int32_t>{has_def, def_int});
-
-            // Outer sizing is guaranteed by `validate_decode_context`; only the per-field
-            // metadata-populated check remains.
-            auto const& valid_enums     = field_meta.enum_valid_values;
-            auto const& enum_name_bytes = field_meta.enum_names;
-            CUDF_EXPECTS(!valid_enums.empty() && valid_enums.size() == enum_name_bytes.size(),
-                         "Protobuf decode error: missing or mismatched enum metadata for "
-                         "enum-as-string field");
-            column_map[schema_idx] = build_enum_string_column(
-              out,
-              valid,
-              {{schema_context, decode_ctx}, message_data, schema_idx, {num_rows}},
-              stream,
-              mr);
-          } else {
-            // Regular protobuf STRING (length-delimited)
-            bool has_def_str    = has_def;
-            auto const& def_str = field_meta.default_string;
-            top_level_location_provider loc_provider{
-              list_offsets, base_offset, d_locations.data(), i, num_scalar};
-            auto valid_fn = [locs = d_locations.data(), i, num_scalar, has_def_str] __device__(
-                              cudf::size_type row) {
-              return locs[flat_index(row, num_scalar, i)].offset >= 0 || has_def_str;
-            };
-            column_map[schema_idx] = extract_and_build_string_or_bytes_column(false,
-                                                                              message_data,
-                                                                              num_rows,
-                                                                              loc_provider,
-                                                                              valid_fn,
-                                                                              has_def_str,
-                                                                              def_str,
-                                                                              d_error,
-                                                                              stream,
-                                                                              mr);
-          }
-          break;
-        }
-        case cudf::type_id::LIST: {
-          // bytes (BinaryType) represented as LIST<UINT8>
-          bool has_def_bytes    = has_def;
-          auto const& def_bytes = field_meta.default_string;
-          top_level_location_provider loc_provider{
-            list_offsets, base_offset, d_locations.data(), i, num_scalar};
-          auto valid_fn = [locs = d_locations.data(), i, num_scalar, has_def_bytes] __device__(
-                            cudf::size_type row) {
-            return locs[flat_index(row, num_scalar, i)].offset >= 0 || has_def_bytes;
-          };
-          column_map[schema_idx] = extract_and_build_string_or_bytes_column(true,
-                                                                            message_data,
-                                                                            num_rows,
-                                                                            loc_provider,
-                                                                            valid_fn,
-                                                                            has_def_bytes,
-                                                                            def_bytes,
-                                                                            d_error,
-                                                                            stream,
-                                                                            mr);
-          break;
-        }
-        default:
-          // Unreachable: schema validation only admits the scalar element types enumerated
-          // above (STRUCT is dispatched through the nested path, not this scalar switch).
-          CUDF_FAIL("Protobuf decode internal error: unsupported scalar element type id=" +
-                    std::to_string(static_cast<int>(dt.id())));
-      }
+      bool const has_default = field_meta.schema.has_default_value;
+      top_level_location_provider loc_provider{
+        list_offsets, base_offset, d_locations.data(), i, num_scalar};
+      auto valid_fn = [loc_provider, has_default] __device__(cudf::size_type row) {
+        int32_t data_offset = 0;
+        return loc_provider.get(row, data_offset).offset >= 0 || has_default;
+      };
+      auto get_top_row_indices = []() -> int32_t const* { return nullptr; };
+      column_map[schema_idx]   = build_protobuf_field_values_column(
+        {{schema_context, decode_ctx}, message_data, schema_idx, {num_rows}},
+        loc_provider,
+        valid_fn,
+        get_top_row_indices,
+        stream,
+        mr);
     }
   }
 
   // Process repeated fields (three-phase: offsets → combined scan → build columns)
   if (num_repeated > 0) {
-    // Phase A: build per-row LIST offsets. Allocate against `mr` since the buffer
-    // flows into the output column at Phase C.
-    std::vector<repeated_field_work> rep_work;
-    rep_work.reserve(num_repeated);
+    // Phases A and B: build LIST offsets and allocate occurrence buffers.
+    auto rep_work = make_repeated_field_work_bundle(
+      std::views::iota(0, num_repeated),
+      num_repeated,
+      [&](int repeated_position) { return repeated_field_indices[repeated_position]; },
+      d_repeated_info.data(),
+      num_rows,
+      schema_context,
+      "Top-level repeated field",
+      stream,
+      mr,
+      scratch_mr);
 
-    for (int ri = 0; ri < num_repeated; ri++) {
-      int schema_idx = repeated_field_indices[ri];
-
-      auto counts_begin = thrust::make_transform_iterator(
-        thrust::make_counting_iterator<int>(0),
-        extract_strided_count{d_repeated_info.data(), ri, num_repeated});
-      rep_work.emplace_back(
-        schema_idx,
-        make_list_offsets_from_counts(
-          counts_begin, num_rows, "Top-level repeated field", stream, mr, scratch_mr));
-    }
-
-    // Phase B: allocate occurrence buffers and launch the combined scan kernel.
-    auto h_scan_descs =
-      cudf::detail::make_pinned_vector_async<field_occurrence_scan_desc>(0, stream);
-    h_scan_descs.reserve(num_repeated);
-
-    for (auto& w : rep_work) {
-      if (w.total_count > 0) {
-        w.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
-          w.total_count, stream, scratch_mr);
-        h_scan_descs.push_back({schema[w.schema_idx].field_number,
-                                static_cast<int>(schema[w.schema_idx].wire_type),
-                                w.offsets.data(),
-                                w.occurrences->data()});
-      }
-    }
-
-    if (!h_scan_descs.empty()) {
-      auto scan_bundle = make_field_occurrence_scan_bundle(h_scan_descs, stream, scratch_mr);
+    if (!rep_work.scan_descriptors.empty()) {
+      auto scan_bundle =
+        make_field_occurrence_scan_bundle(rep_work.scan_descriptors, stream, scratch_mr);
       launch_scan_all_field_occurrences(*d_in, scan_bundle.view(), d_error.data(), stream);
     }
 
     // Phase C: Build columns per field.
     for (int ri = 0; ri < num_repeated; ri++) {
-      auto& w             = rep_work[ri];
+      CUDF_EXPECTS(rep_work.fields[ri].has_value(),
+                   "Protobuf decode internal error: missing top-level repeated-field work");
+      auto& w             = rep_work.fields[ri].value();
       int schema_idx      = w.schema_idx;
       auto element_type   = cudf::data_type{schema[schema_idx].output_type};
       int32_t total_count = w.total_count;
@@ -844,12 +729,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
       if (total_count <= 0) {
         // All rows empty: w.offsets is already a zero-filled buffer from Phase A.
-        auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                          num_rows + 1,
-                                                          w.offsets.release(),
-                                                          rmm::device_buffer{},
-                                                          0);
-
+        auto offsets_col       = make_offsets_column(num_rows, std::move(w.offsets));
         auto child_col         = make_empty_column_safe(element_type, stream, mr);
         column_map[schema_idx] = make_list_column_with_input_nulls(
           num_rows, std::move(offsets_col), std::move(child_col), binary_input, stream, mr);

@@ -238,7 +238,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
-      validateEnumMetadata(i, encodings[i], enumValidValues[i], enumNames[i]);
+      validateEnumMetadata(
+          i, outputTypeIds[i], encodings[i], enumValidValues[i], enumNames[i]);
     }
   }
 
@@ -336,8 +337,17 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     }
   }
 
-  private static void validateEnumMetadata(int index, int encoding,
+  private static void validateEnumMetadata(int index, int outputTypeId, int encoding,
                                             int[] validValues, byte[][] names) {
+    boolean isNumericEnum =
+        outputTypeId == INT32_TYPE_ID && encoding == Protobuf.ENC_DEFAULT;
+    boolean isStringEnum =
+        outputTypeId == STRING_TYPE_ID && encoding == Protobuf.ENC_ENUM_STRING;
+    if (validValues != null && !isNumericEnum && !isStringEnum) {
+      throw new IllegalArgumentException(
+          "Enum metadata at index " + index +
+          " requires INT32/DEFAULT or STRING/ENUM_STRING");
+    }
     if (encoding == Protobuf.ENC_ENUM_STRING &&
         (validValues == null || validValues.length == 0 ||
          names == null || names.length == 0)) {

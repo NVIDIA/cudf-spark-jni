@@ -93,6 +93,18 @@ public class ProtobufSchemaDescriptorTest {
   }
 
   @Test
+  void testEnumMetadataRejectsNonEnumTypeOrEncoding() {
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_FIXED, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_ZIGZAG, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT64).enumValidValues(new int[]{0, 1})
+            .build());
+  }
+
+  @Test
   void testDuplicateFieldNumbersUnderSameParentRejected() {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
