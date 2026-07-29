@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.jni;
 
+import ai.rapids.cudf.CloseableArray;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.CudfException;
@@ -265,17 +266,11 @@ public class MapUtilsTest {
     List<HostColumnVector.StructData> row0 = Arrays.asList(entry(1, 10));
     List<HostColumnVector.StructData> row1 = Arrays.asList(entry(2, 20));
     List<HostColumnVector.StructData> row2 = Arrays.asList(entry(3, 30));
-    try (ColumnVector full = ColumnVector.fromLists(LIST_TYPE, row0, row1, row2)) {
-      ColumnView[] views = full.splitAsViews(1);  // [0..1), [1..3) — second has offset != 0
-      try {
-        ColumnView sliced = views[1];
-        assertThrows(CudfException.class, () -> MapUtils.isValidMap(sliced, true));
-        assertThrows(CudfException.class, () -> MapUtils.mapFromEntries(sliced, true));
-      } finally {
-        for (ColumnView v : views) {
-          v.close();
-        }
-      }
+    try (ColumnVector full = ColumnVector.fromLists(LIST_TYPE, row0, row1, row2);
+         CloseableArray<ColumnView> views = CloseableArray.wrap(full.splitAsViews(1))) {
+      ColumnView sliced = views.get(1);  // [0..1), [1..3) — second has offset != 0
+      assertThrows(CudfException.class, () -> MapUtils.isValidMap(sliced, true));
+      assertThrows(CudfException.class, () -> MapUtils.mapFromEntries(sliced, true));
     }
   }
 

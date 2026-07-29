@@ -299,33 +299,36 @@ __device__ inline uint64_t load_le<uint64_t>(uint8_t const* p)
 
 /**
  * O(1) lookup of field_number -> field_index using a direct-mapped table.
- * Falls back to linear search when the table is empty (field numbers too large).
+ * Falls back to linear search when the table is empty.
  *
  * `match(int candidate, int field_number) -> bool` decides whether the candidate index
  * actually corresponds to `field_number` (and any other criteria the caller wants to
  * enforce, such as schema depth). The lookup-table fast path applies the same `match`
  * predicate, so a buggy lookup table can't silently dispatch to the wrong index.
  *
- * Returns the matching candidate index in `[0, num_candidates)`, or `-1` if not found.
+ * Returns the matching candidate index in `[0, table.size)`, or `-1` if not found.
  */
-template <typename Match>
+template <typename T, typename Match>
   requires std::is_invocable_r_v<bool, Match, int, int>
-__device__ __forceinline__ int lookup_field(int field_number,
-                                            int const* lookup_table,
-                                            int lookup_table_size,
-                                            int num_candidates,
-                                            Match&& match)
+__device__ __forceinline__ int lookup_field(int field_number, lookup_view<T> table, Match&& match)
 {
-  if (lookup_table != nullptr && field_number > 0 && field_number < lookup_table_size) {
-    int const f = lookup_table[field_number];
-    // Bound `f` against `num_candidates` before invoking `match`, so a buggy table can't
+  if (table.direct != nullptr && field_number > 0 && field_number < table.direct_size) {
+    int const f = table.direct[field_number];
+    // Bound `f` against `table.size` before invoking `match`, so a buggy table can't
     // cause an out-of-range read inside the predicate.
-    return (f >= 0 && f < num_candidates && match(f, field_number)) ? f : -1;
+    return (f >= 0 && f < table.size && match(f, field_number)) ? f : -1;
   }
-  for (int f = 0; f < num_candidates; f++) {
+  for (int f = 0; f < table.size; f++) {
     if (match(f, field_number)) return f;
   }
   return -1;
+}
+
+template <typename T>
+__device__ __forceinline__ int lookup_field(int field_number, lookup_view<T> table)
+{
+  return lookup_field(
+    field_number, table, [&table](int f, int n) { return table.data[f].field_number == n; });
 }
 
 }  // namespace spark_rapids_jni::protobuf::detail
