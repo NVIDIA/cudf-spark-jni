@@ -89,7 +89,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a04390a4ad07316b9a6a4b128733fe8e77552e9f",
+      "git_tag" : "eeea5f73cca5abf20d88169156db6cbd40e1f6cc",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.10"
