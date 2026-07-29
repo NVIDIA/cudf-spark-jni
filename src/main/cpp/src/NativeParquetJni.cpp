@@ -22,6 +22,7 @@
 #include <cudf/io/parquet_schema.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <cstring>
 #include <cwctype>
 #include <limits>
 #include <stdexcept>
@@ -187,7 +188,7 @@ class column_pruner {
       bool is_leaf     = schema_item.type != pq::Type::UNDEFINED;
       if (is_leaf) { ++next_input_chunk_index; }
 
-      num_to_skip = num_to_skip + schema_item.num_children;
+      num_to_skip += schema_item.num_children;
 
       --num_to_skip;
       ++current_input_schema_index;
@@ -323,6 +324,8 @@ class column_pruner {
     // 4. Otherwise, the repeated field's type is the element type with the repeated field's
     // repetition.
     if (!is_group) {
+      // cudf defaults an absent repetition_type to REQUIRED (0), never REPEATED, so this bare
+      // != REPEATED test is equivalent to the old "!__isset.repetition_type || != REPEATED" guard.
       if (list_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
         throw std::runtime_error("expected list item to be repeating");
       }
@@ -432,6 +435,7 @@ class column_pruner {
 
     // Now lets look at the repeated child.
     auto repeated_field_schema_item = schema.at(current_input_schema_index);
+    // An absent repetition_type defaults to REQUIRED (not REPEATED), so this bare check suffices.
     if (repeated_field_schema_item.repetition_type != pq::FieldRepetitionType::REPEATED) {
       throw std::runtime_error("found non repeating map child");
     }
@@ -600,6 +604,7 @@ static int64_t get_offset(pq::ColumnChunk const& column_chunk)
 {
   auto md        = column_chunk.meta_data;
   int64_t offset = md.data_page_offset;
+  // A real dictionary_page_offset is >= 4 (offset 0 holds the PAR1 magic), so 0 means unset.
   if (md.dictionary_page_offset != 0 && offset > md.dictionary_page_offset) {
     offset = md.dictionary_page_offset;
   }
@@ -652,6 +657,7 @@ static row_groups filter_groups(pq::FileMetaData const& meta,
         // use minStartIndex(imprecise in case of padding, but good enough for filtering)
         start_index = (pre_start_index == 0) ? 4 : pre_start_index + pre_compressed_size;
       }
+      // Absent total_compressed_size defaults to 0, preserving the legacy Thrift zero-init.
       pre_start_index     = start_index;
       pre_compressed_size = row_group.total_compressed_size.value_or(0);
     }
@@ -709,7 +715,8 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
   SRJ_FUNC_RANGE();
   JNI_TRY
   {
-    uint32_t len = static_cast<uint32_t>(buffer_length);
+    if (buffer_length < 0) { throw std::invalid_argument("buffer_length must not be negative"); }
+    std::size_t len = static_cast<std::size_t>(buffer_length);
     // We don't support encrypted parquet...
     // Parse leniently (throw_if_type_mismatch::NO): skip a known field whose wire type does not
     // match cudf's schema (Thrift forward-compat) rather than rejecting real files that use it.
