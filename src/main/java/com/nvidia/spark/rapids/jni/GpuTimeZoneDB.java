@@ -581,10 +581,13 @@ public class GpuTimeZoneDB {
     private final int readerInitialOffset;
     private final int readerRawOffset;
     private final int[] readerDstRule;
+    private final long readerFirstTransitionUs;
+    private final boolean writerReaderRulesDiffer;
     private boolean closed;
 
     private OrcTimezoneContext(Table writerTzInfoTable, Table readerTzInfoTable,
-        String writerTimezone, OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
+        String writerTimezone, String readerTimezone,
+        OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
       this.writerTzInfoTable = writerTzInfoTable;
       this.readerTzInfoTable = readerTzInfoTable;
       this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
@@ -595,6 +598,18 @@ public class GpuTimeZoneDB {
       this.readerInitialOffset = readerTzInfo.initialOffset;
       this.readerRawOffset = readerTzInfo.rawOffset;
       this.readerDstRule = dstRuleToArray(readerTzInfo.dstRule);
+      this.readerFirstTransitionUs =
+          readerTzInfo.transitions == null || readerTzInfo.transitions.length == 0
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(readerTzInfo.transitions[0]);
+      TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone).getId());
+      TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone).getId());
+      this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
+    }
+
+    public long getReaderFirstTransitionUs() {
+      ensureOpen();
+      return readerFirstTransitionUs;
     }
 
     private void ensureOpen() {
@@ -634,7 +649,7 @@ public class GpuTimeZoneDB {
       writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
       readerTzInfoTable = getTableForUtilTZ(readerTzInfo);
       return new OrcTimezoneContext(writerTzInfoTable, readerTzInfoTable,
-          writerTimezone, writerTzInfo, readerTzInfo);
+          writerTimezone, readerTimezone, writerTzInfo, readerTzInfo);
     } catch (RuntimeException | Error e) {
       try {
         Arms.closeAll(writerTzInfoTable, readerTzInfoTable);
@@ -667,7 +682,42 @@ public class GpuTimeZoneDB {
         context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
         context.readerInitialOffset,
         context.readerRawOffset,
+        context.readerDstRule,
+        context.writerReaderRulesDiffer));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics using a pre-built
+   * ORC timezone context. The input must be TIMESTAMP_MICROSECONDS.
+   *
+   * @param input values to convert
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, OrcTimezoneContext context) {
+    context.ensureOpen();
+    return new ColumnVector(convertOrcFromUtcWithRules(
+        input.getNativeView(),
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
         context.readerDstRule));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics.
+   *
+   * @param input TIMESTAMP_MICROSECONDS values
+   * @param readerTimezone target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, String readerTimezone) {
+    try (OrcTimezoneContext context =
+        buildOrcTimezoneContext(readerTimezone, readerTimezone)) {
+      return convertOrcFromUtc(input, context);
+    }
   }
 
   private static int[] dstRuleToArray(OrcDstRuleExtractor.DstRule rule) {
@@ -734,6 +784,14 @@ public class GpuTimeZoneDB {
       int writerTzInitialOffset,
       int writerTzRawOffset,
       int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule,
+      boolean writerReaderRulesDiffer);
+
+  private static native long convertOrcFromUtcWithRules(
+      long input,
       long readerTzInfoTable,
       int readerTzInitialOffset,
       int readerTzRawOffset,
