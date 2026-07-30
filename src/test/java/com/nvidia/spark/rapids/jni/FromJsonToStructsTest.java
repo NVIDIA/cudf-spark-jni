@@ -125,6 +125,25 @@ public class FromJsonToStructsTest {
   }
 
   @Test
+  void testFromJsonToStructsHandlesEmptyAndNullInputs() {
+    Schema schema = mixedNestedTypesSchema();
+
+    try (ColumnVector emptyInput = ColumnVector.fromStrings();
+         ColumnVector emptyOutput =
+             JSONUtils.fromJSONToStructs(emptyInput, schema, getOptions(), true)) {
+      assertEquals(0, emptyOutput.getRowCount());
+      assertEquals(0, emptyOutput.getNullCount());
+    }
+
+    try (ColumnVector nullInput = ColumnVector.fromStrings((String) null);
+         ColumnVector nullOutput =
+             JSONUtils.fromJSONToStructs(nullInput, schema, getOptions(), true)) {
+      assertEquals(1, nullOutput.getRowCount());
+      assertEquals(1, nullOutput.getNullCount());
+    }
+  }
+
+  @Test
   void testFromJsonToStructsAssociatesMismatchRowsByColumnName() {
     Schema.Builder root = Schema.builder();
     root.addColumn(DType.STRUCT, "a").column(DType.INT32, "value");

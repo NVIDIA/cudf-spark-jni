@@ -40,6 +40,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_segmented_reduce.cuh>
+#include <cuda/atomic>
 #include <cuda/functional>
 #include <cuda/std/functional>
 #include <cuda/std/tuple>
@@ -51,6 +52,7 @@
 #include <thrust/transform.h>
 #include <thrust/uninitialized_fill.h>
 
+#include <algorithm>
 #include <map>
 #include <span>
 #include <unordered_map>
@@ -154,6 +156,37 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> generate_stru
       cudf::data_type{cudf::type_id::STRUCT}, -1, std::move(schema_cols_with_precisions)}};
 }
 
+std::unique_ptr<cudf::column> make_empty_column_from_schema(
+  schema_element_with_precision const& schema,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  if (schema.type.id() == cudf::type_id::LIST) {
+    CUDF_EXPECTS(schema.child_types.size() == 1,
+                 "A list schema must have exactly one child.",
+                 std::invalid_argument);
+    return cudf::make_lists_column(
+      0,
+      cudf::make_empty_column(cudf::data_type{cudf::type_id::INT32}),
+      make_empty_column_from_schema(schema.child_types.front().second, stream, mr),
+      0,
+      {});
+  }
+
+  if (schema.type.id() == cudf::type_id::STRUCT) {
+    std::vector<std::unique_ptr<cudf::column>> children;
+    children.reserve(schema.child_types.size());
+    std::transform(
+      schema.child_types.begin(),
+      schema.child_types.end(),
+      std::back_inserter(children),
+      [&](auto const& child) { return make_empty_column_from_schema(child.second, stream, mr); });
+    return cudf::make_structs_column(0, std::move(children), 0, {}, stream, mr);
+  }
+
+  return cudf::make_empty_column(schema.type);
+}
+
 void nullify_rows(cudf::column& input,
                   std::span<cudf::size_type const> row_indices,
                   rmm::cuda_stream_view stream,
@@ -170,10 +203,9 @@ void nullify_rows(cudf::column& input,
                                               : static_cast<cudf::bitmask_type*>(null_mask.data());
 
   // Diagnostic row indices are sorted and unique, so updates to one mask word are adjacent.
-  auto word_updates = cudf::detail::make_empty_pinned_vector<mask_word_update>(
-    std::min(row_indices.size(),
-             static_cast<std::size_t>(cudf::num_bitmask_words(input_view.size()))),
-    stream);
+  std::vector<mask_word_update> word_updates;
+  word_updates.reserve(std::min(
+    row_indices.size(), static_cast<std::size_t>(cudf::num_bitmask_words(input_view.size()))));
   for (auto const row : row_indices) {
     auto const word_index = cudf::word_index(row);
     auto const bit        = cudf::bitmask_type{1} << cudf::intra_word_index(row);
@@ -187,12 +219,15 @@ void nullify_rows(cudf::column& input,
   auto const use_word_updates =
     word_updates.size() * sizeof(mask_word_update) < row_indices.size() * sizeof(cudf::size_type);
   if (use_word_updates) {
+    auto h_word_updates =
+      cudf::detail::make_empty_pinned_vector<mask_word_update>(word_updates.size(), stream);
+    h_word_updates.insert(h_word_updates.end(), word_updates.begin(), word_updates.end());
     auto d_word_updates = cudf::detail::make_device_uvector_async(
-      word_updates, stream, cudf::get_current_device_resource_ref());
+      h_word_updates, stream, cudf::get_current_device_resource_ref());
     thrust::for_each(rmm::exec_policy_nosync(stream),
                      d_word_updates.begin(),
                      d_word_updates.end(),
-                     [mask_ptr] __device__(auto const update) {
+                     [mask_ptr] __device__(auto const update) -> void {
                        mask_ptr[update.word_index] &= ~update.bits_to_clear;
                      });
   } else {
@@ -204,9 +239,11 @@ void nullify_rows(cudf::column& input,
     thrust::for_each(rmm::exec_policy_nosync(stream),
                      d_row_indices.begin(),
                      d_row_indices.end(),
-                     [mask_ptr] __device__(auto const row) {
-                       // clear_bit uses atomicAnd, so concurrent updates to one mask word are safe.
-                       cudf::clear_bit(mask_ptr, row);
+                     [mask_ptr] __device__(auto const row) -> void {
+                       auto const bit = cudf::bitmask_type{1} << cudf::intra_word_index(row);
+                       auto ref = cuda::atomic_ref<cudf::bitmask_type, cuda::thread_scope_device>{
+                         mask_ptr[cudf::word_index(row)]};
+                       ref.fetch_and(~bit, cuda::memory_order_relaxed);
                      });
   }
 
@@ -957,6 +994,8 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
     concat_json(input, false, stream, cudf::get_current_device_resource_ref());
   auto const [schema, schema_with_precision] =
     generate_struct_schema(col_names, num_children, types, scales, precisions);
+
+  if (input.is_empty()) { return make_empty_column_from_schema(schema_with_precision, stream, mr); }
 
   auto opts_builder =
     cudf::io::json_reader_options::builder(
