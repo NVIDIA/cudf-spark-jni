@@ -95,7 +95,7 @@ struct field_descriptor {
   int field_number;                    // Protobuf field number
   proto_wire_type expected_wire_type;  // Expected wire type for this field
   bool is_repeated;                    // Repeated children are scanned via count/scan kernels
-  int output_index = -1;  // Column within the matching output buffer, or -1 when unused
+  int output_index = -1;               // Matching output column, or -1 when unused
 };
 
 /**

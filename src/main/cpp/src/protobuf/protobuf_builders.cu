@@ -538,17 +538,15 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                               decode_ctx,
                               stream);
 
-  auto repeated_work = make_repeated_field_work_bundle(
-    repeated_child_positions,
-    num_child_fields,
-    [&](int child_position) { return child_field_indices[child_position]; },
-    d_repeated_info.data(),
-    input.num_rows,
-    schema,
-    "Repeated nested-field",
-    stream,
-    mr,
-    scratch_mr);
+  auto repeated_work = make_repeated_field_work_bundle(repeated_child_positions,
+                                                       child_field_indices,
+                                                       d_repeated_info.data(),
+                                                       input.num_rows,
+                                                       schema,
+                                                       "Repeated nested-field",
+                                                       stream,
+                                                       mr,
+                                                       scratch_mr);
 
   if (!repeated_work.scan_descriptors.empty()) {
     auto scan_bundle =

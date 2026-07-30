@@ -311,8 +311,7 @@ void validate_decode_context(protobuf_decode_context const& context)
                    std::to_string(i),
                  std::invalid_argument);
 
-    auto const has_enum_metadata =
-      !(context.enum_valid_values[i].empty() && context.enum_names[i].empty());
+    auto const has_enum_metadata = !context.enum_valid_values[i].empty();
     auto const is_numeric_enum =
       type.id() == cudf::type_id::INT32 && field.encoding == proto_encoding::DEFAULT;
     auto const is_string_enum =
@@ -320,7 +319,8 @@ void validate_decode_context(protobuf_decode_context const& context)
     CUDF_EXPECTS(!has_enum_metadata || is_numeric_enum || is_string_enum,
                  "protobuf decode context: enum metadata requires INT32/DEFAULT or "
                  "STRING/ENUM_STRING at field " +
-                   std::to_string(i),
+                   std::to_string(i) + " (output_type=" + cudf::type_to_name(type) +
+                   ", encoding=" + std::to_string(static_cast<int>(field.encoding)) + ")",
                  std::invalid_argument);
 
     if (field.encoding == proto_encoding::ENUM_STRING) {
@@ -573,13 +573,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     // Batched scalar extraction: group non-special fixed-width fields by extraction
     // category and extract all fields of each category with a single 2D kernel launch.
     {
-      static constexpr auto fallback = scalar_kinds.size();
-      std::array<std::vector<int>, scalar_kinds.size() + 1> group_lists;
+      static constexpr auto fallback = SCALAR_KINDS.size();
+      std::array<std::vector<int>, SCALAR_KINDS.size() + 1> group_lists;
       // Implied constexpr (https://en.cppreference.com/cpp/language/lambda).
       auto find_group = [](cudf::type_id type, proto_encoding encoding) {
         auto const decode = get_scalar_decode_kind(type, encoding);
-        auto const it     = std::ranges::find(scalar_kinds, scalar_kind{type, decode});
-        return static_cast<size_t>(it - scalar_kinds.begin());
+        auto const it     = std::ranges::find(SCALAR_KINDS, scalar_kind{type, decode});
+        return static_cast<size_t>(it - SCALAR_KINDS.begin());
       };
 
       for (int i = 0; i < num_scalar; i++) {
@@ -638,18 +638,16 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
       };
 
-      auto launch_index = [&](auto index_constant) {
-        constexpr auto index = decltype(index_constant)::value;
-        using T              = std::conditional_t<scalar_kinds[index].type == cudf::type_id::BOOL8,
-                                                  uint8_t,
-                                                  cudf::id_to_type<scalar_kinds[index].type>>;
-        dispatch_scalar_decoder<T>(scalar_kinds[index].decode, [&]<auto DecodeFn>() {
-          launch_decoder.template operator()<T, DecodeFn>(group_lists[index]);
+      auto launch_index = [&]<std::size_t I, std::size_t = I>() {
+        constexpr auto type = SCALAR_KINDS[I].type;
+        using T = std::conditional_t<type == cudf::type_id::BOOL8, uint8_t, cudf::id_to_type<type>>;
+        dispatch_scalar_decoder<T, SCALAR_KINDS[I].decode>([&]<auto DecodeFn>() {
+          launch_decoder.template operator()<T, DecodeFn>(group_lists[I]);
         });
       };
       [&]<size_t... I>(std::index_sequence<I...>) {
-        (launch_index(std::integral_constant<size_t, I>{}), ...);
-      }(std::make_index_sequence<scalar_kinds.size()>{});
+        (launch_index.template operator()<I>(), ...);
+      }(std::make_index_sequence<SCALAR_KINDS.size()>{});
 
       // Per-field fallback (INT32 with enum, etc.)
       for (int i : group_lists[fallback]) {
@@ -691,17 +689,15 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // Process repeated fields (three-phase: offsets → combined scan → build columns)
   if (num_repeated > 0) {
     // Phases A and B: build LIST offsets and allocate occurrence buffers.
-    auto rep_work = make_repeated_field_work_bundle(
-      std::views::iota(0, num_repeated),
-      num_repeated,
-      [&](int repeated_position) { return repeated_field_indices[repeated_position]; },
-      d_repeated_info.data(),
-      num_rows,
-      schema_context,
-      "Top-level repeated field",
-      stream,
-      mr,
-      scratch_mr);
+    auto rep_work = make_repeated_field_work_bundle(std::views::iota(0, num_repeated),
+                                                    repeated_field_indices,
+                                                    d_repeated_info.data(),
+                                                    num_rows,
+                                                    schema_context,
+                                                    "Top-level repeated field",
+                                                    stream,
+                                                    mr,
+                                                    scratch_mr);
 
     if (!rep_work.scan_descriptors.empty()) {
       auto scan_bundle =

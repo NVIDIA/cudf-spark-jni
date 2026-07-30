@@ -240,7 +240,7 @@ __device__ inline void decode_fixed_value(scalar_value_input input,
   if (output.valid) output.valid[index] = true;
 }
 
-enum class scalar_decode_kind : uint8_t { fixed, varint, zigzag };
+enum class scalar_decode_kind : uint8_t { FIXED, VARINT, ZIGZAG };
 
 struct scalar_kind {
   cudf::type_id type;
@@ -248,29 +248,29 @@ struct scalar_kind {
   bool operator==(scalar_kind const&) const = default;
 };
 
-inline constexpr auto scalar_kinds = std::to_array<scalar_kind>({
-  {cudf::type_id::INT32, scalar_decode_kind::varint},
-  {cudf::type_id::UINT32, scalar_decode_kind::varint},
-  {cudf::type_id::INT64, scalar_decode_kind::varint},
-  {cudf::type_id::UINT64, scalar_decode_kind::varint},
-  {cudf::type_id::BOOL8, scalar_decode_kind::varint},
-  {cudf::type_id::INT32, scalar_decode_kind::zigzag},
-  {cudf::type_id::INT64, scalar_decode_kind::zigzag},
-  {cudf::type_id::FLOAT32, scalar_decode_kind::fixed},
-  {cudf::type_id::FLOAT64, scalar_decode_kind::fixed},
-  {cudf::type_id::INT32, scalar_decode_kind::fixed},
-  {cudf::type_id::UINT32, scalar_decode_kind::fixed},
-  {cudf::type_id::INT64, scalar_decode_kind::fixed},
-  {cudf::type_id::UINT64, scalar_decode_kind::fixed},
+inline constexpr auto SCALAR_KINDS = std::to_array<scalar_kind>({
+  {cudf::type_id::INT32, scalar_decode_kind::VARINT},
+  {cudf::type_id::UINT32, scalar_decode_kind::VARINT},
+  {cudf::type_id::INT64, scalar_decode_kind::VARINT},
+  {cudf::type_id::UINT64, scalar_decode_kind::VARINT},
+  {cudf::type_id::BOOL8, scalar_decode_kind::VARINT},
+  {cudf::type_id::INT32, scalar_decode_kind::ZIGZAG},
+  {cudf::type_id::INT64, scalar_decode_kind::ZIGZAG},
+  {cudf::type_id::FLOAT32, scalar_decode_kind::FIXED},
+  {cudf::type_id::FLOAT64, scalar_decode_kind::FIXED},
+  {cudf::type_id::INT32, scalar_decode_kind::FIXED},
+  {cudf::type_id::UINT32, scalar_decode_kind::FIXED},
+  {cudf::type_id::INT64, scalar_decode_kind::FIXED},
+  {cudf::type_id::UINT64, scalar_decode_kind::FIXED},
 });
 
 constexpr scalar_decode_kind get_scalar_decode_kind(cudf::type_id type, proto_encoding encoding)
 {
   using enum cudf::type_id;
   using enum proto_encoding;
-  return type == FLOAT32 || type == FLOAT64 || encoding == FIXED ? scalar_decode_kind::fixed
-         : encoding == ZIGZAG                                    ? scalar_decode_kind::zigzag
-                                                                 : scalar_decode_kind::varint;
+  return type == FLOAT32 || type == FLOAT64 || encoding == FIXED ? scalar_decode_kind::FIXED
+         : encoding == ZIGZAG                                    ? scalar_decode_kind::ZIGZAG
+                                                                 : scalar_decode_kind::VARINT;
 }
 
 template <typename T>
@@ -279,22 +279,37 @@ inline scalar_decode_kind get_scalar_decode_kind(proto_encoding encoding)
   if constexpr (std::is_floating_point_v<T>) {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT || encoding == proto_encoding::FIXED,
                  "Floating-point protobuf extraction requires default or fixed encoding");
-    return scalar_decode_kind::fixed;
   } else if (encoding == proto_encoding::FIXED) {
-    if constexpr (sizeof(T) == 4 || sizeof(T) == 8) {
-      return scalar_decode_kind::fixed;
-    } else {
-      CUDF_FAIL("Fixed-width protobuf extraction requires a 32-bit or 64-bit output type");
-    }
+    CUDF_EXPECTS(sizeof(T) == 4 || sizeof(T) == 8,
+                 "Fixed-width protobuf extraction requires a 32-bit or 64-bit output type");
   } else if constexpr (std::is_signed_v<T>) {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT || encoding == proto_encoding::ZIGZAG,
                  "Signed varint protobuf extraction requires default or zigzag encoding");
-    return encoding == proto_encoding::ZIGZAG ? scalar_decode_kind::zigzag
-                                              : scalar_decode_kind::varint;
-  } else {
+  } else if constexpr (std::is_integral_v<T>) {
     CUDF_EXPECTS(encoding == proto_encoding::DEFAULT,
                  "Unsigned varint protobuf extraction requires default encoding");
-    return scalar_decode_kind::varint;
+  } else {
+    CUDF_FAIL("Varint protobuf extraction requires an integral output type");
+  }
+  return get_scalar_decode_kind(
+    std::is_floating_point_v<T> ? cudf::type_id::FLOAT32 : cudf::type_id::INT32, encoding);
+}
+
+template <typename T, scalar_decode_kind Decode, typename F>
+constexpr void dispatch_scalar_decoder(F&& f)
+{
+  if constexpr (Decode == scalar_decode_kind::FIXED) {
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+    std::forward<F>(f).template operator()<decode_fixed_value<T>>();
+  } else if constexpr (Decode == scalar_decode_kind::VARINT) {
+    static_assert(std::is_integral_v<T>);
+    std::forward<F>(f).template operator()<decode_varint_value<T, false>>();
+  } else if constexpr (Decode == scalar_decode_kind::ZIGZAG) {
+    static_assert(std::is_integral_v<T> && std::is_signed_v<T>);
+    std::forward<F>(f).template operator()<decode_varint_value<T, true>>();
+  } else {
+    static_assert(Decode == scalar_decode_kind::FIXED || Decode == scalar_decode_kind::VARINT ||
+                  Decode == scalar_decode_kind::ZIGZAG);
   }
 }
 
@@ -302,29 +317,23 @@ template <typename T, typename F>
 inline void dispatch_scalar_decoder(scalar_decode_kind decode, F&& f)
 {
   switch (decode) {
-    case scalar_decode_kind::fixed:
+    case scalar_decode_kind::FIXED:
       if constexpr (sizeof(T) == 4 || sizeof(T) == 8) {
-        f.template operator()<decode_fixed_value<T>>();
-      } else {
-        CUDF_FAIL("Fixed-width protobuf extraction requires a 32-bit or 64-bit output type");
+        return dispatch_scalar_decoder<T, scalar_decode_kind::FIXED>(std::forward<F>(f));
       }
       break;
-    case scalar_decode_kind::varint:
+    case scalar_decode_kind::VARINT:
       if constexpr (std::is_integral_v<T>) {
-        f.template operator()<decode_varint_value<T, false>>();
-      } else {
-        CUDF_FAIL("Varint protobuf extraction requires an integral output type");
+        return dispatch_scalar_decoder<T, scalar_decode_kind::VARINT>(std::forward<F>(f));
       }
       break;
-    case scalar_decode_kind::zigzag:
+    case scalar_decode_kind::ZIGZAG:
       if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-        f.template operator()<decode_varint_value<T, true>>();
-      } else {
-        CUDF_FAIL("Zigzag protobuf extraction requires a signed integral output type");
+        return dispatch_scalar_decoder<T, scalar_decode_kind::ZIGZAG>(std::forward<F>(f));
       }
       break;
-    default: CUDF_FAIL("Unknown protobuf scalar decode kind");
   }
+  CUDF_UNREACHABLE("Invalid protobuf scalar decode kind/type combination");
 }
 
 template <typename OutputType, auto DecodeFn, typename LocationProvider>
@@ -463,23 +472,6 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   return cudf::detail::valid_if(begin, end, pred, stream, mr);
 }
 
-template <typename T, typename LaunchFn>
-std::unique_ptr<cudf::column> extract_and_build_scalar_column(cudf::data_type dt,
-                                                              int num_rows,
-                                                              LaunchFn&& launch_extract,
-                                                              rmm::cuda_stream_view stream,
-                                                              rmm::device_async_resource_ref mr)
-{
-  rmm::device_uvector<T> out(num_rows, stream, mr);
-  rmm::device_uvector<bool> valid(num_rows, stream, mr);
-  if (num_rows == 0) {
-    return std::make_unique<cudf::column>(dt, 0, out.release(), rmm::device_buffer{}, 0);
-  }
-  launch_extract(out.data(), valid.data());
-  auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
-  return std::make_unique<cudf::column>(dt, num_rows, out.release(), std::move(mask), null_count);
-}
-
 template <typename T, typename LocationProvider>
 inline void extract_scalar_into_buffers(uint8_t const* message_data,
                                         LocationProvider const& loc_provider,
@@ -521,21 +513,20 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  return extract_and_build_scalar_column<T>(
-    field.output_type,
+  if (num_rows == 0) { return cudf::make_empty_column(field.output_type); }
+  rmm::device_uvector<T> out(num_rows, stream, mr);
+  rmm::device_uvector<bool> valid(num_rows, stream, mr);
+  extract_scalar_into_buffers<T, LocationProvider>(
+    message_data,
+    loc_provider,
     num_rows,
-    [&](T* out_ptr, bool* valid_ptr) {
-      extract_scalar_into_buffers<T, LocationProvider>(
-        message_data,
-        loc_provider,
-        num_rows,
-        field.schema.encoding,
-        make_scalar_decode_options<T>(field),
-        {out_ptr, valid_ptr, decode_ctx.error->data()},
-        stream);
-    },
-    stream,
-    mr);
+    field.schema.encoding,
+    make_scalar_decode_options<T>(field),
+    {out.data(), valid.data(), decode_ctx.error->data()},
+    stream);
+  auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
+  return std::make_unique<cudf::column>(
+    field.output_type, num_rows, out.release(), std::move(mask), null_count);
 }
 
 template <typename LocationProvider, typename ValidityFn>
@@ -665,9 +656,7 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
       return extract_and_build_scalar_field_column<uint8_t>(
         field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
     case cudf::type_id::INT32: {
-      if (num_items == 0) {
-        return std::make_unique<cudf::column>(dt, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
-      }
+      if (num_items == 0) { return cudf::make_empty_column(dt); }
       rmm::device_uvector<int32_t> out(num_items, stream, mr);
       rmm::device_uvector<bool> valid(num_items, stream, mr);
       extract_scalar_into_buffers<int32_t, LocationProvider>(
