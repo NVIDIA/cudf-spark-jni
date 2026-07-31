@@ -602,8 +602,8 @@ public class GpuTimeZoneDB {
           readerTzInfo.transitions == null || readerTzInfo.transitions.length == 0
               ? Long.MIN_VALUE
               : TimeUnit.MILLISECONDS.toMicros(readerTzInfo.transitions[0]);
-      TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone).getId());
-      TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone).getId());
+      TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone));
+      TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone));
       this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
     }
 

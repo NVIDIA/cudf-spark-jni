@@ -43,7 +43,7 @@ public class GpuTimeZoneDBTest {
   private static final long MICROS_PER_SECOND = TimeUnit.SECONDS.toMicros(1);
 
   private static TimeZone getTimeZoneForOrc(String timezoneId) {
-    return TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId).getId());
+    return TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId));
   }
 
   private static long orc2015YearBaseOffsetUs(String timezoneId) {
@@ -187,6 +187,30 @@ public class GpuTimeZoneDBTest {
         ColumnVector actual =
             GpuTimeZoneDB.convertOrcTimezones(input, "Asia/Shanghai", "Asia/Shanghai")) {
       assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testConvertOrcTimezonesFixedOffsetIds() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    long[] microseconds = {0L, -1L, 1L, -2_957_649_381_472_612L};
+    String[][] cases = {
+        {"UTC", "+05:30"},
+        {"+05:30", "UTC"},
+        {"UTC", "EST"},
+        {"EST", "UTC"}
+    };
+
+    for (String[] timezones : cases) {
+      try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
+          ColumnVector expected =
+              convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
+          ColumnVector actual =
+              GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
+        assertColumnsAreEqual(expected, actual);
+      }
     }
   }
 
