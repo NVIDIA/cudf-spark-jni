@@ -1040,11 +1040,6 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   h_path_data.reserve(json_paths.size());
 
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
-    auto const& path = json_paths[idx];
-    if (path.size() > MAX_JSON_PATH_DEPTH) {
-      CUDF_FAIL("JSON Path has depth exceeds the maximum allowed value.");
-    }
-
     scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
     out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
       static_cast<std::size_t>(input.size()), stream});
@@ -1178,6 +1173,22 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   rmm::device_async_resource_ref mr)
 {
   auto const num_outputs = json_paths.size();
+
+  // Both limits are properties of the path alone, so check them before the empty-input shortcut;
+  // otherwise the same query is accepted or rejected depending on the batch it meets.
+  for (auto const& path : json_paths) {
+    CUDF_EXPECTS(path.size() <= MAX_JSON_PATH_DEPTH,
+                 "JSON Path has depth exceeds the maximum allowed value.");
+    for (auto const& [type, name, index] : path) {
+      CUDF_EXPECTS(type == path_instruction_type::WILDCARD ||
+                     type == path_instruction_type::INDEX || type == path_instruction_type::NAMED,
+                   "Invalid path instruction type");
+      // A negative subscript matches no element and would silently return element 0. The Java
+      // wrapper rejects it, but this entry point is also callable from C++.
+      CUDF_EXPECTS(type != path_instruction_type::INDEX || index >= 0,
+                   "JSON Path index must be non-negative.");
+    }
+  }
 
   // Input is empty or all nulls - just return all null columns.
   if (input.is_empty() || input.size() == input.null_count()) {
