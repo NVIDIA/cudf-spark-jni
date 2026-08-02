@@ -58,9 +58,10 @@ namespace {
 // `generate_input`.
 constexpr auto default_value_width = 10;
 
-// Build a list of `num_keys` all-STRING column types. A string is the only value kind the raw-map
-// engine may unescape instead of copying verbatim, so a homogeneous all-STRING flat object is the
-// worst case for the rendering work and the only shape that can reach either rendering path.
+// Build a list of `num_keys` all-STRING column types: string values are the dominant raw-map
+// workload, so a homogeneous flat object is the default input shape. It reaches only the string
+// rendering categories -- the integer, float, and non-numeric canonicalization paths need a
+// mixed-type input.
 std::vector<cudf::type_id> make_all_string_column_types(int num_keys)
 {
   return std::vector<cudf::type_id>(num_keys, cudf::type_id::STRING);
