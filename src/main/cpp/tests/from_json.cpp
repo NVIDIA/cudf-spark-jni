@@ -47,18 +47,19 @@ struct FromJsonTest : public cudf::test::BaseFixture {};
 namespace {
 
 // One (key, value) entry of a raw-map row, in the exact textual content the raw-map engine emits.
-// The value is stored WITHOUT surrounding quotes for a JSON string value, matching
-// `from_json_to_raw_map`'s `include_quote_char=false` extraction.
+// A string value (or key) is stored WITHOUT surrounding quotes and JSON-unescaped; every other
+// value kind carries its verbatim raw JSON bytes (see the RawMapOpt_* contract block below).
 using kv = std::pair<std::string, std::string>;
 
 // Build the expected `LIST<STRUCT<STRING,STRING>>` raw-map column directly from host data.
 //
 // `rows[r]` is the ordered list of (key, value) pairs that row `r` must contain (already in the
-// exact byte content the engine emits: keys verbatim, string values with their surrounding quotes
-// stripped). `row_valid[r] == false` makes row `r` a NULL list row (its pairs, if any, are ignored
-// and contribute nothing to the children). The keys child and values child are flat STRING columns
-// concatenated in row-major order; the structs child wraps them; the list offsets are the running
-// per-row pair counts of the valid rows; the row null mask comes from `row_valid`.
+// exact byte content the engine emits: keys and string values de-quoted and unescaped, every other
+// value kind its verbatim raw bytes). `row_valid[r] == false` makes row `r` a NULL list row
+// (its pairs, if any, are ignored and contribute nothing to the children). The keys child and
+// values child are flat STRING columns concatenated in row-major order; the structs child wraps
+// them; the list offsets are the running per-row pair counts of the valid rows; the row null mask
+// comes from `row_valid`.
 std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>> const& rows,
                                                     std::vector<bool> const& row_valid)
 {
@@ -236,9 +237,12 @@ TEST_F(FromJsonTest, RawMapOpt_UnquotedControlCharactersStrict)
 
 // ===========================================================================
 // RawMapOpt_* : pin the exact LIST<STRUCT<STRING,STRING>> output of `from_json_to_raw_map`.
-// Raw-map value semantics:
-//   * String VALUES/KEYS are emitted WITHOUT surrounding quotes (`include_quote_char=false`).
-//   * The extractor is a verbatim byte-range copy; it performs NO JSON unescaping.
+// Value semantics (this layer renders string keys/values only; every other value kind is verbatim):
+//   * String VALUES/KEYS are emitted WITHOUT surrounding quotes and JSON-UNESCAPED (`\"` -> `"`,
+//     `\uXXXX` -> UTF-8, ...); escape-free strings are byte-identical to the raw extraction.
+//   * Every non-string value kind keeps its VERBATIM raw JSON bytes: a number (e.g. `1.00000`,
+//     `007`), a `NaN`/`Infinity` spelling, a nested object/array value, and the JSON `null` literal
+//     are all copied unchanged; `true`/`false` and already-canonical scalars are byte-identical.
 //   * A populated object yields a non-null list of its (key, value) pairs in INPUT TEXTUAL order;
 //     a duplicate key is emitted once PER OCCURRENCE (no collapsing).
 //   * An empty object `{}` yields an EMPTY, NON-NULL list row.
@@ -402,8 +406,9 @@ void expect_raw_map_shape(cudf::column_view const& col, cudf::size_type num_rows
 
 }  // namespace
 
-// JSON `null` literal value `{"k":null}` -- the map path keeps the literal text "null" as the value
-// (no JSON-null handling: the value node range is copied verbatim). The whole row stays valid.
+// JSON `null` literal value `{"k":null}` -- this layer keeps the literal text "null" as the value
+// (the value node range is copied verbatim; SQL-NULL handling is a later layer). The whole row
+// stays valid.
 TEST_F(FromJsonTest, RawMapOpt_Char_NullLiteralValue)
 {
   auto const input_col =
@@ -415,14 +420,104 @@ TEST_F(FromJsonTest, RawMapOpt_Char_NullLiteralValue)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
-// Escaped quote `\"` and escaped backslash `\\` inside a quoted string value survive literally
-// (the extractor copies the value's byte range verbatim; it performs no JSON unescaping).
+// Escaped quote `\"` and escaped backslash `\\` inside a quoted string value are JSON-unescaped,
+// matching Spark's `getText` conversion of string values.
 TEST_F(FromJsonTest, RawMapOpt_Char_EscapedValues)
 {
   auto const input_col = cudf::test::strings_column_wrapper{R"({"d":"x\"y","e":"p\\q"})"};
   auto const input     = cudf::strings_column_view{input_col};
 
-  auto const expected = make_expected_raw_map({{{"d", R"(x\"y)"}, {"e", R"(p\\q)"}}}, all_valid(1));
+  auto const expected = make_expected_raw_map({{{"d", R"(x"y)"}, {"e", R"(p\q)"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Every simple JSON escape inside string values is unescaped: \n \t \r \b \f \/ \" \\ .
+TEST_F(FromJsonTest, RawMapOpt_Render_StringEscapes)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"a":"l1\nl2","b":"t\tb","c":"cr\rx","d":"bs\bx","e":"ff\fx",)"
+    R"("f":"sl\/x","g":"q\"r","h":"p\\q"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"a", "l1\nl2"},
+                                                {"b", "t\tb"},
+                                                {"c", "cr\rx"},
+                                                {"d", "bs\bx"},
+                                                {"e", "ff\fx"},
+                                                {"f", "sl/x"},
+                                                {"g", R"(q"r)"},
+                                                {"h", R"(p\q)"}}},
+                                              all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// \uXXXX escapes decode to UTF-8, including a surrogate pair (U+1F600) and mixed-case hex digits.
+TEST_F(FromJsonTest, RawMapOpt_Render_UnicodeEscapes)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"u":"\u4e2d\u56FD","v":"A\u00e9B","w":"\ud83d\uDE00"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"u", "中国"}, {"v", "AéB"}, {"w", "\U0001F600"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Keys are unescaped too: an escaped key renders like an escaped string value.
+TEST_F(FromJsonTest, RawMapOpt_Render_KeyEscapes)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k\u00e9y":"v","a\tb":"w","q\"r":"x"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"kéy", "v"}, {"a\tb", "w"}, {"q\"r", "x"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Non-string scalar values keep their verbatim raw JSON bytes: booleans, zero, and a negative
+// number each render as their literal input text, per the contract block above.
+TEST_F(FromJsonTest, RawMapOpt_Render_VerbatimScalarValues)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"b":true,"c":false})", R"({"i":0,"j":-1,"k":10})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"b", "true"}, {"c", "false"}}, {{"i", "0"}, {"j", "-1"}, {"k", "10"}}}, all_valid(2));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Lenient number spellings keep their verbatim raw JSON bytes at this layer: `allow_leading_zeros`
+// keeps `007`, `allow_nonnumeric_numbers` keeps `NaN`/`Infinity`, and a non-canonical float is not
+// normalized. Number canonicalization arrives in a later layer, which must flip this expectation.
+TEST_F(FromJsonTest, RawMapOpt_Render_VerbatimLenientNumbers)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":007,"b":NaN,"c":Infinity,"d":1.00000})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"a", "007"}, {"b", "NaN"}, {"c", "Infinity"}, {"d", "1.00000"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Long ESCAPED value: `RawMapOpt_LongValues` covers the long escape-free (verbatim memcpy) path;
+// this covers the long unescape path, where `make_strings_children` re-parses the whole token once
+// per pass and the rendered length shrinks across hundreds of escapes.
+TEST_F(FromJsonTest, RawMapOpt_Render_LongEscapedValue)
+{
+  constexpr int num_repeats = 512;
+  std::string raw;
+  std::string unescaped;
+  for (int i = 0; i < num_repeats; ++i) {
+    raw += R"(\u4e2d\tx\\y)";
+    unescaped += "中\tx\\y";
+  }
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":")" + raw + R"("})"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"k", unescaped}}}, all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
@@ -598,7 +693,8 @@ TEST_F(FromJsonTest, RawMapOpt_WarpBoundaryNullMask)
 //   * value = JSON `null` literal -> row KEPT, NULL inner list (mask #1).
 //   * value = scalar / object (present, non-null, NOT an array) -> HARD TYPE MISMATCH: the WHOLE
 //     row is nullified (Spark row-level bad-record semantics), even if other keys are valid arrays.
-//   * element = string -> de-quoted bytes; number/bool/nested -> raw JSON substring.
+//   * element = string -> de-quoted and JSON-unescaped; every other element kind (number, bool,
+//     nested object/array) keeps its VERBATIM raw JSON bytes.
 //   * element = literal `null` -> NULL element (mask #2); a JSON STRING "null" stays valid.
 // ===========================================================================
 
@@ -812,28 +908,19 @@ TEST_F(FromJsonTest, RawMapArray_TypeMismatchValueNullsRow)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
-// One array mixing literal `null`, the STRING "null", a number, a bool, and nested obj/array
-// elements. Pins mask #2 (literal null -> null element) + raw-text + de-quote together. The nested
-// object `{"x":1}` and array `[2,3]` elements keep their interior bytes verbatim.
+// One array mixing literal `null`, the STRING "null", a number, both bools, and nested obj/array
+// elements. Pins mask #2 (literal null -> null element) + de-quote together. The number, bools,
+// and nested `{"x":1}`/`[2,3]` elements are copied verbatim (already canonical), so only the
+// strings are de-quoted/unescaped.
 TEST_F(FromJsonTest, RawMapArray_MixedElementKinds)
 {
   auto const input_col =
-    cudf::test::strings_column_wrapper{R"({"k":[null,"null",123,true,{"x":1},[2,3]]})"};
+    cudf::test::strings_column_wrapper{R"({"k":[null,"null",123,true,false,{"x":1},[2,3]]})"};
   auto const input = cudf::strings_column_view{input_col};
 
   auto const expected = make_expected_raw_map_array(
-    {{{"k", arr({null_elem(), "null", "123", "true", R"({"x":1})", "[2,3]"})}}}, all_valid(1));
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
-}
-
-// Number / bool elements -> raw text.
-TEST_F(FromJsonTest, RawMapArray_NumberBoolElements)
-{
-  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":[1,22,333,true,false]})"};
-  auto const input     = cudf::strings_column_view{input_col};
-
-  auto const expected =
-    make_expected_raw_map_array({{{"k", arr({"1", "22", "333", "true", "false"})}}}, all_valid(1));
+    {{{"k", arr({null_elem(), "null", "123", "true", "false", R"({"x":1})", "[2,3]"})}}},
+    all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
@@ -861,14 +948,27 @@ TEST_F(FromJsonTest, RawMapArray_InvalidRows)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
-// Escaped quotes and backslashes inside string elements survive verbatim (no JSON unescaping).
+// Escaped quotes, backslashes, and \uXXXX escapes inside string elements are JSON-unescaped,
+// matching Spark's `getText` conversion of string elements. The last element is a surrogate pair
+// (U+1F600), which decodes to a single 4-byte UTF-8 character.
 TEST_F(FromJsonTest, RawMapArray_EscapedElements)
 {
-  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":["x\"y","p\\q"]})"};
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":["x\"y","p\\q","a\tb","\u4e2d","\ud83d\uDE00"]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({R"(x"y)", R"(p\q)", "a\tb", "中", "\U0001F600"})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Keys of the array-valued map are unescaped too.
+TEST_F(FromJsonTest, RawMapArray_KeyEscapes)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"k\u00e9":["v"]})"};
   auto const input     = cudf::strings_column_view{input_col};
 
-  auto const expected =
-    make_expected_raw_map_array({{{"k", arr({R"(x\"y)", R"(p\\q)"})}}}, all_valid(1));
+  auto const expected = make_expected_raw_map_array({{{"ké", arr({"v"})}}}, all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
@@ -912,7 +1012,29 @@ TEST_F(FromJsonTest, RawMapArray_SingleQuoteNormalization)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
 }
 
-// Leading-zeros / non-numeric-number leniency on numeric elements (kept as raw text).
+// `normalize_single_quotes` + escaped strings: normalization rewrites the quotes before
+// tokenization, so the unescape re-parse -- which rebuilds the quoted token from the byte before
+// the stored range -- must still see a 1-byte double quote on each side.
+TEST_F(FromJsonTest, RawMapArray_SingleQuoteNormalizationWithEscapes)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{R"({'k':['a\tb','x\\y']})"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const result = spark_rapids_jni::from_json_to_raw_map_array_values(
+    input,
+    spark_rapids_jni::json_parse_options{/*normalize_single_quotes=*/true,
+                                         default_options.allow_leading_zeros,
+                                         default_options.allow_nonnumeric_numbers,
+                                         default_options.allow_unquoted_control});
+
+  auto const expected =
+    make_expected_raw_map_array({{{"k", arr({"a\tb", R"(x\y)"})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+}
+
+// Leading-zeros / non-numeric-number leniency on numeric elements: both spellings keep their
+// verbatim raw JSON bytes at this layer. Number canonicalization arrives in a later layer, which
+// must flip this expectation.
 TEST_F(FromJsonTest, RawMapArray_NumericLeniency)
 {
   auto const input_col = cudf::test::strings_column_wrapper{R"({"k":[007,NaN,Infinity]})"};
@@ -1002,6 +1124,28 @@ TEST_F(FromJsonTest, RawMapArray_InnerOffsetAdversarialLarge)
     rows.emplace_back(R"({"a":[],"b":null,"c":["x","y","z"],"d":["w"]})");
     expected_rows.push_back(
       {{"a", arr({})}, {"b", null_arr()}, {"c", arr({"x", "y", "z"})}, {"d", arr({"w"})}});
+  }
+
+  auto const input_col = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(expected_rows, all_valid(num_rows));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Escaped and escape-free elements mixed inside every row at 50k-row scale, so both category arms
+// of `render_node_fn` run within the same warp. Mirrors the large-input sanitizer vehicle above.
+TEST_F(FromJsonTest, RawMapArray_Render_MixedCategoriesLarge)
+{
+  constexpr int num_rows = 50000;
+  std::vector<std::string> rows;
+  std::vector<std::vector<kva>> expected_rows;
+  rows.reserve(num_rows);
+  expected_rows.reserve(num_rows);
+
+  for (int r = 0; r < num_rows; ++r) {
+    rows.emplace_back(R"({"a":["x","y\tz","\u00e9"],"b":["w"]})");
+    expected_rows.push_back({{"a", arr({"x", "y\tz", "é"})}, {"b", arr({"w"})}});
   }
 
   auto const input_col = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
