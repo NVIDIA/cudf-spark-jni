@@ -315,7 +315,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
 void runPremergeBuild() {
     common.prepareArtNetrc(this)
     withEnv([
-        "ARROW_THRIFT_MIRROR_URL=https://${env.ARTIFACTORY_NAME}/artifactory/apache-remote",
+        "ARROW_THRIFT_MIRROR_URL=https://${env.ARTIFACTORY_NAME}/artifactory/sw-spark-maven/apache-remote",
         "CMAKE_NETRC=OPTIONAL",
     ]) {
         sh 'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
