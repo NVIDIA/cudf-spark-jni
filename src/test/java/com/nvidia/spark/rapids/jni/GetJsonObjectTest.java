@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -980,6 +980,145 @@ public class GetJsonObjectTest {
             "[11]");
         ColumnVector output = JSONUtils.getJsonObject(input, query)) {
       assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  /**
+   * An index past the end of one inner array must fail only that element, not the whole row, so
+   * the enclosing wildcard loop continues to the next element.
+   */
+  @Test
+  void getJsonObjectTest_IndexPastInnerArrayEndKeepsOtherElements() {
+    // Expected values come from Spark, not from this parser.
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "[[1],[8,9]]", "[[1],[7,8,9]]", "[[1,2],[8,9]]");
+         ColumnVector expected = ColumnVector.fromStrings("9", "8", "[2,9]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { wildcardPath(), indexPath(1) })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("[[1],[7,8,9]]");
+         ColumnVector expected = ColumnVector.fromStrings("9");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { wildcardPath(), indexPath(2) })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("[[1],[9,{\"a\":7}]]");
+         ColumnVector expected = ColumnVector.fromStrings("7");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { wildcardPath(), indexPath(1), namedPath("a") })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * An index past the end takes a second branch when the subscript is followed by a wildcard.
+   * Element [1] has no index 1 and must fail alone; [[8],[9]] has one and still matches.
+   */
+  @Test
+  void getJsonObjectTest_IndexAndWildcardPastInnerArrayEnd() {
+    // Expected value comes from Spark, not from this parser.
+    try (ColumnVector input = ColumnVector.fromStrings("[[1],[[8],[9]]]");
+         ColumnVector expected = ColumnVector.fromStrings("[9]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] {
+                 wildcardPath(), indexPath(1), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * Spark feeds its wildcard counter a boolean, so a nested match contributes exactly one. Passing
+   * the child's raw count through instead adds an extra array nesting level to the output.
+   */
+  @Test
+  void getJsonObjectTest_NestedWildcardDoesNotOverNest() {
+    try (ColumnVector input = ColumnVector.fromStrings("[[{\"a\":[1,2]}]]");
+         ColumnVector expected = ColumnVector.fromStrings("[[1,2]]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { wildcardPath(), wildcardPath(), wildcardPath(),
+                                                  namedPath("a"), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A matched field whose value is null fails only that field. Spark keeps scanning, so a later
+   * element or a later duplicate key can still supply the value.
+   */
+  @Test
+  void getJsonObjectTest_NullFieldDoesNotAbortWholeRow() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "[{\"a\":null},{\"a\":1}]");
+         ColumnVector expected = ColumnVector.fromStrings("1");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { wildcardPath(), namedPath("a") })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":null,\"a\":1}");
+         ColumnVector expected = ColumnVector.fromStrings("1");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { namedPath("a") })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * Jackson does not reject duplicate keys, and Spark re-enters the object loop for every remaining
+   * token, so a second field of the same name gets another chance to satisfy the rest of the path.
+   */
+  @Test
+  void getJsonObjectTest_DuplicateKeyObjectScanContinues() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":{\"c\":1},\"a\":{\"b\":2}}");
+         ColumnVector expected = ColumnVector.fromStrings("2");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { namedPath("a"), namedPath("b") })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * Spark's object loop keeps scanning until a field yields output, and its array-wildcard branch
+   * reports an empty array as no output. The two styles then differ: the raw-style branch buffers
+   * and discards those bytes, while the quoted-style branch has already committed them, so a later
+   * duplicate key appends after them. Both outputs below come from running Spark.
+   */
+  @Test
+  void getJsonObjectTest_EmptyArrayMatchDoesNotStopObjectScan() {
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":[],\"a\":[1]}");
+         ColumnVector expected = ColumnVector.fromStrings("1");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { namedPath("a"), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("[{\"a\":[],\"a\":[1]}]");
+         ColumnVector expected = ColumnVector.fromStrings("[],[1]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] {
+                 wildcardPath(), namedPath("a"), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    // A double wildcard writes its array tokens straight to the shared generator, so the re-scan
+    // lands the second match beside the first at the root, where an array comma does not apply.
+    // Spark emits Jackson's root value separator there -- a single space, not nothing.
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":[],\"a\":[[1]]}");
+         ColumnVector expected = ColumnVector.fromStrings("[] [1]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] {
+                 namedPath("a"), wildcardPath(), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
+    }
+    // Three root values: the separator keys off the accumulated output length, not a once-only
+    // flag, and the object scan re-enters once per non-producing match. Expected value derived
+    // from Spark's evaluatePath, not from this parser.
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":[],\"a\":[],\"a\":[[1]]}");
+         ColumnVector expected = ColumnVector.fromStrings("[] [] [1]");
+         ColumnVector actual = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] {
+                 namedPath("a"), wildcardPath(), wildcardPath() })) {
+      assertColumnsAreEqual(expected, actual);
     }
   }
 
