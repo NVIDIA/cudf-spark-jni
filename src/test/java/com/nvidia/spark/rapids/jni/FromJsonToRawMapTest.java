@@ -95,7 +95,7 @@ public class FromJsonToRawMapTest {
          ColumnVector expectedKeys = ColumnVector.fromStrings("Zipcode", "ZipCodeType", "City",
              "State", "category", "index", "author", "title", "price");
          ColumnVector expectedValues = ColumnVector.fromStrings("704", "STANDARD", "PARC PARQUE",
-             "PR", "reference", "[4,{},null,{\"a\":[{ }, {}] } ]", "Nigel Rees", "{}[], " +
+             "PR", "reference", "[4,{},null,{\"a\":[{},{}]}]", "Nigel Rees", "{}[], " +
                  "<=semantic-symbols-string", "8.95");
          ColumnVector expectedStructs = ColumnVector.makeStruct(expectedKeys, expectedValues);
          ColumnVector expectedOffsets = ColumnVector.fromInts(0, 4, 4, 4, 9);
@@ -199,9 +199,9 @@ public class FromJsonToRawMapTest {
 
   // ===== MAP<STRING,ARRAY<STRING>> (array-valued map) =====
 
-  // ARRAY_OF_STRING: a single object whose one key maps to a two-element string array. Elements are
-  // de-quoted and JSON-unescaped; both elements here are escape-free, so {"k":["a","b"]} yields one
-  // non-null row holding the pair (k -> ["a", "b"]).
+  // ARRAY_OF_STRING: a single object whose one key maps to a two-element string array. The engine
+  // renders each element the way Spark does, which for a plain string is just de-quoting, so
+  // {"k":["a","b"]} yields one non-null row holding the pair (k -> ["a", "b"]).
   @Test
   void testExtractRawMapArrayFromJsonString() {
     List<HostColumnVector.StructData> row0 =
