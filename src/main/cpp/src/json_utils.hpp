@@ -40,10 +40,18 @@ struct json_parse_options {
 /**
  * @brief Extract a map column from the JSON strings given by an input strings column.
  *
- * Targets the Spark schema `MapType[StringType, StringType]`. String keys and values are de-quoted
- * and JSON-unescaped (`\"` -> `"`, `\uXXXX` -> UTF-8, ...) to match Spark's `getText`; every other
- * value kind (number, boolean, `NaN`/`Infinity` spelling, nested object/array, and the JSON `null`
- * literal) keeps its verbatim raw JSON bytes.
+ * Keys and values are rendered to match Spark's `from_json` for the schema
+ * `MapType[StringType, StringType]` (Jackson semantics): string keys/values are de-quoted and
+ * JSON-unescaped; floats re-render via Java `Double.toString`; integer leading zeros and `-0` are
+ * stripped; the `NaN`/`Infinity` spellings become their quoted canonical forms; a nested
+ * object/array value keeps its verbatim raw JSON bytes. A value that is the JSON `null` literal
+ * keeps its pair but nulls the corresponding entry of the values child.
+ *
+ * A row is nullified when the input row is null, empty, whitespace only, or not a valid JSON
+ * object, or when any of its values is a number the JSON parser refuses. The parser caps a number's
+ * digit count -- signs, `.`, `e`/`E`, and leading zeros excluded -- and applies that cap to
+ * integers and floats alike; a number past it makes the record a Spark bad record, so the whole row
+ * becomes null instead of that value rendering.
  */
 std::unique_ptr<cudf::column> from_json_to_raw_map(
   cudf::strings_column_view const& input,
@@ -62,9 +70,11 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(
  * A value that is the JSON `null` literal produces a null inner list (the map row is kept). A value
  * that is non-null but not a JSON array (a scalar or an object) is a row-level bad record: the
  * entire outer map row is nullified, matching Spark `from_json`. An array element that is the
- * literal `null` produces a null element; a string element is de-quoted and JSON-unescaped like the
- * `from_json_to_raw_map` values, and every other element kind keeps its verbatim raw JSON bytes.
- * Row-level null/empty/invalid handling is otherwise identical to `from_json_to_raw_map`.
+ * literal `null` produces a null element; every other element is rendered like the
+ * `from_json_to_raw_map` values (strings de-quoted and unescaped, numbers re-rendered, nested
+ * objects/arrays keep their verbatim raw JSON bytes). A number the JSON parser refuses nullifies
+ * the whole row as an array element just as it does as a direct value. Row-level
+ * null/empty/invalid handling is otherwise identical to `from_json_to_raw_map`.
  */
 std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   cudf::strings_column_view const& input,
