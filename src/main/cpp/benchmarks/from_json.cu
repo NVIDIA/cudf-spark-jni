@@ -27,6 +27,8 @@
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/split/split.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/strings/translate.hpp>
+#include <cudf/table/table.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
@@ -46,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -55,8 +58,9 @@ namespace {
 // `generate_input`.
 constexpr auto default_value_width = 10;
 
-// Build a list of `num_keys` all-STRING column types. The raw-map engine extracts every value as a
-// raw substring, so a homogeneous all-STRING flat object is the representative input.
+// Build a list of `num_keys` all-STRING column types. A string is the only value kind the raw-map
+// engine may unescape instead of copying verbatim, so a homogeneous all-STRING flat object is the
+// worst case for the rendering work and the only shape that can reach either rendering path.
 std::vector<cudf::type_id> make_all_string_column_types(int num_keys)
 {
   return std::vector<cudf::type_id>(num_keys, cudf::type_id::STRING);
@@ -86,11 +90,16 @@ constexpr spark_rapids_jni::json_parse_options benchmark_parse_options()
 //                      chars ("k" + zero-padded i) so longer key names can be exercised.
 //   - `row_count`    : if > 0, the table is sized by row count and `size_bytes` is ignored; else
 //                      the table is sized by target byte count via `table_size_bytes`.
+//   - `escape_free`  : if true, fold every character the JSON writer escapes out of the generated
+//                      values, so the extraction stays on the verbatim raw-copy fast path. The
+//                      character count per value is preserved; the byte count shrinks where a
+//                      multi-byte character is folded away.
 struct input_options {
   int value_width       = default_value_width;
   double null_pct       = 0.0;
   int key_name_len      = 0;
   std::size_t row_count = 0;
+  bool escape_free      = false;
 };
 
 std::unique_ptr<cudf::column> generate_input(std::size_t size_bytes,
@@ -110,11 +119,30 @@ std::unique_ptr<cudf::column> generate_input(std::size_t size_bytes,
 
   // The cudf benchmark `row_count` size-tag struct selects the table-by-rows overload; name it via
   // `::row_count` to distinguish the tag type from `options.row_count` (the count value).
-  auto const input_table =
+  auto input_table =
     options.row_count > 0
       ? create_random_table(
           column_types, ::row_count{static_cast<cudf::size_type>(options.row_count)}, table_profile)
       : create_random_table(column_types, table_size_bytes{size_bytes}, table_profile);
+
+  // The random values span 32..137, which contains `"`, `/`, `\` and the multi-byte UTF-8 band --
+  // every one of which `write_json` escapes -- so a generated column is escape-free only if it is
+  // filtered to be. Without this, the value extraction always takes the transform path. The kept
+  // ranges are printable ASCII minus those three characters; every other character, including the
+  // non-ASCII band the writer emits as `\uXXXX`, folds to the replacement.
+  if (options.escape_free) {
+    std::vector<std::pair<cudf::char_utf8, cudf::char_utf8>> const keep_ranges{
+      {' ', '!'}, {'#', '.'}, {'0', '['}, {']', '~'}};
+    std::vector<std::unique_ptr<cudf::column>> filtered;
+    filtered.reserve(num_keys);
+    for (auto const& col : input_table->view()) {
+      filtered.push_back(cudf::strings::filter_characters(cudf::strings_column_view{col},
+                                                          keep_ranges,
+                                                          cudf::strings::filter_type::KEEP,
+                                                          cudf::string_scalar("x")));
+    }
+    input_table = std::make_unique<cudf::table>(std::move(filtered));
+  }
 
   // JSON object keys must match the schema column names. With the default naming the keys are
   // "col0".."colN-1"; when `key_name_len > 0` the keys become "k" + zero-padded index, padded to
@@ -193,9 +221,11 @@ __device__ inline std::uint64_t hash_index(std::uint64_t x)
 // deterministic function of its index. A value is the literal `null` (null inner list, mask #1) at
 // `value_null_stride`; an element is the literal `null` (null element, mask #2) at
 // `element_null_stride`. At `mismatch_stride` a value is instead a scalar string (a non-array,
-// non-null value) to exercise the bad-record nullification path. When `key_len > 0`, keys are
-// exactly `key_len` content characters instead of a hashed width. The same code path computes the
-// row size (when `d_chars == nullptr`) and writes the bytes, so the two passes cannot disagree.
+// non-null value) to exercise the bad-record nullification path. At `escape_stride` an element
+// carries a `\"` escape, which routes the element extraction off the verbatim fast path.
+// When `key_len > 0`, keys are exactly `key_len` content characters instead of a hashed width. The
+// same code path computes the row size (when `d_chars == nullptr`) and writes the bytes, so the two
+// passes cannot disagree.
 struct map_of_array_row_fn {
   cudf::size_type keys_per_row;
   cudf::size_type array_len;
@@ -203,6 +233,7 @@ struct map_of_array_row_fn {
   cudf::size_type element_null_stride;  // 0 disables; else element null when index % stride == 0
   cudf::size_type mismatch_stride;      // 0 disables; else scalar (non-array) value at this cadence
   cudf::size_type key_len;              // 0 = hashed key width; else exactly this many key chars
+  cudf::size_type escape_stride;        // 0 disables; else element carries a \" escape here
 
   cudf::size_type* d_sizes{};
   char* d_chars{};
@@ -229,11 +260,16 @@ struct map_of_array_row_fn {
     };
     // A quoted token seeded deterministically by `seed`. `fixed_width <= 0` selects a hashed width
     // in [1, max_string_width]; otherwise the token has exactly `fixed_width` content characters.
-    auto emit_token = [&](std::uint64_t seed, cudf::size_type fixed_width) {
+    // `escaped` prepends a `\"` escape, which makes the token classify `string_unescape`.
+    auto emit_token = [&](std::uint64_t seed, cudf::size_type fixed_width, bool escaped = false) {
       auto const width = fixed_width > 0
                            ? fixed_width
                            : static_cast<cudf::size_type>(1 + hash_index(seed) % max_string_width);
       emit('"');
+      if (escaped) {
+        emit('\\');
+        emit('"');
+      }
       for (cudf::size_type c = 0; c < width; ++c) {
         emit(static_cast<char>('a' + (seed + c) % 26));
       }
@@ -261,7 +297,8 @@ struct map_of_array_row_fn {
         if (element_null_stride != 0 && element_index % element_null_stride == 0) {
           emit_literal("null");
         } else {
-          emit_token(element_index + element_seed_salt, 0);
+          auto const escaped = escape_stride != 0 && element_index % escape_stride == 0;
+          emit_token(element_index + element_seed_salt, 0, escaped);
         }
       }
       emit(']');
@@ -277,17 +314,20 @@ struct map_of_array_row_fn {
 // in [1, max_string_width]; key widths vary likewise unless `key_name_len > 0`, which forces every
 // key to exactly that many characters. `element_null_pct` / `value_null_pct` inject literal `null`
 // elements (mask #2) / values, i.e. null inner lists (mask #1), at a fixed cadence. `mismatch_pct`
-// injects scalar (non-array, non-null) values to exercise the bad-record nullification path. The
-// column is built entirely on the GPU, so large row counts stay cheap.
+// injects scalar (non-array, non-null) values to exercise the bad-record nullification path.
+// `element_escape_pct` injects `\"` escapes into elements, which routes the element extraction from
+// the verbatim raw-copy fast path onto the unescape transform. The column is built entirely on the
+// GPU, so large row counts stay cheap.
 // Tunable inputs for `generate_map_of_array_input` (designated-initializer friendly so callers set
 // only the fields they need): each `*_pct` is a fraction in [0,1] mapped to a "1 in stride" cadence
 // (0 disables); `key_name_len` <= 0 keeps the default "col" names, > 0 uses keys of exactly that
 // many characters.
 struct map_of_array_options {
-  double element_null_pct = 0.0;
-  double value_null_pct   = 0.0;
-  double mismatch_pct     = 0.0;
-  int key_name_len        = 0;
+  double element_null_pct   = 0.0;
+  double value_null_pct     = 0.0;
+  double mismatch_pct       = 0.0;
+  int key_name_len          = 0;
+  double element_escape_pct = 0.0;
 };
 
 std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
@@ -305,7 +345,8 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
                          .value_null_stride   = to_stride(options.value_null_pct),
                          .element_null_stride = to_stride(options.element_null_pct),
                          .mismatch_stride     = to_stride(options.mismatch_pct),
-                         .key_len             = static_cast<cudf::size_type>(options.key_name_len)};
+                         .key_len             = static_cast<cudf::size_type>(options.key_name_len),
+                         .escape_stride       = to_stride(options.element_escape_pct)};
 
   auto const stream    = cudf::get_default_stream();
   auto const row_count = static_cast<cudf::size_type>(num_rows);
@@ -348,10 +389,12 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
 // Map engine: token-walk parser producing the LIST<STRUCT<STRING,STRING>> raw-map output.
 void BM_from_json_to_raw_map(nvbench::state& state)
 {
-  auto const size_bytes = static_cast<std::size_t>(state.get_int64("size_bytes"));
-  auto const num_keys   = static_cast<int>(state.get_int64("num_keys"));
+  auto const size_bytes  = static_cast<std::size_t>(state.get_int64("size_bytes"));
+  auto const num_keys    = static_cast<int>(state.get_int64("num_keys"));
+  auto const escape_free = state.get_int64("escape_free") != 0;
 
-  auto const json_strings = generate_input(size_bytes, make_all_string_column_types(num_keys));
+  auto const json_strings = generate_input(
+    size_bytes, make_all_string_column_types(num_keys), {.escape_free = escape_free});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -466,7 +509,11 @@ void BM_from_json_to_raw_map_array_values(nvbench::state& state)
   auto const num_rows        = static_cast<std::size_t>(state.get_int64("num_rows"));
   constexpr int keys_per_row = 5;
 
-  auto const json_strings = generate_map_of_array_input(num_rows, keys_per_row, array_len);
+  auto const json_strings = generate_map_of_array_input(
+    num_rows,
+    keys_per_row,
+    array_len,
+    {.element_escape_pct = static_cast<double>(state.get_int64("element_escape_pct")) / 100.0});
 
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
@@ -574,10 +621,15 @@ void BM_from_json_to_raw_map_array_values_type_mismatch(nvbench::state& state)
 // Verification -- MAP<STRING,STRING> path: regression-guards the shared token-tree prelude so the
 // existing from_json_to_raw_map kernel is not slowed by the code now shared with the array path.
 // ============================================================================================
+// `escape_free` selects the value-rendering path: 0 keeps the random values, which the JSON writer
+// always escapes somewhere in the column, so the value extraction takes the unescape transform; 1
+// folds those characters away so it takes the verbatim raw-copy fast path. Presence, not density,
+// is the meaningful axis -- the gate is column-global, so any escape at all opens it.
 NVBENCH_BENCH(BM_from_json_to_raw_map)
   .set_name("from_json_to_raw_map")
   .add_int64_axis("size_bytes", {1'000'000, 10'000'000, 100'000'000})
-  .add_int64_axis("num_keys", {1, 8, 32, 64});
+  .add_int64_axis("num_keys", {1, 8, 32, 64})
+  .add_int64_axis("escape_free", {0, 1});
 
 NVBENCH_BENCH(BM_from_json_to_raw_map_value_width)
   .set_name("from_json_to_raw_map_value_width")
@@ -603,10 +655,15 @@ NVBENCH_BENCH(BM_from_json_to_raw_map_key_name_len)
 // num_rows tops out at 1M: the value-strings output holds num_rows * keys_per_row(5) * array_len
 // strings, which must fit cudf's 2^31 column-size limit. At 10M rows the array_len 3 and 10 cells
 // overflow it, so 1M is the largest count that keeps every array_len cell in range.
+// `element_escape_pct` sweeps the element rendering path: 0 keeps every element on the verbatim
+// raw-copy fast path, 1 is the worst case for the gate (the whole column pays the transform
+// dispatch to unescape almost nothing), and 50 measures the unescape renderer under load. Keys
+// carry no escape at any setting, so this isolates the element gate from the key gate.
 NVBENCH_BENCH(BM_from_json_to_raw_map_array_values)
   .set_name("from_json_to_raw_map_array_values")
   .add_int64_axis("array_len", {1, 3, 10})
-  .add_int64_axis("num_rows", {100'000, 1'000'000});
+  .add_int64_axis("num_rows", {100'000, 1'000'000})
+  .add_int64_axis("element_escape_pct", {0, 1, 50});
 
 // [PERF-OPTIMIZATION TARGET] Null-mask construction (value/element validity) -- tune against this.
 NVBENCH_BENCH(BM_from_json_to_raw_map_array_values_null_density)
