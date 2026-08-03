@@ -122,6 +122,9 @@ ConfigureTest(MAP_UTILS
 ConfigureTest(SUBSTRING_INDEX
     substring_index.cpp)
 
+ConfigureTest(REVERSE_STRINGS
+    reverse_strings.cpp)
+
 ConfigureTest(SHUFFLE_SPLIT
     shuffle_split.cu)
     

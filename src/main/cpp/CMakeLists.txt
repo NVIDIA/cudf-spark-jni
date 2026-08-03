@@ -288,6 +288,7 @@ add_library(
   src/protobuf/protobuf_builders.cu
   src/protobuf/protobuf_kernels.cu
   src/regex_rewrite_utils.cu
+  src/reverse_strings.cu
   src/row_conversion.cu
   src/round_float.cu
   src/shuffle_assemble.cu

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 
 #include "cudf_jni_apis.hpp"
+#include "reverse_strings.hpp"
 #include "uuid.hpp"
 
 extern "C" {
@@ -28,6 +29,20 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_StringUtils_randomUUIDs
   {
     cudf::jni::auto_set_device(env);
     return cudf::jni::release_as_jlong(spark_rapids_jni::random_uuids(row_count, seed));
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_StringUtils_reverseStrings(JNIEnv* env, jclass, jlong input_handle)
+{
+  JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input = reinterpret_cast<cudf::column_view const*>(input_handle);
+    return cudf::jni::release_as_jlong(
+      spark_rapids_jni::reverse_strings(cudf::strings_column_view{*input}));
   }
   JNI_CATCH(env, 0);
 }
