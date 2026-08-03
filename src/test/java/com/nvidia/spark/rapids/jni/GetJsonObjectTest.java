@@ -21,6 +21,7 @@ import ai.rapids.cudf.CudfException;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
@@ -753,9 +754,13 @@ public class GetJsonObjectTest {
         Arrays.asList(namedPath("a"), namedPath("b")));
     List<List<JSONUtils.PathInstructionJni>> wildcardPaths = Arrays.asList(
         Arrays.asList(wildcardPath()));
+    List<List<JSONUtils.PathInstructionJni>> emptyPaths =
+        Collections.singletonList(Collections.emptyList());
     try (ColumnVector input = ColumnVector.fromStrings("{\"a\":{\"b\":\"value\"}}")) {
       assertThrows(IllegalArgumentException.class, () -> JSONUtils.getJsonObjectMultiplePaths(
           input, wildcardPaths, JSONUtils.NamedFieldMatchPolicy.FIRST_NON_NULL));
+      assertThrows(IllegalArgumentException.class, () -> JSONUtils.getJsonObjectMultiplePaths(
+          input, emptyPaths, JSONUtils.NamedFieldMatchPolicy.FIRST_NON_NULL));
       assertThrows(IllegalArgumentException.class, () -> JSONUtils.getJsonObjectMultiplePaths(
           input, nestedPaths, JSONUtils.NamedFieldMatchPolicy.LAST_NON_NULL));
       assertThrows(IllegalArgumentException.class, () -> JSONUtils.getJsonObjectMultiplePaths(

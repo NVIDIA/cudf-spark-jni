@@ -1166,19 +1166,21 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<rmm::device_uvector<char>> scratch_buffers;
   std::vector<rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>> out_stringviews;
   std::vector<json_path_processing_data> h_path_data;
+  std::vector<bool> named_path_selection_flags;
   scratch_buffers.reserve(json_paths.size());
   out_stringviews.reserve(json_paths.size());
   h_path_data.reserve(json_paths.size());
+  named_path_selection_flags.reserve(json_paths.size());
 
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
     auto const& path = json_paths[idx];
     if (path.size() > MAX_JSON_PATH_DEPTH) {
       CUDF_FAIL("JSON Path has depth exceeds the maximum allowed value.");
     }
-    auto const use_named_path_selection =
+    named_path_selection_flags.emplace_back(
       !path.empty() && std::all_of(path.begin(), path.end(), [](auto const& instruction) {
         return std::get<0>(instruction) == path_instruction_type::NAMED;
-      });
+      }));
 
     scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
     out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
@@ -1190,7 +1192,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                                        scratch_buffers.back().data(),
                                                        d_error_check.data() + idx,
                                                        match_policy,
-                                                       use_named_path_selection});
+                                                       named_path_selection_flags.back()});
   }
   auto d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
@@ -1233,11 +1235,6 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
     if (h_error_check[idx]) {
       oob_indices.emplace_back(idx);
-      auto const& path = json_paths[idx];
-      auto const use_named_path_selection =
-        !path.empty() && std::all_of(path.begin(), path.end(), [](auto const& instruction) {
-          return std::get<0>(instruction) == path_instruction_type::NAMED;
-        });
 
       out_null_masks_and_null_counts.emplace_back(
         cudf::detail::valid_if(out_sview.begin(), out_sview.end(), validator, stream, mr));
@@ -1263,7 +1260,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                   out_char_buffers.back().data(),
                                   d_error_check.data() + idx,
                                   match_policy,
-                                  use_named_path_selection});
+                                  named_path_selection_flags[idx]});
     } else {
       no_oob_indices.emplace_back(idx);
       batch_stringviews.emplace_back(out_sview);
