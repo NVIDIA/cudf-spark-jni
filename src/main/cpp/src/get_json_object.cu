@@ -894,10 +894,7 @@ __device__ named_path_selection select_named_path(json_parser& p,
         }
 
         auto const is_valid = validate_remaining_json(p, max_path_depth_exceeded);
-        return {is_valid,
-                char_range::null(),
-                true,
-                is_valid ? generator.get_output_len() : 0};
+        return {is_valid, char_range::null(), true, is_valid ? generator.get_output_len() : 0};
       }
 
       auto const value_begin = p.current_range().data();
@@ -983,9 +980,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   if (str.size_bytes() > 0) {
     json_parser p{char_range{str}};
     if (path.use_named_path_selection) {
-      auto const can_materialize =
-        path.out_stringviews != nullptr &&
-        path.match_policy == named_field_match_policy::FIRST_NON_NULL;
+      auto const can_materialize = path.out_stringviews != nullptr &&
+                                   path.match_policy == named_field_match_policy::FIRST_NON_NULL;
       auto const selection = select_named_path(p,
                                                path.path_commands,
                                                path.match_policy,
