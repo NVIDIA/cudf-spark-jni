@@ -32,6 +32,10 @@
 #include <cuda/std/algorithm>
 #include <thrust/for_each.h>
 
+#include <stdint.h>
+
+#include <memory>
+
 namespace spark_rapids_jni {
 namespace detail {
 namespace {

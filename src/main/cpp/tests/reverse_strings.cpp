@@ -20,8 +20,13 @@
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
 
+#include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 
+#include <stdint.h>
+
+#include <cstring>
+#include <initializer_list>
 #include <string>
 
 namespace {
@@ -47,6 +52,15 @@ TEST_F(ReverseStringsTests, EmptyAndNulls)
     cudf::test::strings_column_wrapper({"cba", "", "界世"}, {true, false, true});
   auto const reversed = spark_rapids_jni::reverse_strings(cudf::strings_column_view{with_nulls});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*reversed, expected);
+
+  // Valid empty string (not a null) plus a nonzero-offset slice of the input.
+  auto const slice_source = cudf::test::strings_column_wrapper({"prefix", "", "ignored", "世界"},
+                                                               {true, true, false, true});
+  auto const slice        = cudf::slice(slice_source, {1, 4}).front();
+  auto const slice_expected =
+    cudf::test::strings_column_wrapper({"", "ignored", "界世"}, {true, false, true});
+  auto const slice_reversed = spark_rapids_jni::reverse_strings(cudf::strings_column_view{slice});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*slice_reversed, slice_expected);
 }
 
 TEST_F(ReverseStringsTests, WellFormedUtf8)
@@ -89,6 +103,18 @@ TEST_F(ReverseStringsTests, TruncatedTrailingUtf8NoOverread)
      bytes_to_string({0x44, 0x88, 0x8D}),
      bytes_to_string({0xCE, 0xE4, 0xB8, 0x96}),
      bytes_to_string({0x45})});
+
+  auto const result = spark_rapids_jni::reverse_strings(cudf::strings_column_view{input});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, expected);
+}
+
+TEST_F(ReverseStringsTests, DisallowedUtf8LeadBytesAreWidthOne)
+{
+  // Spark treats 0xC0-0xC1 and 0xF5-0xFF as width 1 (same as ASCII/continuation).
+  auto const input = cudf::test::strings_column_wrapper(
+    {bytes_to_string({0x41, 0xC0, 0x42, 0xC1, 0x43, 0xF5, 0x44, 0xFF, 0x45})});
+  auto const expected = cudf::test::strings_column_wrapper(
+    {bytes_to_string({0x45, 0xFF, 0x44, 0xF5, 0x43, 0xC1, 0x42, 0xC0, 0x41})});
 
   auto const result = spark_rapids_jni::reverse_strings(cudf::strings_column_view{input});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, expected);
