@@ -31,9 +31,11 @@ import java.time.zone.ZoneOffsetTransitionRule;
 import java.time.zone.ZoneRules;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.SimpleTimeZone;
 import java.util.TimeZone;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -400,8 +402,48 @@ public class OrcTimezoneInfoTest {
   @Test
   void testExtractDstRuleNoDstReturnsNull() {
     // Asia/Shanghai had DST historically (1940s, 1986-1991) but no current rule.
-    // tz.useDaylightTime() must be false → extractDstRule returns null.
+    // Probing finds no recurring transitions and useDaylightTime() is false.
     assertNull(extractDstRuleFor("Asia/Shanghai"));
+  }
+
+  @Test
+  void testExtractDstRuleProbesBeforeUsingDaylightFlag() {
+    TimeZone tz = new SimpleTimeZone(
+        -8 * 3_600_000,
+        "Synthetic/FalseDaylightFlag",
+        Calendar.MARCH,
+        2,
+        Calendar.SUNDAY,
+        2 * 3_600_000,
+        Calendar.NOVEMBER,
+        1,
+        Calendar.SUNDAY,
+        2 * 3_600_000,
+        3_600_000) {
+      @Override
+      public boolean useDaylightTime() {
+        return false;
+      }
+    };
+    ZoneOffset baseOffset = ZoneOffset.ofHours(-8);
+    ZoneOffsetTransition historical = ZoneOffsetTransition.of(
+        LocalDateTime.of(1900, 1, 1, 0, 0),
+        ZoneOffset.ofHours(-9),
+        baseOffset);
+    ZoneRules rules = ZoneRules.of(
+        baseOffset,
+        baseOffset,
+        Collections.emptyList(),
+        Collections.singletonList(historical),
+        Collections.emptyList());
+
+    assertFalse(tz.useDaylightTime());
+    OrcDstRuleExtractor.DstRule rule = OrcDstRuleExtractor.extractDstRule(
+        tz.getID(), tz, rules);
+    assertNotNull(rule);
+    assertEquals(3_600_000, rule.dstSavings);
+    assertEquals(Calendar.MARCH, rule.startMonth);
+    assertEquals(Calendar.NOVEMBER, rule.endMonth);
   }
 
   @Test

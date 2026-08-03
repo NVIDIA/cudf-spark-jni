@@ -146,10 +146,14 @@ public class GpuTimeZoneDBTest {
   }
 
   private static Long[] getOrcFromUtcBoundaryMicros(String readerTzId) {
+    long minSupportedUs = LocalDateTime.of(1, 1, 1, 0, 0)
+        .toEpochSecond(ZoneOffset.UTC) * MICROS_PER_SECOND;
+    long maxSupportedUs = LocalDateTime.of(9999, 12, 31, 23, 59, 59)
+        .toEpochSecond(ZoneOffset.UTC) * MICROS_PER_SECOND + 999_999L;
     List<Long> values = new ArrayList<>(Arrays.asList(
         null,
-        Long.MIN_VALUE,
-        Long.MIN_VALUE + 1,
+        minSupportedUs,
+        minSupportedUs + 1,
         -3_649_379_812_521_628L,
         -2_957_649_381_472_612L,
         -1_501L,
@@ -161,8 +165,8 @@ public class GpuTimeZoneDBTest {
         999L,
         1_001L,
         514_952_012L,
-        Long.MAX_VALUE - 1,
-        Long.MAX_VALUE));
+        maxSupportedUs - 1,
+        maxSupportedUs));
 
     OrcTimezoneInfo readerInfo = OrcTimezoneInfo.get(readerTzId);
     if (readerInfo.transitions != null) {
@@ -282,6 +286,7 @@ public class GpuTimeZoneDBTest {
     List<String> timezones = Arrays.asList(
         "UTC",
         "America/New_York",
+        "America/Vancouver",
         "America/Los_Angeles",
         "Europe/Paris",
         "Asia/Shanghai",
@@ -354,6 +359,7 @@ public class GpuTimeZoneDBTest {
 
     List<String> timezones = Arrays.asList(
         "America/Los_Angeles",
+        "America/Vancouver",
         "America/Cancun",
         "Asia/Shanghai",
         "Antarctica/DumontDUrville",

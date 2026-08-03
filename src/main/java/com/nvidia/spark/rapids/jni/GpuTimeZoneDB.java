@@ -532,15 +532,36 @@ public class GpuTimeZoneDB {
   }
 
   private static ColumnVector getTransitionsForUtilTZ(OrcTimezoneInfo info) {
-    try (HostColumnVector hcv = HostColumnVector.fromLongs(info.transitions)) {
+    long[] transitions = info.transitions;
+    if (needsTerminalOffsetSentinel(info)) {
+      transitions = Arrays.copyOf(transitions, transitions.length + 1);
+      transitions[transitions.length - 1] = Long.MAX_VALUE;
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromLongs(transitions)) {
       return hcv.copyToDevice();
     }
   }
 
   private static ColumnVector getOffsetsForUtilTZ(OrcTimezoneInfo info) {
-    try (HostColumnVector hcv = HostColumnVector.fromInts(info.offsets)) {
+    int[] offsets = info.offsets;
+    if (needsTerminalOffsetSentinel(info)) {
+      offsets = Arrays.copyOf(offsets, offsets.length + 1);
+      offsets[offsets.length - 1] = offsets[offsets.length - 2];
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromInts(offsets)) {
       return hcv.copyToDevice();
     }
+  }
+
+  private static boolean needsTerminalOffsetSentinel(OrcTimezoneInfo info) {
+    // Native lookup normally falls back to rawOffset beyond the last historical
+    // transition. Some JDK TimeZone implementations instead retain the final
+    // wall offset indefinitely. Keep every timestamp_us lookup inside the table
+    // with a Long.MAX_VALUE-millisecond sentinel when those offsets differ.
+    return info.dstRule == null
+        && info.offsets != null
+        && info.offsets.length > 0
+        && info.offsets[info.offsets.length - 1] != info.rawOffset;
   }
 
   private static Table getTableForUtilTZ(OrcTimezoneInfo info) {
