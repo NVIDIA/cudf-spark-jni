@@ -631,6 +631,10 @@ public class GpuTimeZoneDB {
 
     /**
      * Returns the reader timezone's first transition in the local ORC timestamp frame.
+     *
+     * @return the first transition in microseconds, or {@link Long#MIN_VALUE} if the reader
+     *         timezone has no transitions
+     * @throws IllegalStateException if this context is closed
      */
     public long getReaderFirstTransitionUs() {
       ensureOpen();
