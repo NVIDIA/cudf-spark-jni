@@ -323,6 +323,31 @@ public class GpuTimeZoneDBTest {
   }
 
   @Test
+  void testOrcTimezoneContextConversionFailures() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(0L)) {
+      GpuTimeZoneDB.OrcTimezoneContext closed =
+          GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "UTC");
+      closed.close();
+      assertThrows(IllegalStateException.class,
+          () -> GpuTimeZoneDB.convertOrcTimezones(input, closed));
+      assertThrows(IllegalStateException.class,
+          () -> GpuTimeZoneDB.convertOrcFromUtc(input, closed));
+    }
+
+    try (ColumnVector input = ColumnVector.timestampSecondsFromLongs(0L);
+        GpuTimeZoneDB.OrcTimezoneContext context =
+            GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "UTC")) {
+      assertThrows(CudfException.class,
+          () -> GpuTimeZoneDB.convertOrcTimezones(input, context));
+      assertThrows(CudfException.class,
+          () -> GpuTimeZoneDB.convertOrcFromUtc(input, context));
+    }
+  }
+
+  @Test
   void testReaderFirstTransitionUs() {
     String transitionTzId = "Europe/Paris";
     OrcTimezoneInfo transitionInfo = OrcTimezoneInfo.get(transitionTzId);
