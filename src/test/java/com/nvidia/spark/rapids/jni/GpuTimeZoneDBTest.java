@@ -324,11 +324,13 @@ public class GpuTimeZoneDBTest {
 
   @Test
   void testReaderFirstTransitionUs() {
-    String transitionTzId = "America/Los_Angeles";
+    String transitionTzId = "Europe/Paris";
     OrcTimezoneInfo transitionInfo = OrcTimezoneInfo.get(transitionTzId);
+    assertTrue(transitionInfo.rawOffset > 0);
     try (GpuTimeZoneDB.OrcTimezoneContext context =
         GpuTimeZoneDB.buildOrcTimezoneContext("UTC", transitionTzId)) {
-      assertEquals(TimeUnit.MILLISECONDS.toMicros(transitionInfo.transitions[0]),
+      assertEquals(TimeUnit.MILLISECONDS.toMicros(
+              transitionInfo.transitions[0] + transitionInfo.rawOffset),
           context.getReaderFirstTransitionUs());
     }
 

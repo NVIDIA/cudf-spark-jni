@@ -622,12 +622,16 @@ public class GpuTimeZoneDB {
       this.readerFirstTransitionUs =
           readerTzInfo.transitions == null || readerTzInfo.transitions.length == 0
               ? Long.MIN_VALUE
-              : TimeUnit.MILLISECONDS.toMicros(readerTzInfo.transitions[0]);
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.transitions[0] + readerTzInfo.rawOffset);
       TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone));
       TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone));
       this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
     }
 
+    /**
+     * Returns the reader timezone's first transition in the local ORC timestamp frame.
+     */
     public long getReaderFirstTransitionUs() {
       ensureOpen();
       return readerFirstTransitionUs;
