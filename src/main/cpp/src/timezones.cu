@@ -673,24 +673,26 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   // Shared memory layout: writer transitions, writer offsets, reader transitions, reader offsets
   extern __shared__ char smem[];
 
-  char* ptr = smem;
-  int64_t const *wt_begin, *wt_end, *rt_begin, *rt_end;
-  int32_t const *wo_begin, *ro_begin;
-  stage_side_transitions(writer_args.trans,
-                         writer_args.offsets,
-                         writer_args.trans_count,
-                         ptr,
-                         wt_begin,
-                         wt_end,
-                         wo_begin);
-  stage_side_transitions(reader_args.trans,
-                         reader_args.offsets,
-                         reader_args.trans_count,
-                         ptr,
-                         rt_begin,
-                         rt_end,
-                         ro_begin);
-  __syncthreads();
+  char* ptr               = smem;
+  int64_t const *wt_begin = nullptr, *wt_end = nullptr, *rt_begin = nullptr, *rt_end = nullptr;
+  int32_t const *wo_begin = nullptr, *ro_begin = nullptr;
+  if (writer_reader_rules_differ) {
+    stage_side_transitions(writer_args.trans,
+                           writer_args.offsets,
+                           writer_args.trans_count,
+                           ptr,
+                           wt_begin,
+                           wt_end,
+                           wo_begin);
+    stage_side_transitions(reader_args.trans,
+                           reader_args.offsets,
+                           reader_args.trans_count,
+                           ptr,
+                           rt_begin,
+                           rt_end,
+                           ro_begin);
+    __syncthreads();
+  }
 
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
@@ -751,13 +753,15 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   int32_t reader_trans_count = reader.tz_info_table ? reader.tz_info_table->column(0).size() : 0;
 
   size_t smem_bytes = 0;
-  if (writer_trans_count > 0 && writer_trans_count <= MAX_SMEM_TRANSITIONS) {
-    smem_bytes += writer_trans_count * (sizeof(int64_t) + sizeof(int32_t));
-  }
-  if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
-    // Alignment padding between writer offsets (int32_t) and reader transitions (int64_t)
-    smem_bytes = align_up(smem_bytes, alignof(int64_t));
-    smem_bytes += reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+  if (writer_reader_rules_differ) {
+    if (writer_trans_count > 0 && writer_trans_count <= MAX_SMEM_TRANSITIONS) {
+      smem_bytes += writer_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+    }
+    if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
+      // Alignment padding between writer offsets (int32_t) and reader transitions (int64_t)
+      smem_bytes = align_up(smem_bytes, alignof(int64_t));
+      smem_bytes += reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+    }
   }
 
   int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
