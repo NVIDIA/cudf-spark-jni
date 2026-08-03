@@ -817,9 +817,12 @@ __device__ cudf::timestamp_us convert_orc_from_utc_value(cudf::timestamp_us valu
                                                          tz_side_info const& reader)
 {
   auto const value_us = value.time_since_epoch().count();
-  auto const value_ms = spark_rapids_jni::integer_utils::floor_div(value_us, MICROS_PER_MILLI);
-  auto const offset_lookup_ms = wrapping_subtract(value_ms, reader.raw_offset);
-  auto const offset_ms        = get_transition_index(offset_lookup_ms, reader);
+  auto offset_ms      = reader.raw_offset;
+  if (!reader.is_fixed) {
+    auto const value_ms = spark_rapids_jni::integer_utils::floor_div(value_us, MICROS_PER_MILLI);
+    auto const offset_lookup_ms = wrapping_subtract(value_ms, reader.raw_offset);
+    offset_ms                   = get_transition_index(offset_lookup_ms, reader);
+  }
   auto const result_us =
     wrapping_subtract(value_us, static_cast<int64_t>(offset_ms) * MICROS_PER_MILLI);
   return cudf::timestamp_us{cudf::duration_us{result_us}};
@@ -835,17 +838,19 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               orc_tz_side_kernel_args reader_args)
 {
   extern __shared__ char smem[];
-  char* ptr = smem;
-  int64_t const *rt_begin, *rt_end;
-  int32_t const* ro_begin;
-  stage_side_transitions(reader_args.trans,
-                         reader_args.offsets,
-                         reader_args.trans_count,
-                         ptr,
-                         rt_begin,
-                         rt_end,
-                         ro_begin);
-  __syncthreads();
+  char* ptr               = smem;
+  int64_t const *rt_begin = nullptr, *rt_end = nullptr;
+  int32_t const* ro_begin = nullptr;
+  if (!reader_args.is_fixed) {
+    stage_side_transitions(reader_args.trans,
+                           reader_args.offsets,
+                           reader_args.trans_count,
+                           ptr,
+                           rt_begin,
+                           rt_end,
+                           ro_begin);
+    __syncthreads();
+  }
 
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
@@ -855,7 +860,8 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               ro_begin,
                               reader_args.initial_offset,
                               reader_args.raw_offset,
-                              reader_args.dst};
+                              reader_args.dst,
+                              reader_args.is_fixed};
     output[idx] = convert_orc_from_utc_value(input[idx], reader);
   }
 }
@@ -879,6 +885,7 @@ std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& inpu
   int32_t const* reader_offsets_ptr =
     reader.tz_info_table ? reader.tz_info_table->column(1).begin<int32_t>() : nullptr;
   int32_t reader_trans_count = reader.tz_info_table ? reader.tz_info_table->column(0).size() : 0;
+  auto const is_reader_fixed = reader_trans_count == 0 && !reader.dst.has_dst;
   size_t smem_bytes          = 0;
   if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
     smem_bytes = reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
@@ -889,7 +896,8 @@ std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& inpu
                                                    reader_trans_count,
                                                    reader.initial_offset,
                                                    reader.raw_offset,
-                                                   reader.dst};
+                                                   reader.dst,
+                                                   is_reader_fixed};
   int32_t num_blocks       = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
