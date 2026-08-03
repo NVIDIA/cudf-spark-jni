@@ -798,6 +798,8 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 struct named_path_selection {
   bool valid;
   char_range value;
+  bool materialized{};
+  cudf::size_type output_size{};
 };
 
 /**
@@ -824,16 +826,17 @@ __device__ bool validate_remaining_json(json_parser& p, int8_t* max_path_depth_e
  * @brief Select a non-null terminal value for a path containing only named
  * instructions.
  *
- * This scanner never writes to the output buffer. It walks matched nested
- * objects with a single parser and a path-depth counter. A failed suffix
- * therefore cannot leave partial output in another row's scratch space. The
- * selected terminal range is replayed by `evaluate_path` exactly once after the
- * entire JSON input has been validated.
+ * This scanner walks matched nested objects with a single parser and a path-depth counter. On the
+ * initial FIRST_NON_NULL pass it can materialize the selected terminal directly into scratch to
+ * avoid a second traversal. If trailing validation then fails, the caller discards that scratch
+ * and forces an exact-size rebuild. LAST_NON_NULL and exact-size retries capture the selected
+ * terminal range without writing, then replay it only after the entire JSON input is validated.
  */
 __device__ named_path_selection select_named_path(json_parser& p,
                                                   cudf::device_span<path_instruction const> path,
                                                   named_field_match_policy match_policy,
-                                                  int8_t* max_path_depth_exceeded)
+                                                  int8_t* max_path_depth_exceeded,
+                                                  char* out_buf)
 {
   auto selected = char_range::null();
   auto token    = p.next_token();
@@ -877,6 +880,26 @@ __device__ named_path_selection select_named_path(json_parser& p,
 
     auto const is_terminal_match = is_name_matched && path_depth + 1 == path.size();
     if (is_terminal_match && token != json_token::VALUE_NULL) {
+      if (out_buf != nullptr && match_policy == named_field_match_policy::FIRST_NON_NULL) {
+        json_generator generator{};
+        bool materialization_succeeded = true;
+        if (token == json_token::VALUE_STRING) {
+          generator.write_raw(p, out_buf);
+        } else {
+          materialization_succeeded = generator.copy_current_structure(p, out_buf);
+        }
+        if (!materialization_succeeded) {
+          if (p.max_nesting_depth_exceeded()) { set_device_flag(max_path_depth_exceeded); }
+          return {false, char_range::null(), true, 0};
+        }
+
+        auto const is_valid = validate_remaining_json(p, max_path_depth_exceeded);
+        return {is_valid,
+                char_range::null(),
+                true,
+                is_valid ? generator.get_output_len() : 0};
+      }
+
       auto const value_begin = p.current_range().data();
       if (!p.try_skip_children()) {
         if (p.max_nesting_depth_exceeded()) { set_device_flag(max_path_depth_exceeded); }
@@ -960,9 +983,23 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   if (str.size_bytes() > 0) {
     json_parser p{char_range{str}};
     if (path.use_named_path_selection) {
-      auto const selection =
-        select_named_path(p, path.path_commands, path.match_policy, max_path_depth_exceeded);
-      if (selection.valid && !selection.value.is_null()) {
+      auto const can_materialize =
+        path.out_stringviews != nullptr &&
+        path.match_policy == named_field_match_policy::FIRST_NON_NULL;
+      auto const selection = select_named_path(p,
+                                               path.path_commands,
+                                               path.match_policy,
+                                               max_path_depth_exceeded,
+                                               can_materialize ? dst : nullptr);
+      if (selection.materialized) {
+        is_valid = selection.valid;
+        out_size = selection.output_size;
+        if (!is_valid) {
+          // The first pass may have written before detecting invalid trailing JSON. Rebuild this
+          // path in the isolated exact-size pass instead of consuming its scratch buffer.
+          set_device_flag(path.has_out_of_bound);
+        }
+      } else if (selection.valid && !selection.value.is_null()) {
         json_parser selected_parser{selection.value};
         cuda::std::tie(is_valid, out_size) =
           evaluate_path(selected_parser,

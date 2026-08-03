@@ -725,6 +725,40 @@ public class GetJsonObjectTest {
   }
 
   @Test
+  void getJsonObjectFirstNonNullLongOutputRebuildTest() {
+    List<List<JSONUtils.PathInstructionJni>> paths = Arrays.asList(
+        Arrays.asList(namedPath("k")));
+    String controls = repeat("\n", 512);
+    String longOutput = "[\"" + repeat("\\n", 512) + "\"]";
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+        "{\"k\":[\"" + controls + "\"],\"broken\":}",
+        "{\"k\":\"sentinel\"}");
+         ColumnVector expected = ColumnVector.fromStrings(null, "sentinel")) {
+      ColumnVector[] actual = JSONUtils.getJsonObjectMultiplePaths(
+          input, paths, JSONUtils.NamedFieldMatchPolicy.FIRST_NON_NULL);
+      try {
+        assertColumnsAreEqual(expected, actual[0]);
+      } finally {
+        actual[0].close();
+      }
+    }
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+        "{\"k\":null,\"k\":[\"" + controls + "\"]}",
+        "{\"k\":\"sentinel\"}");
+         ColumnVector expected = ColumnVector.fromStrings(longOutput, "sentinel")) {
+      ColumnVector[] actual = JSONUtils.getJsonObjectMultiplePaths(
+          input, paths, JSONUtils.NamedFieldMatchPolicy.FIRST_NON_NULL);
+      try {
+        assertColumnsAreEqual(expected, actual[0]);
+      } finally {
+        actual[0].close();
+      }
+    }
+  }
+
+  @Test
   void getJsonObjectMultiplePathsLastNonNullTest() {
     List<List<JSONUtils.PathInstructionJni>> paths = Arrays.asList(
         Arrays.asList(namedPath("k0")),
