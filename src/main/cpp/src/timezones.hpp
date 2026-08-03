@@ -181,6 +181,7 @@ struct orc_tz_side {
  * @param stream CUDA stream.
  * @param mr Device memory resource.
  * @return converted column with the same type as input.
+ * @throws cudf::logic_error If input is not TIMESTAMP_MICROSECONDS.
  */
 [[nodiscard]] std::unique_ptr<cudf::column> convert_orc_from_utc(
   cudf::column_view const& input,
