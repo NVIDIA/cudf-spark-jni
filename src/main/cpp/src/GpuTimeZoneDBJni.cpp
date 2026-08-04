@@ -140,7 +140,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
   jlong reader_tz_info_table,
   jint reader_tz_initial_offset,
   jint reader_tz_raw_offset,
-  jintArray reader_dst_rule)
+  jintArray reader_dst_rule,
+  jboolean writer_reader_rules_differ)
 {
   JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
 
@@ -160,7 +161,38 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
     auto const reader = spark_rapids_jni::orc_tz_side{
       reader_tz_info_tab, reader_tz_initial_offset, reader_tz_raw_offset, reader_dst};
     return cudf::jni::release_as_jlong(spark_rapids_jni::convert_orc_writer_reader_timezones(
-      *input, static_cast<int64_t>(writer_tz_offset_at_orc_2015_base_us), writer, reader));
+      *input,
+      static_cast<int64_t>(writer_tz_offset_at_orc_2015_base_us),
+      writer,
+      reader,
+      cudf::get_default_stream(),
+      cudf::get_current_device_resource_ref(),
+      writer_reader_rules_differ));
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOrcFromUtcWithRules(
+  JNIEnv* env,
+  jclass,
+  jlong input_handle,
+  jlong reader_tz_info_table,
+  jint reader_tz_initial_offset,
+  jint reader_tz_raw_offset,
+  jintArray reader_dst_rule)
+{
+  JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
+
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input              = reinterpret_cast<cudf::column_view const*>(input_handle);
+    auto const reader_tz_info_tab = reinterpret_cast<cudf::table_view const*>(reader_tz_info_table);
+    auto const reader_dst         = parse_dst_rule(env, reader_dst_rule);
+    cudf::jni::check_java_exception(env);
+    auto const reader = spark_rapids_jni::orc_tz_side{
+      reader_tz_info_tab, reader_tz_initial_offset, reader_tz_raw_offset, reader_dst};
+    return cudf::jni::release_as_jlong(spark_rapids_jni::convert_orc_from_utc(*input, reader));
   }
   JNI_CATCH(env, 0);
 }
