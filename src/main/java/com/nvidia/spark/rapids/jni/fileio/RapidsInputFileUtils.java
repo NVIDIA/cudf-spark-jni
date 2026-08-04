@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Objects;
 
 final class RapidsInputFileUtils {
+  private static final String INPUT_FILE_NULL_MESSAGE = "inputFile can't be null";
+
   private RapidsInputFileUtils() {
   }
 
@@ -84,7 +86,7 @@ final class RapidsInputFileUtils {
       HostMemoryBuffer output,
       List<RapidsInputFile.CopyRange> copyRanges,
       int copyBufferSize) {
-    Objects.requireNonNull(inputFile, "inputFile can't be null");
+    Objects.requireNonNull(inputFile, INPUT_FILE_NULL_MESSAGE);
     if (copyBufferSize <= 0) {
       throw new IllegalArgumentException("copyBufferSize must be positive");
     }
@@ -96,7 +98,7 @@ final class RapidsInputFileUtils {
       HostMemoryBuffer output,
       List<RapidsInputFile.CopyRange> copyRanges,
       byte[] copyBuffer) {
-    Objects.requireNonNull(inputFile, "inputFile can't be null");
+    Objects.requireNonNull(inputFile, INPUT_FILE_NULL_MESSAGE);
     Objects.requireNonNull(copyBuffer, "copyBuffer can't be null");
     if (copyBuffer.length == 0) {
       throw new IllegalArgumentException("copyBuffer must not be empty");
@@ -108,7 +110,7 @@ final class RapidsInputFileUtils {
       RapidsInputFile inputFile,
       HostMemoryBuffer output,
       List<RapidsInputFile.CopyRange> copyRanges) {
-    Objects.requireNonNull(inputFile, "inputFile can't be null");
+    Objects.requireNonNull(inputFile, INPUT_FILE_NULL_MESSAGE);
     Objects.requireNonNull(output, "output can't be null");
     Objects.requireNonNull(copyRanges, "copyRanges can't be null");
 
