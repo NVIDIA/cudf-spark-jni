@@ -4,9 +4,9 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/6e3ed1e52479c17fca9904ce6508095cffc57b06.tar.gz",
-      "url_hash" : "SHA256=0257d1da74269940617df55ac32ace32b3893640914a110ab28926ed9d8e03ea",
-      "version" : "3.4.1"
+      "url" : "https://github.com/NVIDIA/cccl/archive/9d65c77f9763cfec20452e4071128d3f0bd2625b.tar.gz",
+      "url_hash" : "SHA256=9c1d579a8fa2d25ab4dcf17457f3811008eb969cee740ce37eddabd1076fb3e1",
+      "version" : "3.4.3"
     },
     "GTest" : 
     {
