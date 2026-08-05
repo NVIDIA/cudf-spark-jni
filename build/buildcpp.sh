@@ -141,14 +141,14 @@ cudf_fingerprint_compare_lines() {
 # Write one manifest: the cmp. lines plus RECORD-only provenance. Single-shot overwrite (">"), so
 # a rebuild replaces it; appending would duplicate lines and break the reuse check's single greps.
 cudf_fingerprint_stamp() {
-  local manifest="$1" content cudf_sha gcc_ver nvcc_ver
+  local manifest="$1" nonce="${2:-$SEED_NONCE}" content cudf_sha gcc_ver nvcc_ver
   cudf_sha="$(git -C "$CUDF_PATH" rev-parse HEAD 2>/dev/null)" || cudf_sha=unknown
   gcc_ver="$(gcc -dumpfullversion 2>/dev/null)" || gcc_ver=unknown
   nvcc_ver="$(set -o pipefail; nvcc --version 2>/dev/null | grep -o 'V[0-9][0-9.]*' | head -1)" \
     || nvcc_ver=unknown
   content="$(
     cudf_fingerprint_compare_lines
-    echo "seed_nonce=$SEED_NONCE"
+    echo "seed_nonce=$nonce"
     echo "cudf_sha=$cudf_sha"
     echo "gcc=$gcc_ver"
     echo "nvcc=$nvcc_ver"
@@ -169,10 +169,6 @@ if [[ "$CUDF_REUSE_PREBUILT" == "true" ]]; then
     || { echo "ERROR: no prebuilt libcudfjni.a at $LIBCUDFJNI_BUILD_PATH" >&2; exit 1; }
   [[ -f "$LIBCUDFJNI_BUILD_PATH/_deps/arrow-build/release/libarrow.a" ]] \
     || { echo "ERROR: incomplete libcudfjni _deps (arrow)" >&2; exit 1; }
-  # jar packaging copies libnvcomp*.so from here (pom.xml copy-native-libs) but does not fail if
-  # absent, so a trimmed prebuilt would silently ship a jar without nvcomp.
-  [[ -f "$LIBCUDFJNI_BUILD_PATH/libnvcomp.so" ]] \
-    || { echo "ERROR: prebuilt libcudfjni missing libnvcomp.so (jar packaging)" >&2; exit 1; }
   if [[ "$BUILD_TESTS" == "ON" || "$BUILD_BENCHMARKS" == "ON" ]]; then
     [[ -d "$LIBCUDF_INSTALL_PATH/src/cudftestutil" ]] \
       || { echo "ERROR: test/bench reuse needs installed testutil (src/cudftestutil); re-seed" >&2
@@ -217,6 +213,26 @@ if [[ "$CUDF_REUSE_PREBUILT" == "true" ]]; then
       exit 1
     fi
   fi
+  # Reuse skips apply-patches but still compiles cuDF's Java from CUDF_PATH, so that source must
+  # ALREADY carry the project patches (e.g. the static-nvcomp NativeDepsLoader change) or the jar
+  # fails at native initialization. Verify each patch is present (reverse-applies cleanly) without
+  # mutating the source; the seed's own submodule qualifies. Force downgrades to a warning.
+  PATCH_DIR="$PROJECT_BASE_DIR/patches"
+  if [[ -d "$PATCH_DIR" ]]; then
+    while IFS= read -r -d '' patch; do
+      if ! git -C "$CUDF_PATH" apply --reverse --check "$patch" 2>/dev/null; then
+        if [[ "$CUDF_REUSE_FORCE" == "true" ]]; then
+          echo "WARNING: cudf.path missing patch $(basename "$patch") (overridden)" >&2
+        else
+          echo "ERROR: cudf.path ($CUDF_PATH) is missing project patch $(basename "$patch")." \
+            "Reuse compiles cuDF Java from this source, which must be patched: run" \
+            "build/apply-patches on it, point at the seed's patched submodule, or pass" \
+            "-Dcudf.reuse.force=true." >&2
+          exit 1
+        fi
+      fi
+    done < <(find "$PATCH_DIR" -maxdepth 1 -type f -print0 | sort -zV)
+  fi
   # Non-enforcing cudf-source skew warning (enforce jni pins, not cudf): if CUDF_PATH's commit
   # differs from the prebuilt's cudf_sha, the native/JNI surface may diverge but fails loudly
   # later (phase-3 link or a runtime UnsatisfiedLinkError). Warn early; never block.
@@ -241,6 +257,7 @@ else
   cd "$LIBCUDF_BUILD_PATH"
 
   # Skip explicit cudf cmake configuration if it appears it has already configured
+  LIBCUDF_CONFIGURED=false
   if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.txt ]]; then
     echo "Configuring cudf native libs"
     cmake "$CUDF_PATH/cpp" \
@@ -261,6 +278,7 @@ else
       -DLIBCUDF_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
       -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
       -C="$CUDF_PIN_PATH/setup.cmake"
+    LIBCUDF_CONFIGURED=true
   fi
   # submodule-sync.sh phase 1 calls this script with LIBCUDF_CONFIGURE_ONLY=ON
   if [[ $LIBCUDF_CONFIGURE_ONLY == ON ]]; then
@@ -269,7 +287,14 @@ else
   fi
   echo "Building cudf native libs"
   cmake --build "$LIBCUDF_BUILD_PATH" --target install "-j$CPP_PARALLEL_LEVEL"
-  cudf_fingerprint_stamp "$LIBCUDF_INSTALL_PATH/cudf-prebuilt-fingerprint.txt"
+  # Stamp the reusable fingerprint only when we actually (re)configured. rapids-cmake freezes the
+  # resolved CMAKE_CUDA_ARCHITECTURES (and other ABI inputs) into CMakeCache on the first configure
+  # and ignores later env changes, so on a skipped reconfigure libcudf.a still reflects the prior
+  # config; re-stamping from the requested env would record an ABI that never took effect. Keeping
+  # the existing manifest leaves it matching the built libcudf.a.
+  if [[ "$LIBCUDF_CONFIGURED" == "true" ]]; then
+    cudf_fingerprint_stamp "$LIBCUDF_INSTALL_PATH/cudf-prebuilt-fingerprint.txt"
+  fi
 fi
 
 #
@@ -301,7 +326,13 @@ else
 
   echo "Building cudfjni native libs"
   cmake --build "$LIBCUDFJNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"
-  cudf_fingerprint_stamp "$LIBCUDFJNI_BUILD_PATH/cudf-prebuilt-fingerprint.txt"
+  # Inherit the libcudf manifest's nonce so the install/libcudfjni pair stays coherent when a warm
+  # rebuild skipped the libcudf (re)configure+restamp: the pair identity tracks the libcudf build
+  # generation, not this run. Empty (libcudf never stamped) falls back to this run's nonce.
+  libcudf_manifest="$LIBCUDF_INSTALL_PATH/cudf-prebuilt-fingerprint.txt"
+  libcudf_nonce="$(grep '^seed_nonce=' "$libcudf_manifest" 2>/dev/null | head -1)"
+  cudf_fingerprint_stamp "$LIBCUDFJNI_BUILD_PATH/cudf-prebuilt-fingerprint.txt" \
+    "${libcudf_nonce#seed_nonce=}"
 fi
 
 #

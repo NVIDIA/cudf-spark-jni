@@ -113,9 +113,10 @@ build. When several local checkouts build the same cudf commit, one checkout can
 build them once and the others can reuse the result with `-Dcudf.reuse.prebuilt=true`, which
 can significantly reduce the total build time. Reuse requires BOTH the cudf source and the prebuilt:
 
-* **cudf source** — `-Dcudf.path=<dir>`: a populated `thirdparty/cudf` submodule or any cudf
-  checkout. The source is still required because Maven build of this project always compiles
-  cudf's Java classes from it, and the native build reads its CMake configuration and headers.
+* **cudf source** — `-Dcudf.path=<dir>`: a populated, patched `thirdparty/cudf` submodule or cudf
+  checkout (a git work tree). The source is required because Maven build of this project always
+  compiles cuDF's Java classes from it, and the native build reads its CMake configuration and
+  headers; it must carry the project patches, which the seed's own submodule already has.
 * **cudf prebuilt** — `-Dlibcudf.install.path=<dir>` (a libcudf install tree) plus
   `-Dlibcudfjni.build.path=<dir>` (a libcudfjni build tree, produced by compiling cudf-java native
   sources), both produced together by a previous normal build.
@@ -127,11 +128,13 @@ mvn package -Dcudf.reuse.prebuilt=true \
     -Dlibcudfjni.build.path=/path/to/prebuilt/libcudfjni
 ```
 
-Reuse automatically skips the git submodule check and the cudf patch steps, so no
-`-Dsubmodule.check.skip` or patch-skip flags are needed — the build works even when the
-`thirdparty/cudf` submodule is empty. No cudf code will be recompiled, only the pre-built
-`libcudf.a`, `libcudfjni.a` plus other dependency libraries shipped inside the prebuilt trees
-will be used during the linking step.
+Reuse skips building libcudf/libcudfjni from the submodule and the git submodule check, so no
+`-Dsubmodule.check.skip` flag is needed. It does NOT patch the cuDF source: because Maven still
+compiles cuDF's Java from `-Dcudf.path`, that source must already carry the project patches — the
+seed's own submodule qualifies, since its normal build patched it. Reuse verifies the patches are
+present and fails with guidance on an unpatched source (override with `-Dcudf.reuse.force=true`).
+No cuDF native code is recompiled; only the pre-built `libcudf.a`, `libcudfjni.a`, and the other
+dependency libraries inside the prebuilt trees are linked.
 
 Notes:
 
@@ -149,6 +152,9 @@ Notes:
 
 To enforce a prebuilt to have the same dependency pins and ABI-affecting options as the current build, every
 normal build generates a `cudf-prebuilt-fingerprint.txt` manifest in prebuilt trees of cudf and cudf-java.
+The libcudf manifest reflects the settings from its last configure (libcudf is configured once, see
+above) and is refreshed only on (re)configure, so it always matches the built `libcudf.a`; force a
+reconfigure with `-Dlibcudf.build.configure=true` to refresh a prebuilt after an ABI change.
 A reuse build recomputes the fingerprints from the current checkout to validate against the prebuilt's
 fingerprints. If no such fingerprints are found or the prebuilt fingerprints do not match, an error
 will be thrown.
