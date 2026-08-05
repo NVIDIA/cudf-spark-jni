@@ -70,6 +70,13 @@
       "git_url" : "https://github.com/apache/arrow-nanoarrow.git",
       "version" : "0.8.0"
     },
+    "nvbench" : 
+    {
+      "always_download" : true,
+      "url" : "https://github.com/NVIDIA/nvbench/archive/e4b087805b002af49d357622cb37a8cc82894628.tar.gz",
+      "url_hash" : "SHA256=0253e356ecd0d30a68c367c3d1e2f20a0321fd9e2b1c969d0a208f2a7f3aaad8",
+      "version" : "0.0"
+    },
     "nvtx3" : 
     {
       "always_download" : true,
