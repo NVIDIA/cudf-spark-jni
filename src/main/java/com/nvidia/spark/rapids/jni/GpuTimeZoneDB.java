@@ -532,15 +532,36 @@ public class GpuTimeZoneDB {
   }
 
   private static ColumnVector getTransitionsForUtilTZ(OrcTimezoneInfo info) {
-    try (HostColumnVector hcv = HostColumnVector.fromLongs(info.transitions)) {
+    long[] transitions = info.transitions;
+    if (needsTerminalOffsetSentinel(info)) {
+      transitions = Arrays.copyOf(transitions, transitions.length + 1);
+      transitions[transitions.length - 1] = Long.MAX_VALUE;
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromLongs(transitions)) {
       return hcv.copyToDevice();
     }
   }
 
   private static ColumnVector getOffsetsForUtilTZ(OrcTimezoneInfo info) {
-    try (HostColumnVector hcv = HostColumnVector.fromInts(info.offsets)) {
+    int[] offsets = info.offsets;
+    if (needsTerminalOffsetSentinel(info)) {
+      offsets = Arrays.copyOf(offsets, offsets.length + 1);
+      offsets[offsets.length - 1] = offsets[offsets.length - 2];
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromInts(offsets)) {
       return hcv.copyToDevice();
     }
+  }
+
+  private static boolean needsTerminalOffsetSentinel(OrcTimezoneInfo info) {
+    // Native lookup normally falls back to rawOffset beyond the last historical
+    // transition. Some JDK TimeZone implementations instead retain the final
+    // wall offset indefinitely. Keep every timestamp_us lookup inside the table
+    // with a Long.MAX_VALUE-millisecond sentinel when those offsets differ.
+    return info.dstRule == null
+        && info.offsets != null
+        && info.offsets.length > 0
+        && info.offsets[info.offsets.length - 1] != info.rawOffset;
   }
 
   private static Table getTableForUtilTZ(OrcTimezoneInfo info) {
@@ -581,10 +602,13 @@ public class GpuTimeZoneDB {
     private final int readerInitialOffset;
     private final int readerRawOffset;
     private final int[] readerDstRule;
+    private final long readerFirstTransitionUs;
+    private final boolean writerReaderRulesDiffer;
     private boolean closed;
 
     private OrcTimezoneContext(Table writerTzInfoTable, Table readerTzInfoTable,
-        String writerTimezone, OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
+        String writerTimezone, String readerTimezone,
+        OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
       this.writerTzInfoTable = writerTzInfoTable;
       this.readerTzInfoTable = readerTzInfoTable;
       this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
@@ -595,6 +619,26 @@ public class GpuTimeZoneDB {
       this.readerInitialOffset = readerTzInfo.initialOffset;
       this.readerRawOffset = readerTzInfo.rawOffset;
       this.readerDstRule = dstRuleToArray(readerTzInfo.dstRule);
+      this.readerFirstTransitionUs =
+          readerTzInfo.transitions == null || readerTzInfo.transitions.length == 0
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.transitions[0] + readerTzInfo.rawOffset);
+      TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone));
+      TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone));
+      this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
+    }
+
+    /**
+     * Returns the reader timezone's first transition in the local ORC timestamp frame.
+     *
+     * @return the first transition in microseconds, or {@link Long#MIN_VALUE} if the reader
+     *         timezone has no transitions
+     * @throws IllegalStateException if this context is closed
+     */
+    public long getReaderFirstTransitionUs() {
+      ensureOpen();
+      return readerFirstTransitionUs;
     }
 
     private void ensureOpen() {
@@ -634,7 +678,7 @@ public class GpuTimeZoneDB {
       writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
       readerTzInfoTable = getTableForUtilTZ(readerTzInfo);
       return new OrcTimezoneContext(writerTzInfoTable, readerTzInfoTable,
-          writerTimezone, writerTzInfo, readerTzInfo);
+          writerTimezone, readerTimezone, writerTzInfo, readerTzInfo);
     } catch (RuntimeException | Error e) {
       try {
         Arms.closeAll(writerTzInfoTable, readerTzInfoTable);
@@ -667,7 +711,42 @@ public class GpuTimeZoneDB {
         context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
         context.readerInitialOffset,
         context.readerRawOffset,
+        context.readerDstRule,
+        context.writerReaderRulesDiffer));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics using a pre-built
+   * ORC timezone context. The input must be TIMESTAMP_MICROSECONDS.
+   *
+   * @param input values to convert
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, OrcTimezoneContext context) {
+    context.ensureOpen();
+    return new ColumnVector(convertOrcFromUtcWithRules(
+        input.getNativeView(),
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
         context.readerDstRule));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics.
+   *
+   * @param input TIMESTAMP_MICROSECONDS values
+   * @param readerTimezone target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, String readerTimezone) {
+    try (OrcTimezoneContext context =
+        buildOrcTimezoneContext(readerTimezone, readerTimezone)) {
+      return convertOrcFromUtc(input, context);
+    }
   }
 
   private static int[] dstRuleToArray(OrcDstRuleExtractor.DstRule rule) {
@@ -681,14 +760,14 @@ public class GpuTimeZoneDB {
         rule.startDay,
         rule.startDayOfWeek,
         rule.startTime,
-        rule.startTimeMode,
-        rule.startMode,
+        rule.startTimeMode.nativeValue(),
+        rule.startMode.nativeValue(),
         rule.endMonth,
         rule.endDay,
         rule.endDayOfWeek,
         rule.endTime,
-        rule.endTimeMode,
-        rule.endMode
+        rule.endTimeMode.nativeValue(),
+        rule.endMode.nativeValue()
     };
   }
 
@@ -734,6 +813,14 @@ public class GpuTimeZoneDB {
       int writerTzInitialOffset,
       int writerTzRawOffset,
       int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule,
+      boolean writerReaderRulesDiffer);
+
+  private static native long convertOrcFromUtcWithRules(
+      long input,
       long readerTzInfoTable,
       int readerTzInitialOffset,
       int readerTzRawOffset,

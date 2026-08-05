@@ -158,6 +158,8 @@ struct orc_tz_side {
  *        the same frame as Apache ORC. Pass 0 for no adjustment.
  * @param writer writer timezone transition data, offsets, and DST rule.
  * @param reader reader timezone transition data, offsets, and DST rule.
+ * @param writer_reader_rules_differ whether Apache ORC would call
+ *        SerializationUtils.convertBetweenTimezones for this timezone pair.
  * @param stream CUDA stream.
  * @param mr Device memory resource.
  * @return timestamps rebased between writer and reader timezones.
@@ -166,6 +168,23 @@ struct orc_tz_side {
   cudf::column_view const& input,
   int64_t writer_2015_year_base_offset_us,
   orc_tz_side writer,
+  orc_tz_side reader,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
+  bool writer_reader_rules_differ   = true);
+
+/**
+ * @brief Apply Apache ORC SerializationUtils.convertFromUtc semantics.
+ *
+ * @param input TIMESTAMP_MICROSECONDS input column.
+ * @param reader reader timezone transition data, offsets, and DST rule.
+ * @param stream CUDA stream.
+ * @param mr Device memory resource.
+ * @return converted column with the same type as input.
+ * @throws cudf::logic_error If input is not TIMESTAMP_MICROSECONDS.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> convert_orc_from_utc(
+  cudf::column_view const& input,
   orc_tz_side reader,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());

@@ -31,6 +31,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.zone.ZoneOffsetTransition;
 import java.time.zone.ZoneOffsetTransitionRule;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -43,7 +44,7 @@ public class GpuTimeZoneDBTest {
   private static final long MICROS_PER_SECOND = TimeUnit.SECONDS.toMicros(1);
 
   private static TimeZone getTimeZoneForOrc(String timezoneId) {
-    return TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId).getId());
+    return TimeZone.getTimeZone(GpuTimeZoneDB.getZoneId(timezoneId));
   }
 
   private static long orc2015YearBaseOffsetUs(String timezoneId) {
@@ -127,6 +128,69 @@ public class GpuTimeZoneDBTest {
     return ColumnVector.timestampMicroSecondsFromLongs(results);
   }
 
+  private static ColumnVector convertOrcFromUtcOnCPU(
+      Long[] microseconds,
+      String readerTzId) {
+    Long[] results = new Long[microseconds.length];
+    TimeZone readerTz = getTimeZoneForOrc(readerTzId);
+    for (int i = 0; i < microseconds.length; ++i) {
+      Long valueUs = microseconds[i];
+      if (valueUs != null) {
+        long valueMillis = Math.floorDiv(valueUs, microsPerMillis);
+        int offsetMillis = readerTz.getOffset(valueMillis - readerTz.getRawOffset());
+        results[i] = (valueMillis - offsetMillis) * microsPerMillis
+            + Math.floorMod(valueUs, microsPerMillis);
+      }
+    }
+    return ColumnVector.timestampMicroSecondsFromBoxedLongs(results);
+  }
+
+  private static Long[] getOrcFromUtcBoundaryMicros(String readerTzId) {
+    long minSupportedUs = LocalDateTime.of(1, 1, 1, 0, 0)
+        .toEpochSecond(ZoneOffset.UTC) * MICROS_PER_SECOND;
+    long maxSupportedUs = LocalDateTime.of(9999, 12, 31, 23, 59, 59)
+        .toEpochSecond(ZoneOffset.UTC) * MICROS_PER_SECOND + 999_999L;
+    List<Long> values = new ArrayList<>(Arrays.asList(
+        null,
+        minSupportedUs,
+        minSupportedUs + 1,
+        -3_649_379_812_521_628L,
+        -2_957_649_381_472_612L,
+        -1_501L,
+        -1_001L,
+        -999L,
+        -1L,
+        0L,
+        1L,
+        999L,
+        1_001L,
+        514_952_012L,
+        maxSupportedUs - 1,
+        maxSupportedUs));
+
+    OrcTimezoneInfo readerInfo = OrcTimezoneInfo.get(readerTzId);
+    if (readerInfo.transitions != null) {
+      for (long transitionMillis : readerInfo.transitions) {
+        long localTransitionUs =
+            TimeUnit.MILLISECONDS.toMicros(transitionMillis + readerInfo.rawOffset);
+        values.add(localTransitionUs - 1);
+        values.add(localTransitionUs);
+        values.add(localTransitionUs + 1);
+      }
+    }
+
+    for (ZoneOffsetTransitionRule rule :
+        GpuTimeZoneDB.getZoneId(readerTzId).getRules().getTransitionRules()) {
+      long transitionMillis = rule.createTransition(2099).getInstant().toEpochMilli();
+      long localTransitionUs =
+          TimeUnit.MILLISECONDS.toMicros(transitionMillis + readerInfo.rawOffset);
+      values.add(localTransitionUs - 1);
+      values.add(localTransitionUs);
+      values.add(localTransitionUs + 1);
+    }
+    return values.toArray(new Long[0]);
+  }
+
   @Test
   void testIsSupportedTimeZone() {
     // Named zones with ZoneRules.
@@ -191,6 +255,122 @@ public class GpuTimeZoneDBTest {
   }
 
   @Test
+  void testConvertOrcTimezonesFixedOffsetIds() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    long[] microseconds = {0L, -1L, 1L, -2_957_649_381_472_612L};
+    String[][] cases = {
+        {"UTC", "+05:30"},
+        {"+05:30", "UTC"},
+        {"UTC", "EST"},
+        {"EST", "UTC"}
+    };
+
+    for (String[] timezones : cases) {
+      try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(microseconds);
+          ColumnVector expected =
+              convertOrcTimezonesOnCPU(microseconds, timezones[0], timezones[1]);
+          ColumnVector actual =
+              GpuTimeZoneDB.convertOrcTimezones(input, timezones[0], timezones[1])) {
+        assertColumnsAreEqual(expected, actual);
+      }
+    }
+  }
+
+  @Test
+  void testConvertOrcFromUtcAllTimezones() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    List<String> timezones = Arrays.asList(
+        "UTC",
+        "America/New_York",
+        "America/Vancouver",
+        "America/Los_Angeles",
+        "Europe/Paris",
+        "Asia/Shanghai",
+        "Australia/Sydney",
+        "US/Pacific",
+        "PST",
+        "EST",
+        "+05:30");
+
+    for (String readerTzId : timezones) {
+      Long[] values = getOrcFromUtcBoundaryMicros(readerTzId);
+      Long[] padded = new Long[values.length + 2];
+      padded[0] = 123L;
+      System.arraycopy(values, 0, padded, 1, values.length);
+      padded[padded.length - 1] = 456L;
+
+      try (ColumnVector full = ColumnVector.timestampMicroSecondsFromBoxedLongs(padded);
+          ColumnVector input = full.subVector(1, values.length + 1);
+          ColumnVector expected = convertOrcFromUtcOnCPU(values, readerTzId);
+          GpuTimeZoneDB.OrcTimezoneContext context =
+              GpuTimeZoneDB.buildOrcTimezoneContext("UTC", readerTzId);
+          ColumnVector fromContext = GpuTimeZoneDB.convertOrcFromUtc(input, context);
+          ColumnVector fromTimezone = GpuTimeZoneDB.convertOrcFromUtc(input, readerTzId)) {
+        assertColumnsAreEqual(expected, fromContext);
+        assertColumnsAreEqual(expected, fromTimezone);
+      }
+    }
+
+    try (ColumnVector empty =
+            ColumnVector.timestampMicroSecondsFromBoxedLongs(new Long[] {});
+        ColumnVector actual = GpuTimeZoneDB.convertOrcFromUtc(empty, "UTC")) {
+      assertColumnsAreEqual(empty, actual);
+    }
+  }
+
+  @Test
+  void testOrcTimezoneContextConversionFailures() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    try (ColumnVector input = ColumnVector.timestampMicroSecondsFromLongs(0L)) {
+      GpuTimeZoneDB.OrcTimezoneContext closed =
+          GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "UTC");
+      closed.close();
+      assertThrows(IllegalStateException.class,
+          () -> GpuTimeZoneDB.convertOrcTimezones(input, closed));
+      assertThrows(IllegalStateException.class,
+          () -> GpuTimeZoneDB.convertOrcFromUtc(input, closed));
+    }
+
+    try (ColumnVector input = ColumnVector.timestampSecondsFromLongs(0L);
+        GpuTimeZoneDB.OrcTimezoneContext context =
+            GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "UTC")) {
+      assertThrows(CudfException.class,
+          () -> GpuTimeZoneDB.convertOrcTimezones(input, context));
+      assertThrows(CudfException.class,
+          () -> GpuTimeZoneDB.convertOrcFromUtc(input, context));
+    }
+  }
+
+  @Test
+  void testReaderFirstTransitionUs() {
+    String transitionTzId = "Europe/Paris";
+    OrcTimezoneInfo transitionInfo = OrcTimezoneInfo.get(transitionTzId);
+    assertTrue(transitionInfo.rawOffset > 0);
+    try (GpuTimeZoneDB.OrcTimezoneContext context =
+        GpuTimeZoneDB.buildOrcTimezoneContext("UTC", transitionTzId)) {
+      assertEquals(TimeUnit.MILLISECONDS.toMicros(
+              transitionInfo.transitions[0] + transitionInfo.rawOffset),
+          context.getReaderFirstTransitionUs());
+    }
+
+    try (GpuTimeZoneDB.OrcTimezoneContext context =
+        GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "+05:30")) {
+      assertEquals(Long.MIN_VALUE, context.getReaderFirstTransitionUs());
+    }
+
+    GpuTimeZoneDB.OrcTimezoneContext closed =
+        GpuTimeZoneDB.buildOrcTimezoneContext("UTC", "UTC");
+    closed.close();
+    assertThrows(IllegalStateException.class, closed::getReaderFirstTransitionUs);
+  }
+
+  @Test
   void testConvertOrcTimezones() {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
@@ -206,6 +386,7 @@ public class GpuTimeZoneDBTest {
 
     List<String> timezones = Arrays.asList(
         "America/Los_Angeles",
+        "America/Vancouver",
         "America/Cancun",
         "Asia/Shanghai",
         "Antarctica/DumontDUrville",

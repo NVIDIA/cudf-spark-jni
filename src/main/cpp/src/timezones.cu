@@ -464,6 +464,7 @@ struct tz_side_info {
   int32_t initial_offset;
   int32_t raw_offset;
   spark_rapids_jni::dst_rule dst;
+  bool is_fixed;
 };
 
 struct orc_base_offset_info {
@@ -483,6 +484,7 @@ struct orc_tz_side_kernel_args {
   int32_t initial_offset;
   int32_t raw_offset;
   spark_rapids_jni::dst_rule dst;
+  bool is_fixed;
 };
 
 __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info const& side)
@@ -508,15 +510,6 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
   }
 
   return side.offsets_begin[index - 1];
-}
-
-/**
- * @brief Get the fixed offset for a timezone with no transitions and no DST.
- * Returns true if the timezone is a simple fixed-offset timezone (constant offset).
- */
-__device__ static bool is_fixed_offset_tz(tz_side_info const& side)
-{
-  return (side.trans_begin == side.trans_end) && !side.dst.has_dst;
 }
 
 /**
@@ -589,28 +582,27 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
   cudf::timestamp_us ts,
   orc_base_offset_info writer_2015_year_base_offset,
   tz_side_info const& writer,
-  tz_side_info const& reader)
+  tz_side_info const& reader,
+  bool writer_reader_rules_differ)
 {
   int64_t const decoded_us = static_cast<int64_t>(
     cuda::std::chrono::duration_cast<cudf::duration_us>(ts.time_since_epoch()).count());
   int64_t const adjusted_us = apply_orc_base_offset(decoded_us, writer_2015_year_base_offset);
+  if (!writer_reader_rules_differ) { return cudf::timestamp_us{cudf::duration_us{adjusted_us}}; }
 
   // Floor-divide to get epoch millis (handles negative timestamps correctly)
   int64_t const epoch_millis =
     spark_rapids_jni::integer_utils::floor_div(adjusted_us, MICROS_PER_MILLI);
 
-  bool const writer_fixed = is_fixed_offset_tz(writer);
-  bool const reader_fixed = is_fixed_offset_tz(reader);
-
   int32_t writer_offset_millis =
-    writer_fixed ? writer.raw_offset : get_transition_index(epoch_millis, writer);
+    writer.is_fixed ? writer.raw_offset : get_transition_index(epoch_millis, writer);
   int32_t reader_offset_millis =
-    reader_fixed ? reader.raw_offset : get_transition_index(epoch_millis, reader);
+    reader.is_fixed ? reader.raw_offset : get_transition_index(epoch_millis, reader);
 
   int64_t adjusted_milliseconds = epoch_millis + (writer_offset_millis - reader_offset_millis);
 
   int32_t reader_adjusted_offset =
-    reader_fixed ? reader.raw_offset : get_transition_index(adjusted_milliseconds, reader);
+    reader.is_fixed ? reader.raw_offset : get_transition_index(adjusted_milliseconds, reader);
 
   int32_t final_offset_millis = writer_offset_millis - reader_adjusted_offset;
   int64_t final_result = adjusted_us + static_cast<int64_t>(final_offset_millis) * MICROS_PER_MILLI;
@@ -675,29 +667,32 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                            cudf::size_type input_offset,
                            orc_base_offset_info writer_2015_year_base_offset,
                            orc_tz_side_kernel_args writer_args,
-                           orc_tz_side_kernel_args reader_args)
+                           orc_tz_side_kernel_args reader_args,
+                           bool writer_reader_rules_differ)
 {
   // Shared memory layout: writer transitions, writer offsets, reader transitions, reader offsets
   extern __shared__ char smem[];
 
-  char* ptr = smem;
-  int64_t const *wt_begin, *wt_end, *rt_begin, *rt_end;
-  int32_t const *wo_begin, *ro_begin;
-  stage_side_transitions(writer_args.trans,
-                         writer_args.offsets,
-                         writer_args.trans_count,
-                         ptr,
-                         wt_begin,
-                         wt_end,
-                         wo_begin);
-  stage_side_transitions(reader_args.trans,
-                         reader_args.offsets,
-                         reader_args.trans_count,
-                         ptr,
-                         rt_begin,
-                         rt_end,
-                         ro_begin);
-  __syncthreads();
+  char* ptr               = smem;
+  int64_t const *wt_begin = nullptr, *wt_end = nullptr, *rt_begin = nullptr, *rt_end = nullptr;
+  int32_t const *wo_begin = nullptr, *ro_begin = nullptr;
+  if (writer_reader_rules_differ) {
+    stage_side_transitions(writer_args.trans,
+                           writer_args.offsets,
+                           writer_args.trans_count,
+                           ptr,
+                           wt_begin,
+                           wt_end,
+                           wo_begin);
+    stage_side_transitions(reader_args.trans,
+                           reader_args.offsets,
+                           reader_args.trans_count,
+                           ptr,
+                           rt_begin,
+                           rt_end,
+                           ro_begin);
+    __syncthreads();
+  }
 
   cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < num_rows) {
@@ -707,15 +702,17 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               wo_begin,
                               writer_args.initial_offset,
                               writer_args.raw_offset,
-                              writer_args.dst};
+                              writer_args.dst,
+                              writer_args.is_fixed};
     tz_side_info const reader{rt_begin,
                               rt_end,
                               ro_begin,
                               reader_args.initial_offset,
                               reader_args.raw_offset,
-                              reader_args.dst};
-    output[idx] =
-      convert_timestamp_between_timezones(input[idx], writer_2015_year_base_offset, writer, reader);
+                              reader_args.dst,
+                              reader_args.is_fixed};
+    output[idx] = convert_timestamp_between_timezones(
+      input[idx], writer_2015_year_base_offset, writer, reader, writer_reader_rules_differ);
   }
 }
 
@@ -724,7 +721,8 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           spark_rapids_jni::orc_tz_side writer,
                                           spark_rapids_jni::orc_tz_side reader,
                                           rmm::cuda_stream_view stream,
-                                          rmm::device_async_resource_ref mr)
+                                          rmm::device_async_resource_ref mr,
+                                          bool writer_reader_rules_differ)
 {
   SRJ_FUNC_RANGE();
 
@@ -755,30 +753,36 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   int32_t reader_trans_count = reader.tz_info_table ? reader.tz_info_table->column(0).size() : 0;
 
   size_t smem_bytes = 0;
-  if (writer_trans_count > 0 && writer_trans_count <= MAX_SMEM_TRANSITIONS) {
-    smem_bytes += writer_trans_count * (sizeof(int64_t) + sizeof(int32_t));
-  }
-  if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
-    // Alignment padding between writer offsets (int32_t) and reader transitions (int64_t)
-    smem_bytes = align_up(smem_bytes, alignof(int64_t));
-    smem_bytes += reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+  if (writer_reader_rules_differ) {
+    if (writer_trans_count > 0 && writer_trans_count <= MAX_SMEM_TRANSITIONS) {
+      smem_bytes += writer_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+    }
+    if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
+      // Alignment padding between writer offsets (int32_t) and reader transitions (int64_t)
+      smem_bytes = align_up(smem_bytes, alignof(int64_t));
+      smem_bytes += reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+    }
   }
 
   int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
   auto const writer_2015_year_base_offset =
     make_orc_base_offset_info(writer_2015_year_base_offset_us);
-  auto const writer_args = orc_tz_side_kernel_args{writer_trans_ptr,
+  auto const is_writer_fixed = writer_trans_count == 0 && !writer.dst.has_dst;
+  auto const is_reader_fixed = reader_trans_count == 0 && !reader.dst.has_dst;
+  auto const writer_args     = orc_tz_side_kernel_args{writer_trans_ptr,
                                                    writer_offsets_ptr,
                                                    writer_trans_count,
                                                    writer.initial_offset,
                                                    writer.raw_offset,
-                                                   writer.dst};
-  auto const reader_args = orc_tz_side_kernel_args{reader_trans_ptr,
+                                                   writer.dst,
+                                                   is_writer_fixed};
+  auto const reader_args     = orc_tz_side_kernel_args{reader_trans_ptr,
                                                    reader_offsets_ptr,
                                                    reader_trans_count,
                                                    reader.initial_offset,
                                                    reader.raw_offset,
-                                                   reader.dst};
+                                                   reader.dst,
+                                                   is_reader_fixed};
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
@@ -793,9 +797,121 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                input.offset(),
                writer_2015_year_base_offset,
                writer_args,
-               reader_args);
+               reader_args,
+               writer_reader_rules_differ);
   CUDF_CHECK_CUDA(stream.value());
 
+  return results;
+}
+
+__device__ static int64_t wrapping_subtract(int64_t lhs, int64_t rhs)
+{
+  return static_cast<int64_t>(static_cast<uint64_t>(lhs) - static_cast<uint64_t>(rhs));
+}
+
+template <typename T>
+__device__ static T convert_orc_from_utc_value(T value, tz_side_info const& reader);
+
+template <>
+__device__ cudf::timestamp_us convert_orc_from_utc_value(cudf::timestamp_us value,
+                                                         tz_side_info const& reader)
+{
+  auto const value_us = value.time_since_epoch().count();
+  auto offset_ms      = reader.raw_offset;
+  if (!reader.is_fixed) {
+    auto const value_ms = spark_rapids_jni::integer_utils::floor_div(value_us, MICROS_PER_MILLI);
+    auto const offset_lookup_ms = wrapping_subtract(value_ms, reader.raw_offset);
+    offset_ms                   = get_transition_index(offset_lookup_ms, reader);
+  }
+  auto const result_us =
+    wrapping_subtract(value_us, static_cast<int64_t>(offset_ms) * MICROS_PER_MILLI);
+  return cudf::timestamp_us{cudf::duration_us{result_us}};
+}
+
+template <typename T>
+CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
+  convert_orc_from_utc_kernel(T const* __restrict__ input,
+                              cudf::bitmask_type const* __restrict__ null_mask,
+                              T* __restrict__ output,
+                              cudf::size_type num_rows,
+                              cudf::size_type input_offset,
+                              orc_tz_side_kernel_args reader_args)
+{
+  extern __shared__ char smem[];
+  char* ptr               = smem;
+  int64_t const *rt_begin = nullptr, *rt_end = nullptr;
+  int32_t const* ro_begin = nullptr;
+  if (!reader_args.is_fixed) {
+    stage_side_transitions(reader_args.trans,
+                           reader_args.offsets,
+                           reader_args.trans_count,
+                           ptr,
+                           rt_begin,
+                           rt_end,
+                           ro_begin);
+    __syncthreads();
+  }
+
+  cudf::size_type idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < num_rows) {
+    if (null_mask && !cudf::bit_is_set(null_mask, idx + input_offset)) { return; }
+    tz_side_info const reader{rt_begin,
+                              rt_end,
+                              ro_begin,
+                              reader_args.initial_offset,
+                              reader_args.raw_offset,
+                              reader_args.dst,
+                              reader_args.is_fixed};
+    output[idx] = convert_orc_from_utc_value(input[idx], reader);
+  }
+}
+
+template <typename T>
+std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& input,
+                                                   spark_rapids_jni::orc_tz_side reader,
+                                                   rmm::cuda_stream_view stream,
+                                                   rmm::device_async_resource_ref mr)
+{
+  auto results = cudf::make_fixed_width_column(input.type(),
+                                               input.size(),
+                                               cudf::copy_bitmask(input, stream, mr),
+                                               input.null_count(),
+                                               stream,
+                                               mr);
+  if (input.size() == 0) { return results; }
+
+  int64_t const* reader_trans_ptr =
+    reader.tz_info_table ? reader.tz_info_table->column(0).begin<int64_t>() : nullptr;
+  int32_t const* reader_offsets_ptr =
+    reader.tz_info_table ? reader.tz_info_table->column(1).begin<int32_t>() : nullptr;
+  int32_t reader_trans_count = reader.tz_info_table ? reader.tz_info_table->column(0).size() : 0;
+  auto const is_reader_fixed = reader_trans_count == 0 && !reader.dst.has_dst;
+  size_t smem_bytes          = 0;
+  if (reader_trans_count > 0 && reader_trans_count <= MAX_SMEM_TRANSITIONS) {
+    smem_bytes = reader_trans_count * (sizeof(int64_t) + sizeof(int32_t));
+  }
+
+  auto const reader_args   = orc_tz_side_kernel_args{reader_trans_ptr,
+                                                   reader_offsets_ptr,
+                                                   reader_trans_count,
+                                                   reader.initial_offset,
+                                                   reader.raw_offset,
+                                                   reader.dst,
+                                                   is_reader_fixed};
+  int32_t num_blocks       = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
+  auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
+                                               cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
+                                               cuda::dynamic_shared_memory<char[]>(smem_bytes));
+  cuda::launch(stream.value(),
+               launch_config,
+               convert_orc_from_utc_kernel<T>,
+               input.begin<T>(),
+               input.null_mask(),
+               results->mutable_view().begin<T>(),
+               input.size(),
+               input.offset(),
+               reader_args);
+  CUDF_CHECK_CUDA(stream.value());
   return results;
 }
 
@@ -879,9 +995,22 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   orc_tz_side writer,
   orc_tz_side reader,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+  rmm::device_async_resource_ref mr,
+  bool writer_reader_rules_differ)
 {
-  return convert_timezones(input, writer_2015_year_base_offset_us, writer, reader, stream, mr);
+  return convert_timezones(
+    input, writer_2015_year_base_offset_us, writer, reader, stream, mr, writer_reader_rules_differ);
+}
+
+std::unique_ptr<cudf::column> convert_orc_from_utc(cudf::column_view const& input,
+                                                   orc_tz_side reader,
+                                                   rmm::cuda_stream_view stream,
+                                                   rmm::device_async_resource_ref mr)
+{
+  validate_timezone_table(reader.tz_info_table);
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
+               "ORC convertFromUtc input must be TIMESTAMP_MICROSECONDS");
+  return convert_orc_from_utc_typed<cudf::timestamp_us>(input, reader, stream, mr);
 }
 
 std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
