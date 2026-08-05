@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -74,8 +75,7 @@ jlongArray get_json_object_multiple_paths(JNIEnv* env,
                                           jintArray j_path_offsets,
                                           jlong memory_budget_bytes,
                                           jint parallel_override,
-                                          bool use_match_policy,
-                                          named_field_match_policy match_policy)
+                                          std::optional<named_field_match_policy> match_policy)
 {
   using path_type = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
 
@@ -118,12 +118,12 @@ jlongArray get_json_object_multiple_paths(JNIEnv* env,
 
   auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
   auto output =
-    use_match_policy
+    match_policy.has_value()
       ? spark_rapids_jni::get_json_object_multiple_paths(cudf::strings_column_view{*input_cv},
                                                          paths,
                                                          memory_budget_bytes,
                                                          parallel_override,
-                                                         match_policy)
+                                                         *match_policy)
       : spark_rapids_jni::get_json_object_multiple_paths(
           cudf::strings_column_view{*input_cv}, paths, memory_budget_bytes, parallel_override);
 
@@ -203,8 +203,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
                                           j_path_offsets,
                                           memory_budget_bytes,
                                           parallel_override,
-                                          false,
-                                          named_field_match_policy::FIRST_NON_NULL);
+                                          std::nullopt);
   }
   JNI_CATCH(env, 0);
 }
@@ -243,7 +242,6 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePathsWithMatchPo
                                           j_path_offsets,
                                           memory_budget_bytes,
                                           parallel_override,
-                                          true,
                                           static_cast<named_field_match_policy>(j_match_policy));
   }
   JNI_CATCH(env, 0);

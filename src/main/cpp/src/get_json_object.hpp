@@ -54,7 +54,7 @@ std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
   std::vector<std::tuple<path_instruction_type, std::string, int32_t>> const& instructions,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Extract multiple JSON objects from a JSON string based on the specified JSON paths.
@@ -76,7 +76,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   int64_t memory_budget_bytes,
   int32_t parallel_override,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Extract multiple JSON objects using the specified named-field match policy.

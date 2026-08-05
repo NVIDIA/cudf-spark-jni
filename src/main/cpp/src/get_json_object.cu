@@ -47,8 +47,22 @@
 
 #include <algorithm>
 #include <numeric>
+#include <span>
 
 namespace spark_rapids_jni {
+
+namespace {
+
+using path_spec = std::tuple<path_instruction_type, std::string, int32_t>;
+
+bool is_all_named_path(std::span<path_spec const> path)
+{
+  return !path.empty() && std::all_of(path.begin(), path.end(), [](auto const& instruction) {
+    return std::get<0>(instruction) == path_instruction_type::NAMED;
+  });
+}
+
+}  // namespace
 
 namespace detail {
 
@@ -1210,10 +1224,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     if (path.size() > MAX_JSON_PATH_DEPTH) {
       CUDF_FAIL("JSON Path has depth exceeds the maximum allowed value.");
     }
-    named_path_selection_flags.emplace_back(
-      !path.empty() && std::all_of(path.begin(), path.end(), [](auto const& instruction) {
-        return std::get<0>(instruction) == path_instruction_type::NAMED;
-      }));
+    named_path_selection_flags.emplace_back(is_all_named_path(path));
 
     scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
     out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
@@ -1461,17 +1472,11 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
                  match_policy == named_field_match_policy::LAST_NON_NULL,
                "Invalid named-field match policy.");
   if (match_policy == named_field_match_policy::FIRST_NON_NULL) {
-    CUDF_EXPECTS(
-      std::all_of(json_paths.begin(),
-                  json_paths.end(),
-                  [](auto const& path) {
-                    return !path.empty() &&
-                           std::all_of(path.begin(), path.end(), [](auto const& instruction) {
-                             return std::get<0>(instruction) == path_instruction_type::NAMED;
-                           });
-                  }),
-      "FIRST_NON_NULL requires non-empty paths containing only "
-      "named instructions.");
+    CUDF_EXPECTS(std::all_of(json_paths.begin(),
+                             json_paths.end(),
+                             [](auto const& path) { return is_all_named_path(path); }),
+                 "FIRST_NON_NULL requires non-empty paths containing only "
+                 "named instructions.");
   } else {
     CUDF_EXPECTS(std::all_of(json_paths.begin(),
                              json_paths.end(),
