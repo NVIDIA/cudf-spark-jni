@@ -53,6 +53,7 @@
 #include <thrust/uninitialized_fill.h>
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <span>
 #include <unordered_map>

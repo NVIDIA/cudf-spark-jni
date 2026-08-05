@@ -130,9 +130,9 @@ public class FromJsonToStructsTest {
 
     try (ColumnVector emptyInput = ColumnVector.fromStrings();
          ColumnVector emptyOutput =
-             JSONUtils.fromJSONToStructs(emptyInput, schema, getOptions(), true)) {
-      assertEquals(0, emptyOutput.getRowCount());
-      assertEquals(0, emptyOutput.getNullCount());
+             JSONUtils.fromJSONToStructs(emptyInput, schema, getOptions(), true);
+         ColumnVector expectedEmpty = ColumnVector.fromStructs(schema.asHostDataType())) {
+      assertColumnsAreEqual(expectedEmpty, emptyOutput);
     }
 
     try (ColumnVector nullInput = ColumnVector.fromStrings((String) null);
