@@ -298,18 +298,16 @@ inline scalar_decode_kind get_scalar_decode_kind(proto_encoding encoding)
 template <typename T, scalar_decode_kind Decode, typename F>
 constexpr void dispatch_scalar_decoder(F&& f)
 {
-  if constexpr (Decode == scalar_decode_kind::FIXED) {
+  using enum scalar_decode_kind;
+  if constexpr (Decode == FIXED) {
     static_assert(sizeof(T) == 4 || sizeof(T) == 8);
     std::forward<F>(f).template operator()<decode_fixed_value<T>>();
-  } else if constexpr (Decode == scalar_decode_kind::VARINT) {
-    static_assert(std::is_integral_v<T>);
-    std::forward<F>(f).template operator()<decode_varint_value<T, false>>();
-  } else if constexpr (Decode == scalar_decode_kind::ZIGZAG) {
-    static_assert(std::is_integral_v<T> && std::is_signed_v<T>);
-    std::forward<F>(f).template operator()<decode_varint_value<T, true>>();
   } else {
-    static_assert(Decode == scalar_decode_kind::FIXED || Decode == scalar_decode_kind::VARINT ||
-                  Decode == scalar_decode_kind::ZIGZAG);
+    static_assert(Decode == VARINT || Decode == ZIGZAG);
+    static_assert(std::is_integral_v<T>);
+    constexpr bool zigzag = Decode == ZIGZAG;
+    if constexpr (zigzag) { static_assert(std::is_signed_v<T>); }
+    std::forward<F>(f).template operator()<decode_varint_value<T, zigzag>>();
   }
 }
 

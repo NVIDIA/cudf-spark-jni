@@ -638,6 +638,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
       };
 
+      // `std::size_t = I` works around nvcc #445-D diagnostic.
       auto launch_index = [&]<std::size_t I, std::size_t = I>() {
         constexpr auto type = SCALAR_KINDS[I].type;
         using T = std::conditional_t<type == cudf::type_id::BOOL8, uint8_t, cudf::id_to_type<type>>;
