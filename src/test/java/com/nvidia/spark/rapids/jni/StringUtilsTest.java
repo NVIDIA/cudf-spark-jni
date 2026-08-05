@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -91,6 +91,69 @@ public class StringUtilsTest {
         ColumnVector round2 = StringUtils.randomUUIDsWithSeed(rowCount, seed)) {
       // Same seed should generate the same UUIDs.
       assertColumnsAreEqual(round1, round2);
+    }
+  }
+
+  @Test
+  void testFindInSet() {
+    try (
+        ColumnVector sets = ColumnVector.fromStrings(
+            "a,b,c",
+            "b,a,b",
+            "x,y",
+            "",
+            ",",
+            "a,,b",
+            null,
+            "\u00e9,b",
+            "a,\u00e9",
+            "aa,a",
+            "a,aa");
+        ColumnVector expectedB = ColumnVector.fromBoxedInts(
+            2, 1, 0, 0, 0, 3, null, 2, 0, 0, 0);
+        ColumnVector expectedEmpty = ColumnVector.fromBoxedInts(
+            0, 0, 0, 1, 1, 2, null, 0, 0, 0, 0);
+        ColumnVector expectedAccent = ColumnVector.fromBoxedInts(
+            0, 0, 0, 0, 0, 0, null, 1, 2, 0, 0);
+        ColumnVector expectedComma = ColumnVector.fromBoxedInts(
+            0, 0, 0, 0, 0, 0, null, 0, 0, 0, 0);
+        ColumnVector actualB = StringUtils.findInSet(sets, "b");
+        ColumnVector actualEmpty = StringUtils.findInSet(sets, "");
+        ColumnVector actualAccent = StringUtils.findInSet(sets, "\u00e9");
+        ColumnVector actualComma = StringUtils.findInSet(sets, "a,b")) {
+      assertColumnsAreEqual(expectedB, actualB);
+      assertColumnsAreEqual(expectedEmpty, actualEmpty);
+      assertColumnsAreEqual(expectedAccent, actualAccent);
+      assertColumnsAreEqual(expectedComma, actualComma);
+    }
+  }
+
+  @Test
+  void testFindInSetRepeated() {
+    try (
+        ColumnVector sets = ColumnVector.fromStrings(
+            "a,b,c",
+            "x,b",
+            "a,b,c",
+            null,
+            "b",
+            "",
+            ",");
+        ColumnVector expectedB = ColumnVector.fromBoxedInts(
+            2, 2, 2, null, 1, 0, 0);
+        ColumnVector expectedEmpty = ColumnVector.fromBoxedInts(
+            0, 0, 0, null, 0, 1, 1);
+        ColumnVector expectedComma = ColumnVector.fromBoxedInts(
+            0, 0, 0, null, 0, 0, 0);
+        ColumnVector actualB = StringUtils.findInSetRepeated(sets, "b", 5);
+        ColumnVector actualEmpty = StringUtils.findInSetRepeated(sets, "", 5);
+        ColumnVector actualComma = StringUtils.findInSetRepeated(sets, "a,b", 5)) {
+      assertColumnsAreEqual(expectedB, actualB);
+      assertColumnsAreEqual(expectedEmpty, actualEmpty);
+      assertColumnsAreEqual(expectedComma, actualComma);
+      try (ColumnVector tooManyDistinct = StringUtils.findInSetRepeated(sets, "b", 4)) {
+        assertNull(tooManyDistinct);
+      }
     }
   }
 }
