@@ -135,7 +135,6 @@ final class OrcDstRuleExtractor {
    *     {@code rules}
    * @param rules {@link ZoneRules} for the zone
    * @return the recurring DST rule, or {@code null} if the zone has no DST
-   *     ({@code rules.isFixedOffset()} or {@code !tz.useDaylightTime()})
    * @throws IllegalStateException if the zone reports DST but neither
    *     extraction path produces a usable rule — for example, an unsupported
    *     {@link ZoneRules#getTransitionRules()} count (not 0 and not 2), a
@@ -149,7 +148,7 @@ final class OrcDstRuleExtractor {
     // TimeZone.getTimeZone(zoneId) silently returns GMT for such ids on most
     // JVMs, which would leave `tz` describing a different zone than `rules`.
     // Mirrors the guard in OrcTimezoneInfo.buildRuntimeOrcTimezoneInfo.
-    if (rules.isFixedOffset() || !tz.useDaylightTime()) {
+    if (rules.isFixedOffset()) {
       return null;
     }
     // Sanity-check that tz and rules describe the same zone. Both Path A and
@@ -172,6 +171,12 @@ final class OrcDstRuleExtractor {
     DstRule rule = extractDstRuleByProbing(tz);
     if (rule != null) {
       return rule;
+    }
+    // Some JDK timezone implementations report useDaylightTime() == false even
+    // though getOffset() still applies a recurring DST rule in future years.
+    // ORC conversion follows getOffset(), so only trust this flag after probing.
+    if (!tz.useDaylightTime()) {
+      return null;
     }
     rule = extractDstRuleFromZoneRules(timezoneId, tz, rules);
     if (rule != null) {
@@ -351,7 +356,10 @@ final class OrcDstRuleExtractor {
   private static DstRule buildDstRuleFromProbedTransitions(TimeZone tz,
       DstTransitions transitions) {
     DstRule rule = new DstRule();
-    rule.dstSavings = tz.getDSTSavings();
+    rule.dstSavings = tz.useDaylightTime()
+        ? tz.getDSTSavings()
+        : tz.getOffset(transitions.dstOnTransition)
+            - tz.getOffset(transitions.dstOnTransition - 1);
 
     int[] startFields = decodeTransition(transitions.dstOnTransition, tz.getRawOffset());
     rule.startMonth = startFields[0];

@@ -106,6 +106,13 @@ struct shuffle_split_result {
   rmm::device_uvector<size_t> offsets{0, cudf::get_default_stream()};
 };
 
+struct shuffle_split_output {
+  // Keep this as an aggregate instead of std::pair. CUDA 12.9 cudafe++ crashes when GCC 14's
+  // concepts-based std::pair constructor constraints are instantiated for these result types.
+  shuffle_split_result result;
+  shuffle_split_metadata metadata;
+};
+
 /**
  * @brief Performs a split operation on a cudf table, returning a buffer of data containing
  * all of the sub-tables as a contiguous buffer of anonymous bytes.
@@ -133,11 +140,10 @@ struct shuffle_split_result {
  * partition, and a shuffle_split_metadata struct which contains the metadata needed to reconstruct
  * a table using shuffle_assemble.
  */
-std::pair<shuffle_split_result, shuffle_split_metadata> shuffle_split(
-  cudf::table_view const& input,
-  std::vector<cudf::size_type> const& splits,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+shuffle_split_output shuffle_split(cudf::table_view const& input,
+                                   std::vector<cudf::size_type> const& splits,
+                                   rmm::cuda_stream_view stream,
+                                   rmm::device_async_resource_ref mr);
 
 /**
  * @brief Buffer slice representing a portion of the shared allocated buffer

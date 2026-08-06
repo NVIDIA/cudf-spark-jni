@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -867,14 +867,12 @@ TEST_F(ShuffleSplitTests, MixedValidity)
       cudf::table_view expected_t{{static_cast<cudf::column_view>(*expected)}};
 
       // make the concatenated shuffle_split partitions
-      std::vector<
-        std::pair<spark_rapids_jni::shuffle_split_result, spark_rapids_jni::shuffle_split_metadata>>
-        shuf;
+      std::vector<spark_rapids_jni::shuffle_split_output> shuf;
       size_t total_size = 0;
       for (size_t idx = 0; idx < partition_views.size(); idx++) {
         shuf.push_back(spark_rapids_jni::shuffle_split(
           cudf::table_view{{partition_views[idx]}}, {}, stream, mr));
-        total_size += shuf.back().first.partitions->size();
+        total_size += shuf.back().result.partitions->size();
       }
       rmm::device_uvector<uint8_t> full{total_size, stream, mr};
       rmm::device_uvector<size_t> full_offsets{partition_views.size() + 1, stream, mr};
@@ -882,11 +880,11 @@ TEST_F(ShuffleSplitTests, MixedValidity)
       size_t pos = 0;
       for (size_t idx = 0; idx < partition_views.size(); idx++) {
         cudaMemcpy(static_cast<uint8_t*>(full.data()) + pos,
-                   shuf[idx].first.partitions->data(),
-                   shuf[idx].first.partitions->size(),
+                   shuf[idx].result.partitions->data(),
+                   shuf[idx].result.partitions->size(),
                    cudaMemcpyDeviceToDevice);
         h_full_offsets[idx] = pos;
-        pos += shuf[idx].first.partitions->size();
+        pos += shuf[idx].result.partitions->size();
       }
       h_full_offsets[partition_views.size()] = pos;
       cudaMemcpy(full_offsets.data(),
