@@ -47,19 +47,21 @@ struct FromJsonTest : public cudf::test::BaseFixture {};
 namespace {
 
 // One (key, value) entry of a raw-map row, in the exact textual content the raw-map engine emits.
-// A string value (or key) is stored WITHOUT surrounding quotes and JSON-unescaped; every other
-// value kind carries its verbatim raw JSON bytes (see the RawMapOpt_* contract block below).
-using kv = std::pair<std::string, std::string>;
+// A string value (or key) is stored WITHOUT surrounding quotes and JSON-unescaped; a non-string
+// value carries its Spark-rendered text (see the RawMapOpt_* contract block below). A
+// `std::nullopt` value models a SQL NULL value slot: a JSON `null` value keeps the pair but nulls
+// the corresponding entry of the values child.
+using kv = std::pair<std::string, std::optional<std::string>>;
 
 // Build the expected `LIST<STRUCT<STRING,STRING>>` raw-map column directly from host data.
 //
 // `rows[r]` is the ordered list of (key, value) pairs that row `r` must contain (already in the
-// exact byte content the engine emits: keys and string values de-quoted and unescaped, every other
-// value kind its verbatim raw bytes). `row_valid[r] == false` makes row `r` a NULL list row
-// (its pairs, if any, are ignored and contribute nothing to the children). The keys child and
-// values child are flat STRING columns concatenated in row-major order; the structs child wraps
-// them; the list offsets are the running per-row pair counts of the valid rows; the row null mask
-// comes from `row_valid`.
+// exact byte content the engine emits). `row_valid[r] == false` makes row `r` a NULL list row (its
+// pairs, if any, are ignored and contribute nothing to the children). The keys child and values
+// child are flat STRING columns concatenated in row-major order; a `std::nullopt` value makes its
+// values-child entry null (the pair itself is kept). The structs child wraps them; the list
+// offsets are the running per-row pair counts of the valid rows; the row null mask comes from
+// `row_valid`.
 std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>> const& rows,
                                                     std::vector<bool> const& row_valid)
 {
@@ -69,7 +71,8 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
   auto const num_rows = rows.size();
 
   std::vector<std::string> flat_keys;
-  std::vector<std::string> flat_values;
+  std::vector<std::string> flat_values;  // Content (empty placeholder for a NULL value).
+  std::vector<bool> flat_value_valid;    // SQL-NULL value slots (a JSON `null` value) are false.
   std::vector<cudf::size_type> offsets{0};
   offsets.reserve(num_rows + 1);
 
@@ -79,15 +82,23 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
     if (row_valid[r]) {
       for (auto const& [k, v] : rows[r]) {
         flat_keys.push_back(k);
-        flat_values.push_back(v);
+        flat_values.push_back(v.value_or(""));
+        flat_value_valid.push_back(v.has_value());
         ++running;
       }
     }
     offsets.push_back(running);
   }
 
-  auto keys_child    = cudf::test::strings_column_wrapper(flat_keys.begin(), flat_keys.end());
-  auto values_child  = cudf::test::strings_column_wrapper(flat_values.begin(), flat_values.end());
+  auto keys_child = cudf::test::strings_column_wrapper(flat_keys.begin(), flat_keys.end());
+
+  bool const any_value_null = std::any_of(
+    flat_value_valid.begin(), flat_value_valid.end(), [](bool value) { return !value; });
+  auto values_child =
+    any_value_null ? cudf::test::strings_column_wrapper(
+                       flat_values.begin(), flat_values.end(), flat_value_valid.begin())
+                   : cudf::test::strings_column_wrapper(flat_values.begin(), flat_values.end());
+
   auto structs_child = cudf::test::structs_column_wrapper{{keys_child, values_child}}.release();
 
   auto offsets_col =
@@ -237,16 +248,21 @@ TEST_F(FromJsonTest, RawMapOpt_UnquotedControlCharactersStrict)
 
 // ===========================================================================
 // RawMapOpt_* : pin the exact LIST<STRUCT<STRING,STRING>> output of `from_json_to_raw_map`.
-// Value semantics (this layer renders string keys/values only; every other value kind is verbatim):
+// Value semantics match Spark's `from_json` StringType conversion (Jackson):
 //   * String VALUES/KEYS are emitted WITHOUT surrounding quotes and JSON-UNESCAPED (`\"` -> `"`,
 //     `\uXXXX` -> UTF-8, ...); escape-free strings are byte-identical to the raw extraction.
-//   * Every non-string value kind keeps its VERBATIM raw JSON bytes: a number (e.g. `1.00000`,
-//     `007`), a `NaN`/`Infinity` spelling, a nested object/array value, and the JSON `null` literal
-//     are all copied unchanged; `true`/`false` and already-canonical scalars are byte-identical.
+//   * Numbers are re-rendered: floats via Java `Double.toString`; integer leading zeros and `-0`
+//     are stripped; `NaN`/`Infinity` spellings become their QUOTED canonical forms.
+//   * A nested object/array value keeps its VERBATIM raw JSON bytes (copied unchanged).
+//   * A JSON `null` VALUE keeps the pair but nulls the values-child entry (SQL NULL).
+//   * `true`/`false` and already-canonical scalars are byte-identical to the input.
 //   * A populated object yields a non-null list of its (key, value) pairs in INPUT TEXTUAL order;
 //     a duplicate key is emitted once PER OCCURRENCE (no collapsing).
 //   * An empty object `{}` yields an EMPTY, NON-NULL list row.
 //   * A true-null / empty / whitespace-only / invalid row yields a NULL list row.
+//   * A value that is a number past the JSON parser's digit cap (`json_parser.cuh`'s
+//     `max_num_len`, counting digits only, after leading zeros) is a Spark BAD RECORD: the WHOLE
+//     row is nullified, integers and floats alike, even when its other pairs are fine.
 // ===========================================================================
 
 // Single key, single row.
@@ -406,17 +422,18 @@ void expect_raw_map_shape(cudf::column_view const& col, cudf::size_type num_rows
 
 }  // namespace
 
-// JSON `null` literal value `{"k":null}` -- this layer keeps the literal text "null" as the value
-// (the value node range is copied verbatim; SQL-NULL handling is a later layer). The whole row
-// stays valid.
+// JSON `null` literal value `{"k":null}` -- the pair is KEPT and its values-child entry is SQL
+// NULL, matching Spark (JacksonParser's map conversion nulls the value slot). The whole row stays
+// valid, and sibling pairs of the same row are unaffected.
 TEST_F(FromJsonTest, RawMapOpt_Char_NullLiteralValue)
 {
-  auto const input_col =
-    cudf::test::strings_column_wrapper{R"({"a":"x"})", R"({"k":null})", R"({"b":"y"})"};
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"a":"x"})", R"({"k":null})", R"({"b":"y"})", R"({"c":null,"d":"z"})"};
   auto const input = cudf::strings_column_view{input_col};
 
-  auto const expected =
-    make_expected_raw_map({{{"a", "x"}}, {{"k", "null"}}, {{"b", "y"}}}, all_valid(3));
+  auto const expected = make_expected_raw_map(
+    {{{"a", "x"}}, {{"k", std::nullopt}}, {{"b", "y"}}, {{"c", std::nullopt}, {"d", "z"}}},
+    all_valid(4));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
@@ -474,6 +491,247 @@ TEST_F(FromJsonTest, RawMapOpt_Render_KeyEscapes)
 
   auto const expected =
     make_expected_raw_map({{{"kéy", "v\tz"}, {"a\tb", "w"}, {"q\"r", "x"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Float values re-render via Java `Double.toString` semantics (exactly-parseable literals only:
+// the device float parse is not correctly-rounded for adversarial long mantissas).
+TEST_F(FromJsonTest, RawMapOpt_Render_FloatCanonical)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"a":1.00000,"b":1e2,"c":351.980,"d":1E308,"e":0.0003,"f":0.003})",
+    R"({"g":12345678900000000000.0,"h":-2.5,"i":-0.5,"j":-0.0})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"a", "1.0"},
+                            {"b", "100.0"},
+                            {"c", "351.98"},
+                            {"d", "1.0E308"},
+                            {"e", "3.0E-4"},
+                            {"f", "0.003"}},
+                           {{"g", "1.23456789E19"}, {"h", "-2.5"}, {"i", "-0.5"}, {"j", "-0.0"}}},
+                          all_valid(2));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Float overflow/underflow: out-of-range magnitudes parse to +/-Infinity (rendered QUOTED) or
+// +/-0.0, matching Java `Double.parseDouble` + `Double.toString`.
+TEST_F(FromJsonTest, RawMapOpt_Render_FloatOverflow)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":1e309,"b":-1e309,"c":1e-999,"d":-1e-999})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"a", R"("Infinity")"}, {"b", R"("-Infinity")"}, {"c", "0.0"}, {"d", "-0.0"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Integer leading zeros (`allow_leading_zeros`) and `-0` are stripped textually, so digit runs far
+// beyond int64 range keep every significant digit (matching Jackson's BigInteger re-render).
+TEST_F(FromJsonTest, RawMapOpt_Render_IntLeadingZeros)
+{
+  auto const huge_digits = std::string(26, '9');
+  auto const input_col   = cudf::test::strings_column_wrapper{
+    R"({"a":007,"b":-007,"c":-0,"d":0,"e":42})",
+    "{\"f\":00" + huge_digits + ",\"g\":0000000000000000000000000000007}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"a", "7"}, {"b", "-7"}, {"c", "0"}, {"d", "0"}, {"e", "42"}},
+                           {{"f", huge_digits}, {"g", "7"}}},
+                          all_valid(2));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Floats carrying leading zeros (`allow_leading_zeros`) re-render from the parsed value, including
+// a negative overflow whose sign must land INSIDE the quoted special form.
+TEST_F(FromJsonTest, RawMapOpt_Render_FloatLeadingZeros)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"a":007.5,"b":-007.5,"c":00.5,"d":-000e1,"e":-007e309})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"a", "7.5"}, {"b", "-7.5"}, {"c", "0.5"}, {"d", "-0.0"}, {"e", R"("-Infinity")"}}},
+    all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+namespace {
+
+// The JSON parser's number digit cap (`max_num_len` in `json_parser.cuh`, which also matches
+// Jackson's `StreamReadConstraints.DEFAULT_MAX_NUM_LEN`). A number is refused once its digit count
+// EXCEEDS this, so exactly this many digits is still accepted. Spelled out here rather than
+// included: `json_parser.cuh` is device-only, and an independent literal is what makes these tests
+// catch the classifier drifting away from the parser.
+constexpr int max_num_digits = 1000;
+
+// `n` copies of one digit -- the building block for a number with an exact digit count.
+std::string digits(int n, char d = '7') { return std::string(static_cast<std::size_t>(n), d); }
+
+// A float carrying exactly `n` counted digits: `n - 1` nines and a one-digit exponent. Its
+// magnitude overflows double by such a margin that it renders as the quoted `Infinity` special
+// whatever the mantissa rounds to, so the expectation does not depend on float parsing detail.
+std::string huge_float(int n) { return digits(n - 1, '9') + "e9"; }
+
+// True iff OUTPUT ROW `row` is a null list row. Asserts the OUTER row's validity specifically --
+// an empty or degenerate row is not a null row, and only slicing distinguishes them.
+bool row_is_null(cudf::column_view const& result, cudf::size_type row)
+{
+  return cudf::slice(result, {row, row + 1})[0].null_count() == 1;
+}
+
+}  // namespace
+
+// Digit-cap boundary for INTEGERS, on both classification arms: a canonical integer (verbatim, the
+// raw fast path) and one carrying leading zeros or a sign (textually stripped). Exactly
+// `max_num_digits` digits renders; one more makes the record a Spark bad record and nulls the whole
+// row. This boundary is what pins the classifier's digit count to the parser's own, so it must
+// break loudly if either side moves.
+TEST_F(FromJsonTest, RawMapOpt_Reject_IntDigitCapBoundary)
+{
+  auto const at_cap    = digits(max_num_digits);
+  auto const over      = digits(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{
+    // Row 0: every arm exactly AT the cap -> all render.
+    R"({"plain":)" + at_cap + R"(,"zeros":00)" + at_cap + R"(,"neg":-00)" + at_cap + "}",
+    // Rows 1-3: one digit OVER, one arm each -> whole row null.
+    R"({"plain":)" + over + "}",
+    R"({"zeros":00)" + over + "}",
+    R"({"neg":-00)" + over + "}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"plain", at_cap}, {"zeros", at_cap}, {"neg", "-" + at_cap}}, {}, {}, {}},
+    {true, false, false, false});
+  auto const result = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_TRUE(row_is_null(result->view(), 2));
+  EXPECT_TRUE(row_is_null(result->view(), 3));
+}
+
+// Digit-cap boundary for FLOATS, on both rendering arms of `render_normalized_float`: the plain arm
+// (no leading zeros, parsed whole) and the negative-with-stripped-zeros arm that renders the
+// positive value one byte in and re-applies the sign INSIDE the quoted special. The over-cap
+// negative case is the crash repro: the parser refuses it and writes nothing, which used to be read
+// back as a rendered byte and turned into a `memcpy` of length `0 - 1`.
+TEST_F(FromJsonTest, RawMapOpt_Reject_FloatDigitCapBoundary)
+{
+  auto const at_cap    = huge_float(max_num_digits);
+  auto const over      = huge_float(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{
+    // Row 0: both arms exactly AT the cap -> both render as the quoted special.
+    R"({"plain":)" + at_cap + R"(,"negzeros":-00)" + at_cap + "}",
+    // Rows 1-2: one digit OVER, one arm each -> whole row null.
+    R"({"plain":)" + over + "}",
+    R"({"negzeros":-00)" + over + "}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"plain", R"("Infinity")"}, {"negzeros", R"("-Infinity")"}}, {}, {}}, {true, false, false});
+  auto const result = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_TRUE(row_is_null(result->view(), 2));
+}
+
+// Leading zeros are NOT counted toward the cap -- both the parser and Jackson skip them before
+// counting. These tokens are far longer than the cap in raw bytes yet carry only two counted
+// digits, so they must render normally. A digit count taken over the raw range would reject every
+// one of them.
+TEST_F(FromJsonTest, RawMapOpt_Reject_LeadingZerosNotCounted)
+{
+  auto const zeros = digits(max_num_digits + 5, '0');
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":)" + zeros + R"(.5,"b":-)" + zeros + R"(.5,"c":)" +
+                                       zeros + R"(7,"d":-)" + zeros + "7}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  // `a`/`b` keep one zero before the point (a zero is dropped only while another DIGIT follows);
+  // `c`/`d` strip the whole run down to the single significant digit.
+  auto const expected =
+    make_expected_raw_map({{{"a", "0.5"}, {"b", "-0.5"}, {"c", "7"}, {"d", "-7"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// A refused number nullifies its ENTIRE row, not merely its own value slot, and touches no other
+// row: the neighbours keep every pair. Also pins that a rejected value nulls the row even when the
+// object is otherwise well formed and its other pairs already rendered.
+TEST_F(FromJsonTest, RawMapOpt_Reject_NullsWholeRowNotJustValue)
+{
+  auto const over = digits(max_num_digits + 1);
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":"keep","b":1})",
+                                       R"({"a":"drop","b":)" + over + R"(,"c":"drop too"})",
+                                       R"({"a":"keep2"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"a", "keep"}, {"b", "1"}}, {}, {{"a", "keep2"}}}, {true, false, true});
+  auto const result = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_EQ(result->null_count(), 1);
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_FALSE(row_is_null(result->view(), 2));
+}
+
+// Every value in the column renders zero bytes -- one refused number and one SQL NULL -- so the
+// VALUES extraction's total size is zero and `make_strings_children` skips its write pass entirely.
+// The reject must therefore already be settled at classification time: a signal raised only while
+// writing chars would never run here. The surviving `null` row keeps the case non-degenerate.
+TEST_F(FromJsonTest, RawMapOpt_Reject_ZeroTotalValueBytesSkipsWritePass)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"k":)" + digits(max_num_digits + 1) + "}", R"({"n":null})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{}, {{"n", std::nullopt}}}, {false, true});
+  auto const result   = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+  EXPECT_TRUE(row_is_null(result->view(), 0));
+  EXPECT_FALSE(row_is_null(result->view(), 1));
+}
+
+// A row nulled for a refused number is a well-formed object whose earlier pairs were already
+// materialized, so its outer list slot would be a NON-EMPTY null. The hand-assembled list must be
+// sanitized: `CUDF_TEST_EXPECT_COLUMNS_EQUAL` compares offsets, so an unpurged row fails here.
+TEST_F(FromJsonTest, RawMapOpt_Reject_AfterValidPairsPurgesNonEmptyNull)
+{
+  auto const over      = huge_float(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"p":"one","q":"two","r":"three","s":)" + over + "}", R"({"p":"kept"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{}, {{"p", "kept"}}}, {false, true});
+  auto const result   = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+  EXPECT_TRUE(row_is_null(result->view(), 0));
+}
+
+// All six tokenizer-accepted non-numeric spellings (`allow_nonnumeric_numbers`) render as their
+// QUOTED canonical forms, exactly as Jackson writes them with QUOTE_NON_NUMERIC_NUMBERS.
+TEST_F(FromJsonTest, RawMapOpt_Render_NonNumeric)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"a":NaN,"b":Infinity,"c":+INF,"d":+Infinity,"e":-INF,"f":-Infinity})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"a", R"("NaN")"},
+                                                {"b", R"("Infinity")"},
+                                                {"c", R"("Infinity")"},
+                                                {"d", R"("Infinity")"},
+                                                {"e", R"("-Infinity")"},
+                                                {"f", R"("-Infinity")"}}},
+                                              all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
@@ -573,20 +831,6 @@ TEST_F(FromJsonTest, RawMapOpt_Render_VerbatimScalarValues)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
-// Lenient number spellings keep their verbatim raw JSON bytes at this layer: `allow_leading_zeros`
-// keeps `007`, `allow_nonnumeric_numbers` keeps `NaN`/`Infinity`, and a non-canonical float is not
-// normalized. Number canonicalization arrives in a later layer, which must flip this expectation.
-TEST_F(FromJsonTest, RawMapOpt_Render_VerbatimLenientNumbers)
-{
-  auto const input_col =
-    cudf::test::strings_column_wrapper{R"({"a":007,"b":NaN,"c":Infinity,"d":1.00000})"};
-  auto const input = cudf::strings_column_view{input_col};
-
-  auto const expected = make_expected_raw_map(
-    {{{"a", "007"}, {"b", "NaN"}, {"c", "Infinity"}, {"d", "1.00000"}}}, all_valid(1));
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
-}
-
 // Long ESCAPED value: `RawMapOpt_LongValues` covers the long escape-free (verbatim memcpy) path;
 // this covers the long unescape path, where `make_strings_children` re-parses the whole token once
 // per pass and the rendered length shrinks across hundreds of escapes.
@@ -603,6 +847,41 @@ TEST_F(FromJsonTest, RawMapOpt_Render_LongEscapedValue)
   auto const input     = cudf::strings_column_view{input_col};
 
   auto const expected = make_expected_raw_map({{{"k", unescaped}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// A nested object/array VALUE keeps its VERBATIM raw JSON bytes -- its inner escapes and spacing
+// are NOT re-rendered -- which is the one contract line above that no other test pins. The escaped
+// sibling value forces the values gate TRUE, so the nested bytes are materialized by the render
+// dispatch rather than the raw fast path, and over a range spanning many tokens rather than one.
+TEST_F(FromJsonTest, RawMapOpt_Render_NestedValuesVerbatim)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"o":{"a":"x\"y"},"l":[1,{"b":2},"s"],"e":"p\\q"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"o", R"({"a":"x\"y"})"}, {"l", R"([1,{"b":2},"s"])"}, {"e", R"(p\q)"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Multi-block coverage for the render path: every other gate-flipping test is small enough to fit
+// one thread block, so the render dispatch, the zip compaction, and the device-scope sticky gate
+// flags have never run across blocks. Both gates are TRUE here -- the key carries an escape, and
+// the values span four render categories.
+TEST_F(FromJsonTest, RawMapOpt_Render_MultiBlockTransform)
+{
+  constexpr int num_rows = 50000;
+  std::vector<std::string> rows(static_cast<std::size_t>(num_rows),
+                                R"({"e\tk":"a\"b","f":1.50000,"z":007,"n":NaN})");
+  std::vector<std::vector<kv>> expected_rows(
+    static_cast<std::size_t>(num_rows),
+    {{"e\tk", R"(a"b)"}, {"f", "1.5"}, {"z", "7"}, {"n", R"("NaN")"}});
+
+  auto const input_col = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(expected_rows, all_valid(num_rows));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
@@ -770,6 +1049,41 @@ TEST_F(FromJsonTest, RawMapOpt_WarpBoundaryNullMask)
   }
 }
 
+// The VALUES-child null mask around 32-bit bitmask word boundaries. That mask is indexed by PAIR,
+// not by row, so a one-row column still drives it arbitrarily wide; every other null-value test
+// stays under a single word. The first and last pair of each size is a JSON `null`, so the boundary
+// word is written from both ends.
+TEST_F(FromJsonTest, RawMapOpt_WarpBoundaryValueNullMask)
+{
+  for (int const num_pairs : {31, 32, 33, 65}) {
+    SCOPED_TRACE(std::format("num_pairs={}", num_pairs));
+
+    std::string row = "{";
+    std::vector<kv> expected_row;
+    expected_row.reserve(static_cast<std::size_t>(num_pairs));
+    for (int p = 0; p < num_pairs; ++p) {
+      bool const is_null    = p == 0 || p == num_pairs - 1;
+      auto const value_text = is_null ? std::string{"null"} : std::format(R"("v{}")", p);
+      if (p > 0) { row += ","; }
+      row += std::format(R"("k{}":{})", p, value_text);
+      expected_row.emplace_back(
+        std::format("k{}", p),
+        is_null ? std::optional<std::string>{} : std::optional<std::string>{std::format("v{}", p)});
+    }
+    row += "}";
+
+    auto const input_col = cudf::test::strings_column_wrapper{row};
+    auto const result    = raw_map(cudf::strings_column_view{input_col});
+    auto const expected  = make_expected_raw_map({expected_row}, all_valid(1));
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+    auto const values =
+      cudf::structs_column_view{cudf::lists_column_view{result->view()}.child()}.child(1);
+    EXPECT_EQ(values.size(), num_pairs);
+    EXPECT_EQ(values.null_count(), 2);
+  }
+}
+
 // ===========================================================================
 // Array path: `from_json_to_raw_map_array_values` -> LIST<STRUCT<STRING, LIST<STRING>>>.
 // Each test asserts exact output via `make_expected_raw_map_array`. Element/value semantics:
@@ -778,9 +1092,13 @@ TEST_F(FromJsonTest, RawMapOpt_WarpBoundaryNullMask)
 //   * value = JSON `null` literal -> row KEPT, NULL inner list (mask #1).
 //   * value = scalar / object (present, non-null, NOT an array) -> HARD TYPE MISMATCH: the WHOLE
 //     row is nullified (Spark row-level bad-record semantics), even if other keys are valid arrays.
-//   * element = string -> de-quoted and JSON-unescaped; every other element kind (number, bool,
-//     nested object/array) keeps its VERBATIM raw JSON bytes.
+//   * element = Spark-rendered like the string-map values: strings de-quoted and JSON-unescaped;
+//     numbers re-rendered (float canonical, leading-zero strip, quoted NaN/Infinity); nested
+//     object/array elements keep their VERBATIM raw JSON bytes; bools byte-identical.
 //   * element = literal `null` -> NULL element (mask #2); a JSON STRING "null" stays valid.
+//   * element = number past the JSON parser's digit cap -> Spark BAD RECORD: the WHOLE row is
+//     nullified, exactly as for a string-map value (a rejected number sitting directly as a value
+//     is already covered by the hard-type-mismatch rule above).
 // ===========================================================================
 
 namespace {
@@ -1009,6 +1327,17 @@ TEST_F(FromJsonTest, RawMapArray_MixedElementKinds)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
+// Already-canonical number / bool elements are byte-identical to their input text.
+TEST_F(FromJsonTest, RawMapArray_NumberBoolElements)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":[1,22,333,true,false]})"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map_array({{{"k", arr({"1", "22", "333", "true", "false"})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
 // Null input row yields a NULL map row.
 TEST_F(FromJsonTest, RawMapArray_NullInputRow)
 {
@@ -1133,13 +1462,17 @@ TEST_F(FromJsonTest, RawMapArray_SingleQuoteNormalizationWithEscapes)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
 }
 
-// Leading-zeros / non-numeric-number leniency on numeric elements: both spellings keep their
-// verbatim raw JSON bytes at this layer. Number canonicalization arrives in a later layer, which
-// must flip this expectation.
+// Leading-zeros / non-numeric-number leniency on numeric elements: lenient numbers re-render like
+// the string-map values (leading zeros stripped, non-numeric spellings quoted canonical). All six
+// spellings the tokenizer accepts are pinned here, as on the map side. The zero-padded run is far
+// beyond int64 range, so it also pins that the element strip stays textual rather than going
+// through an integer parse.
 TEST_F(FromJsonTest, RawMapArray_NumericLeniency)
 {
-  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":[007,NaN,Infinity]})"};
-  auto const input     = cudf::strings_column_view{input_col};
+  auto const huge_digits = std::string(26, '9');
+  auto const input_col   = cudf::test::strings_column_wrapper{
+    R"({"k":[007,NaN,Infinity,+INF,+Infinity,-INF,-Infinity,-0,00)" + huge_digits + "]}"};
+  auto const input = cudf::strings_column_view{input_col};
 
   auto const result = spark_rapids_jni::from_json_to_raw_map_array_values(
     input,
@@ -1148,9 +1481,34 @@ TEST_F(FromJsonTest, RawMapArray_NumericLeniency)
                                          /*allow_nonnumeric_numbers=*/true,
                                          default_options.allow_unquoted_control});
 
-  auto const expected =
-    make_expected_raw_map_array({{{"k", arr({"007", "NaN", "Infinity"})}}}, all_valid(1));
+  auto const expected = make_expected_raw_map_array({{{"k",
+                                                       arr({"7",
+                                                            R"("NaN")",
+                                                            R"("Infinity")",
+                                                            R"("Infinity")",
+                                                            R"("Infinity")",
+                                                            R"("-Infinity")",
+                                                            R"("-Infinity")",
+                                                            "0",
+                                                            huge_digits})}}},
+                                                    all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+}
+
+// Float elements re-render via Java `Double.toString` semantics; an overflow renders quoted. The
+// last three carry leading zeros (`allow_leading_zeros`), which the strict parser refuses, so they
+// are stripped and re-rendered from the parsed value -- and a NEGATIVE one has its sign re-applied
+// to that render, landing INSIDE the quote of a quoted special.
+TEST_F(FromJsonTest, RawMapArray_Render_FloatElements)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":[1.00000,1e2,-1e309,007.5,-007.5,-007e309]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({"1.0", "100.0", R"("-Infinity")", "7.5", "-7.5", R"("-Infinity")"})}}},
+    all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
 // All-canonical, escape-free column (clean strings/ints/bools, an empty array): every key/element
@@ -1193,6 +1551,63 @@ TEST_F(FromJsonTest, RawMapArray_Render_MultiBlockEscaped)
 
   auto const expected = make_expected_raw_map_array(expected_rows, all_valid(num_rows));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Digit-cap boundary for ARRAY ELEMENTS, mirroring the string-map boundary tests: exactly
+// `max_num_digits` renders, one more nullifies the whole row. Covers integers on both
+// classification arms (canonical/verbatim and leading-zero-stripped) and floats on both rendering
+// arms (plain and negative-with-stripped-zeros).
+TEST_F(FromJsonTest, RawMapArray_Reject_ElementDigitCapBoundary)
+{
+  auto const at_cap_int   = digits(max_num_digits);
+  auto const over_int     = digits(max_num_digits + 1);
+  auto const at_cap_float = huge_float(max_num_digits);
+  auto const over_float   = huge_float(max_num_digits + 1);
+  auto const input_col =
+    cudf::test::strings_column_wrapper{// Row 0: every arm exactly AT the cap -> all render.
+                                       R"({"k":[)" + at_cap_int + ",00" + at_cap_int + "," +
+                                         at_cap_float + ",-00" + at_cap_float + "]}",
+                                       // Rows 1-4: one digit OVER, one arm each -> whole row null.
+                                       R"({"k":[)" + over_int + "]}",
+                                       R"({"k":[00)" + over_int + "]}",
+                                       R"({"k":[)" + over_float + "]}",
+                                       R"({"k":[-00)" + over_float + "]}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({at_cap_int, at_cap_int, R"("Infinity")", R"("-Infinity")"})}}, {}, {}, {}, {}},
+    {true, false, false, false, false});
+  auto const result = raw_map_array(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  for (cudf::size_type row = 1; row < 5; ++row) {
+    SCOPED_TRACE(std::format("row={}", row));
+    EXPECT_TRUE(row_is_null(result->view(), row));
+  }
+}
+
+// A refused ELEMENT nullifies the whole row even when it sits among valid elements and valid keys,
+// and leaves neighbouring rows untouched. The nulled row has materialized pairs, so the outer list
+// would carry a non-empty null without the sanitation step -- `CUDF_TEST_EXPECT_COLUMNS_EQUAL`
+// compares offsets and would fail. A refused number sitting DIRECTLY as a value needs no case of
+// its own: it is already a hard type mismatch (see `RawMapArray_NonArrayValuesNullInnerList`).
+TEST_F(FromJsonTest, RawMapArray_Reject_ElementNullsWholeRow)
+{
+  auto const over      = digits(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"ok":["a","b"]})", R"({"good":["x"],"bad":["1",)" + over + R"(,"3"]})", R"({"ok2":["c"]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"ok", arr({"a", "b"})}}, {}, {{"ok2", arr({"c"})}}}, {true, false, true});
+  auto const result = raw_map_array(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_EQ(result->null_count(), 1);
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_FALSE(row_is_null(result->view(), 2));
 }
 
 // Whitespace around values: insignificant whitespace is not part of the element bytes. The

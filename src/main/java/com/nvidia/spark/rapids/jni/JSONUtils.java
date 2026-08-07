@@ -153,17 +153,19 @@ public class JSONUtils {
   }
 
   /**
-   * Extract key-value pairs for each output map from the given json strings, targeting the Spark
-   * schema {@code MapType[StringType, StringType]}. String keys and values are de-quoted and
-   * JSON-unescaped ({@code \"} -> {@code "}, <code>&#92;uXXXX</code> -> UTF-8, ...) to match
-   * Spark's `getText`; every other value kind (number, boolean, `NaN`/`Infinity` spelling, nested
-   * object/array, and the JSON `null` literal) keeps its verbatim raw JSON bytes.
+   * Extract key-value pairs for each output map from the given json strings. Keys and values are
+   * rendered to match Spark's `from_json` for the schema {@code MapType[StringType, StringType]}
+   * (Jackson semantics): string keys/values are de-quoted and JSON-unescaped; floats re-render via
+   * Java `Double.toString`; integer leading zeros and `-0` are stripped; the `NaN`/`Infinity`
+   * spellings become their quoted canonical forms; a nested object/array value keeps its verbatim
+   * raw JSON bytes. A JSON `null` value keeps its pair but nulls the corresponding entry of the
+   * values child.
    * <p/>
-   * This is the raw-map layer only, so the output is not yet byte-identical to Spark's `from_json`:
-   * Spark re-serializes a non-string value through a JSON generator while this function copies the
-   * input bytes unchanged (a number keeps its input spelling, e.g. {@code 1.00000}), and Spark maps
-   * a JSON {@code null} value to SQL NULL while this function emits the text {@code null}. Callers
-   * needing Spark-identical output must apply that normalization downstream.
+   * A row is nullified when the input row is null, empty, whitespace only, or not a valid JSON
+   * object, or when any of its values is a number the JSON parser refuses. The parser caps a
+   * number's digit count (signs, `.`, `e`/`E`, and leading zeros excluded) and applies that cap to
+   * integers and floats alike; a number past it makes the record a Spark bad record, so the whole
+   * row becomes null instead of that value rendering.
    *
    * @param input The input strings column in which each row specifies a json object
    * @param opts The options for parsing JSON strings
@@ -180,25 +182,24 @@ public class JSONUtils {
   }
 
   /**
-   * Extract key-value pairs for each output map from the given json strings. String keys, values,
-   * and elements are de-quoted and JSON-unescaped ({@code \"} -> {@code "}, <code>&#92;uXXXX</code>
-   * -> UTF-8, ...) to match Spark's `getText`; every other value or element kind (number, boolean,
-   * `NaN`/`Infinity` spelling, nested object/array) keeps its verbatim raw JSON bytes. The JSON
-   * {@code null} literal is verbatim only for {@link MapValueType#STRING}; under
-   * {@link MapValueType#ARRAY_OF_STRING} it becomes a null inner list (as a value) or a null
-   * element, as described below.
+   * Extract key-value pairs for each output map from the given json strings. Keys and values are
+   * rendered to match Spark's `from_json` StringType conversion (Jackson semantics): string
+   * keys/values/elements are de-quoted and JSON-unescaped; floats re-render via Java
+   * `Double.toString`; integer leading zeros and `-0` are stripped; the `NaN`/`Infinity` spellings
+   * become their quoted canonical forms; nested objects/arrays keep their verbatim raw JSON bytes.
    * <p/>
-   * This is the raw-map layer only, so the output is not yet byte-identical to Spark's `from_json`:
-   * Spark re-serializes a non-string value through a JSON generator while this function copies the
-   * input bytes unchanged (a number keeps its input spelling, e.g. {@code 1.00000}), and for
-   * {@link MapValueType#STRING} Spark maps a JSON {@code null} value to SQL NULL while this
-   * function emits the text {@code null}. Callers needing Spark-identical output must apply that
-   * normalization downstream.
+   * For BOTH value types, a row is nullified when the input row is null, empty, whitespace only, or
+   * not a valid JSON object, or when any number in it is one the JSON parser refuses. The parser
+   * caps a number's digit count (signs, `.`, `e`/`E`, and leading zeros excluded) and applies that
+   * cap to integers and floats alike; a number past it makes the record a Spark bad record, so the
+   * whole row becomes null instead of that number rendering -- as an array element just as much as
+   * a direct value. This is independent of the array-schema type-mismatch rule described below.
    * <p/>
    * The {@code valueType} parameter selects how each JSON value is interpreted and therefore the
    * shape of the output map column:<br>
    * - {@link MapValueType#STRING}: values are scalar strings, producing a column of type
-   *   {@code List<Struct<String,String>>}.<br>
+   *   {@code List<Struct<String,String>>}. A JSON {@code null} value keeps its pair but nulls the
+   *   corresponding entry of the values child.<br>
    * - {@link MapValueType#ARRAY_OF_STRING}: values are JSON arrays of strings, producing a column of
    *   type {@code List<Struct<String,List<String>>>} (targets Spark's `from_json` for the schema
    *   {@code MapType[StringType, ArrayType[StringType]]}).
