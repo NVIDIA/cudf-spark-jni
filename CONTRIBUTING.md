@@ -240,7 +240,20 @@ that the host environment does not match the container well enough to run these 
 in errors finding libraries. The script `build/run-in-docker` was created to help with this
 situation. A test can be run directly using this script or the script can be run without any
 arguments to get into an interactive shell inside the container.
-```build/run-in-docker target/jni/cmake-build/gtests/ROW_CONVERSION```
+```
+build/run-in-docker target/jni/cmake-build/gtests/ROW_CONVERSION
+```
+
+The full C++ test suite should be run on a GPU with enough free device memory for the largest
+test inputs and conversion temporaries. For example, `RowToColumnTests.Biggest` builds a
+128-column table with `2 * 1024 * 1024` `INT32` rows, which is about 1 GiB of input data before
+the row-conversion output and intermediate allocations. This test is known to run out of memory
+on 6 GiB GPUs. When iterating on smaller development GPUs, run a narrower gtest filter, such as:
+```
+build/run-in-docker target/jni/cmake-build/gtests/ROW_CONVERSION \
+  --gtest_filter=-RowToColumnTests.Biggest
+```
+Use a larger-memory GPU when validating the complete C++ test suite.
 
 #### Testing with Compute Sanitizer
 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) is a
