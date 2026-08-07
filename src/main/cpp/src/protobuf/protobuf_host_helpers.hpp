@@ -52,6 +52,19 @@
 
 namespace spark_rapids_jni::protobuf::detail {
 
+struct enum_string_lookup_tables {
+  rmm::device_uvector<int32_t> d_valid_enums;
+  rmm::device_uvector<int32_t> d_name_offsets;
+  rmm::device_uvector<uint8_t> d_name_chars;
+
+  enum_string_lookup_device_view view() const
+  {
+    return {{d_valid_enums.data(), static_cast<int>(d_valid_enums.size())},
+            d_name_offsets.data(),
+            d_name_chars.data()};
+  }
+};
+
 class protobuf_schema {
  public:
   explicit protobuf_schema(protobuf_decode_context const& context);
@@ -78,6 +91,8 @@ class protobuf_schema {
   [[nodiscard]] protobuf_field_meta_view field(int schema_idx) const;
   [[nodiscard]] std::vector<int> const& children(int parent_schema_idx) const;
   [[nodiscard]] bool is_output(int schema_idx) const;
+  [[nodiscard]] enum_string_lookup_tables enum_lookup(int schema_idx,
+                                                      rmm::cuda_stream_view stream) const;
 
  private:
   // Avoid copying pinned metadata; the decode context outlives this stack-scoped facade.
@@ -89,6 +104,7 @@ class protobuf_schema {
 struct field_descriptor_bundle {
   cudf::detail::host_vector<field_descriptor> host;
   rmm::device_uvector<field_descriptor> device;
+  rmm::device_uvector<int32_t> enum_values;
 };
 
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
@@ -104,7 +120,8 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
 struct protobuf_decode_runtime_context {
   rmm::device_uvector<bool>* row_force_null;
   rmm::device_uvector<protobuf_error>* error;
-  bool propagate_invalid_enum_rows = true;
+  rmm::device_uvector<protobuf_error>* deferred_enum_error;
+  bool fail_on_errors;
 };
 
 struct recursive_decode_context {
@@ -127,12 +144,16 @@ struct list_offsets_from_counts_result {
 // Offsets become LIST output storage; occurrences remain scratch used by value extraction.
 struct repeated_field_work {
   int schema_idx;
+  int depth;
   int32_t total_count;
   rmm::device_uvector<int32_t> offsets;
   std::unique_ptr<rmm::device_uvector<field_occurrence>> occurrences;
 
-  repeated_field_work(int schema_index, list_offsets_from_counts_result offsets_result)
+  repeated_field_work(int schema_index,
+                      list_offsets_from_counts_result offsets_result,
+                      int nested_depth = 0)
     : schema_idx(schema_index),
+      depth(nested_depth),
       total_count(offsets_result.total_count),
       offsets(std::move(offsets_result.offsets))
   {
@@ -154,6 +175,55 @@ struct extract_strided_count {
     return info[flat_index(row, num_fields, field_position)].count;
   }
 };
+
+struct singular_message_merge_work {
+  int schema_idx;
+  int32_t total_fragments;
+  rmm::device_uvector<int32_t> row_offsets;
+  rmm::device_uvector<field_occurrence> fragments;
+
+  singular_message_merge_work(int schema_index,
+                              list_offsets_from_counts_result offsets_result,
+                              rmm::cuda_stream_view stream,
+                              rmm::device_async_resource_ref mr)
+    : schema_idx(schema_index),
+      total_fragments(offsets_result.total_count),
+      row_offsets(std::move(offsets_result.offsets)),
+      fragments(total_fragments, stream, mr)
+  {
+  }
+};
+
+inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_rows,
+                                                         rmm::device_uvector<int32_t>&& offsets)
+{
+  CUDF_EXPECTS(offsets.size() == static_cast<size_t>(num_rows) + 1,
+               std::string{__func__} + ": offsets size must match row count");
+  return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                        num_rows + 1,
+                                        offsets.release(),
+                                        rmm::device_buffer{},
+                                        0);
+}
+
+inline rmm::device_uvector<int32_t> make_top_row_indices(
+  rmm::device_uvector<field_occurrence> const& occurrences,
+  int32_t const* parent_top_row_indices,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  rmm::device_uvector<int32_t> result(occurrences.size(), stream, mr);
+  thrust::transform(rmm::exec_policy_nosync(stream, mr),
+                    occurrences.begin(),
+                    occurrences.end(),
+                    result.begin(),
+                    [parent_top_row_indices] __device__(field_occurrence const& occurrence) {
+                      return parent_top_row_indices != nullptr
+                               ? parent_top_row_indices[occurrence.row_idx]
+                               : occurrence.row_idx;
+                    });
+  return result;
+}
 
 inline void validate_nonempty_repeated_field_work(
   repeated_field_work const& work,
@@ -203,18 +273,6 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
   return {total_count, std::move(offsets)};
 }
 
-inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_rows,
-                                                         rmm::device_uvector<int32_t>&& offsets)
-{
-  CUDF_EXPECTS(offsets.size() == static_cast<size_t>(num_rows) + 1,
-               std::string{__func__} + ": offsets size must match row count");
-  return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                        num_rows + 1,
-                                        offsets.release(),
-                                        rmm::device_buffer{},
-                                        0);
-}
-
 template <typename PositionRange>
 inline repeated_field_work_bundle make_repeated_field_work_bundle(
   PositionRange const& field_positions,
@@ -239,14 +297,14 @@ inline repeated_field_work_bundle make_repeated_field_work_bundle(
     CUDF_EXPECTS(repeated_info != nullptr,
                  std::string{__func__} + ": repeated count buffer must be non-null");
     auto const schema_idx = schema_indices[field_position];
-    // The source is row-major; expose one field's counts without materializing another buffer.
-    auto counts_begin = thrust::make_transform_iterator(
+    auto counts_begin     = thrust::make_transform_iterator(
       thrust::make_counting_iterator<int>(0),
       extract_strided_count{repeated_info, field_position, num_fields});
     auto& work = result.fields[field_position].emplace(
       schema_idx,
       make_list_offsets_from_counts(
-        counts_begin, num_rows, count_context, stream, output_mr, scratch_mr));
+        counts_begin, num_rows, count_context, stream, output_mr, scratch_mr),
+      schema[schema_idx].depth);
 
     if (work.total_count > 0) {
       work.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
@@ -256,25 +314,6 @@ inline repeated_field_work_bundle make_repeated_field_work_bundle(
         field.field_number, field.wire_type, work.offsets.data(), work.occurrences->data()});
     }
   }
-  return result;
-}
-
-inline rmm::device_uvector<int32_t> make_top_row_indices(
-  rmm::device_uvector<field_occurrence> const& occurrences,
-  int32_t const* parent_top_row_indices,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
-{
-  rmm::device_uvector<int32_t> result(occurrences.size(), stream, mr);
-  thrust::transform(rmm::exec_policy_nosync(stream, mr),
-                    occurrences.begin(),
-                    occurrences.end(),
-                    result.begin(),
-                    [parent_top_row_indices] __device__(field_occurrence const& occurrence) {
-                      return parent_top_row_indices != nullptr
-                               ? parent_top_row_indices[occurrence.row_idx]
-                               : occurrence.row_idx;
-                    });
   return result;
 }
 
@@ -349,7 +388,7 @@ inline field_occurrence_scan_bundle make_field_occurrence_scan_bundle(
  * Find all child field indices for a given parent index in the schema.
  * This is a commonly used pattern throughout the codebase.
  *
- * @param schema The schema vector
+ * @param schema The host schema.
  * @param parent_idx The parent index to search for
  * @return Vector of child field indices
  */
@@ -434,24 +473,19 @@ void maybe_check_required_fields(required_field_input_view input,
                                  protobuf_decode_runtime_context decode_ctx,
                                  rmm::cuda_stream_view stream);
 
-void propagate_invalid_enum_flags_to_rows(rmm::device_uvector<bool> const& item_invalid,
-                                          protobuf_decode_runtime_context decode_ctx,
-                                          protobuf_value_domain_view value_domain,
-                                          rmm::cuda_stream_view stream);
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    enum_domain_device_view enum_domain,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    protobuf_value_domain_view value_domain,
+                                    rmm::cuda_stream_view stream);
 
-void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values,
-                                      rmm::device_uvector<bool>& valid,
-                                      enum_domain_device_view enum_domain,
-                                      protobuf_decode_runtime_context decode_ctx,
-                                      protobuf_value_domain_view value_domain,
-                                      rmm::cuda_stream_view stream);
-
-void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values,
-                                      rmm::device_uvector<bool>& valid,
-                                      cudf::detail::host_vector<int32_t> const& valid_enums,
-                                      protobuf_decode_runtime_context decode_ctx,
-                                      protobuf_value_domain_view value_domain,
-                                      rmm::cuda_stream_view stream);
+void validate_enum_and_apply_policy(rmm::device_uvector<int32_t> const& values,
+                                    rmm::device_uvector<bool>& valid,
+                                    cudf::detail::host_vector<int32_t> const& valid_enums,
+                                    protobuf_decode_runtime_context decode_ctx,
+                                    protobuf_value_domain_view value_domain,
+                                    rmm::cuda_stream_view stream);
 
 // ============================================================================
 // Forward declarations of builder/utility functions
@@ -497,19 +531,18 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
 std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  recursive_decode_context context,
+  protobuf_schema const& schema,
+  protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> build_repeated_string_column(
-  cudf::column_view const& binary_input,
-  protobuf_input_view input,
-  repeated_field_work work,
-  bool is_bytes,
-  rmm::device_uvector<protobuf_error>& d_error,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view const& binary_input,
+                                                           protobuf_input_view input,
+                                                           protobuf_field_meta_view field,
+                                                           repeated_field_work work,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_nested_struct_column(
   protobuf_input_view input,
@@ -520,11 +553,30 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
+std::unique_ptr<cudf::column> build_merged_singular_struct_column(
+  protobuf_input_view input,
+  message_fragment_source_view source,
+  std::vector<int> const& child_field_indices,
+  recursive_decode_context context,
+  singular_message_merge_work work,
+  int depth,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
+
 std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_view input,
                                                                nested_parent_view parent,
                                                                recursive_decode_context context,
                                                                repeated_field_work work,
                                                                rmm::cuda_stream_view stream,
                                                                rmm::device_async_resource_ref mr);
+
+std::unique_ptr<cudf::column> build_repeated_struct_column(
+  cudf::column_view const& binary_input,
+  protobuf_input_view input,
+  std::vector<int> const& child_field_indices,
+  recursive_decode_context context,
+  repeated_field_work work,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr);
 
 }  // namespace spark_rapids_jni::protobuf::detail

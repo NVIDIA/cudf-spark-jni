@@ -151,7 +151,7 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Conditional form so callers can pass a flag inline; {@code repeated(false)} is a no-op. */
+  /** Set whether the current field is repeated. */
   public ProtobufSchemaDescriptorBuilder repeated(boolean value) {
     current().isRepeated = value;
     return this;
@@ -205,7 +205,7 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Conditional form so callers can pass a flag inline; {@code hasDefault(false)} is a no-op. */
+  /** Set whether the current field has a default value. */
   public ProtobufSchemaDescriptorBuilder hasDefault(boolean value) {
     current().hasDefaultValue = value;
     return this;
@@ -215,14 +215,12 @@ public final class ProtobufSchemaDescriptorBuilder {
   public ProtobufSchemaDescriptorBuilder enumMetadata(String... names) {
     Field f = current();
     f.encoding = Protobuf.ENC_ENUM_STRING;
-    int[] validValues = new int[names.length];
-    byte[][] encodedNames = new byte[names.length][];
+    f.enumValidValues = new int[names.length];
+    f.enumNames = new byte[names.length][];
     for (int i = 0; i < names.length; i++) {
-      validValues[i] = i;
-      encodedNames[i] = names[i].getBytes(StandardCharsets.UTF_8);
+      f.enumValidValues[i] = i;
+      f.enumNames[i] = names[i].getBytes(StandardCharsets.UTF_8);
     }
-    f.enumValidValues = validValues;
-    f.enumNames = encodedNames;
     return this;
   }
 
