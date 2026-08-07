@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,11 @@
 
 #include <cast_string.hpp>
 
+#include <cstddef>
 #include <limits>
+#include <string>
+#include <type_traits>
+#include <vector>
 
 using namespace cudf;
 
@@ -638,6 +642,47 @@ TYPED_TEST(StringToFloatTests, Simple)
     data_type{type_to_id<TypeParam>()}, strings_column_view{in}, false, cudf::get_default_stream());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected->view());
+}
+
+TYPED_TEST(StringToFloatTests, DecimalPointAfterTruncatedDigitsAcrossBatches)
+{
+  auto const make_value = [](std::size_t digits) { return std::string(digits, '9') + ".0"; };
+  std::vector<std::string> const input{make_value(31),
+                                       make_value(32),
+                                       make_value(38),
+                                       "-" + make_value(38),
+                                       std::string(38, '9') + "." + std::string(100, '0') + "1",
+                                       make_value(300),
+                                       make_value(307),
+                                       make_value(38) + "e-38"};
+  auto const in = cudf::test::strings_column_wrapper{input.begin(), input.end()};
+
+  auto const expected = []() {
+    if constexpr (std::is_same_v<TypeParam, float>) {
+      return test::fixed_width_column_wrapper<TypeParam>{static_cast<TypeParam>(1.0e31),
+                                                         static_cast<TypeParam>(1.0e32),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(-1.0e38),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         std::numeric_limits<TypeParam>::infinity(),
+                                                         std::numeric_limits<TypeParam>::infinity(),
+                                                         static_cast<TypeParam>(1.0)};
+    } else {
+      return test::fixed_width_column_wrapper<TypeParam>{static_cast<TypeParam>(1.0e31),
+                                                         static_cast<TypeParam>(1.0e32),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(-1.0e38),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(1.0e300),
+                                                         static_cast<TypeParam>(1.0e307),
+                                                         static_cast<TypeParam>(1.0)};
+    }
+  }();
+
+  auto const result = spark_rapids_jni::string_to_float(
+    data_type{type_to_id<TypeParam>()}, strings_column_view{in}, false, cudf::get_default_stream());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->view(), expected);
 }
 
 TYPED_TEST(StringToFloatTests, InfNaN)
