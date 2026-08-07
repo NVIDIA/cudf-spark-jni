@@ -18,8 +18,54 @@
 # This special Java executable is specified to the "jvm" configuration of the
 # the surefire plugin to intercept forking the processes for tests. Then
 # the tests will run with the compute-sanitizer tool.
-exec compute-sanitizer --tool memcheck \
+log_token="${BASHPID:-$$}_${RANDOM}_${RANDOM}"
+log_basename="sanitizer_for_pid_${log_token}"
+WORKDIR="$PWD"
+sanitizer_pid=""
+received_signal=""
+
+# forward_signal is invoked from the trap handlers below.
+# shellcheck disable=SC2329
+forward_signal() {
+    received_signal="$1"
+    if [[ -n "$sanitizer_pid" ]]; then
+        kill "-$received_signal" "$sanitizer_pid" 2>/dev/null || true
+    fi
+}
+
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+compute-sanitizer --tool memcheck \
     --launch-timeout 600 \
     --error-exitcode -2 \
-    --log-file "./sanitizer_for_pid_%p.log" \
-    java "$@"
+    --log-file "${WORKDIR}/${log_basename}_%p.log" \
+    java "$@" &
+sanitizer_pid=$!
+
+wait "$sanitizer_pid"
+status=$?
+trap - TERM INT HUP
+
+if [[ $status -ne 0 ]]; then
+    echo "compute-sanitizer failed with exit code $status." >&2
+
+    found_logs=false
+    while IFS= read -r sanitizer_log; do
+        found_logs=true
+        echo "===== Last 80 lines of $sanitizer_log =====" >&2
+        tail -n 80 "$sanitizer_log" >&2
+    done < <(find "$WORKDIR" -maxdepth 1 -type f -name "${log_basename}_*.log" | sort)
+
+    if [[ $found_logs == false ]]; then
+        echo "No sanitizer_for_pid_*.log files were created for this fork." >&2
+    fi
+fi
+
+if [[ -n "$received_signal" ]]; then
+    kill "-$received_signal" "$$"
+    wait
+fi
+
+exit $status
