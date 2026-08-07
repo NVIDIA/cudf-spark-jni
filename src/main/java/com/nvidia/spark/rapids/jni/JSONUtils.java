@@ -157,15 +157,15 @@ public class JSONUtils {
    * rendered to match Spark's `from_json` for the schema {@code MapType[StringType, StringType]}
    * (Jackson semantics): string keys/values are de-quoted and JSON-unescaped; floats re-render via
    * Java `Double.toString`; integer leading zeros and `-0` are stripped; the `NaN`/`Infinity`
-   * spellings become their quoted canonical forms; a nested object/array value keeps its verbatim
-   * raw JSON bytes. A JSON `null` value keeps its pair but nulls the corresponding entry of the
-   * values child.
+   * spellings become their quoted canonical forms; a nested object/array value is re-serialized
+   * compactly. A JSON `null` value keeps its pair but nulls the corresponding entry of the values
+   * child.
    * <p/>
    * A row is nullified when the input row is null, empty, whitespace only, or not a valid JSON
-   * object, or when any of its values is a number the JSON parser refuses. The parser caps a
-   * number's digit count (signs, `.`, `e`/`E`, and leading zeros excluded) and applies that cap to
-   * integers and floats alike; a number past it makes the record a Spark bad record, so the whole
-   * row becomes null instead of that value rendering.
+   * object, or when it holds a number the JSON parser refuses -- as a value or anywhere inside a
+   * nested one. The parser caps a number's digit count (signs, `.`, `e`/`E`, and leading zeros
+   * excluded) and applies that cap to integers and floats alike; a number past it makes the record
+   * a Spark bad record, so the whole row becomes null instead of that value rendering.
    *
    * @param input The input strings column in which each row specifies a json object
    * @param opts The options for parsing JSON strings
@@ -186,14 +186,15 @@ public class JSONUtils {
    * rendered to match Spark's `from_json` StringType conversion (Jackson semantics): string
    * keys/values/elements are de-quoted and JSON-unescaped; floats re-render via Java
    * `Double.toString`; integer leading zeros and `-0` are stripped; the `NaN`/`Infinity` spellings
-   * become their quoted canonical forms; nested objects/arrays keep their verbatim raw JSON bytes.
+   * become their quoted canonical forms; nested objects/arrays are re-serialized compactly.
    * <p/>
    * For BOTH value types, a row is nullified when the input row is null, empty, whitespace only, or
    * not a valid JSON object, or when any number in it is one the JSON parser refuses. The parser
    * caps a number's digit count (signs, `.`, `e`/`E`, and leading zeros excluded) and applies that
    * cap to integers and floats alike; a number past it makes the record a Spark bad record, so the
-   * whole row becomes null instead of that number rendering -- as an array element just as much as
-   * a direct value. This is independent of the array-schema type-mismatch rule described below.
+   * whole row becomes null instead of that number rendering -- as an array element, or anywhere
+   * inside a nested value, just as much as a direct value. This is independent of the array-schema
+   * type-mismatch rule described below.
    * <p/>
    * The {@code valueType} parameter selects how each JSON value is interpreted and therefore the
    * shape of the output map column:<br>
