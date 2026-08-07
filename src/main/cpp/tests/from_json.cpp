@@ -463,15 +463,100 @@ TEST_F(FromJsonTest, RawMapOpt_Render_UnicodeEscapes)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
-// Keys are unescaped too: an escaped key renders like an escaped string value.
+// Keys are unescaped too: an escaped key renders like an escaped string value. The first value
+// also carries an escape, so BOTH the keys gate and the values gate of the same conversion open
+// -- the two are computed in one fused pass, and this is the only test that drives both.
 TEST_F(FromJsonTest, RawMapOpt_Render_KeyEscapes)
 {
   auto const input_col =
-    cudf::test::strings_column_wrapper{R"({"k\u00e9y":"v","a\tb":"w","q\"r":"x"})"};
+    cudf::test::strings_column_wrapper{R"({"k\u00e9y":"v\tz","a\tb":"w","q\"r":"x"})"};
   auto const input = cudf::strings_column_view{input_col};
 
   auto const expected =
-    make_expected_raw_map({{{"kéy", "v"}, {"a\tb", "w"}, {"q\"r", "x"}}}, all_valid(1));
+    make_expected_raw_map({{{"kéy", "v\tz"}, {"a\tb", "w"}, {"q\"r", "x"}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// All-canonical, escape-free column: every key/value classifies verbatim, so the extraction takes
+// the raw-copy fast path (the transform gate stays FALSE) and the output is byte-identical to the
+// input ranges. Covers escape-free strings, integers, booleans, an empty object, and duplicate
+// keys; the `null` literal and nested object/array values are pinned by their own tests above.
+TEST_F(FromJsonTest, RawMapOpt_Render_FastPathAllCanonical)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"s":"plain","t":"","u":"a b c"})",
+                                                            R"({"i":0,"j":-1,"k":10,"l":42})",
+                                                            R"({"b":true,"c":false})",
+                                                            R"({})",
+                                                            R"({"m":"x","m":"y"})"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"s", "plain"}, {"t", ""}, {"u", "a b c"}},
+                                               {{"i", "0"}, {"j", "-1"}, {"k", "10"}, {"l", "42"}},
+                                               {{"b", "true"}, {"c", "false"}},
+                                               {},
+                                               {{"m", "x"}, {"m", "y"}}},
+                                              all_valid(5));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Escaped and canonical values in the SAME extraction: one escaped value opens the transform gate
+// for the whole values column, so the canonical values beside it must still come out byte-identical
+// to their raw ranges. This is the only shape that runs the verbatim arm of the render dispatch --
+// an all-canonical column takes the raw-copy fast path instead and never enters it. The keys are
+// escape-free, so the keys extraction stays on the fast path.
+TEST_F(FromJsonTest, RawMapOpt_Render_MixedEscapedAndVerbatim)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":"x\"y","b":"plain","c":42,"d":true,"e":""})",
+                                       R"({"f":"clean","g":"t\tb","h":"a b c"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"a", R"(x"y)"}, {"b", "plain"}, {"c", "42"}, {"d", "true"}, {"e", ""}},
+                           {{"f", "clean"}, {"g", "t\tb"}, {"h", "a b c"}}},
+                          all_valid(2));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// The transform path across many thread blocks: 5,000 rows x 4 keys puts 20,000 values through the
+// two-pass materializer, far past the single block every other gate-opening test fits in. Every row
+// carries an escaped value beside canonical ones, so both arms of the render dispatch run at scale
+// and the per-string offsets stay aligned across block boundaries.
+TEST_F(FromJsonTest, RawMapOpt_Render_MultiBlockEscaped)
+{
+  constexpr int num_rows = 5000;
+  constexpr int num_keys = 4;
+
+  std::vector<std::string> rows;
+  std::vector<std::vector<kv>> expected_rows;
+  rows.reserve(num_rows);
+  expected_rows.reserve(num_rows);
+
+  for (int r = 0; r < num_rows; ++r) {
+    std::string obj = "{";
+    std::vector<kv> pairs;
+    pairs.reserve(static_cast<std::size_t>(num_keys));
+    for (int k = 0; k < num_keys; ++k) {
+      if (k > 0) { obj += ","; }
+      auto const key = std::format("k{}", k);
+      // Odd keys carry a `\t` escape, even keys stay canonical, so one extraction holds both.
+      if (k % 2 == 1) {
+        obj += std::format(R"("{}":"v{}\tr{}")", key, k, r);
+        pairs.emplace_back(key, std::format("v{}\tr{}", k, r));
+      } else {
+        obj += std::format(R"("{}":"v{}r{}")", key, k, r);
+        pairs.emplace_back(key, std::format("v{}r{}", k, r));
+      }
+    }
+    obj += "}";
+    rows.push_back(std::move(obj));
+    expected_rows.push_back(std::move(pairs));
+  }
+
+  auto const input_col = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(expected_rows, all_valid(num_rows));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
@@ -962,13 +1047,29 @@ TEST_F(FromJsonTest, RawMapArray_EscapedElements)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
-// Keys of the array-valued map are unescaped too.
+// Escaped and canonical elements in the SAME extraction: one escaped element opens the transform
+// gate for the whole elements column, so the canonical ones beside it must still come out
+// byte-identical. The literal `null` element is the sharpest case -- it stays `verbatim` with an
+// EMPTY byte range, so it runs the verbatim arm on a zero-length span while mask #2 nulls the slot.
+TEST_F(FromJsonTest, RawMapArray_Render_MixedEscapedAndVerbatim)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":["x\"y","plain",null,123,true,""]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({R"(x"y)", "plain", null_elem(), "123", "true", ""})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Keys of the array-valued map are unescaped too. The array also carries an escaped element, so
+// BOTH the keys gate and the elements gate of the same conversion open.
 TEST_F(FromJsonTest, RawMapArray_KeyEscapes)
 {
-  auto const input_col = cudf::test::strings_column_wrapper{R"({"k\u00e9":["v"]})"};
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"k\u00e9":["v","x\"y"]})"};
   auto const input     = cudf::strings_column_view{input_col};
 
-  auto const expected = make_expected_raw_map_array({{{"ké", arr({"v"})}}}, all_valid(1));
+  auto const expected = make_expected_raw_map_array({{{"ké", arr({"v", R"(x"y)"})}}}, all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
@@ -1050,6 +1151,48 @@ TEST_F(FromJsonTest, RawMapArray_NumericLeniency)
   auto const expected =
     make_expected_raw_map_array({{{"k", arr({"007", "NaN", "Infinity"})}}}, all_valid(1));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+}
+
+// All-canonical, escape-free column (clean strings/ints/bools, an empty array): every key/element
+// classifies verbatim, so the extraction takes the raw-copy fast path (the transform gate stays
+// FALSE) and the output is byte-identical to the raw extraction.
+TEST_F(FromJsonTest, RawMapArray_Render_FastPathAllCanonical)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"a":["x","y"],"b":[],"c":[1,-2,true,false,0]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"a", arr({"x", "y"})}, {"b", arr({})}, {"c", arr({"1", "-2", "true", "false", "0"})}}},
+    all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// The transform path across many thread blocks on the array engine: 5,000 rows x 5 elements puts
+// 25,000 elements through the two-pass materializer, far past the single block every other
+// gate-opening test fits in. Every row mixes escaped, canonical, and null elements, so both arms of
+// the render dispatch and the zero-length null span run at scale. The keys carry no escape, so the
+// keys extraction stays on the raw-copy fast path.
+TEST_F(FromJsonTest, RawMapArray_Render_MultiBlockEscaped)
+{
+  constexpr int num_rows = 5000;
+
+  std::vector<std::string> rows;
+  std::vector<std::vector<kva>> expected_rows;
+  rows.reserve(num_rows);
+  expected_rows.reserve(num_rows);
+
+  for (int r = 0; r < num_rows; ++r) {
+    rows.emplace_back(R"({"a":["x\"y","plain"],"b":["p\\q",null,42]})");
+    expected_rows.push_back(
+      {{"a", arr({R"(x"y)", "plain"})}, {"b", arr({R"(p\q)", null_elem(), "42"})}});
+  }
+
+  auto const input_col = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(expected_rows, all_valid(num_rows));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
 // Whitespace around values: insignificant whitespace is not part of the element bytes. The
@@ -1134,7 +1277,7 @@ TEST_F(FromJsonTest, RawMapArray_InnerOffsetAdversarialLarge)
 }
 
 // Escaped and escape-free elements mixed inside every row at 50k-row scale, so both category arms
-// of `render_node_fn` run within the same warp. Mirrors the large-input sanitizer vehicle above.
+// of `transform_fn` run within the same warp. Mirrors the large-input sanitizer vehicle above.
 TEST_F(FromJsonTest, RawMapArray_Render_MixedCategoriesLarge)
 {
   constexpr int num_rows = 50000;

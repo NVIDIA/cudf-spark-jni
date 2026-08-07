@@ -754,7 +754,7 @@ struct classified_nodes {
 
 // Compute the position range and rendering category for each node.
 // The ranges identify positions to extract nodes from the unified json string; the categories
-// drive the Spark-render materializer.
+// drive the Spark-render materializer and its verbatim fast-path gate.
 classified_nodes compute_node_ranges_and_categories(
   cudf::device_span<char const> input_json,
   cudf::device_span<PdaTokenT const> tokens,
@@ -785,11 +785,35 @@ classified_nodes compute_node_ranges_and_categories(
   return {std::move(node_ranges), std::move(node_categories)};
 }
 
-// String-render materializer for every extracted node, dispatching per compacted category. It keeps
-// `make_strings_children`'s two-pass convention: a null destination sizes, a non-null one writes.
-// The stored ranges are assumed in-bounds for `d_string`; no bound check is performed. The
-// `verbatim` arm is a raw memcpy of the byte range; only a `string_unescape` node re-parses.
-struct render_node_fn {
+// Function logic for substring API.
+// This both calculates the output size and executes the substring.
+// No bound check is performed, assuming that the substring bounds are all valid.
+struct substring_fn {
+  cudf::device_span<char const> d_string;
+  cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> d_ranges;
+
+  cudf::size_type* d_sizes;
+  char* d_chars;
+  cudf::detail::input_offsetalator d_offsets;
+
+  __device__ void operator()(cudf::size_type idx)
+  {
+    auto const range = d_ranges[idx];
+    auto const size  = range.second - range.first;
+    if (d_chars) {
+      memcpy(d_chars + d_offsets[idx], d_string.data() + range.first, size);
+    } else {
+      d_sizes[idx] = size;
+    }
+  }
+};
+
+// String-render materializer, used when the extraction holds at least one `string_unescape` node.
+// It keeps `make_strings_children`'s two-pass convention: a null destination sizes, a non-null one
+// writes. The stored ranges are assumed in-bounds for `d_string`; no bound check is performed. The
+// `verbatim` arm is a raw memcpy of the byte range, so a canonical token in a flagged column still
+// takes the raw copy; only a `string_unescape` node re-parses.
+struct transform_fn {
   cudf::device_span<char const> d_string;
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> d_ranges;
   cudf::device_span<token_category const> d_categories;
@@ -818,29 +842,112 @@ struct render_node_fn {
   }
 };
 
+// What one extraction selects and how it renders: the nodes tagged `sentinel` in `selector`, each
+// materialized per its `categories` entry. All three are indexed by node id and must travel
+// together -- pairing a selector with another extraction's categories reads the wrong node.
+struct extraction_spec {
+  node_kind sentinel;
+  cudf::device_span<node_kind const> selector;
+  cudf::device_span<token_category const> categories;
+};
+
+// An extraction bound to the verbatim fast-path gate computed for it: `needs_transform` is true
+// when any node `spec` selects classified non-`verbatim`, so the extraction must materialize
+// through `transform_fn` rather than the raw byte-range copy. Binding the two in one value is what
+// keeps a gate from being handed to the extraction it was not computed for.
+struct gated_extraction {
+  extraction_spec spec;
+  bool needs_transform;
+};
+
+// Compute both extraction gates of one map conversion in a single fused pass and a single
+// device-to-host copy, instead of one blocking `thrust::any_of` round trip per extraction. Both
+// specs are indexed by the same node ids, and each is returned already bound to its own gate.
+cuda::std::pair<gated_extraction, gated_extraction> compute_transform_gates(
+  extraction_spec first, extraction_spec second, rmm::cuda_stream_view stream)
+{
+  auto const num_nodes = first.selector.size();
+  CUDF_EXPECTS(first.categories.size() == num_nodes && second.selector.size() == num_nodes &&
+                 second.categories.size() == num_nodes,
+               "Transform gates require equally sized node metadata.");
+  auto gates = rmm::device_uvector<int32_t>(2, stream);
+  CUDF_CUDA_TRY(cudaMemsetAsync(gates.data(), 0, 2 * sizeof(int32_t), stream));
+  auto const node_id_it = thrust::make_counting_iterator<cudf::size_type>(0);
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   node_id_it,
+                   node_id_it + num_nodes,
+                   [first, second, gates = gates.data()] __device__(auto const node_id) {
+                     // Concurrent relaxed stores of the same value: a gate only ever flips to 1.
+                     if (first.selector[node_id] == first.sentinel &&
+                         first.categories[node_id] != token_category::verbatim) {
+                       cuda::atomic_ref<int32_t, cuda::thread_scope_device>{gates[0]}.store(
+                         1, cuda::memory_order_relaxed);
+                     }
+                     if (second.selector[node_id] == second.sentinel &&
+                         second.categories[node_id] != token_category::verbatim) {
+                       cuda::atomic_ref<int32_t, cuda::thread_scope_device>{gates[1]}.store(
+                         1, cuda::memory_order_relaxed);
+                     }
+                   });
+
+  int32_t gates_host[2];
+  CUDF_CUDA_TRY(
+    cudaMemcpyAsync(gates_host, gates.data(), sizeof(gates_host), cudaMemcpyDeviceToHost, stream));
+  stream.synchronize();
+  return {{first, gates_host[0] != 0}, {second, gates_host[1] != 0}};
+}
+
 // Extract key-value string pairs from the input json string, with escaped strings/keys unescaped to
-// match Spark. The compaction carries each node's category alongside its range and materializes
-// through `render_node_fn`, which unescapes the `string_unescape` slots and copies the rest
-// verbatim.
+// match Spark. When every selected node classified `verbatim` (`needs_transform == false`,
+// precomputed by `compute_transform_gates` and carried on the extraction itself), this is exactly
+// the raw byte-range gather; otherwise the compaction additionally carries each node's category and
+// materializes through `transform_fn`, which unescapes the `string_unescape` slots.
 std::unique_ptr<cudf::column> extract_keys_or_values(
-  node_kind key_value_sentinel,
+  gated_extraction const& extraction,
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
-  cudf::device_span<token_category const> node_categories,
-  cudf::device_span<node_kind const> key_or_value,
   cudf::device_span<char const> input_json,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
+  auto const& spec = extraction.spec;
+  CUDF_EXPECTS(
+    spec.selector.size() == node_ranges.size() && spec.categories.size() == node_ranges.size(),
+    "Extraction requires equally sized node metadata.");
   auto const is_key_or_value = cuda::proclaim_return_type<bool>(
-    [key_or_value, key_value_sentinel] __device__(auto const node_id) {
-      return key_or_value[node_id] == key_value_sentinel;
+    [selector = spec.selector, sentinel = spec.sentinel] __device__(auto const node_id) {
+      return selector[node_id] == sentinel;
     });
 
+  // With every selected node `verbatim` (escape-free strings/keys, or any non-string value kind),
+  // the raw copy below is already byte-identical to Spark's rendering.
+  if (!extraction.needs_transform) {
+    auto extracted_ranges = rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(
+      node_ranges.size(), stream);
+    auto const range_end = copy_if(node_ranges.begin(),
+                                   node_ranges.end(),
+                                   thrust::make_counting_iterator(0),
+                                   extracted_ranges.begin(),
+                                   is_key_or_value,
+                                   stream);
+    auto const num_extract =
+      static_cast<cudf::size_type>(cuda::std::distance(extracted_ranges.begin(), range_end));
+    if (num_extract == 0) {
+      return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING});
+    }
+
+    auto [offsets, chars] = cudf::strings::detail::make_strings_children(
+      substring_fn{input_json, extracted_ranges}, num_extract, stream, mr);
+    return cudf::make_strings_column(
+      num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
+  }
+
+  // Transform path: compact (range, category) with the same stencil in one pass, then materialize
+  // through the category dispatch.
   auto const num_nodes = node_ranges.size();
   auto extracted_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
   auto extracted_categories = rmm::device_uvector<token_category>(num_nodes, stream);
-  auto const zip_in = thrust::make_zip_iterator(node_ranges.begin(), node_categories.begin());
+  auto const zip_in = thrust::make_zip_iterator(node_ranges.begin(), spec.categories.begin());
   auto const zip_out =
     thrust::make_zip_iterator(extracted_ranges.begin(), extracted_categories.begin());
   auto const zip_end     = copy_if(zip_in,
@@ -853,7 +960,7 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
   if (num_extract == 0) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING}); }
 
   auto [offsets, chars] = cudf::strings::detail::make_strings_children(
-    render_node_fn{input_json, extracted_ranges, extracted_categories}, num_extract, stream, mr);
+    transform_fn{input_json, extracted_ranges, extracted_categories}, num_extract, stream, mr);
   return cudf::make_strings_column(
     num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
 }
@@ -1102,7 +1209,8 @@ struct element_classify_fn {
 
       // Mask #2: a literal `null` element is a null element, and gets an empty byte span -- it
       // materializes as a null string with no non-empty-null payload, which the manual list
-      // assembly requires. Its category stays `verbatim`, so the empty span copies zero bytes.
+      // assembly requires. Its category stays `verbatim` (the empty span copies zero bytes),
+      // keeping all-clean-but-nulls columns on the raw fast path.
       if (token == token_t::ValueBegin &&
           is_json_null_literal(input_json.data(), range_begin, range_end)) {
         valid = false;
@@ -1149,20 +1257,15 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto const& node_ranges     = classified.ranges;
   auto const& node_categories = classified.categories;
 
-  auto extracted_keys   = extract_keys_or_values(node_kind::key,
-                                               node_ranges,
-                                               node_categories,
-                                               is_key_or_value_node,
-                                               preprocessed_input,
-                                               stream,
-                                               mr);
-  auto extracted_values = extract_keys_or_values(node_kind::value,
-                                                 node_ranges,
-                                                 node_categories,
-                                                 is_key_or_value_node,
-                                                 preprocessed_input,
-                                                 stream,
-                                                 mr);
+  // Both extractions' transform gates in one fused pass and one sync.
+  auto const [keys, values] =
+    compute_transform_gates({node_kind::key, is_key_or_value_node, node_categories},
+                            {node_kind::value, is_key_or_value_node, node_categories},
+                            stream);
+
+  auto extracted_keys = extract_keys_or_values(keys, node_ranges, preprocessed_input, stream, mr);
+  auto extracted_values =
+    extract_keys_or_values(values, node_ranges, preprocessed_input, stream, mr);
   CUDF_EXPECTS(extracted_keys->size() == extracted_values->size(),
                "Invalid key-value pair extraction.");
 
@@ -1235,8 +1338,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto const& node_categories = classified.categories;
 
   // Fused classification pass: per node emit the element flag, the de-quoted element byte range,
-  // element validity (mask #2), and the rendering category in one transform. Runs before the
-  // element extraction, which consumes the ranges and categories it produces.
+  // element validity (mask #2), and the rendering category in one transform. Runs before both
+  // extractions so their transform gates can be read back with a single sync.
   auto element_flag = rmm::device_uvector<node_kind>(num_nodes, stream);
   auto element_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
@@ -1259,22 +1362,17 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                                          element_categories.begin()});
   }
 
-  auto extracted_keys = extract_keys_or_values(node_kind::key,
-                                               node_ranges,
-                                               node_categories,
-                                               is_key_or_value_node,
-                                               preprocessed_input,
-                                               stream,
-                                               mr);
+  // Both extractions' transform gates in one fused pass and one sync.
+  auto const [keys, elements] =
+    compute_transform_gates({node_kind::key, is_key_or_value_node, node_categories},
+                            {node_kind::element, element_flag, element_categories},
+                            stream);
+
+  auto extracted_keys = extract_keys_or_values(keys, node_ranges, preprocessed_input, stream, mr);
 
   // Extract element strings with the shared extractor (a 0-null STRING column); attach mask #2.
-  auto extracted_elements = extract_keys_or_values(node_kind::element,
-                                                   element_ranges,
-                                                   element_categories,
-                                                   element_flag,
-                                                   preprocessed_input,
-                                                   stream,
-                                                   mr);
+  auto extracted_elements =
+    extract_keys_or_values(elements, element_ranges, preprocessed_input, stream, mr);
   {
     // Mask #2 over only the selected (element-flagged) nodes, in element document order, matching
     // the order `extract_keys_or_values` emits.
