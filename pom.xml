@@ -96,6 +96,9 @@
     <jni.classifier>${cuda.version}</jni.classifier>
     <cudf.path>${project.basedir}/thirdparty/cudf</cudf.path>
     <cudf.pin.path>${project.basedir}/thirdparty/cudf-pins/</cudf.pin.path>
+    <!-- Reuse a prebuilt libcudf/libcudfjni (skip their builds); force overrides the skew guard -->
+    <cudf.reuse.prebuilt>false</cudf.reuse.prebuilt>
+    <cudf.reuse.force>false</cudf.reuse.force>
     <guava.version>14.0.1</guava.version>
     <hadoop.version>3.4.0</hadoop.version>
     <junit.version>5.8.1</junit.version>
@@ -393,6 +396,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/submodule-check">
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -422,6 +426,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/apply-patches">
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -438,6 +443,7 @@
                 <exec dir="${project.basedir}"
                       failonerror="true"
                       executable="${project.basedir}/build/unapply-patches">
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                 </exec>
               </target>
             </configuration>
@@ -464,6 +470,8 @@
                   <env key="CUDF_BUILD_TYPE" value="${CUDF_BUILD_TYPE}"/>
                   <env key="CUDF_PATH" value="${cudf.path}"/>
                   <env key="CUDF_PIN_PATH" value="${cudf.pin.path}"/>
+                  <env key="CUDF_REUSE_FORCE" value="${cudf.reuse.force}"/>
+                  <env key="CUDF_REUSE_PREBUILT" value="${cudf.reuse.prebuilt}"/>
                   <env key="CUDF_USE_PER_THREAD_DEFAULT_STREAM" value="${CUDF_USE_PER_THREAD_DEFAULT_STREAM}"/>
                   <env key="FROM_MAVEN" value="true"/>
                   <env key="GPU_ARCHS" value="${GPU_ARCHS}"/>
@@ -498,7 +506,7 @@
                   <arg value="${project.basedir}/build/build-info"/>
                   <arg value="${project.version}"/>
                   <arg value="${cudf.path}"/>
-                  <arg value="${libcudf.build.path}/libcudf.a"/>
+                  <arg value="${libcudf.install.path}"/>
                 </exec>
                 <exec executable="bash"
                       output="${project.build.directory}/extra-resources/spark-rapids-jni-version-info.properties"
