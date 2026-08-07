@@ -30,8 +30,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertTi
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input         = reinterpret_cast<cudf::column_view const*>(input_handle);
-    auto const timezone_info = reinterpret_cast<cudf::table_view const*>(timezone_info_handle);
+    auto const input         = std::bit_cast<cudf::column_view const*>(input_handle);
+    auto const timezone_info = std::bit_cast<cudf::table_view const*>(timezone_info_handle);
     auto const index         = static_cast<cudf::size_type>(tz_index);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::convert_timestamp_to_utc(*input, *timezone_info, index).release());
@@ -48,8 +48,8 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertUTCTimestampColumnToTimeZo
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input         = reinterpret_cast<cudf::column_view const*>(input_handle);
-    auto const timezone_info = reinterpret_cast<cudf::table_view const*>(timezone_info_handle);
+    auto const input         = std::bit_cast<cudf::column_view const*>(input_handle);
+    auto const timezone_info = std::bit_cast<cudf::table_view const*>(timezone_info_handle);
     auto const index         = static_cast<cudf::size_type>(tz_index);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::convert_utc_timestamp_to_timezone(*input, *timezone_info, index).release());
@@ -80,14 +80,14 @@ Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertTimestampColumnToUTCWithTz
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_seconds = reinterpret_cast<cudf::column_view const*>(input_seconds_handle);
+    auto const input_seconds = std::bit_cast<cudf::column_view const*>(input_seconds_handle);
     auto const input_microseconds =
-      reinterpret_cast<cudf::column_view const*>(input_microseconds_handle);
-    auto const invalid       = reinterpret_cast<cudf::column_view const*>(invalid_handle);
-    auto const tz_type       = reinterpret_cast<cudf::column_view const*>(tz_type_handle);
-    auto const tz_offset     = reinterpret_cast<cudf::column_view const*>(tz_offset_handle);
-    auto const timezone_info = reinterpret_cast<cudf::table_view const*>(timezone_info_handle);
-    auto const tz_indices    = reinterpret_cast<cudf::column_view const*>(tz_indices_handle);
+      std::bit_cast<cudf::column_view const*>(input_microseconds_handle);
+    auto const invalid       = std::bit_cast<cudf::column_view const*>(invalid_handle);
+    auto const tz_type       = std::bit_cast<cudf::column_view const*>(tz_type_handle);
+    auto const tz_offset     = std::bit_cast<cudf::column_view const*>(tz_offset_handle);
+    auto const timezone_info = std::bit_cast<cudf::table_view const*>(timezone_info_handle);
+    auto const tz_indices    = std::bit_cast<cudf::column_view const*>(tz_indices_handle);
 
     return cudf::jni::ptr_as_jlong(spark_rapids_jni::convert_timestamp_to_utc(*input_seconds,
                                                                               *input_microseconds,
@@ -149,9 +149,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input              = reinterpret_cast<cudf::column_view const*>(input_handle);
-    auto const writer_tz_info_tab = reinterpret_cast<cudf::table_view const*>(writer_tz_info_table);
-    auto const reader_tz_info_tab = reinterpret_cast<cudf::table_view const*>(reader_tz_info_table);
+    auto const input              = std::bit_cast<cudf::column_view const*>(input_handle);
+    auto const writer_tz_info_tab = std::bit_cast<cudf::table_view const*>(writer_tz_info_table);
+    auto const reader_tz_info_tab = std::bit_cast<cudf::table_view const*>(reader_tz_info_table);
     auto const writer_dst         = parse_dst_rule(env, writer_dst_rule);
     cudf::jni::check_java_exception(env);
     auto const reader_dst = parse_dst_rule(env, reader_dst_rule);
