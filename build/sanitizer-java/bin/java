@@ -20,7 +20,7 @@
 # the tests will run with the compute-sanitizer tool.
 log_token="${BASHPID:-$$}_${RANDOM}_${RANDOM}"
 log_basename="sanitizer_for_pid_${log_token}"
-WORKDIR="$PWD"
+WORKDIR="${SANITIZER_LOG_DIR:-$PWD}"
 sanitizer_pid=""
 received_signal=""
 
@@ -47,21 +47,6 @@ sanitizer_pid=$!
 wait "$sanitizer_pid"
 status=$?
 trap - TERM INT HUP
-
-if [[ $status -ne 0 ]]; then
-    echo "compute-sanitizer failed with exit code $status." >&2
-
-    found_logs=false
-    while IFS= read -r sanitizer_log; do
-        found_logs=true
-        echo "===== Last 80 lines of $sanitizer_log =====" >&2
-        tail -n 80 "$sanitizer_log" >&2
-    done < <(find "$WORKDIR" -maxdepth 1 -type f -name "${log_basename}_*.log" | sort)
-
-    if [[ $found_logs == false ]]; then
-        echo "No sanitizer_for_pid_*.log files were created for this fork." >&2
-    fi
-fi
 
 if [[ -n "$received_signal" ]]; then
     kill "-$received_signal" "$$"
