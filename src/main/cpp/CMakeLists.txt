@@ -285,6 +285,7 @@ add_library(
   src/protobuf/protobuf_kernels.cu
   src/regex_rewrite_utils.cu
   src/row_conversion.cu
+  src/row_conversion_jit.cpp
   src/round_float.cu
   src/shuffle_assemble.cu
   src/shuffle_split.cu
@@ -322,6 +323,9 @@ target_include_directories(
           "${JNI_INCLUDE_DIRS}"
           "${CUDFJNI_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
+          # librtcx installs rtcx.hpp/hash.hpp under include/rtcx, and rtcx.hpp includes its
+          # sibling as <hash.hpp>, so the subdirectory itself must be on the include path.
+          "${CUDF_INSTALL_DIR}/include/rtcx"
 )
 
 target_compile_definitions(
@@ -349,6 +353,13 @@ target_link_libraries(
     ${PARQUET_LIB}
     ${THRIFT_LIB}
 )
+# librtcx (with static NVRTC + nvJitLink) is already absorbed into this library through
+# cudf::cudf, so this link is belt-and-braces only. cudf exports the target from its static
+# build alone, so a shared-libcudf configure must not fail on it.
+if(TARGET rtcx::rtcx)
+  target_link_libraries(spark_rapids_jni PRIVATE rtcx::rtcx)
+endif()
+
 rapids_cuda_set_runtime(spark_rapids_jni USE_STATIC ON)
 set_target_properties(spark_rapids_jni PROPERTIES LINK_LANGUAGE "CXX")
 # For backwards-compatibility with the cudf Java bindings and RAPIDS accelerated UDFs,

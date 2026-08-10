@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ Java_com_nvidia_spark_rapids_jni_RowConversion_convertToRows(JNIEnv* env, jclass
 
 JNIEXPORT jlongArray JNICALL
 Java_com_nvidia_spark_rapids_jni_RowConversion_convertFromRowsFixedWidthOptimized(
-  JNIEnv* env, jclass, jlong input_column, jintArray types, jintArray scale)
+  JNIEnv* env, jclass, jlong input_column, jintArray types, jintArray scale, jboolean all_valid)
 {
   JNI_NULL_CHECK(env, input_column, "input column is null", 0);
   JNI_NULL_CHECK(env, types, "types is null", 0);
@@ -87,15 +87,20 @@ Java_com_nvidia_spark_rapids_jni_RowConversion_convertFromRowsFixedWidthOptimize
                    n_scale.begin(),
                    std::back_inserter(types_vec),
                    [](jint type, jint scale) { return cudf::jni::make_data_type(type, scale); });
+    // The false case must call the incumbent overload rather than pass a vector of `true`: for a
+    // zero-column schema that vector is empty, and `none_of` over an empty range is true, which
+    // would take the fast path for a caller that declared nothing.
     std::unique_ptr<cudf::table> result =
-      spark_rapids_jni::convert_from_rows_fixed_width_optimized(list_input, types_vec);
+      all_valid ? spark_rapids_jni::convert_from_rows_fixed_width_optimized(
+                    list_input, types_vec, std::vector<bool>(types_vec.size(), false))
+                : spark_rapids_jni::convert_from_rows_fixed_width_optimized(list_input, types_vec);
     return cudf::jni::convert_table_for_return(env, result);
   }
   JNI_CATCH(env, 0);
 }
 
 JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_RowConversion_convertFromRows(
-  JNIEnv* env, jclass, jlong input_column, jintArray types, jintArray scale)
+  JNIEnv* env, jclass, jlong input_column, jintArray types, jintArray scale, jboolean all_valid)
 {
   JNI_NULL_CHECK(env, input_column, "input column is null", 0);
   JNI_NULL_CHECK(env, types, "types is null", 0);
@@ -116,8 +121,11 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_RowConversion_conv
                    n_scale.begin(),
                    std::back_inserter(types_vec),
                    [](jint type, jint scale) { return cudf::jni::make_data_type(type, scale); });
+    // A branch, not a constructed vector: `none_of` over an empty schema would be true.
     std::unique_ptr<cudf::table> result =
-      spark_rapids_jni::convert_from_rows(list_input, types_vec);
+      all_valid ? spark_rapids_jni::convert_from_rows(
+                    list_input, types_vec, std::vector<bool>(types_vec.size(), false))
+                : spark_rapids_jni::convert_from_rows(list_input, types_vec);
     return cudf::jni::convert_table_for_return(env, result);
   }
   JNI_CATCH(env, 0);

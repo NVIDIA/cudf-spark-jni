@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -135,6 +135,26 @@ public class RowConversion {
    * @return the parsed table.
    */
   public static Table convertFromRows(ColumnView vec, DType ... schema) {
+    return convertFromRows(vec, false, schema);
+  }
+
+  /**
+   * Convert a column of list of bytes that is formatted like the output from `convertToRows`
+   * and convert it back to a table.
+   *
+   * NOTE: This method doesn't support nested types
+   *
+   * @param vec the row data to process.
+   * @param allValid true only if the producer OBSERVED that it wrote no nulls into these rows.
+   *                 Never pass a value inferred from a declared schema: the conversion skips all
+   *                 validity work and returns non-nullable columns, so a false claim yields wrong
+   *                 values rather than an error. Set the environment variable
+   *                 ROWCONV_VALIDATE_ALL_VALID=1 to re-verify every such claim and throw on a
+   *                 violation instead (debug aid, default off).
+   * @param schema the types of each column.
+   * @return the parsed table.
+   */
+  public static Table convertFromRows(ColumnView vec, boolean allValid, DType ... schema) {
     int[] types = new int[schema.length];
     int[] scale = new int[schema.length];
     for (int i = 0; i < schema.length; i++) {
@@ -142,7 +162,7 @@ public class RowConversion {
       scale[i] = schema[i].getScale();
 
     }
-    return new Table(convertFromRows(vec.getNativeView(), types, scale));
+    return new Table(convertFromRows(vec.getNativeView(), types, scale, allValid));
   }
 
   /**
@@ -156,6 +176,27 @@ public class RowConversion {
    * @return the parsed table.
    */
   public static Table convertFromRowsFixedWidthOptimized(ColumnView vec, DType ... schema) {
+    return convertFromRowsFixedWidthOptimized(vec, false, schema);
+  }
+
+  /**
+   * Convert a column of list of bytes that is formatted like the output from `convertToRows`
+   * and convert it back to a table.
+   *
+   * NOTE: This method doesn't support nested types
+   *
+   * @param vec the row data to process.
+   * @param allValid true only if the producer OBSERVED that it wrote no nulls into these rows.
+   *                 Never pass a value inferred from a declared schema: the conversion skips all
+   *                 validity work and returns non-nullable columns, so a false claim yields wrong
+   *                 values rather than an error. Set the environment variable
+   *                 ROWCONV_VALIDATE_ALL_VALID=1 to re-verify every such claim and throw on a
+   *                 violation instead (debug aid, default off).
+   * @param schema the types of each column.
+   * @return the parsed table.
+   */
+  public static Table convertFromRowsFixedWidthOptimized(ColumnView vec, boolean allValid,
+      DType ... schema) {
     int[] types = new int[schema.length];
     int[] scale = new int[schema.length];
     for (int i = 0; i < schema.length; i++) {
@@ -163,12 +204,15 @@ public class RowConversion {
       scale[i] = schema[i].getScale();
 
     }
-    return new Table(convertFromRowsFixedWidthOptimized(vec.getNativeView(), types, scale));
+    return new Table(
+        convertFromRowsFixedWidthOptimized(vec.getNativeView(), types, scale, allValid));
   }
 
   private static native long[] convertToRows(long nativeHandle);
   private static native long[] convertToRowsFixedWidthOptimized(long nativeHandle);
 
-  private static native long[] convertFromRows(long nativeColumnView, int[] types, int[] scale);
-  private static native long[] convertFromRowsFixedWidthOptimized(long nativeColumnView, int[] types, int[] scale);
+  private static native long[] convertFromRows(long nativeColumnView, int[] types, int[] scale,
+      boolean allValid);
+  private static native long[] convertFromRowsFixedWidthOptimized(long nativeColumnView,
+      int[] types, int[] scale, boolean allValid);
 }
