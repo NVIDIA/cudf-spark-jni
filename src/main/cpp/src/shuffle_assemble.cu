@@ -40,6 +40,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <thrust/binary_search.h>
@@ -1380,7 +1381,7 @@ __global__ void copy_validity(cudf::device_span<assemble_batch> batches)
 
   // how many leading bytes we have. that is, how many bytes will be read by the initial read, which
   // accounts for misaligned source buffers.
-  int const leading_bytes = (4 - (reinterpret_cast<uint64_t>(batch.src) % 4));
+  int const leading_bytes = (4 - (cuda::std::bit_cast<uint64_t>(batch.src) % 4));
   int remaining_rows      = batch.validity_row_count;
 
   // - if the address is misaligned, load byte-by-byte and only store up to that many bits/rows off

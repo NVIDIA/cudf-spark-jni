@@ -37,6 +37,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/launch>
+#include <cuda/std/bit>
 #include <cuda/std/chrono>
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
@@ -643,7 +644,8 @@ __device__ static void stage_side_transitions(int64_t const* __restrict__ g_tran
   int32_t* s_offsets = nullptr;
 
   if (fits && trans_count > 0) {
-    ptr     = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
+    ptr =
+      cuda::std::bit_cast<char*>(align_up(cuda::std::bit_cast<uintptr_t>(ptr), alignof(int64_t)));
     s_trans = reinterpret_cast<int64_t*>(ptr);
     ptr += trans_count * sizeof(int64_t);
     s_offsets = reinterpret_cast<int32_t*>(ptr);
