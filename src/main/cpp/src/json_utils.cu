@@ -274,7 +274,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
       : cudf::column_view{cudf::data_type{cudf::type_id::STRING},
                           input.size(),
                           input.chars_begin(stream),
-                          reinterpret_cast<cudf::bitmask_type const*>(null_mask->data()),
+                          static_cast<cudf::bitmask_type const*>(null_mask->data()),
                           null_count,
                           input.offset(),
                           std::vector<cudf::column_view>{input.offsets()}};

@@ -314,13 +314,13 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(int version,
   rmm::device_buffer buf{static_cast<size_t>(buf_size), stream, mr};
 
   bloom_filter_header header{version, num_hashes, bloom_filter_longs};
-  pack_bloom_filter_header({reinterpret_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)},
+  pack_bloom_filter_header({static_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)},
                            header,
                            stream,
                            (version == bloom_filter_version_1 ? 0 : seed));
 
-  CUDF_CUDA_TRY(cudaMemsetAsync(
-    reinterpret_cast<uint8_t*>(buf.data()) + hdr_size, 0, bloom_filter_size, stream));
+  CUDF_CUDA_TRY(
+    cudaMemsetAsync(static_cast<uint8_t*>(buf.data()) + hdr_size, 0, bloom_filter_size, stream));
 
   return std::make_unique<cudf::list_scalar>(
     cudf::column(
@@ -417,11 +417,10 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_merge(cudf::column_view const& b
 
   rmm::device_buffer buf{static_cast<size_t>(buf_size), stream, mr};
   pack_bloom_filter_header(
-    {reinterpret_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)}, header, stream, seed);
+    {static_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)}, header, stream, seed);
 
   auto src = lcv.child().data<uint8_t>() + hdr_size;
-  auto dst =
-    reinterpret_cast<cudf::bitmask_type*>(reinterpret_cast<uint8_t*>(buf.data()) + hdr_size);
+  auto dst = reinterpret_cast<cudf::bitmask_type*>(static_cast<uint8_t*>(buf.data()) + hdr_size);
 
   cudf::size_type num_words = header.num_longs * 2;
   thrust::transform(
