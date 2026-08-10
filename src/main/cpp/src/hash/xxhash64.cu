@@ -25,6 +25,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/array>
 #include <cuda/std/bit>
 #include <cuda/std/utility>
 #include <thrust/tabulate.h>
@@ -73,7 +74,8 @@ struct XXHash_64 {
   template <typename T>
   result_type __device__ inline compute(T const& key) const
   {
-    return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T));
+    auto const bytes = cuda::std::bit_cast<cuda::std::array<cuda::std::byte, sizeof(T)>>(key);
+    return compute_bytes(bytes.data(), bytes.size());
   }
 
   result_type __device__ inline compute_remaining_bytes(cuda::std::byte const* data,
@@ -269,8 +271,8 @@ hash_value_type __device__ inline XXHash_64<numeric::decimal128>::operator()(
   numeric::decimal128 const& key) const
 {
   auto [java_d, length] = to_java_bigdecimal(key);
-  auto bytes            = reinterpret_cast<cuda::std::byte*>(&java_d);
-  return compute_bytes(bytes, length);
+  auto const bytes = cuda::std::bit_cast<cuda::std::array<cuda::std::byte, sizeof(java_d)>>(java_d);
+  return compute_bytes(bytes.data(), length);
 }
 
 /**
