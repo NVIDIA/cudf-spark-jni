@@ -924,8 +924,8 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
     chunk,
     input.chars_begin(stream),
     offsets_mutable_view.begin<size_type>(),
-    reinterpret_cast<size_type*>(src_offsets.data()),
-    reinterpret_cast<bitmask_type*>(null_mask.data()),
+    src_offsets.data(),
+    static_cast<bitmask_type*>(null_mask.data()),
     d_matches ? cuda::std::optional<column_device_view const>{*d_matches} : cuda::std::nullopt);
 
   // use scan to transform number of bytes into offsets
@@ -948,12 +948,12 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   parse_uri<<<num_threadblocks, threadblock_size, 0, stream.value()>>>(
     *d_strings,
     input.chars_begin(stream),
-    reinterpret_cast<size_type*>(src_offsets.data()),
+    src_offsets.data(),
     offsets_column->view().begin<size_type>(),
     static_cast<char*>(d_out_chars.data()));
 
   auto null_count =
-    cudf::null_count(reinterpret_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
+    cudf::null_count(static_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
