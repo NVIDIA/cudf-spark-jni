@@ -25,6 +25,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/utility>
 #include <thrust/tabulate.h>
 
@@ -56,7 +57,7 @@ struct XXHash_64 {
     uint32_t result = static_cast<uint32_t>(block[0]) | (static_cast<uint32_t>(block[1]) << 8) |
                       (static_cast<uint32_t>(block[2]) << 16) |
                       (static_cast<uint32_t>(block[3]) << 24);
-    return reinterpret_cast<T const*>(&result)[0];
+    return cuda::std::bit_cast<T>(result);
   }
 
   __device__ inline hash_value_type getblock64(cuda::std::byte const* data,
@@ -64,7 +65,7 @@ struct XXHash_64 {
   {
     uint64_t result = static_cast<uint64_t>(getblock32<uint32_t>(data, offset)) |
                       static_cast<uint64_t>(getblock32<uint32_t>(data, offset + 4)) << 32;
-    return reinterpret_cast<hash_value_type const*>(&result)[0];
+    return cuda::std::bit_cast<hash_value_type>(result);
   }
 
   result_type __device__ inline operator()(Key const& key) const { return compute(key); }
