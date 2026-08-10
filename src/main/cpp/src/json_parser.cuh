@@ -222,7 +222,11 @@ class char_range_reader : public char_range {
 class json_parser {
  public:
   __device__ inline explicit json_parser(char_range _chars)
-    : chars(_chars), curr_pos(0), current_token(json_token::INIT), max_depth_exceeded(false)
+    : chars(_chars),
+      curr_pos(0),
+      current_token(json_token::INIT),
+      max_depth_exceeded(false),
+      token_has_lone_surrogate(false)
   {
   }
 
@@ -414,8 +418,12 @@ class json_parser {
    */
   __device__ inline void parse_string_and_set_current()
   {
-    [[maybe_unused]] auto const [success, matched, end] =
-      try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)});
+    // A local, not the member: passing the member by reference lets its address escape into the
+    // string loop, which blocks optimization there and measurably slows it down.
+    bool found_lone_surrogate                           = false;
+    [[maybe_unused]] auto const [success, matched, end] = try_parse_string(
+      char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)}, found_lone_surrogate);
+    token_has_lone_surrogate = found_lone_surrogate;
     if (success) {
       curr_pos      = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
       current_token = json_token::VALUE_STRING;
@@ -436,10 +444,26 @@ class json_parser {
   }
 
   /**
+   * write one UTF-16 code unit as an uppercase JSON unicode escape
+   */
+  static __device__ inline int write_unicode_escape(uint16_t code_unit, char* output)
+  {
+    if (output != nullptr) {
+      output[0] = '\\';
+      output[1] = 'u';
+      for (int digit = 0; digit < 4; ++digit) {
+        auto const shift  = static_cast<unsigned int>((3 - digit) * 4);
+        output[2 + digit] = to_hex_char((code_unit >> shift) & 0x0F);
+      }
+    }
+    return 6;
+  }
+
+  /**
    * escape control char ( ASCII code value [0, 32) )
    * e.g.: \0  (ASCII code 0) will be escaped to 6 chars: \u0000
    * e.g.: \10 (ASCII code 0) will be escaped to 2 chars: \n
-   * @param char to be escaped, c should in range [0, 31)
+   * @param char to be escaped, c should in range [0, 32)
    * @param[out] escape output
    */
   static __device__ inline int escape_char(unsigned char c, char* output)
@@ -475,23 +499,8 @@ class json_parser {
         output[0] = '\\';
         output[1] = 'r';
         return 2;
-      default:
-        output[0] = '\\';
-        output[1] = 'u';
-        output[2] = '0';
-        output[3] = '0';
-
-        // write high digit
-        if (c >= 16) {
-          output[4] = '1';
-        } else {
-          output[4] = '0';
-        }
-
-        // write low digit
-        unsigned int v = c % 16;
-        output[5]      = to_hex_char(v);
-        return 6;
+      // A control char is its own UTF-16 code unit.
+      default: return write_unicode_escape(c, output);
     }
   }
 
@@ -501,6 +510,7 @@ class json_parser {
   struct utf8_sequence {
     cudf::size_type length;  // input bytes consumed
     bool malformed;          // decoder emits one U+FFFD instead of a code point
+    bool astral;             // well formed and outside the BMP, so ESCAPED emits a surrogate pair
   };
 
   // Shared by the write path and the field-name match path so the two cannot compare against
@@ -563,54 +573,63 @@ class json_parser {
    * identical: `ED A0 80` fails only the surrogate check, so all three bytes become one U+FFFD,
    * while the overlong `E0 80 80` fails after the lead and yields three. The size of `str` bounds
    * the lookahead.
+   *
+   * Every rule below is decided on the raw bytes; only the astral escape needs the code point, so
+   * it is computed at that one branch rather than for every character.
    */
   static __device__ inline utf8_sequence classify_utf8_sequence(char_range const& str)
   {
     auto const remaining = str.size();
     auto const lead      = static_cast<unsigned char>(str[0]);
 
-    if (lead <= 0x7F) { return {1, false}; }
+    if (lead <= 0x7F) { return {1, false, false}; }
 
     // Bare continuation byte, an overlong 2-byte lead, or a lead beyond the Unicode range.
-    if (lead <= 0xBF || lead == 0xC0 || lead == 0xC1 || lead >= 0xF5) { return {1, true}; }
+    if (lead <= 0xBF || lead == 0xC0 || lead == 0xC1 || lead >= 0xF5) { return {1, true, false}; }
 
     if (lead <= 0xDF) {
-      if (is_plain_two_byte(str, lead)) { return {2, false}; }
-      if (remaining < 2) { return {remaining, true}; }
-      return {1, true};
+      if (is_plain_two_byte(str, lead)) { return {2, false, false}; }
+      if (remaining < 2) { return {remaining, true, false}; }
+      return {1, true, false};
     }
 
     if (lead <= 0xEF) {
-      if (is_plain_three_byte(str, lead)) { return {3, false}; }
-      if (remaining < 2) { return {remaining, true}; }
+      if (is_plain_three_byte(str, lead)) { return {3, false, false}; }
+      if (remaining < 2) { return {remaining, true, false}; }
       auto const b2 = static_cast<unsigned char>(str[1]);
       // A 0xE0 lead with a 0x80..0x9F second byte is overlong; the decoder drops the lead alone.
-      if ((lead == 0xE0 && (b2 & 0xE0) == 0x80) || !is_utf8_continuation(b2)) { return {1, true}; }
-      if (remaining < 3) { return {remaining, true}; }
-      if (!is_utf8_continuation(static_cast<unsigned char>(str[2]))) { return {2, true}; }
+      if ((lead == 0xE0 && (b2 & 0xE0) == 0x80) || !is_utf8_continuation(b2)) {
+        return {1, true, false};
+      }
+      if (remaining < 3) { return {remaining, true, false}; }
+      if (!is_utf8_continuation(static_cast<unsigned char>(str[2]))) { return {2, true, false}; }
       // A 0xED lead with a second byte at or above 0xA0 encodes a surrogate, which is structurally
       // valid, so the whole 3-byte run is replaced.
-      if (lead == 0xED && b2 >= 0xA0) { return {3, true}; }
-      return {3, false};
+      if (lead == 0xED && b2 >= 0xA0) { return {3, true, false}; }
+      return {3, false, false};
     }
 
-    // Length 3 means the first three bytes satisfy the four-byte rules, which already exclude the
-    // overlong 0xF0 and out-of-range 0xF4 forms, so a fourth continuation byte completes the point.
+    // A length of 3 means the lead, the second byte and the third all satisfy the four-byte rules,
+    // which already exclude the overlong 0xF0 and the out-of-range 0xF4 forms, so a fourth
+    // continuation byte completes a well-formed code point, necessarily outside the BMP.
     auto const bad_length = malformed_four_byte_length(str, lead);
-    if (remaining < 4) { return {cuda::std::min(bad_length, remaining), true}; }
+    if (remaining < 4) { return {cuda::std::min(bad_length, remaining), true, false}; }
     if (bad_length != 3 || !is_utf8_continuation(static_cast<unsigned char>(str[3]))) {
-      return {bad_length, true};
+      return {bad_length, true, false};
     }
-    return {4, false};
+    return {4, false, true};
   }
 
   /**
-   * @brief Write the sequence `str` starts on, advancing both `str` and `copy_destination`
-   *
-   * `str` must not be empty. A null `copy_destination` sizes without writing, so the sizing and
-   * writing passes return the same count.
+   * Writes the UTF-8 sequence `str` starts on, advances `str` past the bytes it consumed and
+   * `copy_destination` past the bytes it wrote, and returns that written count. `str` must not be
+   * empty. A null `copy_destination` sizes without writing, so a sizing pass and a writing pass
+   * return the same count. Under ESCAPED an astral character is written as a surrogate-pair escape,
+   * so the count it returns is not the count it consumed.
    */
-  static __device__ inline int write_utf8_sequence(char_range_reader& str, char*& copy_destination)
+  static __device__ inline int write_utf8_sequence(char_range_reader& str,
+                                                   char*& copy_destination,
+                                                   escape_style w_style)
   {
     auto const lead = static_cast<unsigned char>(str.current_char());
 
@@ -649,6 +668,22 @@ class json_parser {
         copy_destination += 3;
       }
       written = 3;
+    } else if (escape_style::ESCAPED == w_style && sequence.astral) {
+      // Jackson renders a raw astral char as a surrogate-pair escape, turning 4 input bytes into
+      // 12. That is the largest expansion here, so an astral-heavy row overruns its input-sized
+      // budget and forces the kernel's second launch; the scratch padding absorbs the write.
+      uint32_t const code_point = ((static_cast<unsigned char>(str[0]) & 0x07u) << 18) |
+                                  ((static_cast<unsigned char>(str[1]) & 0x3Fu) << 12) |
+                                  ((static_cast<unsigned char>(str[2]) & 0x3Fu) << 6) |
+                                  (static_cast<unsigned char>(str[3]) & 0x3Fu);
+      uint32_t const surrogate_offset = code_point - 0x0001'0000u;
+      auto const high_unit            = static_cast<uint16_t>(0xD800u + (surrogate_offset >> 10));
+      auto const low_unit  = static_cast<uint16_t>(0xDC00u + (surrogate_offset & 0x3FFu));
+      auto const high_size = write_unicode_escape(high_unit, copy_destination);
+      if (copy_destination != nullptr) { copy_destination += high_size; }
+      auto const low_size = write_unicode_escape(low_unit, copy_destination);
+      if (copy_destination != nullptr) { copy_destination += low_size; }
+      written = high_size + low_size;
     } else {
       if (copy_destination != nullptr) {
         for (cudf::size_type i = 0; i < sequence.length; ++i) {
@@ -687,6 +722,12 @@ class json_parser {
     // skip left quote char
     // No need to check because we just read it in.
     str.next();
+
+    // One set serves every escape: this writer never reads them back, and the tokenizer already
+    // recorded any lone surrogate.
+    char_range_reader to_match(char_range::null());
+    bool matched_field_name   = false;
+    bool found_lone_surrogate = false;
 
     // scan string content
     while (!str.is_empty()) {
@@ -729,10 +770,13 @@ class json_parser {
       } else if ('\\' == c) {
         // path 3: escape path
         str.next();
-        char_range_reader to_match(char_range::null());  // unused
-        bool matched_field_name{false};                  // unused
-        if (!try_skip_escape_part(
-              str, to_match, copy_destination, w_style, output_size_bytes, matched_field_name)) {
+        if (!try_skip_escape_part(str,
+                                  to_match,
+                                  copy_destination,
+                                  w_style,
+                                  output_size_bytes,
+                                  matched_field_name,
+                                  found_lone_surrogate)) {
           return output_size_bytes;
         }
       } else {
@@ -751,7 +795,7 @@ class json_parser {
           continue;
         }
 
-        output_size_bytes += write_utf8_sequence(str, copy_destination);
+        output_size_bytes += write_utf8_sequence(str, copy_destination, w_style);
       }
     }
 
@@ -770,7 +814,7 @@ class json_parser {
    */
   template <bool WithUtf8Classification>
   static __device__ __forceinline__ cuda::std::tuple<bool, bool, char const*> try_parse_string_impl(
-    char_range_reader str, char_range_reader to_match)
+    char_range_reader str, bool& found_lone_surrogate, char_range_reader to_match)
   {
     if (str.is_empty()) { return cuda::std::make_tuple(false, false, nullptr); }
     char const quote_char   = str.current_char();
@@ -804,12 +848,14 @@ class json_parser {
 
         char* copy_dest_nullptr = nullptr;  // unused
         int output_size_bytes   = 0;        // unused
+        // Record a lone surrogate for the writer; tokenizing itself must not fail on one.
         if (!try_skip_escape_part(str,
                                   to_match,
                                   copy_dest_nullptr,
                                   escape_style::UNESCAPED,
                                   output_size_bytes,
-                                  matched_field_name)) {
+                                  matched_field_name,
+                                  found_lone_surrogate)) {
           return cuda::std::make_tuple(false, false, nullptr);
         }
       } else if constexpr (WithUtf8Classification) {  // path 4: safe code point
@@ -852,10 +898,12 @@ class json_parser {
       }
     }
 
-    // Replaying the consumed prefix is what keeps the classification out of the loop; the saved
-    // readers are copies, so the replay sees the same input.
+    // Replaying the prefix the loop already consumed is what keeps the classification out of that
+    // loop. `found_lone_surrogate` is only ever set, so replaying cannot lose or invent one.
     if constexpr (!WithUtf8Classification) {
-      if (needs_classification) { return try_parse_string_slow(str_start, to_match_start); }
+      if (needs_classification) {
+        return try_parse_string_slow(str_start, found_lone_surrogate, to_match_start);
+      }
     }
 
     return cuda::std::make_tuple(false, false, nullptr);
@@ -866,9 +914,9 @@ class json_parser {
    * the byte loop of the instantiation that runs on every string
    */
   static __device__ __noinline__ cuda::std::tuple<bool, bool, char const*> try_parse_string_slow(
-    char_range_reader str, char_range_reader to_match)
+    char_range_reader str, bool& found_lone_surrogate, char_range_reader to_match)
   {
-    return try_parse_string_impl<true>(str, to_match);
+    return try_parse_string_impl<true>(str, found_lone_surrogate, to_match);
   }
 
   /**
@@ -910,14 +958,18 @@ class json_parser {
    *     ;
    *
    * @param str string to parse
+   * @param[in,out] found_lone_surrogate set to true when a `\uXXXX` escape decodes to an unpaired
+   *        UTF-16 surrogate; never cleared here, so the caller must pass it already false
    * @param to_match expected match str
    * @return a tuple of values indicating if the parse process was successful, if field name was
    *         matched, and a pointer to the past-end position of the parsed data
    */
   static __device__ inline cuda::std::tuple<bool, bool, char const*> try_parse_string(
-    char_range_reader str, char_range_reader to_match = char_range_reader(char_range::null()))
+    char_range_reader str,
+    bool& found_lone_surrogate,
+    char_range_reader to_match = char_range_reader(char_range::null()))
   {
-    return try_parse_string_impl<false>(str, to_match);
+    return try_parse_string_impl<false>(str, found_lone_surrogate, to_match);
   }
 
   static __device__ inline bool try_match_char(char_range_reader& reader, char c)
@@ -937,14 +989,17 @@ class json_parser {
   /**
    * skip the second char in \", \', \\, \/, \b, \f, \n, \r, \t;
    * skip the HEX chars in \u HEX HEX HEX HEX.
-   * @return positive escaped ASCII value if success, -1 otherwise
+   * @param[in,out] found_lone_surrogate set to true when a `\uXXXX` escape decodes to an unpaired
+   *        UTF-16 surrogate; never cleared here, so the caller must pass it already false
+   * @return true if the escape was consumed, false if no valid escape char follows the backslash
    */
   static __device__ inline bool try_skip_escape_part(char_range_reader& str,
                                                      char_range_reader& to_match,
                                                      char*& copy_dest,
                                                      escape_style w_style,
                                                      int& output_size_bytes,
-                                                     bool& matched_field_name)
+                                                     bool& matched_field_name,
+                                                     bool& found_lone_surrogate)
   {
     // already skipped the first '\'
     // try skip second part
@@ -1063,9 +1118,13 @@ class json_parser {
           // path 2: \u HEX HEX HEX HEX
           str.next();
 
-          // for both unescaped/escaped writes corresponding utf8 bytes, no need
-          // to pass in write style
-          return try_skip_unicode(str, to_match, copy_dest, output_size_bytes, matched_field_name);
+          return try_skip_unicode(str,
+                                  to_match,
+                                  copy_dest,
+                                  w_style,
+                                  output_size_bytes,
+                                  matched_field_name,
+                                  found_lone_surrogate);
         default:
           // path 3: invalid
           return false;
@@ -1178,15 +1237,64 @@ class json_parser {
   }
 
   /**
+   * The UTF-16 surrogate ranges.
+   */
+  static __device__ inline bool is_high_surrogate(uint32_t unit)
+  {
+    return unit >= 0xD800 && unit <= 0xDBFF;
+  }
+
+  static __device__ inline bool is_low_surrogate(uint32_t unit)
+  {
+    return unit >= 0xDC00 && unit <= 0xDFFF;
+  }
+
+  static __device__ inline bool is_surrogate(uint32_t unit)
+  {
+    return is_high_surrogate(unit) || is_low_surrogate(unit);
+  }
+
+  /**
+   * @brief Consume the `\uXXXX` low surrogate following `str` and return that code unit
+   *
+   * Returns 0 and leaves `str` unmoved when what follows is not one; zero is unambiguous because a
+   * low surrogate is never zero.
+   */
+  static __device__ inline uint16_t try_consume_low_surrogate(char_range_reader& str)
+  {
+    // '\' 'u' and four hex digits.
+    if (str.size() < 6) { return 0; }
+    if (str[0] != '\\' || str[1] != 'u' || !is_hex_digit(str[2]) || !is_hex_digit(str[3]) ||
+        !is_hex_digit(str[4]) || !is_hex_digit(str[5])) {
+      return 0;
+    }
+    cudf::char_utf8 low_surrogate = 0;
+    for (size_t i = 0; i < 4; i++) {
+      low_surrogate = (low_surrogate * 16) + hex_value(str[i + 2]);
+    }
+    if (!is_low_surrogate(low_surrogate)) { return 0; }
+    str.advance(6);
+    return static_cast<uint16_t>(low_surrogate);
+  }
+
+  /**
    * try skip 4 HEX chars, and possibly another \u escaped hex char
    * sequence, if the sequence is part of a surrogate pair.
    * in pattern: '\\' 'u' HEX HEX HEX HEX, it's a code point of unicode
+   *
+   * @param w_style under ESCAPED, surrogate code units are re-emitted as `\uXXXX` rather than
+   *        decoded, matching Jackson's writeString
+   * @param[in,out] found_lone_surrogate set to true when a `\uXXXX` escape decodes to an unpaired
+   *        UTF-16 surrogate; never cleared here, so the caller must pass it already false. ESCAPED
+   *        re-emits the units and returns before that point, so it always leaves the flag untouched
    */
   static __device__ bool try_skip_unicode(char_range_reader& str,
                                           char_range_reader& to_match,
                                           char*& copy_dest,
+                                          escape_style w_style,
                                           int& output_size_bytes,
-                                          bool& matched_field_name)
+                                          bool& matched_field_name,
+                                          bool& found_lone_surrogate)
   {
     // Parse initial \u escape sequence
     cudf::char_utf8 code_point = 0;
@@ -1197,56 +1305,74 @@ class json_parser {
       if (!is_hex_digit(c)) { return false; }
       code_point = (code_point * 16) + hex_value(c);
     }
+    auto const first_code_unit = static_cast<uint16_t>(code_point);
+    bool has_surrogate_pair    = false;
+    uint16_t low_code_unit     = 0;
 
-    // Check for high surrogate
-    if (code_point >= 0xD800 && code_point <= 0xDBFF) {
-      // We need to peek ahead 6 characters: \uXXXX
-      if (str.size() >= 6) {
-        // Peek for '\'
-        if (str[0] == '\\' && str[1] == 'u' && is_hex_digit(str[2]) && is_hex_digit(str[3]) &&
-            is_hex_digit(str[4]) && is_hex_digit(str[5])) {
-          cudf::char_utf8 low_surrogate = 0;
-          for (size_t i = 0; i < 4; i++) {
-            char const c  = str[i + 2];
-            low_surrogate = (low_surrogate * 16) + hex_value(c);
-          }
-          // If valid low surrogate, combine
-          if (low_surrogate >= 0xDC00 && low_surrogate <= 0xDFFF) {
-            code_point = 0x10000 + ((code_point - 0xD800) << 10) + (low_surrogate - 0xDC00);
-            str.next();
-            str.next();
-            str.next();
-            str.next();
-            str.next();
-            str.next();
-          }
-        }
+    // A high surrogate followed by a low one is a single astral character.
+    if (is_high_surrogate(code_point)) {
+      low_code_unit = try_consume_low_surrogate(str);
+      if (low_code_unit != 0) {
+        has_surrogate_pair = true;
+        code_point         = 0x0001'0000 + ((code_point - 0xD800) << 10) + (low_code_unit - 0xDC00);
       }
     }
 
-    auto utf_char = codepoint_to_utf8(code_point);
-    // write utf8 bytes.
-    // In UTF-8, the maximum number of bytes used to encode a single character
-    // is 4
-    char buff[4];
-    cudf::size_type const bytes = from_char_utf8(utf_char, buff);
-    output_size_bytes += bytes;
-
-    // TODO I think if we do an escape sequence for \n/etc it will return
-    // the wrong thing....
-    if (nullptr != copy_dest) {
-      for (cudf::size_type i = 0; i < bytes; i++) {
-        *copy_dest++ = buff[i];
+    // Jackson escapes every surrogate code unit, including a valid pair, so re-emit the units
+    // rather than the decoded character.
+    if (w_style == escape_style::ESCAPED && (has_surrogate_pair || is_surrogate(first_code_unit))) {
+      auto const first_size = write_unicode_escape(first_code_unit, copy_dest);
+      if (copy_dest != nullptr) { copy_dest += first_size; }
+      output_size_bytes += first_size;
+      if (has_surrogate_pair) {
+        auto const second_size = write_unicode_escape(low_code_unit, copy_dest);
+        if (copy_dest != nullptr) { copy_dest += second_size; }
+        output_size_bytes += second_size;
       }
+      return true;
+    }
+    // An unpaired surrogate has no UTF-8 encoding, so Spark nulls the row. Flag rather than fail:
+    // tokenizing must still succeed, and `write_raw` gates on the flag.
+    if (!has_surrogate_pair && is_surrogate(code_point)) {
+      found_lone_surrogate = true;
+      // A key holding a lone surrogate matches no query key, not even one carrying the same
+      // surrogate. Spark would match that, so it is a known divergence on an input that cannot
+      // round-trip through UTF-8 anyway.
+      if (matched_field_name && !to_match.is_null()) { matched_field_name = false; }
+      return true;
     }
 
-    if (matched_field_name && !to_match.is_null()) {
-      for (cudf::size_type i = 0; i < bytes; i++) {
-        if (to_match.is_empty() || to_match.current_char() != buff[i]) {
-          matched_field_name = false;
-          break;
+    // Only the last branch needs the decoded UTF-8 bytes; the ESCAPED forms above write pure
+    // ASCII. Field-name matching sits there because it compares those same bytes.
+    if (w_style == escape_style::ESCAPED && (code_point == '"' || code_point == '\\')) {
+      output_size_bytes += 2;
+      if (copy_dest != nullptr) {
+        *copy_dest++ = '\\';
+        *copy_dest++ = static_cast<char>(code_point);
+      }
+    } else if (w_style == escape_style::ESCAPED && code_point < 32) {
+      auto const escaped_size = escape_char(static_cast<unsigned char>(code_point), copy_dest);
+      output_size_bytes += escaped_size;
+      if (copy_dest != nullptr) { copy_dest += escaped_size; }
+    } else {
+      // In UTF-8, the maximum number of bytes used to encode a single character is 4.
+      char buff[4];
+      cudf::size_type const bytes = from_char_utf8(codepoint_to_utf8(code_point), buff);
+      output_size_bytes += bytes;
+      if (copy_dest != nullptr) {
+        for (cudf::size_type i = 0; i < bytes; i++) {
+          *copy_dest++ = buff[i];
         }
-        to_match.next();
+      }
+
+      if (matched_field_name && !to_match.is_null()) {
+        for (cudf::size_type i = 0; i < bytes; i++) {
+          if (to_match.is_empty() || to_match.current_char() != buff[i]) {
+            matched_field_name = false;
+            break;
+          }
+          to_match.next();
+        }
       }
     }
 
@@ -1481,9 +1607,13 @@ class json_parser {
     bool& matched_field_name, char_range to_match_field_name = char_range::null())
   {
     current_token_start_pos = curr_pos;
+    // A local for the same reason as in `parse_string_and_set_current`.
+    bool found_lone_surrogate = false;
     auto const [success, matched, end] =
       try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)},
+                       found_lone_surrogate,
                        char_range_reader{cuda::std::move(to_match_field_name)});
+    token_has_lone_surrogate = found_lone_surrogate;
     if (success) {
       matched_field_name = matched;
       curr_pos           = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
@@ -1503,6 +1633,9 @@ class json_parser {
     bool& matched_field_name,
     char_range to_match_field_name = char_range::null())
   {
+    // Every token transition funnels through here, so clearing the flag keeps it a strict
+    // description of `current_token`.
+    token_has_lone_surrogate = false;
     skip_whitespaces();
     if (!eof()) {
       char const c = chars[curr_pos];
@@ -1694,6 +1827,9 @@ class json_parser {
    * e.g.: "\u4e2d\u56FD" are code points for Chinese chars "中国",
    *   writes 6 utf8 bytes: -28  -72 -83 -27 -101 -67
    * For number, write verbatim without normalization
+   *
+   * @note A lone surrogate has no UTF-8 encoding, so it is dropped rather than written. A caller
+   * that needs the whole token must reject such a token first, by checking `has_lone_surrogate()`.
    */
   __device__ cudf::size_type write_unescaped_text(char* destination) const
   {
@@ -1952,6 +2088,12 @@ class json_parser {
 
   __device__ inline bool max_nesting_depth_exceeded() const { return max_depth_exceeded; }
 
+  /**
+   * whether the current string token has a `\uXXXX` escape that decodes to an unpaired UTF-16
+   * surrogate; a surrogate already encoded in the input bytes is not detected
+   */
+  __device__ inline bool has_lone_surrogate() const { return token_has_lone_surrogate; }
+
  private:
   char_range const chars;
   cudf::size_type curr_pos;
@@ -1974,6 +2116,11 @@ class json_parser {
 
   // Error check if the maximum nesting depth has been reached.
   bool max_depth_exceeded;
+
+  // Set while parsing a string token whose `\uXXXX` escape decodes to an unpaired UTF-16 surrogate,
+  // which Spark renders as a null row. A surrogate already encoded in the input bytes is not
+  // detected. Reset on every token transition, so it always describes `current_token`.
+  bool token_has_lone_surrogate;
 };
 
 }  // namespace spark_rapids_jni
