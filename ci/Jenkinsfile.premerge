@@ -300,10 +300,9 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                 ])
 
                             if (sonarBuild.result == 'UNSTABLE') {
-                                unstable("SonarQube Quality Gate failed: ${sonarBuild.absoluteUrl}")
+                                unstable('SonarQube Quality Gate failed')
                             } else if (sonarBuild.result != 'SUCCESS') {
-                                error("SonarQube pipeline was ${sonarBuild.result}: " +
-                                    "${sonarBuild.absoluteUrl}")
+                                error("SonarQube pipeline was ${sonarBuild.result}")
                             }
                         }
                     }
