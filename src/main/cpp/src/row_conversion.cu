@@ -16,23 +16,23 @@
 
 #include "nvtx_ranges.hpp"
 #include "row_conversion.hpp"
+#include "row_conversion_jit.hpp"
 #include "utilities/iterator.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
-#include <cudf/detail/utilities/vector_factories.hpp>
-#include <cudf/filling.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
-#include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/pinned_memory.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -41,37 +41,61 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cooperative_groups.h>
+#include <cuda/atomic>
 #include <cuda/barrier>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
 #include <thrust/binary_search.h>
 #include <thrust/scan.h>
+#include <thrust/tabulate.h>
+
+#include <strings.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 
 namespace {
 
 constexpr auto JCUDF_ROW_ALIGNMENT = 8;
 
+// Local because `cudf::detail::warp_size` is a private libcudf internal this repo may not use.
+constexpr auto WARP_SIZE = 32;
+
 constexpr auto MAX_BATCH_SIZE = std::numeric_limits<cudf::size_type>::max();
 
 constexpr auto BLOCK_SIZE = 1024;
 
-// Number of rows each block processes in the two kernels. Tuned via nsight
-constexpr auto NUM_STRING_ROWS_PER_BLOCK_TO_ROWS   = BLOCK_SIZE;
-constexpr auto NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS = 64;
-constexpr auto MIN_STRING_BLOCKS                   = 32;
-constexpr auto MAX_STRING_BLOCKS                   = MAX_BATCH_SIZE;
+// Number of rows each block processes in the string to-rows kernel. Tuned via nsight
+constexpr auto NUM_STRING_ROWS_PER_BLOCK_TO_ROWS = BLOCK_SIZE;
+constexpr auto MAX_STRING_BLOCKS                 = MAX_BATCH_SIZE;
+
+// From-rows string copy engine geometry: four warps per block, matching cudf's strings-gather
+constexpr auto STRING_COPY_WARPS_PER_BLOCK = 4;
+constexpr auto STRING_COPY_BLOCK_SIZE      = STRING_COPY_WARPS_PER_BLOCK * 32;
+
+// Grid x-dimension cap of the warp-per-string from-rows kernel; its warps grid-stride over rows
+constexpr auto MAX_STRING_COPY_BLOCKS = 65536;
+
+// Mean string length above which the from-rows string copy picks the warp-per-string kernel
+constexpr auto STRING_COPY_AVG_LEN_SWITCH = 32;
+
+// Strings staged per block by the char-parallel from-rows kernel
+constexpr auto STRING_COPY_STRINGS_PER_BLOCK = 32;
 
 }  // anonymous namespace
 
@@ -79,8 +103,6 @@ constexpr auto MAX_STRING_BLOCKS                   = MAX_BATCH_SIZE;
 #pragma nv_diag_suppress static_var_with_dynamic_init
 
 using namespace cudf;
-using detail::make_device_uvector;
-using detail::make_device_uvector_async;
 using rmm::device_uvector;
 
 namespace spark_rapids_jni {
@@ -164,9 +186,8 @@ struct tile_info {
                                        JCUDF_ROW_ALIGNMENT);
   }
 
-  // Real, un-padded data width spanned by this tile. Used as the memcpy_async length when
-  // writing the shared tile out to global memory (and when reading it in for the from-rows
-  // direction). Writing only the actual bytes prevents the JCUDF_ROW_ALIGNMENT rounding in
+  // Real, un-padded data width spanned by this tile. Bounds the write of the shared tile out to
+  // global memory: writing only the actual bytes prevents the JCUDF_ROW_ALIGNMENT rounding in
   // get_shared_row_size() from spilling into the next tile's output region — a race that can
   // corrupt data non-deterministically when the cumulative size at the tile boundary is not
   // an 8-byte multiple (e.g. an odd number of INT32 columns in the first tile).
@@ -198,11 +219,120 @@ struct row_batch {
  *
  */
 struct batch_data {
-  device_uvector<size_type> batch_row_offsets;       // offsets to each row in incoming data
-  device_uvector<size_type> d_batch_row_boundaries;  // row numbers for the start of each batch
+  device_uvector<size_type> batch_row_offsets;  // offsets to each row in incoming data
   std::vector<size_type>
     batch_row_boundaries;              // row numbers for the start of each batch: 0, 1500, 2700
   std::vector<row_batch> row_batches;  // information about each batch such as byte count
+};
+
+/**
+ * @brief Packs per-conversion host metadata into pinned memory, one batched H2D copy per pack.
+ *
+ * Pinned staging is required, not an optimization: a pageable async copy either degrades to
+ * synchronous (pre CUDA 13) or reads its host source only when the stream executes it (CUDA 13+),
+ * outliving the staging vector.
+ *
+ * Pinned-pool reuse is stream-ordered, which orders device work but never a host `memcpy`
+ * against a queued copy, so both directions need an explicit event: the destructor waits on the
+ * upload event before the block returns to the pool, and `upload` drains once before its host
+ * write because the block it just took may still be a previous owner's copy source.
+ */
+class staging_arena {
+ public:
+  explicit staging_arena(rmm::cuda_stream_view stream) : _stream{stream} {}
+
+  staging_arena(staging_arena const&)            = delete;
+  staging_arena& operator=(staging_arena const&) = delete;
+
+  ~staging_arena()
+  {
+    // Errors are ignored: destructors must not throw, and a failure would surface on the stream.
+    for (auto& round : _rounds) {
+      cudaEventSynchronize(round.event);
+      cudaEventDestroy(round.event);
+    }
+  }
+
+  /**
+   * @brief Copies the given host arrays into one pinned block at 16-byte-aligned offsets and
+   * enqueues a single H2D copy of that block on the arena stream.
+   *
+   * @tparam Ts element type of each packed array; every one must be trivially copyable and no
+   * more strictly aligned than PACK_ALIGNMENT
+   * @param arrays host arrays to pack, in the order their device pointers are returned
+   * @return one device pointer per input array, valid for stream-ordered use while the arena
+   * lives; empty arrays yield nullptr
+   */
+  template <typename... Ts>
+  std::tuple<Ts*...> upload(std::vector<Ts> const&... arrays)
+  {
+    // The packing memcpy and the returned casts are only defined under these two bounds.
+    static_assert((std::is_trivially_copyable_v<Ts> && ...));
+    static_assert(((alignof(Ts) <= PACK_ALIGNMENT) && ...));
+
+    std::array<std::size_t, sizeof...(Ts)> offsets{};
+    std::size_t total = 0;
+    {
+      std::size_t i = 0;
+      ((offsets[i++] = total,
+        total += cudf::util::round_up_safe(arrays.size() * sizeof(Ts), PACK_ALIGNMENT)),
+       ...);
+    }
+    if (total == 0) { return {static_cast<Ts*>(nullptr)...}; }
+
+    upload_round round{
+      rmm::device_buffer{
+        total, _stream, rmm::device_async_resource_ref{cudf::get_pinned_memory_resource()}},
+      rmm::device_buffer{total, _stream, cudf::get_current_device_resource_ref()},
+      nullptr};
+
+    // The block may still be a previous owner's copy source, which pool ordering does not cover.
+    _stream.synchronize();
+
+    {
+      auto* const pinned_base = static_cast<char*>(round.pinned.data());
+      std::size_t i           = 0;
+      auto pack               = [&](void const* src, std::size_t bytes) {
+        if (bytes > 0) { std::memcpy(pinned_base + offsets[i], src, bytes); }
+        ++i;
+      };
+      (pack(arrays.data(), arrays.size() * sizeof(Ts)), ...);
+    }
+
+    try {
+      CUDF_CUDA_TRY(cudaMemcpyAsync(
+        round.device.data(), round.pinned.data(), total, cudaMemcpyHostToDevice, _stream.value()));
+      CUDF_CUDA_TRY(cudaEventCreateWithFlags(&round.event, cudaEventDisableTiming));
+      CUDF_CUDA_TRY(cudaEventRecord(round.event, _stream.value()));
+      _rounds.push_back(std::move(round));
+    } catch (...) {
+      // The copy may already be enqueued; retire it before the buffers are freed.
+      cudaStreamSynchronize(_stream.value());
+      if (round.event != nullptr) { cudaEventDestroy(round.event); }
+      throw;
+    }
+
+    auto* const device_base = static_cast<char*>(_rounds.back().device.data());
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+      return std::tuple<Ts*...>{
+        (arrays.empty() ? nullptr : reinterpret_cast<Ts*>(device_base + offsets[Is]))...};
+    }(std::index_sequence_for<Ts...>{});
+  }
+
+ private:
+  // Covers the alignment of every packed element type: size_type, pointers, tile_info and
+  // input_offsetalator.
+  static constexpr std::size_t PACK_ALIGNMENT = 16;
+
+  // Cleanup lives solely in the arena destructor, so vector reallocation may shallow-move rounds.
+  struct upload_round {
+    rmm::device_buffer pinned;  // host-writable: allocated from the pinned pool
+    rmm::device_buffer device;
+    cudaEvent_t event;
+  };
+
+  rmm::cuda_stream_view _stream;
+  std::vector<upload_round> _rounds;
 };
 
 /**
@@ -210,53 +340,50 @@ struct batch_data {
  *
  * @param tbl table from which to compute row size information
  * @param fixed_width_and_validity_size size of fixed-width and validity data in this table
+ * @param arena staging arena the offset iterators are uploaded through
  * @param stream cuda stream on which to operate
- * @return pair of device vector of size_types of the row sizes of the table and a device vector of
- * offsets into the string column
+ * @return pair of device vector of size_types of the row sizes of the table and a device span of
+ * offsets into the string columns, valid while the arena lives
  */
-std::pair<rmm::device_uvector<size_type>, rmm::device_uvector<cudf::detail::input_offsetalator>>
+std::pair<rmm::device_uvector<size_type>, device_span<cudf::detail::input_offsetalator>>
 build_string_row_offsets(table_view const& tbl,
                          size_type fixed_width_and_validity_size,
+                         staging_arena& arena,
                          rmm::cuda_stream_view stream)
 {
   auto const num_rows = tbl.num_rows();
   rmm::device_uvector<size_type> d_row_sizes(num_rows, stream);
   thrust::uninitialized_fill(rmm::exec_policy(stream), d_row_sizes.begin(), d_row_sizes.end(), 0);
 
-  auto d_offsets_iterators = [&]() {
-    std::vector<cudf::detail::input_offsetalator> offsets_iterators;
-    auto itr = cuda::make_transform_iterator(
-      tbl.begin(), [](auto const& col) -> cudf::detail::input_offsetalator {
-        return cudf::detail::offsetalator_factory::make_input_iterator(
-          strings_column_view(col).offsets(), col.offset());
-      });
-    auto stencil = cuda::make_transform_iterator(
-      tbl.begin(), [](auto const& col) -> bool { return !is_fixed_width(col.type()); });
-    thrust::copy_if(thrust::host,
-                    itr,
-                    itr + tbl.num_columns(),
-                    stencil,
-                    std::back_inserter(offsets_iterators),
-                    cuda::std::identity{});
-    return make_device_uvector(
-      offsets_iterators, stream, rmm::mr::get_current_device_resource_ref());
-  }();
+  std::vector<cudf::detail::input_offsetalator> offsets_iterators;
+  auto itr = cuda::make_transform_iterator(
+    tbl.begin(), [](auto const& col) -> cudf::detail::input_offsetalator {
+      return cudf::detail::offsetalator_factory::make_input_iterator(
+        strings_column_view(col).offsets(), col.offset());
+    });
+  auto stencil = cuda::make_transform_iterator(
+    tbl.begin(), [](auto const& col) -> bool { return !is_fixed_width(col.type()); });
+  thrust::copy_if(thrust::host,
+                  itr,
+                  itr + tbl.num_columns(),
+                  stencil,
+                  std::back_inserter(offsets_iterators),
+                  cuda::std::identity{});
+  auto* const d_offsets_iterators = std::get<0>(arena.upload(offsets_iterators));
 
-  auto const num_columns = static_cast<size_type>(d_offsets_iterators.size());
+  auto const num_columns = static_cast<size_type>(offsets_iterators.size());
 
-  thrust::for_each(rmm::exec_policy(stream),
-                   cuda::make_counting_iterator(0),
-                   cuda::make_counting_iterator(num_columns * num_rows),
-                   [d_offsets_iterators = d_offsets_iterators.data(),
-                    num_columns,
-                    num_rows,
-                    d_row_sizes = d_row_sizes.data()] __device__(auto element_idx) {
-                     auto const row = element_idx % num_rows;
-                     auto const col = element_idx / num_rows;
-                     auto const val =
-                       d_offsets_iterators[col][row + 1] - d_offsets_iterators[col][row];
-                     atomicAdd(&d_row_sizes[row], val);
-                   });
+  thrust::for_each(
+    rmm::exec_policy(stream),
+    cuda::make_counting_iterator(0),
+    cuda::make_counting_iterator(num_columns * num_rows),
+    [d_offsets_iterators, num_columns, num_rows, d_row_sizes = d_row_sizes.data()] __device__(
+      auto element_idx) {
+      auto const row = element_idx % num_rows;
+      auto const col = element_idx / num_rows;
+      auto const val = d_offsets_iterators[col][row + 1] - d_offsets_iterators[col][row];
+      atomicAdd(&d_row_sizes[row], val);
+    });
 
   // transform the row sizes to include fixed width size and alignment
   thrust::transform(rmm::exec_policy(stream),
@@ -269,7 +396,9 @@ build_string_row_offsets(table_view const& tbl,
                                                            JCUDF_ROW_ALIGNMENT);
                       }));
 
-  return {std::move(d_row_sizes), std::move(d_offsets_iterators)};
+  return {
+    std::move(d_row_sizes),
+    device_span<cudf::detail::input_offsetalator>{d_offsets_iterators, offsets_iterators.size()}};
 }
 
 /**
@@ -316,7 +445,8 @@ struct fixed_width_row_offset_functor {
  * @param input_offset_in_row offset to each row of data
  * @param num_bytes total number of bytes in the incoming data
  * @param output_data array of pointers to the output data
- * @param output_nm array of pointers to the output null masks
+ * @param output_nm array of pointers to the output null masks, or nullptr when the caller has
+ * observed that the rows carry no nulls — the kernel then skips its validity phase entirely
  * @param input_data pointing to the incoming row data
  */
 CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
@@ -425,12 +555,16 @@ CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
           }
         }
 
-        bitmask_type* nm          = output_nm[col_index];
-        int8_t* valid_byte        = &row_vld_tmp[col_index / 8];
-        size_type byte_bit_offset = col_index % 8;
-        int predicate             = *valid_byte & (1 << byte_bit_offset);
-        uint32_t bitmask          = __ballot_sync(active_mask, predicate);
-        if (row_index % 32 == 0) { nm[word_index(row_index)] = bitmask; }
+        // The trusted all-valid path passes output_nm == nullptr; the guard is a kernel argument,
+        // so every thread of active_mask skips the ballot together and no mask is written.
+        if (output_nm != nullptr) {
+          bitmask_type* nm          = output_nm[col_index];
+          int8_t* valid_byte        = &row_vld_tmp[col_index / 8];
+          size_type byte_bit_offset = col_index % 8;
+          int predicate             = *valid_byte & (1 << byte_bit_offset);
+          uint32_t bitmask          = __ballot_sync(active_mask, predicate);
+          if (row_index % 32 == 0) { nm[word_index(row_index)] = bitmask; }
+        }
       }  // end column loop
     }  // end row copy
     // wait for the row_group to be totally copied before starting on the next row group
@@ -611,8 +745,17 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_
   auto const warp  = cooperative_groups::tiled_partition<cudf::detail::warp_size>(group);
   extern __shared__ int8_t shared_data[];
 
-  __shared__ cuda::barrier<cuda::thread_scope_block> tile_barrier;
-  if (group.thread_rank() == 0) { init(&tile_barrier, group.size()); }
+  // Tile-relative indices of the first and last columns with a non-null data pointer. Columns
+  // with a null pointer are variable-width (offset,length) slots whose final bytes
+  // `copy_strings_to_rows` writes later on this stream, so the row drain below can skip the
+  // leading and trailing runs of them. No cuda::barrier is needed: the drain uses plain stores,
+  // which complete when the kernel exits.
+  __shared__ size_type first_live_col_shared;
+  __shared__ size_type last_live_col_shared;
+  if (group.thread_rank() == 0) {
+    first_live_col_shared = cuda::std::numeric_limits<size_type>::max();
+    last_live_col_shared  = -1;
+  }
   group.sync();
 
   auto const tile                   = tile_infos[blockIdx.x];
@@ -643,6 +786,14 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_
     if (col_ptr == nullptr) {
       // variable-width data column
       continue;
+    }
+
+    // One lane per column extends the live-column span over the columns this warp writes.
+    if (warp.thread_rank() == 0) {
+      cuda::atomic_ref<size_type, cuda::thread_scope_block> first_live{first_live_col_shared};
+      cuda::atomic_ref<size_type, cuda::thread_scope_block> last_live{last_live_col_shared};
+      first_live.fetch_min(relative_col, cuda::memory_order_relaxed);
+      last_live.fetch_max(relative_col, cuda::memory_order_relaxed);
     }
 
     for (int relative_row = warp.thread_rank(); relative_row < num_tile_rows;
@@ -687,23 +838,61 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_
   auto const tile_output_buffer = output_data[tile.batch_number];
   auto const row_batch_start = tile.batch_number == 0 ? 0 : batch_row_boundaries[tile.batch_number];
 
-  // no async copies above waiting on the barrier, so we sync the group here to ensure all copies to
-  // shared memory are completed before copying data out
+  // ensure all shared-memory writes (staged elements and the live-column bounds) land before the
+  // row drain reads them
   group.sync();
 
-  // each warp takes a row
-  for (int copy_row = warp.meta_group_rank(); copy_row < tile.num_rows();
-       copy_row += warp.meta_group_size()) {
-    auto const src = &shared_data[tile_row_size * copy_row];
-    auto const dst = tile_output_buffer + row_offsets(copy_row + tile.start_row, row_batch_start) +
-                     starting_column_offset;
-    // Use actual_row_size (un-padded) so the JCUDF_ROW_ALIGNMENT rounding inside the shared
-    // tile never reaches into the next tile's output region — see tile_info::get_actual_row_size.
-    cuda::memcpy_async(warp, dst, src, actual_row_size, tile_barrier);
-  }
+  // Leading and trailing runs of variable-width columns pack their 8-byte (offset,length) slots
+  // gap-free against the tile's byte edges, and `copy_strings_to_rows` overwrites every slot
+  // afterwards on this stream, so the drain skips exactly those dead bytes. Alignment holes
+  // beside fixed-width columns stay inside the drained span, and bounding by the un-padded
+  // actual_row_size keeps this tile's alignment rounding out of the next tile's output region.
+  if (first_live_col_shared <= last_live_col_shared) {
+    constexpr size_type slot_size = sizeof(uint32_t) + sizeof(uint32_t);
+    auto const drain_begin        = slot_size * first_live_col_shared;
+    auto const drain_end = actual_row_size - slot_size * (num_tile_cols - 1 - last_live_col_shared);
+    auto const drain_bytes = drain_end - drain_begin;
+    // One tile-uniform destination phase decides the word width: row offsets and drain_begin are
+    // both 8-byte multiples, so dst % 8 == starting_column_offset % 8 for every row, while the
+    // shared source is always 8-byte aligned (the shared row stride is an 8-byte multiple). The
+    // column march only opens a band on an 8- or 4-byte phase, so the byte fallback is defensive.
+    auto const dst_phase = starting_column_offset & (JCUDF_ROW_ALIGNMENT - 1);
+    auto const lane      = static_cast<size_type>(warp.thread_rank());
 
-  // wait on the last copies to complete
-  tile_barrier.arrive_and_wait();
+    // each warp takes a row
+    for (int copy_row = warp.meta_group_rank(); copy_row < tile.num_rows();
+         copy_row += warp.meta_group_size()) {
+      auto const src = &shared_data[tile_row_size * copy_row + drain_begin];
+      auto const dst = tile_output_buffer +
+                       row_offsets(copy_row + tile.start_row, row_batch_start) +
+                       starting_column_offset + drain_begin;
+      if (dst_phase == 0) {
+        auto const num_words = drain_bytes / static_cast<size_type>(sizeof(int64_t));
+        for (auto word = lane; word < num_words; word += warp.size()) {
+          reinterpret_cast<int64_t*>(dst)[word] = reinterpret_cast<int64_t const*>(src)[word];
+        }
+        for (auto byte = num_words * static_cast<size_type>(sizeof(int64_t)) + lane;
+             byte < drain_bytes;
+             byte += warp.size()) {
+          dst[byte] = src[byte];
+        }
+      } else if ((dst_phase & 3) == 0) {
+        auto const num_words = drain_bytes / static_cast<size_type>(sizeof(int32_t));
+        for (auto word = lane; word < num_words; word += warp.size()) {
+          reinterpret_cast<int32_t*>(dst)[word] = reinterpret_cast<int32_t const*>(src)[word];
+        }
+        for (auto byte = num_words * static_cast<size_type>(sizeof(int32_t)) + lane;
+             byte < drain_bytes;
+             byte += warp.size()) {
+          dst[byte] = src[byte];
+        }
+      } else {
+        for (auto byte = lane; byte < drain_bytes; byte += warp.size()) {
+          dst[byte] = src[byte];
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -897,7 +1086,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
  * @tparam RowOffsetFunctor iterator that gives the size of a specific row of the table.
  * @param num_rows total number of rows in the table
  * @param num_columns total number of columns in the table
- * @param shmem_used_per_tile amount of shared memory that is used by a tile
+ * @param shmem_used_per_tile shared-memory budget the tiles were shaped against; unused here
  * @param row_offsets offset to a specific row in the input data
  * @param batch_row_boundaries row numbers for batch starts
  * @param output_data pointers to column data
@@ -920,85 +1109,68 @@ __launch_bounds__(block_size) CUDF_KERNEL
                       device_span<tile_info const> tile_infos,
                       int8_t const* input_data)
 {
-  // We are going to copy the data in two passes.
-  // The first pass copies a chunk of data into shared memory.
-  // The second pass copies that chunk from shared memory out to the final location.
-
-  // Because shared memory is limited we copy a subset of the rows at a time. This has been broken
-  // up for us in the tile_info struct, so we don't have any calculation to do here, but it is
-  // important to note.
-
-  // To speed up some of the random access memory we do, we copy col_sizes and col_offsets to shared
-  // memory for each of the tiles that we work on
-
+  // Direct gather: no shared staging, no synchronization. Warp lanes walk consecutive rows of
+  // one column so the stores coalesce, while the strided row reads rely on L1, where a sector
+  // fetched for one column is re-hit by neighbouring columns of the same rows. The host requests
+  // a max-L1 carveout for this kernel, which the driver may decline.
   auto const group = cooperative_groups::this_thread_block();
   auto const warp  = cooperative_groups::tiled_partition<cudf::detail::warp_size>(group);
-  extern __shared__ int8_t shared[];
 
-  // Initialize cuda barriers for each tile.
-  __shared__ cuda::barrier<cuda::thread_scope_block> tile_barrier;
-  if (group.thread_rank() == 0) { init(&tile_barrier, group.size()); }
-  group.sync();
+  auto const tile            = tile_infos[blockIdx.x];
+  auto const rows_in_tile    = tile.num_rows();
+  auto const cols_in_tile    = tile.num_cols();
+  auto const row_batch_start = tile.batch_number == 0 ? 0 : batch_row_boundaries[tile.batch_number];
 
-  {
-    auto const fetch_tile            = tile_infos[blockIdx.x];
-    auto const fetch_tile_start_row  = fetch_tile.start_row;
-    auto const starting_col_offset   = col_offsets[fetch_tile.start_col];
-    auto const fetch_tile_row_size   = fetch_tile.get_shared_row_size(col_offsets, col_sizes);
-    auto const fetch_actual_row_size = fetch_tile.get_actual_row_size(col_offsets, col_sizes);
-    auto const row_batch_start =
-      fetch_tile.batch_number == 0 ? 0 : batch_row_boundaries[fetch_tile.batch_number];
+  for (int relative_row = warp.thread_rank(); relative_row < rows_in_tile;
+       relative_row += warp.size()) {
+    auto const absolute_row = relative_row + tile.start_row;
+    // One row-offset functor evaluation per row, held in a register across the column sweep.
+    auto const row_start = row_offsets(absolute_row, row_batch_start);
 
-    for (int absolute_row = warp.meta_group_rank() + fetch_tile.start_row;
-         absolute_row <= fetch_tile.end_row;
-         absolute_row += warp.meta_group_size()) {
-      warp.sync();
-      auto shared_offset = (absolute_row - fetch_tile_start_row) * fetch_tile_row_size;
-      auto dst           = &shared[shared_offset];
-      auto src = &input_data[row_offsets(absolute_row, row_batch_start) + starting_col_offset];
-      // Shared stride stays padded (8-aligned for fast access); only fetch the bytes that
-      // actually belong to this tile so we never reach past the tile's column range.
-      cuda::memcpy_async(warp, dst, src, fetch_actual_row_size, tile_barrier);
-    }
-  }
+    for (int relative_col = warp.meta_group_rank(); relative_col < cols_in_tile;
+         relative_col += warp.meta_group_size()) {
+      auto const absolute_col = relative_col + tile.start_col;
+      auto const column_size  = col_sizes[absolute_col];
 
-  {
-    auto const tile          = tile_infos[blockIdx.x];
-    auto const rows_in_tile  = tile.num_rows();
-    auto const cols_in_tile  = tile.num_cols();
-    auto const tile_row_size = tile.get_shared_row_size(col_offsets, col_sizes);
+      int8_t const* src = &input_data[row_start + col_offsets[absolute_col]];
+      int8_t* dst       = &output_data[absolute_col][absolute_row * column_size];
 
-    // ensure our data is ready
-    tile_barrier.arrive_and_wait();
-
-    // Now we copy from shared memory to final destination. The data is laid out in rows in shared
-    // memory, so the reads for a column will be "vertical". Because of this and the different sizes
-    // for each column, this portion is handled on row/column basis. to prevent each thread working
-    // on a single row and also to ensure that all threads can do work in the case of more threads
-    // than rows, we do a global index instead of a double for loop with col/row.
-    for (int relative_row = warp.thread_rank(); relative_row < rows_in_tile;
-         relative_row += warp.size()) {
-      auto const absolute_row             = relative_row + tile.start_row;
-      auto const shared_memory_row_offset = tile_row_size * relative_row;
-
-      for (int relative_col = warp.meta_group_rank(); relative_col < cols_in_tile;
-           relative_col += warp.meta_group_size()) {
-        auto const absolute_col = relative_col + tile.start_col;
-
-        auto const shared_memory_offset =
-          col_offsets[absolute_col] - col_offsets[tile.start_col] + shared_memory_row_offset;
-        auto const column_size = col_sizes[absolute_col];
-
-        int8_t* shmem_src = &shared[shared_memory_offset];
-        int8_t* dst       = &output_data[absolute_col][absolute_row * column_size];
-
-        cuda::memcpy_async(dst, shmem_src, column_size, tile_barrier);
+      // Full-width copies are safe: JCUDF row starts are 8-byte aligned with each column's offset
+      // aligned to its element size, and dst is an rmm allocation base plus an element-size
+      // multiple.
+      switch (column_size) {
+        case 2: {
+          int16_t const* short_col_input   = reinterpret_cast<int16_t const*>(src);
+          *reinterpret_cast<int16_t*>(dst) = *short_col_input;
+          break;
+        }
+        case 4: {
+          int32_t const* int_col_input     = reinterpret_cast<int32_t const*>(src);
+          *reinterpret_cast<int32_t*>(dst) = *int_col_input;
+          break;
+        }
+        case 8: {
+          int64_t const* long_col_input    = reinterpret_cast<int64_t const*>(src);
+          *reinterpret_cast<int64_t*>(dst) = *long_col_input;
+          break;
+        }
+        case 1: *dst = *src; break;
+        case 16: {
+          // decimal128: rows are only 8-byte aligned, so read two 8-byte halves and emit them as
+          // one 16-byte store to the 16-byte-aligned destination.
+          int64_t const* long_col_input      = reinterpret_cast<int64_t const*>(src);
+          *reinterpret_cast<longlong2*>(dst) = longlong2{long_col_input[0], long_col_input[1]};
+          break;
+        }
+        default: {
+          for (int i = 0; i < column_size; ++i) {
+            dst[i] = src[i];
+          }
+          break;
+        }
       }
     }
   }
-
-  // wait on the last copies to complete
-  tile_barrier.arrive_and_wait();
 }
 
 /**
@@ -1008,13 +1180,15 @@ __launch_bounds__(block_size) CUDF_KERNEL
  * @tparam RowOffsetFunctor iterator that gives the size of a specific row of the table.
  * @param num_rows total number of rows in the table
  * @param num_columns total number of columns in the table
- * @param shmem_used_per_tile amount of shared memory that is used by a tile
+ * @param shmem_used_per_tile dynamic shared memory allocated for this launch; the per-column
+ * counters are placed inside it, so a larger value than the launch reserves overruns `shared[]`
  * @param row_offsets offset to the first column a specific row in the input data
  * @param batch_row_boundaries row numbers for batch starts
  * @param output_nm pointers to null masks for columns
  * @param validity_offsets offset into input data row for validity data
  * @param tile_infos information about the tiles of work
  * @param input_data pointer to input data
+ * @param valid_counts per-column valid-row counts, accumulated atomically across all tiles
  *
  */
 template <int block_size, typename RowOffsetFunctor>
@@ -1027,7 +1201,8 @@ __launch_bounds__(block_size) CUDF_KERNEL
                                bitmask_type** output_nm,
                                size_type const validity_offset,
                                device_span<tile_info const> tile_infos,
-                               int8_t const* input_data)
+                               int8_t const* input_data,
+                               size_type* valid_counts)
 {
   extern __shared__ int8_t shared[];
 
@@ -1070,6 +1245,21 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const validity_data_col_length = num_sections_y * 4;  // words to bytes
   auto const total_sections           = num_sections_x * num_sections_y;
 
+  // Per-column valid-bit counters live in the dynamic-shmem tail past the validity words;
+  // shmem_used_per_tile is the dynamic-shmem allocation at both launch sites, making the
+  // block-uniform fit check exact. A tile shape with no tail slack (none produced by
+  // build_validity_tile_infos for 48KB-class limits) falls back to per-word global adds.
+  auto const validity_bytes  = validity_data_col_length * num_tile_cols;
+  auto const counts_bytes    = static_cast<size_type>(sizeof(size_type)) * num_tile_cols;
+  bool const counts_in_shmem = validity_bytes + counts_bytes <= shmem_used_per_tile;
+  auto const shared_counts   = reinterpret_cast<size_type*>(&shared[validity_bytes]);
+  if (counts_in_shmem) {
+    for (int i = group.thread_rank(); i < num_tile_cols; i += block_size) {
+      shared_counts[i] = 0;
+    }
+  }
+  group.sync();
+
   // the tile is divided into sections. A warp operates on a section at a time.
   for (int my_section_idx = warp.meta_group_rank(); my_section_idx < total_sections;
        my_section_idx += warp.meta_group_size()) {
@@ -1092,7 +1282,9 @@ __launch_bounds__(block_size) CUDF_KERNEL
       // so every thread that is participating in the warp has a byte, but it's row-based data and
       // we need it in column-based. So we shuffle the bits around to make the bytes we actually
       // write.
-      for (int i = 0, byte_mask = 0x1; (i < cols_per_read) && ((relative_col + i) < num_columns);
+      // Bound by the tile's own column count so a phantom word past the last real column is
+      // neither written nor counted.
+      for (int i = 0, byte_mask = 0x1; (i < cols_per_read) && ((relative_col + i) < num_tile_cols);
            ++i, byte_mask <<= 1) {
         auto const validity_data = __ballot_sync(participation_mask, my_byte & byte_mask);
         // lead thread in each warp writes data
@@ -1100,6 +1292,16 @@ __launch_bounds__(block_size) CUDF_KERNEL
           auto const validity_write_offset =
             validity_data_col_length * (relative_col + i) + relative_row / cols_per_read;
           *reinterpret_cast<bitmask_type*>(&shared[validity_write_offset]) = validity_data;
+          // Tail bits of a partial section are ballot zeros, so popc adds in-range rows only.
+          if (counts_in_shmem) {
+            cuda::atomic_ref<size_type, cuda::thread_scope_block> ref(
+              shared_counts[relative_col + i]);
+            ref.fetch_add(cuda::std::popcount(validity_data), cuda::memory_order_relaxed);
+          } else {
+            cuda::atomic_ref<size_type, cuda::thread_scope_device> ref(
+              valid_counts[tile_start_col + relative_col + i]);
+            ref.fetch_add(cuda::std::popcount(validity_data), cuda::memory_order_relaxed);
+          }
         }
       }
     }
@@ -1110,6 +1312,14 @@ __launch_bounds__(block_size) CUDF_KERNEL
 
   // make sure entire tile has finished copy
   group.sync();
+
+  // Flush this tile's counters; totals accumulate atomically across tiles per output column.
+  if (counts_in_shmem) {
+    for (int i = group.thread_rank(); i < num_tile_cols; i += block_size) {
+      cuda::atomic_ref<size_type, cuda::thread_scope_device> ref(valid_counts[tile_start_col + i]);
+      ref.fetch_add(shared_counts[i], cuda::memory_order_relaxed);
+    }
+  }
 
   for (int relative_col = warp.meta_group_rank(); relative_col < num_tile_cols;
        relative_col += warp.meta_group_size()) {
@@ -1126,67 +1336,181 @@ __launch_bounds__(block_size) CUDF_KERNEL
   shared_tile_barrier.arrive_and_wait();
 }
 
+// Load 16B from a potentially unaligned address via aligned 4B words funnel-shifted into place.
+// Reads bytes in [ptr - 3, ptr + 20), so callers must keep that window inside the source buffer.
+__forceinline__ __device__ uint4 load_uint4(char const* ptr)
+{
+  auto const offset       = reinterpret_cast<std::uintptr_t>(ptr) % 4;
+  auto const* aligned_ptr = reinterpret_cast<unsigned int const*>(ptr - offset);
+  auto const shift        = offset * 8;
+
+  uint4 regs = {aligned_ptr[0], aligned_ptr[1], aligned_ptr[2], aligned_ptr[3]};
+  uint tail  = 0;
+  if (shift) { tail = aligned_ptr[4]; }
+
+  regs.x = __funnelshift_r(regs.x, regs.y, shift);
+  regs.y = __funnelshift_r(regs.y, regs.z, shift);
+  regs.z = __funnelshift_r(regs.z, regs.w, shift);
+  regs.w = __funnelshift_r(regs.w, tail, shift);
+
+  return regs;
+}
+
 /**
- * @brief copies string data from jcudf row format to cudf columns
+ * @brief copies string data from jcudf row format to cudf columns, one output byte per thread
  *
- * @tparam block_size number of threads in a block.
- * @tparam RowOffsetFunctor iterator for row offsets into the destination data
+ * Port of cudf's strings-gather char-parallel kernel: each block stages the offsets window and the
+ * source address of each of its strings in shared memory, then threads write consecutive output
+ * bytes, binary-searching the window for the owning string. Suited to short strings, where dense
+ * byte stores beat one-warp-per-string copies. Columns map to blockIdx.y.
+ *
+ * @tparam strings_per_block number of strings each block copies
+ * @tparam RowOffsetFunctor iterator for row offsets into the input jcudf row data
  * @param row_offsets offsets for each row in input data
  * @param string_row_offsets offset data into jcudf row data for each string
- * @param string_lengths length of each incoming string in each column
  * @param string_column_offsets offset column data for cudf column
  * @param string_col_data output cudf string column data
  * @param row_data jcudf row data
  * @param num_rows number of rows in data
  * @param num_string_columns number of string columns in the table
  */
-template <int block_size, typename RowOffsetFunctor>
-__launch_bounds__(block_size) CUDF_KERNEL
-  void copy_strings_from_rows(RowOffsetFunctor row_offsets,
-                              int32_t** string_row_offsets,
-                              int32_t** string_lengths,
-                              size_type** string_column_offsets,
-                              char** string_col_data,
-                              int8_t const* row_data,
-                              size_type const num_rows,
-                              size_type const num_string_columns)
+template <int strings_per_block, typename RowOffsetFunctor>
+__launch_bounds__(STRING_COPY_BLOCK_SIZE) CUDF_KERNEL
+  void copy_strings_from_rows_char_parallel(RowOffsetFunctor row_offsets,
+                                            int32_t** string_row_offsets,
+                                            size_type** string_column_offsets,
+                                            char** string_col_data,
+                                            int8_t const* row_data,
+                                            size_type const num_rows,
+                                            size_type const num_string_columns)
 {
-  // Each warp takes a tile, which is a single column and up to ROWS_PER_BLOCK rows. A tile will not
-  // wrap around the bottom of the table. The warp will copy the strings for each row in the tile.
-  // Traversing in row-major order to coalesce the offsets and size reads.
-  auto my_block = cooperative_groups::this_thread_block();
-  auto warp     = cooperative_groups::tiled_partition<cudf::detail::warp_size>(my_block);
+  // Offsets window plus per-string source addresses, staged so the per-byte loop does one
+  // shared-memory lookup per side instead of three dependent global loads.
+  __shared__ size_type block_offsets[strings_per_block + 1];
+  __shared__ char const* block_src[strings_per_block];
 
-  // The barrier must be __shared__, initialized, and waited on; see the matching comment in
-  // copy_strings_to_rows.
-  __shared__ cuda::barrier<cuda::thread_scope_block> block_barrier;
-  if (my_block.thread_rank() == 0) { init(&block_barrier, my_block.size()); }
-  my_block.sync();
+  auto const begin_row         = static_cast<size_type>(blockIdx.x) * strings_per_block;
+  auto const num_block_strings = cuda::std::min(strings_per_block, num_rows - begin_row);
+  if (num_block_strings <= 0) { return; }
 
-  // workaround for not being able to take a reference to a constexpr host variable
-  auto const ROWS_PER_BLOCK = NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS;
-  auto const tiles_per_col  = cudf::util::div_rounding_up_unsafe(num_rows, ROWS_PER_BLOCK);
-  auto const starting_tile  = blockIdx.x * warp.meta_group_size() + warp.meta_group_rank();
-  auto const num_tiles      = tiles_per_col * num_string_columns;
-  auto const tile_stride    = warp.meta_group_size() * gridDim.x;
-  // Each warp will copy strings in its tile. This is handled by all the threads of a warp passing
-  // the same parameters to async_memcpy and all threads in the warp participating in the copy.
-  for (auto my_tile = starting_tile; my_tile < num_tiles; my_tile += tile_stride) {
-    auto const starting_row = (my_tile % tiles_per_col) * ROWS_PER_BLOCK;
-    auto const col          = my_tile / tiles_per_col;
-    auto const str_len      = string_lengths[col];
-    auto const str_row_off  = string_row_offsets[col];
-    auto const str_col_off  = string_column_offsets[col];
-    auto str_col_data       = string_col_data[col];
-    for (int row = starting_row; row < starting_row + ROWS_PER_BLOCK && row < num_rows; ++row) {
-      auto const src = &row_data[row_offsets(row, 0) + str_row_off[row]];
-      auto dst       = &str_col_data[str_col_off[row]];
+  for (auto col = blockIdx.y; col < static_cast<uint32_t>(num_string_columns); col += gridDim.y) {
+    auto const str_col_off = string_column_offsets[col];
+    auto const str_row_off = string_row_offsets[col];
+    for (size_type idx = threadIdx.x; idx <= num_block_strings; idx += blockDim.x) {
+      auto const row     = begin_row + idx;
+      block_offsets[idx] = str_col_off[row];
+      if (idx < num_block_strings) {
+        block_src[idx] =
+          reinterpret_cast<char const*>(row_data) + row_offsets(row, 0) + str_row_off[row];
+      }
+    }
+    __syncthreads();
 
-      cuda::memcpy_async(warp, dst, src, str_len[row], block_barrier);
+    auto const out_chars = string_col_data[col];
+    for (int64_t out_ibyte = static_cast<int64_t>(block_offsets[0]) + threadIdx.x;
+         out_ibyte < block_offsets[num_block_strings];
+         out_ibyte += blockDim.x) {
+      // Find the string owning this output byte in the staged window
+      auto const string_idx = static_cast<size_type>(cuda::std::distance(
+        block_offsets,
+        cuda::std::prev(thrust::upper_bound(thrust::seq,
+                                            block_offsets,
+                                            block_offsets + num_block_strings,
+                                            static_cast<size_type>(out_ibyte)))));
+      out_chars[out_ibyte]  = block_src[string_idx][out_ibyte - block_offsets[string_idx]];
+    }
+
+    // The shared window is reused per column iteration; the condition is block-uniform
+    if (col + gridDim.y < static_cast<uint32_t>(num_string_columns)) { __syncthreads(); }
+  }
+}
+
+/**
+ * @brief copies string data from jcudf row format to cudf columns, one warp per string
+ *
+ * Port of cudf's strings-gather string-parallel kernel: a warp cooperatively stores its string
+ * through 16B-aligned uint4 writes, funnel-shifting unaligned source words into place, with
+ * bytewise head/tail fixups. Suited to long strings. Columns map to blockIdx.y; warps grid-stride
+ * over the rows of a column.
+ *
+ * @tparam RowOffsetFunctor iterator for row offsets into the input jcudf row data
+ * @param row_offsets offsets for each row in input data
+ * @param string_row_offsets offset data into jcudf row data for each string
+ * @param string_column_offsets offset column data for cudf column
+ * @param string_col_data output cudf string column data
+ * @param row_data jcudf row data
+ * @param num_rows number of rows in data
+ * @param num_string_columns number of string columns in the table
+ */
+template <typename RowOffsetFunctor>
+__launch_bounds__(STRING_COPY_BLOCK_SIZE) CUDF_KERNEL
+  void copy_strings_from_rows_string_parallel(RowOffsetFunctor row_offsets,
+                                              int32_t** string_row_offsets,
+                                              size_type** string_column_offsets,
+                                              char** string_col_data,
+                                              int8_t const* row_data,
+                                              size_type const num_rows,
+                                              size_type const num_string_columns)
+{
+  constexpr int64_t warp_size         = 32;
+  constexpr int64_t out_datatype_size = sizeof(uint4);
+  constexpr int64_t in_datatype_size  = sizeof(uint);
+
+  auto const global_thread_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  auto const global_warp_id   = global_thread_id / warp_size;
+  auto const warp_lane        = global_thread_id % warp_size;
+  auto const nwarps           = static_cast<int64_t>(gridDim.x) * blockDim.x / warp_size;
+
+  for (auto col = blockIdx.y; col < static_cast<uint32_t>(num_string_columns); col += gridDim.y) {
+    auto const str_row_off = string_row_offsets[col];
+    auto const str_col_off = string_column_offsets[col];
+    auto const out_chars   = string_col_data[col];
+
+    auto const alignment_offset =
+      static_cast<int64_t>(reinterpret_cast<std::uintptr_t>(out_chars) % out_datatype_size);
+    uint4* const out_chars_aligned = reinterpret_cast<uint4*>(out_chars - alignment_offset);
+
+    for (auto row = global_warp_id; row < num_rows; row += nwarps) {
+      int64_t const out_start = str_col_off[row];
+      int64_t const out_end   = str_col_off[row + 1];
+      // Null and empty strings carry zero length: nothing to copy
+      if (out_start == out_end) { continue; }
+
+      char const* const in_start = reinterpret_cast<char const*>(row_data) +
+                                   row_offsets(static_cast<size_type>(row), 0) + str_row_off[row];
+
+      // 16B-aligned store range, shrunk by one 4B word on each side so load_uint4's word reads
+      // never leave the string.
+      int64_t const out_start_aligned =
+        (out_start + in_datatype_size + alignment_offset + out_datatype_size - 1) /
+          out_datatype_size * out_datatype_size -
+        alignment_offset;
+      int64_t const out_end_aligned =
+        (out_end - in_datatype_size + alignment_offset) / out_datatype_size * out_datatype_size -
+        alignment_offset;
+
+      for (auto ichar = out_start_aligned + warp_lane * out_datatype_size; ichar < out_end_aligned;
+           ichar += warp_size * out_datatype_size) {
+        *(out_chars_aligned + (ichar + alignment_offset) / out_datatype_size) =
+          load_uint4(in_start + ichar - out_start);
+      }
+
+      if (out_end_aligned <= out_start_aligned) {
+        // No aligned slot fits: copy the whole string bytewise
+        for (auto ichar = out_start + warp_lane; ichar < out_end; ichar += warp_size) {
+          out_chars[ichar] = in_start[ichar - out_start];
+        }
+      } else {
+        // Head [out_start, out_start_aligned) and tail [out_end_aligned, out_end) are each shorter
+        // than one warp-width of bytes.
+        if (out_start + warp_lane < out_start_aligned) {
+          out_chars[out_start + warp_lane] = in_start[warp_lane];
+        }
+        auto const ichar = out_end_aligned + warp_lane;
+        if (ichar < out_end) { out_chars[ichar] = in_start[ichar - out_start]; }
+      }
     }
   }
-
-  block_barrier.arrive_and_wait();
 }
 
 /**
@@ -1252,28 +1576,33 @@ static int calc_fixed_width_kernel_dims(size_type const num_columns,
  * going from start row and containing the next num_rows.  Most of the parameters passed
  * into this function are common between runs and should be calculated once.
  */
-static std::unique_ptr<column> fixed_width_convert_to_rows(
-  size_type const start_row,
-  size_type const num_rows,
-  size_type const num_columns,
-  size_type const size_per_row,
-  rmm::device_uvector<size_type>& column_start,
-  rmm::device_uvector<size_type>& column_size,
-  rmm::device_uvector<int8_t const*>& input_data,
-  rmm::device_uvector<bitmask_type const*>& input_nm,
-  scalar const& zero,
-  scalar const& scalar_size_per_row,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+static std::unique_ptr<column> fixed_width_convert_to_rows(size_type const start_row,
+                                                           size_type const num_rows,
+                                                           size_type const num_columns,
+                                                           size_type const size_per_row,
+                                                           size_type const* column_start,
+                                                           size_type const* column_size,
+                                                           int8_t const** input_data,
+                                                           bitmask_type const** input_nm,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr)
 {
   int64_t const total_allocation = size_per_row * num_rows;
   // We made a mistake in the split somehow
   CUDF_EXPECTS(total_allocation < std::numeric_limits<size_type>::max(),
                "Table is too large to fit!");
 
-  // Allocate and set the offsets row for the byte array
-  std::unique_ptr<column> offsets =
-    cudf::sequence(num_rows + 1, zero, scalar_size_per_row, stream, mr);
+  // Every row is size_per_row bytes wide, so tabulating the offsets directly avoids the pair of
+  // device scalars cudf::sequence would need to carry that constant step onto the device.
+  std::unique_ptr<column> offsets = make_numeric_column(
+    data_type(type_id::INT32), num_rows + 1, mask_state::UNALLOCATED, stream, mr);
+  auto* const d_offsets = offsets->mutable_view().begin<size_type>();
+  // Thrust temporaries come from the current device resource, never the caller's output `mr`.
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   d_offsets,
+                   d_offsets + num_rows + 1,
+                   cuda::proclaim_return_type<size_type>(
+                     [size_per_row] __device__(size_type i) { return i * size_per_row; }));
 
   std::unique_ptr<column> data = make_numeric_column(data_type(type_id::INT8),
                                                      static_cast<size_type>(total_allocation),
@@ -1291,10 +1620,10 @@ static std::unique_ptr<column> fixed_width_convert_to_rows(
     num_rows,
     num_columns,
     size_per_row,
-    column_start.data(),
-    column_size.data(),
-    input_data.data(),
-    input_nm.data(),
+    column_start,
+    column_size,
+    input_data,
+    input_nm,
     data->mutable_view().data<int8_t>());
 
   return make_lists_column(num_rows,
@@ -1596,11 +1925,7 @@ batch_data build_batches(size_type num_rows,
     last_row_end = row_end;
   }
 
-  return {std::move(batch_row_offsets),
-          make_device_uvector_async(
-            batch_row_boundaries, stream, rmm::mr::get_current_device_resource_ref()),
-          std::move(batch_row_boundaries),
-          std::move(row_batches)};
+  return {std::move(batch_row_offsets), std::move(batch_row_boundaries), std::move(row_batches)};
 }
 
 /**
@@ -1647,7 +1972,7 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
  */
 size_type build_tiles(
   device_span<tile_info> tiles,
-  device_uvector<size_type> const& batch_row_boundaries,  // comes from build_batches
+  device_span<size_type const> batch_row_boundaries,  // build_batches (to-rows) or {0, num_rows}
   int column_start,
   int column_end,
   int desired_tile_height,
@@ -1732,6 +2057,9 @@ size_type build_tiles(
  * @param total_number_of_rows total number of rows in the table
  * @param shmem_limit_per_tile shared memory allowed per tile
  * @param f callback function called when building a tile
+ *
+ * The tile height also depends on the current device's SM count, so the count pass and the build
+ * pass of one conversion must run on the same device to agree on the geometry.
  */
 template <typename TileCallback>
 void determine_tiles(std::vector<size_type> const& column_sizes,
@@ -1756,7 +2084,41 @@ void determine_tiles(std::vector<size_type> const& column_sizes,
   auto const optimal_square_len  = static_cast<size_type>(sqrt(shmem_limit_per_tile));
   auto const desired_tile_height = cudf::util::round_up_safe<int>(
     std::min(optimal_square_len / square_bias, total_number_of_rows), cudf::detail::warp_size);
-  auto const tile_height = std::clamp(desired_tile_height, 1, first_row_batch_size);
+
+  // First pass: the total padded row size, accumulated exactly like the column march below so the
+  // single-band test agrees with what the march would build. Keep the two in sync: a probe that
+  // under-estimates the march lets the gate below pass while the march still opens a fresh band,
+  // and that band's row size is never re-checked against the grown tile height.
+  int total_row_size = 0;
+  for (auto const col_size : column_sizes) {
+    total_row_size = cudf::util::round_up_unsafe(total_row_size, col_size) + col_size;
+  }
+  total_row_size = cudf::util::round_up_unsafe(total_row_size, JCUDF_ROW_ALIGNMENT);
+
+  // Schema-adaptive fill-driven height: when the whole row fits a single tile at the square-bias
+  // height the to-rows kernels leave most of their shared-memory budget unused, so grow the tile
+  // downward to fill it and shrink the grid. The from-rows data kernel stages nothing in shared
+  // memory, so there the taller tile is only a grid shrink.
+  // The min-grid guard caps the height at roughly two tiles per SM, and falls back to one warp of
+  // rows when the table is too small to reach that target. Multi-band (wide) schemas keep the
+  // incumbent height.
+  auto adaptive_tile_height = desired_tile_height;
+  if (total_number_of_rows > 0 && total_row_size > 0 &&
+      total_row_size * desired_tile_height <= shmem_limit_per_tile) {
+    constexpr int min_grid_tiles_per_sm = 2;
+    auto const fill_height =
+      cudf::util::round_down_safe<int>(shmem_limit_per_tile / total_row_size, WARP_SIZE);
+    int device_id;
+    CUDF_CUDA_TRY(cudaGetDevice(&device_id));
+    int num_sms;
+    CUDF_CUDA_TRY(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device_id));
+    auto const guard_height =
+      std::max(WARP_SIZE,
+               cudf::util::round_down_safe<int>(
+                 total_number_of_rows / (min_grid_tiles_per_sm * num_sms), WARP_SIZE));
+    adaptive_tile_height = std::min(fill_height, guard_height);
+  }
+  auto const tile_height = std::clamp(adaptive_tile_height, 1, first_row_batch_size);
 
   int row_size = 0;
 
@@ -1801,7 +2163,8 @@ void determine_tiles(std::vector<size_type> const& column_sizes,
  * @param batch_info information about the batches of data
  * @param offset_functor functor that returns the starting offset of each row
  * @param column_info information about incoming columns
- * @param variable_width_offsets optional vector of offsets for variable-with columns
+ * @param variable_width_offsets optional span of offsets for variable-with columns
+ * @param arena staging arena the metadata arrays are uploaded through
  * @param stream stream used
  * @param mr selected memory resource for returned data
  * @return vector of list columns containing byte columns of the JCUDF row data
@@ -1812,7 +2175,8 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   batch_data& batch_info,
   offsetFunctor offset_functor,
   column_info_s const& column_info,
-  std::optional<rmm::device_uvector<cudf::detail::input_offsetalator>> variable_width_offsets,
+  std::optional<device_span<cudf::detail::input_offsetalator>> variable_width_offsets,
+  staging_arena& arena,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -1841,11 +2205,6 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
     return table_view(cols);
   };
 
-  auto dev_col_sizes = make_device_uvector_async(
-    column_info.column_sizes, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_col_starts = make_device_uvector_async(
-    column_info.column_starts, stream, rmm::mr::get_current_device_resource_ref());
-
   // Get the pointers to the input columnar data ready
   auto const data_begin = cuda::make_transform_iterator(tbl.begin(), [](auto const& c) {
     return is_compound(c.type()) ? nullptr : c.template data<int8_t>();
@@ -1856,11 +2215,6 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   auto const nm_begin =
     cuda::make_transform_iterator(tbl.begin(), [](auto const& c) { return c.null_mask(); });
   std::vector<bitmask_type const*> input_nm(nm_begin, nm_begin + tbl.num_columns());
-
-  auto dev_input_data =
-    make_device_uvector_async(input_data, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_input_nm =
-    make_device_uvector_async(input_nm, stream, rmm::mr::get_current_device_resource_ref());
 
   // the first batch always exists unless we were sent an empty table
   auto const first_batch_size = batch_info.row_batches[0].row_count;
@@ -1879,20 +2233,60 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
       return static_cast<int8_t*>(buf.data());
     });
 
-  auto dev_output_data = make_device_uvector_async(output_data, stream, mr);
+  // build validity tiles for ALL columns, variable and fixed width.
+  auto validity_tile_infos = detail::build_validity_tile_infos(
+    tbl.num_columns(), num_rows, shmem_limit_per_tile, batch_info.row_batches);
+
+  // build table view for variable-width data only
+  auto const variable_width_table =
+    select_columns(tbl, [](auto col) { return is_compound(col.type()); });
+  std::vector<int8_t const*> variable_width_input_data;
+  if (!fixed_width_only) {
+    CUDF_EXPECTS(!variable_width_table.is_empty(), "No variable-width columns when expected!");
+    CUDF_EXPECTS(variable_width_offsets.has_value(), "No variable width offset data!");
+
+    auto const variable_data_begin = cuda::make_transform_iterator(
+      variable_width_table.begin(),
+      [](auto const& c) { return is_compound(c.type()) ? c.template data<int8_t>() : nullptr; });
+    variable_width_input_data.assign(variable_data_begin,
+                                     variable_data_begin + variable_width_table.num_columns());
+  }
+
+  auto const [dev_batch_row_boundaries,
+              dev_col_sizes,
+              dev_col_starts,
+              dev_input_data,
+              dev_input_nm,
+              dev_output_data,
+              dev_validity_tile_infos,
+              dev_variable_input_data,
+              dev_variable_col_output_offsets] =
+    arena.upload(batch_info.batch_row_boundaries,
+                 column_info.column_sizes,
+                 column_info.column_starts,
+                 input_data,
+                 input_nm,
+                 output_data,
+                 validity_tile_infos,
+                 variable_width_input_data,
+                 column_info.variable_width_column_starts);
+  auto const gpu_batch_row_boundaries =
+    device_span<size_type const>{dev_batch_row_boundaries, batch_info.batch_row_boundaries.size()};
 
   int info_count = 0;
-  detail::determine_tiles(
-    column_info.column_sizes,
-    column_info.column_starts,
-    first_batch_size,
-    num_rows,
-    shmem_limit_per_tile,
-    [&gpu_batch_row_boundaries = batch_info.d_batch_row_boundaries, &info_count, &stream](
-      int const start_col, int const end_col, int const tile_height) {
-      int i = detail::compute_tile_counts(gpu_batch_row_boundaries, tile_height, stream);
-      info_count += i;
-    });
+  int num_bands  = 0;
+  detail::determine_tiles(column_info.column_sizes,
+                          column_info.column_starts,
+                          first_batch_size,
+                          num_rows,
+                          shmem_limit_per_tile,
+                          [gpu_batch_row_boundaries, &info_count, &num_bands, &stream](
+                            int const start_col, int const end_col, int const tile_height) {
+                            ++num_bands;
+                            int i = detail::compute_tile_counts(
+                              gpu_batch_row_boundaries, tile_height, stream);
+                            info_count += i;
+                          });
 
   // allocate space for tiles
   device_uvector<detail::tile_info> gpu_tile_infos(info_count, stream);
@@ -1904,11 +2298,8 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
     first_batch_size,
     num_rows,
     shmem_limit_per_tile,
-    [&gpu_batch_row_boundaries = batch_info.d_batch_row_boundaries,
-     &gpu_tile_infos,
-     num_rows,
-     &tile_offset,
-     stream](int const start_col, int const end_col, int const tile_height) {
+    [gpu_batch_row_boundaries, &gpu_tile_infos, num_rows, &tile_offset, stream](
+      int const start_col, int const end_col, int const tile_height) {
       tile_offset += detail::build_tiles(
         {gpu_tile_infos.data() + tile_offset, gpu_tile_infos.size() - tile_offset},
         gpu_batch_row_boundaries,
@@ -1919,28 +2310,50 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
         stream);
     });
 
-  // build validity tiles for ALL columns, variable and fixed width.
-  auto validity_tile_infos = detail::build_validity_tile_infos(
-    tbl.num_columns(), num_rows, shmem_limit_per_tile, batch_info.row_batches);
-
-  auto dev_validity_tile_infos = make_device_uvector_async(
-    validity_tile_infos, stream, rmm::mr::get_current_device_resource_ref());
-
   auto const validity_offset = column_info.column_starts.back();
 
-  // blast through the entire table and convert it
-  detail::copy_to_rows<BLOCK_SIZE>
-    <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
-      num_rows,
-      tbl.num_columns(),
-      shmem_limit_per_tile,
-      gpu_tile_infos,
-      dev_input_data.data(),
-      dev_col_sizes.data(),
-      dev_col_starts.data(),
-      offset_functor,
-      batch_info.d_batch_row_boundaries.data(),
-      reinterpret_cast<int8_t**>(dev_output_data.data()));
+  // The generated JIT kernels mirror tile_info. Every member is an int, so size alone cannot
+  // catch a field reorder: pin the offsets too.
+  static_assert(sizeof(tile_info) == 5 * sizeof(int) && std::is_standard_layout_v<tile_info>);
+  static_assert(offsetof(tile_info, start_col) == 0 && offsetof(tile_info, start_row) == 4 &&
+                offsetof(tile_info, end_col) == 8 && offsetof(tile_info, end_row) == 12 &&
+                offsetof(tile_info, batch_number) == 16);
+
+  // Single-band all-fixed-width schemas may run a schema-specialized JIT kernel instead of the
+  // generic interpreter kernel; every other case (multi-band, strings present, JIT disabled,
+  // compile still pending or failed) launches the generic kernel below.
+  bool jit_launched = false;
+  if constexpr (std::is_same_v<offsetFunctor, detail::fixed_width_row_offset_functor>) {
+    if (fixed_width_only && num_bands == 1) {
+      jit_launched = detail::try_jit_copy_to_rows(
+        column_info.column_sizes,
+        column_info.column_starts,
+        cudf::util::round_up_unsafe(column_info.size_per_row, JCUDF_ROW_ALIGNMENT),
+        static_cast<int>(gpu_tile_infos.size()),
+        gpu_tile_infos.data(),
+        total_shmem_in_bytes,
+        dev_input_data,
+        dev_output_data,
+        gpu_batch_row_boundaries.data(),
+        stream);
+    }
+  }
+
+  if (!jit_launched) {
+    // blast through the entire table and convert it
+    detail::copy_to_rows<BLOCK_SIZE>
+      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+        num_rows,
+        tbl.num_columns(),
+        shmem_limit_per_tile,
+        gpu_tile_infos,
+        dev_input_data,
+        dev_col_sizes,
+        dev_col_starts,
+        offset_functor,
+        gpu_batch_row_boundaries.data(),
+        dev_output_data);
+  }
 
   // note that validity gets the entire table and not the fixed-width portion
   detail::copy_validity_to_rows<BLOCK_SIZE>
@@ -1949,31 +2362,13 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
       tbl.num_columns(),
       shmem_limit_per_tile,
       offset_functor,
-      batch_info.d_batch_row_boundaries.data(),
-      dev_output_data.data(),
+      gpu_batch_row_boundaries.data(),
+      dev_output_data,
       validity_offset,
-      dev_validity_tile_infos,
-      dev_input_nm.data());
+      device_span<tile_info const>{dev_validity_tile_infos, validity_tile_infos.size()},
+      dev_input_nm);
 
   if (!fixed_width_only) {
-    // build table view for variable-width data only
-    auto const variable_width_table =
-      select_columns(tbl, [](auto col) { return is_compound(col.type()); });
-
-    CUDF_EXPECTS(!variable_width_table.is_empty(), "No variable-width columns when expected!");
-    CUDF_EXPECTS(variable_width_offsets.has_value(), "No variable width offset data!");
-
-    auto const variable_data_begin = cuda::make_transform_iterator(
-      variable_width_table.begin(),
-      [](auto const& c) { return is_compound(c.type()) ? c.template data<int8_t>() : nullptr; });
-    std::vector<int8_t const*> variable_width_input_data(
-      variable_data_begin, variable_data_begin + variable_width_table.num_columns());
-
-    auto dev_variable_input_data = make_device_uvector_async(
-      variable_width_input_data, stream, rmm::mr::get_current_device_resource_ref());
-    auto dev_variable_col_output_offsets = make_device_uvector_async(
-      column_info.variable_width_column_starts, stream, rmm::mr::get_current_device_resource_ref());
-
     for (uint i = 0; i < batch_info.row_batches.size(); i++) {
       auto const batch_row_offset = batch_info.batch_row_boundaries[i];
       auto const batch_num_rows   = batch_info.row_batches[i].row_count;
@@ -1990,18 +2385,14 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
         <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_TO_ROWS, 0, stream.value()>>>(
           batch_row_offset + batch_num_rows,
           variable_width_table.num_columns(),
-          dev_variable_input_data.data(),
-          dev_variable_col_output_offsets.data(),
+          dev_variable_input_data,
+          dev_variable_col_output_offsets,
           variable_width_offsets->data(),
           column_info.size_per_row,
           offset_functor,
           batch_row_offset,
           reinterpret_cast<int8_t*>(output_data[i]));
     }
-
-    // Drain the async H2D uploads above before variable_width_input_data goes out of scope:
-    // CUDA 13+ may read the host source only when the stream executes the copy.
-    stream.synchronize();
   }
 
   // split up the output buffer into multiple buffers based on row batch sizes and create list of
@@ -2032,11 +2423,6 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
                                             0,
                                             rmm::device_buffer{0, cudf::get_default_stream(), mr});
                  });
-
-  // Drain the async H2D uploads above before input_data, input_nm, output_data and
-  // validity_tile_infos go out of scope: CUDA 13+ may read the host source only when the stream
-  // executes the copy.
-  stream.synchronize();
 
   return ret;
 }
@@ -2131,6 +2517,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
   auto column_info =
     detail::compute_column_information(schema_column_iter, schema_column_iter + num_columns);
   auto const size_per_row = column_info.size_per_row;
+
+  // one arena serves the whole conversion; destroyed after the last consumer is enqueued
+  detail::staging_arena arena(stream);
+
   if (fixed_width_only) {
     // total encoded row size. This includes fixed-width data and validity only. It does not include
     // variable-width data since it isn't copied with the fixed-width and validity kernel.
@@ -2143,9 +2533,9 @@ std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
       cudf::util::round_up_unsafe(size_per_row, JCUDF_ROW_ALIGNMENT));
 
     return detail::convert_to_rows(
-      tbl, batch_info, offset_functor, std::move(column_info), std::nullopt, stream, mr);
+      tbl, batch_info, offset_functor, std::move(column_info), std::nullopt, arena, stream, mr);
   } else {
-    auto offset_data = detail::build_string_row_offsets(tbl, size_per_row, stream);
+    auto offset_data = detail::build_string_row_offsets(tbl, size_per_row, arena, stream);
     auto& row_sizes  = std::get<0>(offset_data);
 
     auto row_size_iter = spark_rapids_jni::util::make_counting_transform_iterator(
@@ -2159,7 +2549,8 @@ std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
                                    batch_info,
                                    offset_functor,
                                    std::move(column_info),
-                                   std::make_optional(std::move(std::get<1>(offset_data))),
+                                   std::make_optional(std::get<1>(offset_data)),
+                                   arena,
                                    stream,
                                    mr);
   }
@@ -2185,8 +2576,6 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
 
   int32_t const size_per_row =
     detail::compute_fixed_width_layout(schema, column_start, column_size);
-  auto dev_column_start = make_device_uvector_async(column_start, stream, mr);
-  auto dev_column_size  = make_device_uvector_async(column_size, stream, mr);
 
   // Make the number of rows per batch a multiple of 32 so we don't have to worry about splitting
   // validity at a specific row offset.  This might change in the future.
@@ -2203,17 +2592,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
     input_data.emplace_back(cv.data<int8_t>());
     input_nm.emplace_back(cv.null_mask());
   }
-  auto dev_input_data = make_device_uvector_async(input_data, stream, mr);
-  auto dev_input_nm   = make_device_uvector_async(input_nm, stream, mr);
 
-  using ScalarType = scalar_type_t<size_type>;
-  auto zero        = make_numeric_scalar(data_type(type_id::INT32), stream.value());
-  zero->set_valid_async(true, stream);
-  static_cast<ScalarType*>(zero.get())->set_value(0, stream);
-
-  auto step = make_numeric_scalar(data_type(type_id::INT32), stream.value());
-  step->set_valid_async(true, stream);
-  static_cast<ScalarType*>(step.get())->set_value(static_cast<size_type>(size_per_row), stream);
+  detail::staging_arena arena(stream);
+  auto const [dev_column_start, dev_column_size, dev_input_data, dev_input_nm] =
+    arena.upload(column_start, column_size, input_data, input_nm);
 
   std::vector<std::unique_ptr<column>> ret;
   for (size_type row_start = 0; row_start < num_rows; row_start += max_rows_per_batch) {
@@ -2227,15 +2609,9 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
                                                          dev_column_size,
                                                          dev_input_data,
                                                          dev_input_nm,
-                                                         *zero,
-                                                         *step,
                                                          stream,
                                                          mr));
   }
-
-  // Drain the async H2D uploads above before column_start, column_size, input_data and input_nm
-  // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
-  stream.synchronize();
 
   return ret;
 }
@@ -2246,28 +2622,76 @@ namespace {
 void fixup_null_counts(std::vector<std::unique_ptr<column>>& output_columns,
                        rmm::cuda_stream_view stream)
 {
-  for (auto& col : output_columns) {
-    col->set_null_count(cudf::null_count(col->view().null_mask(), 0, col->size(), stream));
+  if (output_columns.empty()) { return; }
+  // All from-rows output columns share one row count, so one cudf::batch_null_count costs a
+  // single kernel and D2H sync for the whole table.
+  auto const num_rows = output_columns.front()->size();
+  std::vector<bitmask_type const*> masks;
+  masks.reserve(output_columns.size());
+  for (auto const& col : output_columns) {
+    CUDF_EXPECTS(col->size() == num_rows, "Batched null count requires equally sized columns");
+    masks.push_back(col->view().null_mask());
   }
+  auto const null_counts = cudf::batch_null_count(masks, 0, num_rows, stream);
+  for (std::size_t i = 0; i < output_columns.size(); ++i) {
+    output_columns[i]->set_null_count(null_counts[i]);
+  }
+}
+
+// Debug aid (default off): when 1, an all-valid declaration is re-verified through the incumbent
+// path and a violation throws instead of silently corrupting. Read per call so tests can toggle.
+bool validate_all_valid_enabled()
+{
+  char const* const env = std::getenv("ROWCONV_VALIDATE_ALL_VALID");
+  if (env == nullptr) { return false; }
+  // The sibling JIT kill switch accepts the word forms, so this one must too — a user who learns
+  // one convention would otherwise get the other silently wrong.
+  for (auto const* word : {"1", "true", "on", "yes"}) {
+    if (::strcasecmp(env, word) == 0) { return true; }
+  }
+  return false;
+}
+
+// Returns true when the caller declares every column non-nullable; throws on a size mismatch.
+bool is_all_valid_profile(std::vector<bool> const& may_have_nulls, std::size_t schema_size)
+{
+  CUDF_EXPECTS(may_have_nulls.size() == schema_size,
+               "may_have_nulls size must match the schema size");
+  return std::none_of(
+    may_have_nulls.cbegin(), may_have_nulls.cend(), [](bool const b) { return b; });
+}
+
+// Debug-validation epilogue: proves an all-valid declaration against the incumbent result, then
+// drops the all-set masks so the output matches the fast path's non-nullable shape.
+std::unique_ptr<table> strip_verified_all_valid(std::unique_ptr<table>&& verified)
+{
+  auto columns = verified->release();
+  for (auto& col : columns) {
+    CUDF_EXPECTS(col->null_count() == 0,
+                 "all-valid nullability declaration violated: row data contains nulls");
+    col->set_null_mask(rmm::device_buffer{}, 0);
+  }
+  return std::make_unique<table>(std::move(columns));
 }
 
 }  // namespace
 
+namespace {
+
 /**
- * @brief convert from JCUDF row format to cudf columns
+ * @brief Implementation of the general JCUDF-rows-to-columns conversion
  *
- * @param input vector of list columns containing byte columns of the JCUDF row data
- * @param schema incoming schema of the data
- * @param stream stream to use for compute
- * @param mr memory resource for returned data
- * @return cudf table of the data
+ * @param trust_all_valid when true the caller guarantees no row carries a null in any column:
+ * output columns are created without null masks and the whole reverse-validity pipeline (validity
+ * tiles + kernel, valid-count read-back and its synchronize) is skipped. The row bytes are read
+ * exactly as on the incumbent path; their validity bytes are simply never touched.
  */
-std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
-                                         std::vector<data_type> const& schema,
-                                         rmm::cuda_stream_view stream,
-                                         rmm::device_async_resource_ref mr)
+std::unique_ptr<table> convert_from_rows_impl(lists_column_view const& input,
+                                              std::vector<data_type> const& schema,
+                                              bool trust_all_valid,
+                                              rmm::cuda_stream_view stream,
+                                              rmm::device_async_resource_ref mr)
 {
-  SRJ_FUNC_RANGE();
   // verify that the types are what we expect
   column_view child    = input.child();
   auto const list_type = child.type().id();
@@ -2315,13 +2739,14 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   auto const size_per_row =
     cudf::util::round_up_unsafe(column_info.size_per_row, JCUDF_ROW_ALIGNMENT);
 
-  // Ideally we would check that the offsets are all the same, etc. but for now this is probably
-  // fine
+  // Unchecked precondition: the rows in input must start at multiples of JCUDF_ROW_ALIGNMENT —
+  // for a schema with strings those starts are input.offsets() verbatim. copy_from_rows reads
+  // each element with a naturally-aligned typed load at its row start, so a misaligned start is
+  // undefined behavior, not merely a slow copy. The in-tree producer convert_to_rows rounds each
+  // row size up to that alignment; checking it here would cost a device-wide scan of the offsets.
   CUDF_EXPECTS(size_per_row * num_rows <= child.size(), "The layout of the data appears to be off");
-  auto dev_col_starts = make_device_uvector_async(
-    column_info.column_starts, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_col_sizes = make_device_uvector_async(
-    column_info.column_sizes, stream, rmm::mr::get_current_device_resource_ref());
+
+  detail::staging_arena arena(stream);
 
   // Allocate the columns we are going to write into
   std::vector<std::unique_ptr<column>> output_columns;
@@ -2350,8 +2775,8 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
     };
     if (i.id() == type_id::STRING) {
       auto const int32type = data_type(type_id::INT32);
-      auto offset_col =
-        make_col(int32type, num_rows, true, stream, rmm::mr::get_current_device_resource_ref());
+      auto offset_col      = make_col(
+        int32type, num_rows, !trust_all_valid, stream, rmm::mr::get_current_device_resource_ref());
       string_row_offsets.push_back(offset_col->mutable_view().data<int32_t>());
       string_row_offset_columns.emplace_back(std::move(offset_col));
       auto length_col =
@@ -2361,44 +2786,53 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
       // placeholder
       output_columns.emplace_back(make_empty_column(type_id::STRING));
     } else {
-      output_columns.emplace_back(make_col(i, num_rows, true, stream, mr));
+      output_columns.emplace_back(make_col(i, num_rows, !trust_all_valid, stream, mr));
     }
   }
-
-  auto dev_string_row_offsets = make_device_uvector_async(
-    string_row_offsets, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_string_lengths =
-    make_device_uvector_async(string_lengths, stream, rmm::mr::get_current_device_resource_ref());
 
   // build the row_batches from the passed in list column
   std::vector<detail::row_batch> row_batches;
   row_batches.push_back(
     {detail::row_batch{child.size(), num_rows, device_uvector<size_type>(0, stream)}});
 
-  auto dev_output_data =
-    make_device_uvector_async(output_data, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_output_nm =
-    make_device_uvector_async(output_nm, stream, rmm::mr::get_current_device_resource_ref());
-
   // only ever get a single batch when going from rows, so boundaries are 0, num_rows
-  constexpr auto num_batches = 2;
-  device_uvector<size_type> gpu_batch_row_boundaries(num_batches, stream);
+  std::vector<size_type> batch_row_boundaries{0, num_rows};
 
-  thrust::transform(rmm::exec_policy(stream),
-                    cuda::make_counting_iterator(0),
-                    cuda::make_counting_iterator(num_batches),
-                    gpu_batch_row_boundaries.begin(),
-                    cuda::proclaim_return_type<size_type>(
-                      [num_rows] __device__(auto i) { return i == 0 ? 0 : num_rows; }));
+  // validity needs to be calculated based on the actual number of final table columns; the
+  // trusted all-valid path needs no tiles and the empty vector uploads as nullptr below
+  auto validity_tile_infos = trust_all_valid
+                               ? std::vector<detail::tile_info>{}
+                               : detail::build_validity_tile_infos(
+                                   schema.size(), num_rows, shmem_limit_per_tile, row_batches);
+
+  auto const [dev_col_starts,
+              dev_col_sizes,
+              dev_string_row_offsets,
+              dev_string_lengths,
+              dev_output_data,
+              dev_output_nm,
+              dev_batch_row_boundaries,
+              dev_validity_tile_infos] = arena.upload(column_info.column_starts,
+                                                      column_info.column_sizes,
+                                                      string_row_offsets,
+                                                      string_lengths,
+                                                      output_data,
+                                                      output_nm,
+                                                      batch_row_boundaries,
+                                                      validity_tile_infos);
+  auto const gpu_batch_row_boundaries =
+    device_span<size_type const>{dev_batch_row_boundaries, batch_row_boundaries.size()};
 
   int info_count = 0;
+  int num_bands  = 0;
   detail::determine_tiles(column_info.column_sizes,
                           column_info.column_starts,
                           num_rows,
                           num_rows,
                           shmem_limit_per_tile,
-                          [&gpu_batch_row_boundaries, &info_count, &stream](
+                          [gpu_batch_row_boundaries, &info_count, &num_bands, &stream](
                             int const start_col, int const end_col, int const tile_height) {
+                            ++num_bands;
                             info_count += detail::compute_tile_counts(
                               gpu_batch_row_boundaries, tile_height, stream);
                           });
@@ -2413,7 +2847,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
     num_rows,
     num_rows,
     shmem_limit_per_tile,
-    [&gpu_batch_row_boundaries, &gpu_tile_infos, num_rows, &tile_offset, stream](
+    [gpu_batch_row_boundaries, &gpu_tile_infos, num_rows, &tile_offset, stream](
       int const start_col, int const end_col, int const tile_height) {
       tile_offset += detail::build_tiles(
         {gpu_tile_infos.data() + tile_offset, gpu_tile_infos.size() - tile_offset},
@@ -2427,114 +2861,239 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
 
   dim3 const blocks(gpu_tile_infos.size());
 
-  // validity needs to be calculated based on the actual number of final table columns
-  auto validity_tile_infos =
-    detail::build_validity_tile_infos(schema.size(), num_rows, shmem_limit_per_tile, row_batches);
-
-  auto dev_validity_tile_infos = make_device_uvector_async(
-    validity_tile_infos, stream, rmm::mr::get_current_device_resource_ref());
-
   dim3 const validity_blocks(validity_tile_infos.size());
 
-  if (dev_string_row_offsets.size() == 0) {
+  // Per-column valid-row counts accumulated by the validity kernel, indexed by original schema
+  // position and zeroed once per conversion on this stream, so null counts can come from one
+  // D2H copy instead of per-column null_count reductions. Empty (unused) on the trusted
+  // all-valid path.
+  device_uvector<size_type> dev_valid_counts(trust_all_valid ? 0 : schema.size(), stream);
+  if (!trust_all_valid) {
+    CUDF_CUDA_TRY(cudaMemsetAsync(
+      dev_valid_counts.data(), 0, dev_valid_counts.size() * sizeof(size_type), stream.value()));
+  }
+
+  if (string_row_offsets.empty()) {
     detail::fixed_width_row_offset_functor offset_functor(size_per_row);
 
-    detail::copy_from_rows<BLOCK_SIZE>
-      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
-        num_rows,
-        num_columns,
-        shmem_limit_per_tile,
-        offset_functor,
-        gpu_batch_row_boundaries.data(),
-        dev_output_data.data(),
-        dev_col_sizes.data(),
-        dev_col_starts.data(),
-        gpu_tile_infos,
-        child.data<int8_t>());
+    // The generated JIT kernels mirror tile_info. Every member is an int, so size alone cannot
+    // catch a field reorder: pin the offsets too.
+    static_assert(sizeof(detail::tile_info) == 5 * sizeof(int) &&
+                  std::is_standard_layout_v<detail::tile_info>);
+    static_assert(
+      offsetof(detail::tile_info, start_col) == 0 && offsetof(detail::tile_info, start_row) == 4 &&
+      offsetof(detail::tile_info, end_col) == 8 && offsetof(detail::tile_info, end_row) == 12 &&
+      offsetof(detail::tile_info, batch_number) == 16);
 
-    detail::copy_validity_from_rows<BLOCK_SIZE>
-      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
-        num_rows,
-        num_columns,
-        shmem_limit_per_tile,
-        offset_functor,
-        gpu_batch_row_boundaries.data(),
-        dev_output_nm.data(),
-        column_info.column_starts.back(),
-        dev_validity_tile_infos,
-        child.data<int8_t>());
+    // Single-band schemas may run a schema-specialized JIT gather kernel instead of the generic
+    // interpreter kernel; every other case (multi-band, JIT disabled, compile still pending or
+    // failed) launches the generic kernel below.
+    bool const jit_launched =
+      num_bands == 1 && detail::try_jit_copy_from_rows(column_info.column_sizes,
+                                                       column_info.column_starts,
+                                                       size_per_row,
+                                                       static_cast<int>(gpu_tile_infos.size()),
+                                                       gpu_tile_infos.data(),
+                                                       child.data<int8_t>(),
+                                                       dev_output_data,
+                                                       stream);
+
+    if (!jit_launched) {
+      // copy_from_rows stages nothing in shared memory: launch it with zero dynamic shared
+      // memory and request the maximum-L1 carveout so the cache can serve its strided row
+      // re-reads.
+      CUDF_CUDA_TRY(cudaFuncSetAttribute(
+        detail::copy_from_rows<BLOCK_SIZE, detail::fixed_width_row_offset_functor>,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        cudaSharedmemCarveoutMaxL1));
+      detail::copy_from_rows<BLOCK_SIZE>
+        <<<gpu_tile_infos.size(), BLOCK_SIZE, 0, stream.value()>>>(num_rows,
+                                                                   num_columns,
+                                                                   shmem_limit_per_tile,
+                                                                   offset_functor,
+                                                                   gpu_batch_row_boundaries.data(),
+                                                                   dev_output_data,
+                                                                   dev_col_sizes,
+                                                                   dev_col_starts,
+                                                                   gpu_tile_infos,
+                                                                   child.data<int8_t>());
+    }
+
+    if (!trust_all_valid) {
+      detail::copy_validity_from_rows<BLOCK_SIZE>
+        <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+          num_rows,
+          num_columns,
+          shmem_limit_per_tile,
+          offset_functor,
+          gpu_batch_row_boundaries.data(),
+          dev_output_nm,
+          column_info.column_starts.back(),
+          device_span<detail::tile_info const>{dev_validity_tile_infos, validity_tile_infos.size()},
+          child.data<int8_t>(),
+          dev_valid_counts.data());
+    }
 
   } else {
     detail::string_row_offset_functor offset_functor(device_span<size_type const>{input.offsets()});
+    CUDF_CUDA_TRY(
+      cudaFuncSetAttribute(detail::copy_from_rows<BLOCK_SIZE, detail::string_row_offset_functor>,
+                           cudaFuncAttributePreferredSharedMemoryCarveout,
+                           cudaSharedmemCarveoutMaxL1));
     detail::copy_from_rows<BLOCK_SIZE>
-      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
-        num_rows,
-        num_columns,
-        shmem_limit_per_tile,
-        offset_functor,
-        gpu_batch_row_boundaries.data(),
-        dev_output_data.data(),
-        dev_col_sizes.data(),
-        dev_col_starts.data(),
-        gpu_tile_infos,
-        child.data<int8_t>());
+      <<<gpu_tile_infos.size(), BLOCK_SIZE, 0, stream.value()>>>(num_rows,
+                                                                 num_columns,
+                                                                 shmem_limit_per_tile,
+                                                                 offset_functor,
+                                                                 gpu_batch_row_boundaries.data(),
+                                                                 dev_output_data,
+                                                                 dev_col_sizes,
+                                                                 dev_col_starts,
+                                                                 gpu_tile_infos,
+                                                                 child.data<int8_t>());
 
-    detail::copy_validity_from_rows<BLOCK_SIZE>
-      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
-        num_rows,
-        num_columns,
-        shmem_limit_per_tile,
-        offset_functor,
-        gpu_batch_row_boundaries.data(),
-        dev_output_nm.data(),
-        column_info.column_starts.back(),
-        dev_validity_tile_infos,
-        child.data<int8_t>());
+    if (!trust_all_valid) {
+      detail::copy_validity_from_rows<BLOCK_SIZE>
+        <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+          num_rows,
+          num_columns,
+          shmem_limit_per_tile,
+          offset_functor,
+          gpu_batch_row_boundaries.data(),
+          dev_output_nm,
+          column_info.column_starts.back(),
+          device_span<detail::tile_info const>{dev_validity_tile_infos, validity_tile_infos.size()},
+          child.data<int8_t>(),
+          dev_valid_counts.data());
+    }
 
+    auto const num_string_columns = static_cast<size_type>(string_lengths.size());
+    auto const temp_mr            = cudf::get_current_device_resource_ref();
+
+    // Allocate all offsets buffers up front so one batched scan can fill every column.
     std::vector<device_uvector<size_type>> string_col_offsets;
     std::vector<rmm::device_uvector<char>> string_data_cols;
     std::vector<size_type*> string_col_offset_ptrs;
     std::vector<char*> string_data_col_ptrs;
-    for (auto& col_string_lengths : string_lengths) {
-      device_uvector<size_type> output_string_offsets(num_rows + 1, stream, mr);
-      auto tmp = cuda::proclaim_return_type<int32_t>(
-        [num_rows, col_string_lengths] __device__(auto const& i) {
-          return i < num_rows ? col_string_lengths[i] : 0;
-        });
-      auto bounded_iter = spark_rapids_jni::util::make_counting_transform_iterator(0, tmp);
-      thrust::exclusive_scan(rmm::exec_policy(stream),
-                             bounded_iter,
-                             bounded_iter + num_rows + 1,
-                             output_string_offsets.begin());
-
-      // allocate destination string column
-      rmm::device_uvector<char> string_data(
-        output_string_offsets.element(num_rows, stream), stream, mr);
-
-      string_col_offset_ptrs.push_back(output_string_offsets.data());
-      string_data_col_ptrs.push_back(string_data.data());
-      string_col_offsets.push_back(std::move(output_string_offsets));
-      string_data_cols.push_back(std::move(string_data));
+    for (size_type i = 0; i < num_string_columns; ++i) {
+      string_col_offsets.emplace_back(num_rows + 1, stream, mr);
+      string_col_offset_ptrs.push_back(string_col_offsets.back().data());
     }
-    auto dev_string_col_offsets = make_device_uvector_async(
-      string_col_offset_ptrs, stream, rmm::mr::get_current_device_resource_ref());
-    auto dev_string_data_cols = make_device_uvector_async(
-      string_data_col_ptrs, stream, rmm::mr::get_current_device_resource_ref());
 
-    dim3 const string_blocks(
-      std::min(std::max(MIN_STRING_BLOCKS, num_rows / NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS),
-               MAX_STRING_BLOCKS));
+    // second arena upload, offsets pointers only: the totals gather below dereferences this
+    // array on device before the chars sizes are known. Earlier conversion work is still queued
+    // on the stream here, so the arena's per-round event guard, not a stream drain, is what keeps
+    // its pinned staging block safe.
+    auto* const dev_string_col_offsets = std::get<0>(arena.upload(string_col_offset_ptrs));
 
-    detail::copy_strings_from_rows<NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS>
-      <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS, 0, stream.value()>>>(
-        offset_functor,
-        dev_string_row_offsets.data(),
-        dev_string_lengths.data(),
-        dev_string_col_offsets.data(),
-        dev_string_data_cols.data(),
-        child.data<int8_t>(),
-        num_rows,
-        static_cast<cudf::size_type>(string_col_offsets.size()));
+    // One exclusive scan-by-key over the K string columns flattened to K*(num_rows+1) elements
+    // replaces K per-column scans that each paid a launch plus a hard sync to read back its
+    // total. Segment = column with init 0 per segment, the exact per-column exclusive_scan
+    // result; past each column's last row the value iterator feeds 0 so the column's total chars
+    // size lands at slot [num_rows]. The flat extent is computed in 64 bits because the only
+    // upstream bound on K*num_rows is a layout check whose own product is 32-bit and can overflow.
+    auto const flat_stride = static_cast<int64_t>(num_rows) + 1;
+    auto const flat_count  = static_cast<int64_t>(num_string_columns) * flat_stride;
+    auto flat_keys         = spark_rapids_jni::util::make_counting_transform_iterator(
+      0, cuda::proclaim_return_type<size_type>([flat_stride] __device__(auto const& i) {
+        return static_cast<size_type>(i / flat_stride);
+      }));
+    auto flat_lengths = spark_rapids_jni::util::make_counting_transform_iterator(
+      0,
+      cuda::proclaim_return_type<int32_t>(
+        [flat_stride, num_rows, lengths = dev_string_lengths] __device__(auto const& i) {
+          auto const row = i % flat_stride;
+          return row < num_rows ? lengths[i / flat_stride][row] : 0;
+        }));
+    {
+      // Scan into one contiguous scratch buffer and peel it into the per-column offsets with K
+      // small stream-ordered D2D copies; scoped to release the scratch before the chars
+      // allocations below.
+      rmm::device_uvector<size_type> flat_offsets(flat_count, stream);
+      thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
+                                    flat_keys,
+                                    flat_keys + flat_count,
+                                    flat_lengths,
+                                    flat_offsets.begin());
+      for (size_type i = 0; i < num_string_columns; ++i) {
+        CUDF_CUDA_TRY(
+          cudaMemcpyAsync(string_col_offset_ptrs[i],
+                          flat_offsets.data() + static_cast<std::size_t>(i) * flat_stride,
+                          sizeof(size_type) * flat_stride,
+                          cudaMemcpyDeviceToDevice,
+                          stream.value()));
+      }
+    }
+
+    // Gather the K chars totals and read them back with ONE copy and ONE sync instead of K
+    // element() round-trips.
+    rmm::device_uvector<size_type> dev_chars_sizes(num_string_columns, stream);
+    thrust::transform(
+      rmm::exec_policy_nosync(stream, temp_mr),
+      cuda::make_counting_iterator(0),
+      cuda::make_counting_iterator(num_string_columns),
+      dev_chars_sizes.begin(),
+      cuda::proclaim_return_type<size_type>([num_rows, offsets = dev_string_col_offsets] __device__(
+                                              auto const& i) { return offsets[i][num_rows]; }));
+    std::vector<size_type> chars_sizes(num_string_columns);
+    CUDF_CUDA_TRY(cudaMemcpyAsync(chars_sizes.data(),
+                                  dev_chars_sizes.data(),
+                                  sizeof(size_type) * num_string_columns,
+                                  cudaMemcpyDeviceToHost,
+                                  stream.value()));
+    stream.synchronize();
+
+    // Destination chars buffers stay per-column: each one is released into its own strings
+    // column below. The chars total feeds the engine pick, at no extra sync.
+    int64_t total_string_chars = 0;
+    for (size_type i = 0; i < num_string_columns; ++i) {
+      total_string_chars += chars_sizes[i];
+      string_data_cols.emplace_back(chars_sizes[i], stream, mr);
+      string_data_col_ptrs.push_back(string_data_cols.back().data());
+    }
+
+    // third arena upload: the chars pointers only exist after the sized allocations above
+    auto* const dev_string_data_cols = std::get<0>(arena.upload(string_data_col_ptrs));
+
+    // Engine pick reuses cudf's strings-gather thresholds: short strings fill warps better with
+    // dense per-byte stores, long strings amortize aligned 16B vector stores across a warp.
+    // cudf's third branch, a batched memcpy above ~512K strings, is not ported: its crossover was
+    // tuned on gathers with contiguous source chars, and jcudf rows stride the sources by the row
+    // size, so it would have to be re-measured here.
+    if (num_rows > 0) {
+      auto const avg_string_length =
+        total_string_chars / (static_cast<int64_t>(num_rows) * num_string_columns);
+      // dim3.y caps at 65535; the kernels column-stride past it (never expected in practice)
+      auto const grid_y = static_cast<uint32_t>(std::min(num_string_columns, 65535));
+      if (avg_string_length > STRING_COPY_AVG_LEN_SWITCH) {
+        dim3 const string_parallel_grid(
+          std::min(cudf::util::div_rounding_up_safe(num_rows, STRING_COPY_WARPS_PER_BLOCK),
+                   MAX_STRING_COPY_BLOCKS),
+          grid_y);
+        detail::copy_strings_from_rows_string_parallel<<<string_parallel_grid,
+                                                         STRING_COPY_BLOCK_SIZE,
+                                                         0,
+                                                         stream.value()>>>(offset_functor,
+                                                                           dev_string_row_offsets,
+                                                                           dev_string_col_offsets,
+                                                                           dev_string_data_cols,
+                                                                           child.data<int8_t>(),
+                                                                           num_rows,
+                                                                           num_string_columns);
+      } else {
+        dim3 const char_parallel_grid(
+          cudf::util::div_rounding_up_safe(num_rows, STRING_COPY_STRINGS_PER_BLOCK), grid_y);
+        detail::copy_strings_from_rows_char_parallel<STRING_COPY_STRINGS_PER_BLOCK>
+          <<<char_parallel_grid, STRING_COPY_BLOCK_SIZE, 0, stream.value()>>>(
+            offset_functor,
+            dev_string_row_offsets,
+            dev_string_col_offsets,
+            dev_string_data_cols,
+            child.data<int8_t>(),
+            num_rows,
+            num_string_columns);
+      }
+    }
 
     // merge strings back into output_columns
     int string_idx = 0;
@@ -2549,35 +3108,106 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
                               string_data_cols[string_idx].release(),
                               0,
                               std::move(*string_data.null_mask.release()));
-        // Null count set to 0, temporarily. Will be fixed up before return.
+        // Null count 0 is temporary on the incumbent path (overwritten from the kernel's valid
+        // counts before return); on the trusted all-valid path the mask is empty and 0 is final.
         string_idx++;
       }
     }
-
-    // Drain the async H2D uploads above before string_col_offset_ptrs and string_data_col_ptrs
-    // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
-    stream.synchronize();
   }
 
-  // Set null counts, because output_columns are modified via mutable-view,
-  // in the kernel above.
-  // TODO(future): Consider setting null count in the kernel itself.
-  fixup_null_counts(output_columns, stream);
-
-  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
-  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
-  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
-  stream.synchronize();
+  // The kernels write through mutable views, so null counts must be set before return: one D2H
+  // copy of the kernel-accumulated valid counts, then one synchronize. The all-valid path
+  // allocated no masks, so its counts are already 0 and it skips the read-back entirely.
+  if (!trust_all_valid) {
+    std::vector<size_type> valid_counts(dev_valid_counts.size());
+    CUDF_CUDA_TRY(cudaMemcpyAsync(valid_counts.data(),
+                                  dev_valid_counts.data(),
+                                  dev_valid_counts.size() * sizeof(size_type),
+                                  cudaMemcpyDeviceToHost,
+                                  stream.value()));
+    stream.synchronize();
+    for (std::size_t i = 0; i < output_columns.size(); ++i) {
+      output_columns[i]->set_null_count(num_rows - valid_counts[i]);
+    }
+  }
 
   return std::make_unique<table>(std::move(output_columns));
 }
 
-std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view const& input,
-                                                               std::vector<data_type> const& schema,
-                                                               rmm::cuda_stream_view stream,
-                                                               rmm::device_async_resource_ref mr)
+}  // namespace
+
+/**
+ * @brief convert from JCUDF row format to cudf columns
+ *
+ * @param input vector of list columns containing byte columns of the JCUDF row data
+ * @param schema incoming schema of the data
+ * @param stream stream to use for compute
+ * @param mr memory resource for returned data
+ * @return cudf table of the data
+ */
+std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
+                                         std::vector<data_type> const& schema,
+                                         rmm::cuda_stream_view stream,
+                                         rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
+  // The trusted all-valid path is opt-in through the `may_have_nulls` overload only. No ambient
+  // switch may select it: a caller that has not observed its data must get the incumbent path,
+  // because the fast path returns wrong values rather than an error when the guarantee is false.
+  return convert_from_rows_impl(input, schema, /*trust_all_valid=*/false, stream, mr);
+}
+
+/**
+ * @brief convert from JCUDF row format to cudf columns, trusting a caller-supplied per-column
+ * nullability declaration
+ *
+ * When every entry of `may_have_nulls` is false the caller guarantees the row data contains no
+ * nulls: output columns come back non-nullable (no null masks) and the reverse-validity pipeline
+ * is skipped entirely. The JCUDF row bytes are consumed unchanged — their validity bytes are just
+ * never read — so a false guarantee silently yields wrong values in the rows that are actually
+ * null. Setting `ROWCONV_VALIDATE_ALL_VALID=1` in the environment re-verifies every all-valid
+ * declaration via the incumbent path and throws on violation (debug aid, default off). Any true
+ * entry selects the incumbent path for the whole call.
+ *
+ * @param input vector of list columns containing byte columns of the JCUDF row data
+ * @param schema incoming schema of the data
+ * @param may_have_nulls one entry per schema column; false = guaranteed to contain no nulls
+ * @param stream stream to use for compute
+ * @param mr memory resource for returned data
+ * @return cudf table of the data
+ */
+std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
+                                         std::vector<data_type> const& schema,
+                                         std::vector<bool> const& may_have_nulls,
+                                         rmm::cuda_stream_view stream,
+                                         rmm::device_async_resource_ref mr)
+{
+  SRJ_FUNC_RANGE();
+  auto const trust_all_valid = is_all_valid_profile(may_have_nulls, schema.size());
+  if (trust_all_valid && validate_all_valid_enabled()) {
+    return strip_verified_all_valid(
+      convert_from_rows_impl(input, schema, /*trust_all_valid=*/false, stream, mr));
+  }
+  return convert_from_rows_impl(input, schema, trust_all_valid, stream, mr);
+}
+
+namespace {
+
+/**
+ * @brief Implementation of the fixed-width-optimized JCUDF-rows-to-columns conversion
+ *
+ * @param trust_all_valid when true output columns are created without null masks, the fused
+ * kernel receives no mask pointers (skipping its validity phase) and the batched null-count
+ * fix-up with its blocking read-back is skipped; the staging arena's copy event is then the
+ * only remaining host wait.
+ */
+std::unique_ptr<table> convert_from_rows_fixed_width_optimized_impl(
+  lists_column_view const& input,
+  std::vector<data_type> const& schema,
+  bool trust_all_valid,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
   // verify that the types are what we expect
   column_view child    = input.child();
   auto const list_type = child.type().id();
@@ -2601,10 +3231,6 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   // Ideally we would check that the offsets are all the same, etc. but for now this is probably
   // fine
   CUDF_EXPECTS(size_per_row * num_rows == child.size(), "The layout of the data appears to be off");
-  auto dev_column_start =
-    make_device_uvector_async(column_start, stream, rmm::mr::get_current_device_resource_ref());
-  auto dev_column_size =
-    make_device_uvector_async(column_size, stream, rmm::mr::get_current_device_resource_ref());
 
   // Allocate the columns we are going to write into
   std::vector<std::unique_ptr<column>> output_columns;
@@ -2612,15 +3238,22 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   std::vector<bitmask_type*> output_nm;
   for (int i = 0; i < static_cast<int>(num_columns); i++) {
     auto column =
-      make_fixed_width_column(schema[i], num_rows, mask_state::UNINITIALIZED, stream, mr);
+      make_fixed_width_column(schema[i],
+                              num_rows,
+                              trust_all_valid ? mask_state::UNALLOCATED : mask_state::UNINITIALIZED,
+                              stream,
+                              mr);
     auto mut = column->mutable_view();
     output_data.emplace_back(mut.data<int8_t>());
-    output_nm.emplace_back(mut.null_mask());
+    if (!trust_all_valid) { output_nm.emplace_back(mut.null_mask()); }
     output_columns.emplace_back(std::move(column));
   }
 
-  auto dev_output_data = make_device_uvector_async(output_data, stream, mr);
-  auto dev_output_nm   = make_device_uvector_async(output_nm, stream, mr);
+  // On the all-valid path output_nm is empty and uploads as nullptr, which disables the
+  // kernel's validity phase.
+  detail::staging_arena arena(stream);
+  auto const [dev_column_start, dev_column_size, dev_output_data, dev_output_nm] =
+    arena.upload(column_start, column_size, output_data, output_nm);
 
   dim3 blocks;
   dim3 threads;
@@ -2631,23 +3264,63 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
     num_rows,
     num_columns,
     size_per_row,
-    dev_column_start.data(),
-    dev_column_size.data(),
-    dev_output_data.data(),
-    dev_output_nm.data(),
+    dev_column_start,
+    dev_column_size,
+    dev_output_data,
+    dev_output_nm,
     child.data<int8_t>());
 
-  // Set null counts, because output_columns are modified via mutable-view,
-  // in the kernel above.
+  // Set null counts, because output_columns are modified via mutable-view, in the kernel above.
+  // The trusted all-valid path allocated no masks, so its counts are already 0 and the batched
+  // count (with its blocking read-back) is skipped.
   // TODO(future): Consider setting null count in the kernel itself.
-  fixup_null_counts(output_columns, stream);
-
-  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
-  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
-  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
-  stream.synchronize();
+  if (!trust_all_valid) { fixup_null_counts(output_columns, stream); }
 
   return std::make_unique<table>(std::move(output_columns));
+}
+
+}  // namespace
+
+std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view const& input,
+                                                               std::vector<data_type> const& schema,
+                                                               rmm::cuda_stream_view stream,
+                                                               rmm::device_async_resource_ref mr)
+{
+  SRJ_FUNC_RANGE();
+  // Opt-in only: a wrong guarantee yields wrong values rather than an error.
+  return convert_from_rows_fixed_width_optimized_impl(
+    input, schema, /*trust_all_valid=*/false, stream, mr);
+}
+
+/**
+ * @brief convert from JCUDF row format to cudf columns on the fixed-width-optimized path,
+ * trusting a caller-supplied per-column nullability declaration
+ *
+ * Same declaration contract as the general-path overload above. With an all-valid declaration
+ * this path drops the blocking null-count read-back; the host still waits once on the staging
+ * arena's copy event, which is bounded by the H2D transfer rather than by the kernel.
+ *
+ * @param input vector of list columns containing byte columns of the JCUDF row data
+ * @param schema incoming schema of the data
+ * @param may_have_nulls one entry per schema column; false = guaranteed to contain no nulls
+ * @param stream stream to use for compute
+ * @param mr memory resource for returned data
+ * @return cudf table of the data
+ */
+std::unique_ptr<table> convert_from_rows_fixed_width_optimized(
+  lists_column_view const& input,
+  std::vector<data_type> const& schema,
+  std::vector<bool> const& may_have_nulls,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  SRJ_FUNC_RANGE();
+  auto const trust_all_valid = is_all_valid_profile(may_have_nulls, schema.size());
+  if (trust_all_valid && validate_all_valid_enabled()) {
+    return strip_verified_all_valid(convert_from_rows_fixed_width_optimized_impl(
+      input, schema, /*trust_all_valid=*/false, stream, mr));
+  }
+  return convert_from_rows_fixed_width_optimized_impl(input, schema, trust_all_valid, stream, mr);
 }
 
 }  // namespace spark_rapids_jni
