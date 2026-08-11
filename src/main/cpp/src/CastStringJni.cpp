@@ -34,6 +34,8 @@
 #include <cudf/transform.hpp>
 #include <cudf/unary.hpp>
 
+#include <bit>
+
 constexpr char const* JNI_CAST_ERROR_CLASS = "com/nvidia/spark/rapids/jni/CastException";
 
 #define CATCH_CAST_EXCEPTION(env, ret_val)                                                \
@@ -70,7 +72,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_toInteger(
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::strings_column_view scv{*reinterpret_cast<cudf::column_view const*>(input_column)};
+    cudf::strings_column_view scv{*std::bit_cast<cudf::column_view const*>(input_column)};
     return cudf::jni::release_as_jlong(spark_rapids_jni::string_to_integer(
       cudf::jni::make_data_type(j_dtype, 0), scv, ansi_enabled, strip, cudf::get_default_stream()));
   }
@@ -92,7 +94,7 @@ Java_com_nvidia_spark_rapids_jni_CastStrings_toDecimal(JNIEnv* env,
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::strings_column_view scv{*reinterpret_cast<cudf::column_view const*>(input_column)};
+    cudf::strings_column_view scv{*std::bit_cast<cudf::column_view const*>(input_column)};
     return cudf::jni::release_as_jlong(spark_rapids_jni::string_to_decimal(
       precision, scale, scv, ansi_enabled, strip, cudf::get_default_stream()));
   }
@@ -108,7 +110,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_toFloat(
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::strings_column_view scv{*reinterpret_cast<cudf::column_view const*>(input_column)};
+    cudf::strings_column_view scv{*std::bit_cast<cudf::column_view const*>(input_column)};
     return cudf::jni::release_as_jlong(spark_rapids_jni::string_to_float(
       cudf::jni::make_data_type(j_dtype, 0), scv, ansi_enabled, cudf::get_default_stream()));
   }
@@ -126,7 +128,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_fromFloat(J
   {
     cudf::jni::auto_set_device(env);
 
-    auto const& cv = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const& cv = *std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::release_as_jlong(spark_rapids_jni::float_to_string(
       cv, json_string, cudf::get_default_stream(), cudf::get_current_device_resource_ref()));
   }
@@ -142,7 +144,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_fromFloatWi
   {
     cudf::jni::auto_set_device(env);
 
-    auto const& cv = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const& cv = *std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::format_float(cv, digits, cudf::get_default_stream()));
   }
@@ -159,7 +161,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_fromDecimal
   {
     cudf::jni::auto_set_device(env);
 
-    auto const& cv = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const& cv = *std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::decimal_to_non_ansi_string(cv, cudf::get_default_stream()));
   }
@@ -175,7 +177,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_fromLongToB
   {
     cudf::jni::auto_set_device(env);
 
-    auto const& cv = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const& cv = *std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::long_to_binary_string(cv, cudf::get_default_stream()));
   }
@@ -197,7 +199,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_toIntegersW
     jni::auto_set_device(env);
     auto const zero_scalar   = numeric_scalar<uint64_t>(0);
     auto const res_data_type = jni::make_data_type(j_dtype, 0);
-    auto const input_view{*reinterpret_cast<column_view const*>(input_column)};
+    auto const input_view{*std::bit_cast<column_view const*>(input_column)};
     auto const validity_regex_str = [&] {
       switch (base) {
         case 10: return R"(^\s*(-?[0-9]+).*)"; break;
@@ -261,7 +263,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_fromInteger
   JNI_TRY
   {
     jni::auto_set_device(env);
-    auto input_view{*reinterpret_cast<column_view const*>(input_column)};
+    auto input_view{*std::bit_cast<column_view const*>(input_column)};
     auto result = [&] {
       switch (base) {
         case 10: {
@@ -292,7 +294,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_bytesToHex(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const col = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const col = *std::bit_cast<cudf::column_view const*>(input_column);
     // BinaryType arrives as LIST<INT8>. Reinterpret as STRING for the kernel.
     // STRING layout: data=chars bytes, children=[offsets]  (1 child)
     // LIST<INT8> layout: data=nullptr, children=[offsets, child_int8]  (2 children)
@@ -344,9 +346,9 @@ Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimestampStringsToIntermediate
     cudf::jni::auto_set_device(env);
 
     auto const input_view =
-      cudf::strings_column_view(*reinterpret_cast<cudf::column_view const*>(input_column));
-    auto const* tz_name_to_index = reinterpret_cast<cudf::column_view const*>(tz_name_to_index_map);
-    auto const* timezone_info    = reinterpret_cast<cudf::table_view const*>(timezone_info_table);
+      cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
+    auto const* tz_name_to_index = std::bit_cast<cudf::column_view const*>(tz_name_to_index_map);
+    auto const* timezone_info    = std::bit_cast<cudf::table_view const*>(timezone_info_table);
     auto const spark_system =
       spark_rapids_jni::spark_system(platform, majorVersion, minorVersion, patchVersion);
     return cudf::jni::release_as_jlong(
@@ -369,7 +371,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseDateSt
     cudf::jni::auto_set_device(env);
 
     auto const input_view =
-      cudf::strings_column_view(*reinterpret_cast<cudf::column_view const*>(input_column));
+      cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
     return cudf::jni::release_as_jlong(spark_rapids_jni::parse_strings_to_date(input_view));
   }
   JNI_CATCH(env, 0);
@@ -385,7 +387,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimest
     cudf::jni::auto_set_device(env);
 
     auto const input_view =
-      cudf::strings_column_view(*reinterpret_cast<cudf::column_view const*>(input_column));
+      cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
     auto const format_jstr = cudf::jni::native_jstring(env, j_format);
     auto const format      = std::string(format_jstr.get(), format_jstr.size_bytes());
     return cudf::jni::release_as_jlong(spark_rapids_jni::parse_timestamp_strings_with_format(

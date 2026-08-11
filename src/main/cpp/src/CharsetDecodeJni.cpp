@@ -20,6 +20,8 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
+#include <bit>
+
 extern "C" {
 
 /**
@@ -36,7 +38,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CharsetDecode_decodeNat
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = *reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = *std::bit_cast<cudf::column_view const*>(input_column);
     auto result =
       spark_rapids_jni::decode_charset(input,
                                        static_cast<spark_rapids_jni::charset_type>(charset),

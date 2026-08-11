@@ -794,11 +794,10 @@ shuffle_split_metadata compute_metadata(cudf::table_view const& input,
 /**
  * @copydoc spark_rapids_jni::shuffle_split
  */
-std::pair<shuffle_split_result, shuffle_split_metadata> shuffle_split(
-  cudf::table_view const& input,
-  std::vector<size_type> const& splits,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+shuffle_split_output shuffle_split(cudf::table_view const& input,
+                                   std::vector<size_type> const& splits,
+                                   rmm::cuda_stream_view stream,
+                                   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
 

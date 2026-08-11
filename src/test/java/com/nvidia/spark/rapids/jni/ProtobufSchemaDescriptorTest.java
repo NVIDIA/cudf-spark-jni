@@ -93,6 +93,18 @@ public class ProtobufSchemaDescriptorTest {
   }
 
   @Test
+  void testEnumMetadataRejectsNonEnumTypeOrEncoding() {
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_FIXED, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_ZIGZAG, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT64).enumValidValues(new int[]{0, 1})
+            .build());
+  }
+
+  @Test
   void testDuplicateFieldNumbersUnderSameParentRejected() {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
@@ -139,7 +151,7 @@ public class ProtobufSchemaDescriptorTest {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
             .addField(1, DType.STRING).wireType(Protobuf.WT_LEN)
-                .enumMetadata(new int[]{0, 1}, new byte[][]{"A".getBytes(), "B".getBytes()})
+                .enumMetadata("A", "B")
             .build());
   }
 
@@ -210,7 +222,7 @@ public class ProtobufSchemaDescriptorTest {
   void testSerializationRoundTripPreservesContentsAndIsolation() throws Exception {
     ProtobufSchemaDescriptor original = new ProtobufSchemaDescriptorBuilder()
         .addField(1, DType.STRING)
-            .enumMetadata(new int[]{0, 1}, new byte[][]{"A".getBytes(), "B".getBytes()})
+            .enumMetadata("A", "B")
             .defaultValue("def".getBytes())
             .defaultValue(7)  // non-zero numeric default to exercise scalar round-trip
         .build();

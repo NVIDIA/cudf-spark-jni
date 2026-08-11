@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <bit>
 #include <cwctype>
 #include <limits>
 #include <sstream>
@@ -757,7 +758,7 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
     auto meta    = std::make_unique<parquet::format::FileMetaData>();
     uint32_t len = static_cast<uint32_t>(buffer_length);
     // We don't support encrypted parquet...
-    rapids::jni::deserialize_parquet_footer(reinterpret_cast<uint8_t*>(buffer), len, meta.get());
+    rapids::jni::deserialize_parquet_footer(std::bit_cast<uint8_t*>(buffer), len, meta.get());
 
     // Get the filter for the columns first...
     cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
@@ -822,7 +823,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_close(JNIE
 {
   JNI_TRY
   {
-    auto* ptr = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
+    auto* ptr = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     delete ptr;
   }
   JNI_CATCH(env, );
@@ -834,7 +835,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_getNumRow
 {
   JNI_TRY
   {
-    auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
+    auto* footer = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     long ret     = 0;
     for (auto it = footer->meta->row_groups.begin(); it != footer->meta->row_groups.end(); ++it) {
       ret = ret + it->num_rows;
@@ -850,7 +851,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_getNumCol
 {
   JNI_TRY
   {
-    auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
+    auto* footer = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     int ret      = 0;
     if (footer->meta->schema.size() > 0) {
       if (footer->meta->schema[0].__isset.num_children) {
@@ -868,7 +869,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
   SRJ_FUNC_RANGE();
   JNI_TRY
   {
-    auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
+    auto* footer = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     std::shared_ptr<apache::thrift::transport::TMemoryBuffer> transportOut(
       new apache::thrift::transport::TMemoryBuffer());
     apache::thrift::protocol::TCompactProtocolFactoryT<apache::thrift::transport::TMemoryBuffer>
@@ -881,7 +882,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
 
     // 12 extra is for the MAGIC thrift_footer length MAGIC
     jobject ret = cudf::jni::allocate_host_buffer(env, buf_size + 12, false, host_memory_allocator);
-    uint8_t* ret_addr = reinterpret_cast<uint8_t*>(cudf::jni::get_host_buffer_address(env, ret));
+    uint8_t* ret_addr = std::bit_cast<uint8_t*>(cudf::jni::get_host_buffer_address(env, ret));
     ret_addr[0]       = 'P';
     ret_addr[1]       = 'A';
     ret_addr[2]       = 'R';
@@ -906,10 +907,10 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_getRowIndexOffsets(JNIEnv* env, j
 {
   JNI_TRY
   {
-    auto* footer = reinterpret_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
+    auto* footer = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
     auto const& offsets = footer->row_index_offsets;
     cudf::jni::native_jlongArray result(
-      env, reinterpret_cast<jlong const*>(offsets.data()), static_cast<int>(offsets.size()));
+      env, std::bit_cast<jlong const*>(offsets.data()), static_cast<int>(offsets.size()));
     return result.get_jArray();
   }
   JNI_CATCH(env, nullptr);

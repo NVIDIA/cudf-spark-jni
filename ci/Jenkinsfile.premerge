@@ -313,12 +313,17 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
 } // end of pipeline
 
 void runPremergeBuild() {
+    // CMake uses ~/.netrc to authenticate to the Apache mirror. Redact credentials
+    // from failed downloads via cuDF CMake/libcurl CLI before Jenkins logs them.
     common.prepareArtNetrc(this)
     withEnv([
-        "ARROW_THRIFT_MIRROR_URL=https://${env.ARTIFACTORY_NAME}/artifactory/sw-spark-maven/apache-remote",
+        "ARROW_THRIFT_MIRROR_URL=https://${env.ARTIFACTORY_NAME}/artifactory/sw-spark-apache-remote",
         "CMAKE_NETRC=OPTIONAL",
     ]) {
-        sh 'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
+        common.shWithRedactedAuthorization(
+            this,
+            'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
+        )
     }
 }
 
