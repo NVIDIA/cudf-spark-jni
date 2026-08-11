@@ -29,6 +29,7 @@
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -962,7 +963,7 @@ std::unique_ptr<cudf::column> estimate_from_hll_sketches(cudf::column_view const
   auto result           = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::INT64}, input.size(), cudf::mask_state::UNALLOCATED, stream, mr);
   // evaluate from struct<long, ..., long>
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(0),
                      input.size(),
                      estimate_fn{d_inputs, result->mutable_view().data<int64_t>(), precision});

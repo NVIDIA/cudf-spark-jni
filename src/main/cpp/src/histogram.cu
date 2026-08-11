@@ -31,6 +31,7 @@
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
@@ -193,7 +194,7 @@ struct percentile_dispatcher {
     auto const fill_percentile = [&](auto const sorted_validity_it) {
       auto const sorted_input_it =
         cuda::make_permutation_iterator(data.begin<T>(), ordered_indices);
-      thrust::for_each_n(rmm::exec_policy(stream),
+      thrust::for_each_n(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
                          cuda::make_counting_iterator(0),
                          num_histograms * static_cast<cudf::size_type>(percentages.size()),
                          fill_percentile_fn{offsets,
@@ -307,7 +308,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
   // We need to check and remember which rows are valid (positive) so we can do filtering later on.
   auto check_valid = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
 
-  thrust::for_each_n(rmm::exec_policy(stream),
+  thrust::for_each_n(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
                      cuda::make_counting_iterator(0),
                      frequencies.size(),
                      [frequencies   = frequencies.begin<int64_t>(),
@@ -356,7 +357,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
       // cudf MERGE_HISTOGRAM aggregation.
       // Therefore, we manually set `1` for the frequencies of nulls.
       thrust::for_each_n(
-        rmm::exec_policy(stream),
+        rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
         cuda::make_counting_iterator(0),
         frequencies.size(),
         [frequencies = values_and_frequencies.back()->mutable_view().begin<int64_t>(),
@@ -458,7 +459,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
     auto accumulated_counts = rmm::device_uvector<int64_t>(counts_col.size(), stream, default_mr);
     // We don't need a permutation iterator for the labels, since the same labels always
     // stay together after sorting.
-    thrust::inclusive_scan_by_key(rmm::exec_policy(stream),
+    thrust::inclusive_scan_by_key(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
                                   histogram_labels.begin(),
                                   histogram_labels.end(),
                                   sorted_counts,

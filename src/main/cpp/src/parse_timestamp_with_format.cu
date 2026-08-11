@@ -23,6 +23,7 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
@@ -366,7 +367,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   auto validity =
     rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(0),
                      num_rows,
                      parse_with_format_fn{*d_input,

@@ -22,6 +22,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/iterator.cuh>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -189,7 +190,7 @@ std::unique_ptr<cudf::column> multiply_impl(cudf::data_type type,
   // Scenario A: Both inputs are valid and no overflow check is needed
   // No need to allocate validity vector, result has no nulls
   if (both_inputs_valid && !check_overflow) {
-    thrust::for_each_n(rmm::exec_policy_nosync(stream),
+    thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                        thrust::make_counting_iterator(0),
                        num_rows,
                        multiply_no_validity_fn<T, LEFT_ACCESSOR, RIGHT_ACCESSOR>{
@@ -205,7 +206,7 @@ std::unique_ptr<cudf::column> multiply_impl(cudf::data_type type,
 
   // execute the multiplication
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     num_rows,
     multiply_fn<T, LEFT_ACCESSOR, RIGHT_ACCESSOR>{left_accessor,

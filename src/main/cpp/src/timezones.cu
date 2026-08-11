@@ -32,6 +32,7 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -112,7 +113,7 @@ auto convert_timestamp_tz(column_view const& input,
                                              mr);
 
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     input.begin<timestamp_type>(),
     input.end<timestamp_type>(),
     results->mutable_view().begin<timestamp_type>(),
@@ -230,7 +231,7 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                                                  stream,
                                                  mr);
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator<size_type>(0),
                      input_seconds.size(),
                      convert_with_timezones_fn{input_seconds.begin<int64_t>(),

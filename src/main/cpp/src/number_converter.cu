@@ -21,6 +21,7 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/std/cmath>
 #include <cuda/std/functional>
@@ -466,7 +467,7 @@ bool is_convert_overflow_impl(cudf::size_type num_rows,
     }
   }
   auto num_overflow = thrust::count_if(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::counting_iterator<cudf::size_type>(0),
     thrust::counting_iterator<cudf::size_type>(num_rows),
     is_overflow_fn<STR_ITERATOR, FROM_BASE_ITERATOR, TO_BASE_ITERATOR>{input, from_base, to_base});

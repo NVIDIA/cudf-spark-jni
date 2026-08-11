@@ -24,6 +24,7 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -912,7 +913,7 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
   auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     num_rows,
     parse_timestamp_string_fn{is_spark_320,
@@ -1092,7 +1093,7 @@ std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& inp
     rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     num_rows,
     parse_string_to_date_fn{

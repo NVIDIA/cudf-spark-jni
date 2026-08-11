@@ -25,6 +25,7 @@
 #include <cudf/strings/detail/utf8.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
@@ -132,7 +133,7 @@ void truncate_integral_and_fill(std::unique_ptr<cudf::column>& output,
                                 int32_t width,
                                 rmm::cuda_stream_view stream)
 {
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output->mutable_view().begin<RepT>(),
                    output->mutable_view().end<RepT>(),
                    truncate_integral_fn<RepT>{d_input, width});

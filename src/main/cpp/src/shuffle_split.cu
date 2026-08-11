@@ -32,6 +32,7 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -805,7 +806,10 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   CUDF_EXPECTS(input.num_columns() != 0, "Encountered input with no columns.");
   if (input.num_rows() == 0) {
     rmm::device_uvector<size_t> empty_offsets(1, stream, mr);
-    thrust::fill(rmm::exec_policy(stream), empty_offsets.begin(), empty_offsets.end(), 0);
+    thrust::fill(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+                 empty_offsets.begin(),
+                 empty_offsets.end(),
+                 0);
     return {shuffle_split_result{std::make_unique<rmm::device_buffer>(0, stream, mr),
                                  std::move(empty_offsets)},
             shuffle_split_metadata{compute_metadata(input, 0)}};
@@ -912,14 +916,14 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   rmm::device_uvector<size_t> d_partition_offsets(num_partitions + 1, stream, mr);
 
   // set all has-validity bools to false for all column instances by default
-  thrust::fill_n(rmm::exec_policy_nosync(stream),
+  thrust::fill_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                  d_flattened_col_inst_has_validity,
                  total_flattened_columns * num_partitions,
                  false);
 
   // compute sizes of each buffer in each partition, including alignment.
   thrust::for_each(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<size_t>(0),
     thrust::make_counting_iterator<size_t>(num_bufs),
     [d_dst_buf_info,

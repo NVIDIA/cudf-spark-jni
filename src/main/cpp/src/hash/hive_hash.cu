@@ -21,6 +21,7 @@
 #include <cudf/detail/row_operator/hashing.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/table/table_device_view.cuh>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -489,7 +490,7 @@ std::unique_ptr<cudf::column> hive_hash(cudf::table_view const& input,
   auto output_view      = output->mutable_view();
 
   // Compute the hash value for each row
-  thrust::tabulate(rmm::exec_policy(stream),
+  thrust::tabulate(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
                    output_view.begin<hive_hash_value_t>(),
                    output_view.end<hive_hash_value_t>(),
                    hive_device_row_hasher<hive_hash_function, bool>(nullable, *input_view));

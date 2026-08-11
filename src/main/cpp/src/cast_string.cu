@@ -21,6 +21,7 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_scalar.hpp>
 #include <rmm/exec_policy.hpp>
@@ -615,10 +616,11 @@ void validate_ansi_column(column_view const& col,
   auto const incoming_nulls = source_col.null_count();
   auto const num_errors     = num_nulls - incoming_nulls;
   if (num_errors > 0) {
-    auto const first_error = thrust::find_if(rmm::exec_policy(stream),
-                                             thrust::make_counting_iterator(0),
-                                             thrust::make_counting_iterator(col.size()),
-                                             row_valid_fn{col.null_mask(), source_col.null_mask()});
+    auto const first_error =
+      thrust::find_if(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+                      thrust::make_counting_iterator(0),
+                      thrust::make_counting_iterator(col.size()),
+                      row_valid_fn{col.null_mask(), source_col.null_mask()});
 
     size_type string_bounds[2];
     cudaMemcpyAsync(&string_bounds,

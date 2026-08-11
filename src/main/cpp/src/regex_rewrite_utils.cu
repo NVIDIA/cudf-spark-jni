@@ -24,6 +24,7 @@
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -89,7 +90,7 @@ std::unique_ptr<cudf::column> find_literal_range_pattern(cudf::strings_column_vi
   auto const d_results = results->mutable_view().data<bool>();
   // set the bool values by evaluating the passed function
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(strings_count),
     d_results,
