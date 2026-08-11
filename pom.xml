@@ -306,8 +306,10 @@
                   <target>
                     <delete>
                       <fileset dir="${project.build.directory}/surefire-reports"
-                               includes="sanitizer_for_pid_*.log"
-                               erroronmissingdir="false"/>
+                               erroronmissingdir="false">
+                        <include name="sanitizer_for_pid_*.log"/>
+                        <include name="TEST-*.xml"/>
+                      </fileset>
                     </delete>
                   </target>
                 </configuration>
@@ -323,7 +325,7 @@
                     <echo message="Checking for compute-sanitizer logs..."/>
                     <exec executable="bash" failonerror="true">
                       <arg value="-c"/>
-                      <arg value="found=0; for f in &quot;${project.build.directory}/surefire-reports&quot;/sanitizer_for_pid_*.log; do [ -f &quot;$f&quot; ] || continue; printf '===== %s =====\n' &quot;$f&quot;; head -n 80 &quot;$f&quot;; grep -q 'ERROR SUMMARY: 0 errors' &quot;$f&quot; || found=1; done; exit $found"/>
+                      <arg value="failed=0; report_dir=&quot;${project.build.directory}/surefire-reports&quot;; for f in &quot;$report_dir&quot;/sanitizer_for_pid_*.log; do [ -f &quot;$f&quot; ] || continue; printf '===== %s =====\n' &quot;$f&quot;; head -n 80 &quot;$f&quot;; grep -q 'ERROR SUMMARY: 0 errors' &quot;$f&quot; || failed=1; done; for f in &quot;$report_dir&quot;/TEST-*.xml; do [ -f &quot;$f&quot; ] || continue; if grep -Eq '&lt;(failure|error)([[:space:]]|&gt;)' &quot;$f&quot;; then printf 'Surefire failures recorded in %s\n' &quot;$f&quot;; failed=1; fi; done; exit $failed"/>
                     </exec>
                   </target>
                 </configuration>

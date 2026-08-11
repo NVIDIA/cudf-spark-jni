@@ -254,7 +254,7 @@ that may be doing something incorrectly. To run the unit tests with the Compute 
 
 The Compute Sanitizer writes one or more `sanitizer_for_pid_*.log` files under
 `target/surefire-reports`. Maven prints the first 80 lines of each report after the tests and fails
-the build if any report contains sanitizer errors.
+the build if any report contains sanitizer errors or if an ordinary Java test failed.
 
 Please note not all the unit tests can run with Compute Sanitizer. For example, `RmmTest#testEventHandler`,
 a problematic test, intentionally tries an illegal allocation because of a too big size as part of the
