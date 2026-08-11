@@ -147,27 +147,6 @@ struct nested_repeated_location_provider {
   }
 };
 
-struct repeated_msg_child_location_provider {
-  cudf::size_type const* row_offsets;
-  cudf::size_type base_offset;
-  field_location const* msg_locations;
-  field_location const* child_locations;
-  int field_idx;
-  int num_fields;
-
-  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
-  {
-    auto mloc = msg_locations[thread_idx];
-    auto cloc = child_locations[flat_index(thread_idx, num_fields, field_idx)];
-    if (mloc.offset >= 0 && cloc.offset >= 0) {
-      data_offset = row_offsets[thread_idx] - base_offset + mloc.offset + cloc.offset;
-    } else {
-      cloc.offset = -1;
-    }
-    return cloc;
-  }
-};
-
 __device__ inline scalar_value_input resolve_scalar_value(uint8_t const* message_data,
                                                           field_location location,
                                                           int32_t data_offset)
@@ -438,10 +417,7 @@ void launch_scan_all_field_occurrences_in_nested(protobuf_input_view input,
                                                  protobuf_error* error_flag,
                                                  rmm::cuda_stream_view stream);
 
-void launch_compute_grandchild_parent_locations(field_location const* parent_locs,
-                                                field_location const* child_locs,
-                                                int child_idx,
-                                                int num_child_fields,
+void launch_compute_grandchild_parent_locations(nested_location_provider loc_provider,
                                                 field_location* gc_parent_locs,
                                                 int num_rows,
                                                 protobuf_error* error_flag,
@@ -467,7 +443,9 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   auto pred  = [ptr = valid.data()] __device__(cudf::size_type i) {
     return static_cast<bool>(ptr[i]);
   };
-  return cudf::detail::valid_if(begin, end, pred, stream, mr);
+  auto [mask, null_count] = cudf::detail::valid_if(begin, end, pred, stream, mr);
+  if (null_count == 0) { mask = rmm::device_buffer{}; }
+  return {std::move(mask), null_count};
 }
 
 template <typename T, typename LocationProvider>
@@ -484,6 +462,7 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
   dispatch_scalar_decoder<T>(get_scalar_decode_kind<T>(encoding), [&]<auto DecodeFn>() {
     extract_scalar_kernel<T, DecodeFn><<<blocks, threads, 0, stream.value()>>>(
       message_data, loc_provider, num_rows, output, options);
+    CUDF_CHECK_CUDA(stream.value());
   });
 }
 
@@ -513,7 +492,8 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
 {
   if (num_rows == 0) { return cudf::make_empty_column(field.output_type); }
   rmm::device_uvector<T> out(num_rows, stream, mr);
-  rmm::device_uvector<bool> valid(num_rows, stream, mr);
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
+  rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
   extract_scalar_into_buffers<T, LocationProvider>(
     message_data,
     loc_provider,
@@ -536,22 +516,23 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   ValidityFn validity_fn,
   bool has_default,
   cudf::detail::host_vector<uint8_t> const& default_bytes,
-  rmm::device_uvector<protobuf_error>& d_error,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
-  int32_t def_len = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
-  rmm::device_uvector<uint8_t> d_default(0, stream, mr);
+  int32_t def_len       = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
+  auto const scratch_mr = cudf::get_current_device_resource_ref();
+  rmm::device_uvector<uint8_t> d_default(0, stream, scratch_mr);
   if (has_default && def_len > 0) {
     d_default = cudf::detail::make_device_uvector_async(
       default_bytes, stream, cudf::get_current_device_resource_ref());
   }
 
-  rmm::device_uvector<int32_t> lengths(num_rows, stream, mr);
+  rmm::device_uvector<int32_t> lengths(num_rows, stream, scratch_mr);
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
   extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.value()>>>(
     loc_provider, num_rows, lengths.data(), has_default, def_len);
+  CUDF_CHECK_CUDA(stream.value());
 
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
@@ -591,16 +572,16 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
         }));
 
     size_t temp_storage_bytes = 0;
-    cub::DeviceMemcpy::Batched(
-      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.value());
-    rmm::device_buffer temp_storage(temp_storage_bytes, stream, mr);
-    cub::DeviceMemcpy::Batched(temp_storage.data(),
-                               temp_storage_bytes,
-                               src_iter,
-                               dst_iter,
-                               size_iter,
-                               num_rows,
-                               stream.value());
+    CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
+      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.value()));
+    rmm::device_buffer temp_storage(temp_storage_bytes, stream, scratch_mr);
+    CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(temp_storage.data(),
+                                             temp_storage_bytes,
+                                             src_iter,
+                                             dst_iter,
+                                             size_iter,
+                                             num_rows,
+                                             stream.value()));
   }
 
   if (num_rows == 0) {
@@ -614,20 +595,16 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
       0, std::move(offsets_col), chars.release(), 0, rmm::device_buffer{});
   }
 
-  rmm::device_uvector<bool> valid(num_rows, stream, mr);
-  thrust::transform(rmm::exec_policy_nosync(stream, mr),
+  rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
+  thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                     thrust::make_counting_iterator<cudf::size_type>(0),
                     thrust::make_counting_iterator<cudf::size_type>(num_rows),
                     valid.data(),
                     validity_fn);
   auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
   if (as_bytes) {
-    auto bytes_child =
-      std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
-                                     total_size,
-                                     rmm::device_buffer(chars.data(), total_size, stream, mr),
-                                     rmm::device_buffer{},
-                                     0);
+    auto bytes_child = std::make_unique<cudf::column>(
+      cudf::data_type{cudf::type_id::UINT8}, total_size, chars.release(), rmm::device_buffer{}, 0);
     return cudf::make_lists_column(
       num_rows, std::move(offsets_col), std::move(bytes_child), null_count, std::move(mask));
   }
@@ -656,7 +633,8 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
     case cudf::type_id::INT32: {
       if (num_items == 0) { return cudf::make_empty_column(dt); }
       rmm::device_uvector<int32_t> out(num_items, stream, mr);
-      rmm::device_uvector<bool> valid(num_items, stream, mr);
+      auto const scratch_mr = cudf::get_current_device_resource_ref();
+      rmm::device_uvector<bool> valid(num_items, stream, scratch_mr);
       extract_scalar_into_buffers<int32_t, LocationProvider>(
         message_data,
         loc_provider,
@@ -761,7 +739,6 @@ inline std::unique_ptr<cudf::column> build_protobuf_field_values_column(
                                                       validity_fn,
                                                       has_default,
                                                       field.default_string,
-                                                      *decode_ctx.error,
                                                       stream,
                                                       mr);
     }
