@@ -30,6 +30,12 @@
 #include <thrust/reverse.h>
 
 namespace spark_rapids_jni {
+
+struct java_big_decimal_bytes {
+  cuda::std::array<cuda::std::byte, sizeof(__int128_t)> bytes;
+  cudf::size_type length;
+};
+
 /**
  * Normalization of floating point NaNs, passthrough for all other values.
  */
@@ -59,12 +65,10 @@ T __device__ inline normalize_nans_and_zeros(T const& key)
  *
  * @param key The cudf decimal value
  *
- * @returns A 128 bit value containing the converted decimal bits and a length
- *          representing the relevant number of bytes in the value.
+ * @returns The converted decimal bytes and the relevant number of bytes in the value.
  *
  */
-__device__ __inline__ cuda::std::pair<__int128_t, cudf::size_type> to_java_bigdecimal(
-  numeric::decimal128 key)
+__device__ __inline__ java_big_decimal_bytes to_java_bigdecimal(numeric::decimal128 key)
 {
   // java.math.BigDecimal.valueOf(unscaled_value, _scale).unscaledValue().toByteArray()
   // https://github.com/apache/spark/blob/master/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/hash.scala#L381
@@ -104,6 +108,6 @@ __device__ __inline__ cuda::std::pair<__int128_t, cudf::size_type> to_java_bigde
   cuda::std::array<cuda::std::byte, key_size> big_endian_data{};
   thrust::reverse_copy(thrust::seq, data.begin(), data.begin() + length, big_endian_data.begin());
 
-  return {cuda::std::bit_cast<__int128_t>(big_endian_data), length};
+  return {big_endian_data, length};
 }
 }  // namespace spark_rapids_jni

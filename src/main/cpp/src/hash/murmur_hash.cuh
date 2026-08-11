@@ -203,9 +203,8 @@ template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<numeric::decimal128>::operator()(
   numeric::decimal128 const& key) const
 {
-  auto [java_d, length] = to_java_bigdecimal(key);
-  auto const bytes = cuda::std::bit_cast<cuda::std::array<cuda::std::byte, sizeof(java_d)>>(java_d);
-  return compute_bytes(bytes.data(), length);
+  auto const java_d = to_java_bigdecimal(key);
+  return compute_bytes(java_d.bytes.data(), java_d.length);
 }
 
 }  // namespace spark_rapids_jni
