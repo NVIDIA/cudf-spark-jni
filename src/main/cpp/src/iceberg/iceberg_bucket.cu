@@ -409,7 +409,8 @@ std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input
                                               stream,
                                               mr);
 
-  auto d_input     = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto output_view = output->mutable_view();
 
   auto type_id = input.type().id();

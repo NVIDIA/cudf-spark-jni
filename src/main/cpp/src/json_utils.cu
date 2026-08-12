@@ -129,8 +129,8 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
               rmm::device_uvector<bool>{0, stream, mr}, rmm::device_buffer{}, 0)};
   }
 
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
   auto const default_mr  = rmm::mr::get_current_device_resource_ref();
+  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream, default_mr);
 
   // Check if the input rows are null, empty (containing only whitespaces), and invalid JSON.
   // This will be used for masking out the null/empty/invalid input rows when doing string

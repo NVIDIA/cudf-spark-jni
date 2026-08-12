@@ -925,7 +925,8 @@ construct_path_commands(
     }
     return all_names;
   }();
-  auto d_inst_names = cudf::string_scalar(h_inst_names, true, stream);
+  auto d_inst_names =
+    cudf::string_scalar(h_inst_names, true, stream, cudf::get_current_device_resource_ref());
 
   std::size_t name_pos{0};
   auto h_path_commands = std::make_unique<std::vector<std::vector<path_instruction>>>();
@@ -1200,7 +1201,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   if (memory_budget_bytes <= 0 && parallel_override <= 0) {
     parallel_override = static_cast<int>(sorted_indices.size());
   }
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input_ptr = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
 
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;

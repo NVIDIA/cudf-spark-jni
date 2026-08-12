@@ -878,9 +878,11 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr)
 {
-  auto const num_rows            = input.size();
-  auto const d_input             = cudf::column_device_view::create(input.parent(), stream);
-  auto const d_name_to_index_map = cudf::column_device_view::create(tz_name_to_index_map, stream);
+  auto const num_rows = input.size();
+  auto const d_input  = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
+  auto const d_name_to_index_map = cudf::column_device_view::create(
+    tz_name_to_index_map, stream, cudf::get_current_device_resource_ref());
 
   // the follow saves parsed result
   auto parsed_result_type_col = cudf::make_fixed_width_column(
@@ -905,12 +907,14 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
     std::chrono::duration_cast<std::chrono::seconds>(duration).count();
 
   // get the fixed transitions
-  auto const ft_cdv_ptr        = cudf::column_device_view::create(tz_info_table.column(0), stream);
+  auto const ft_cdv_ptr = cudf::column_device_view::create(
+    tz_info_table.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = cudf::lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(tz_info_table.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    tz_info_table.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   thrust::for_each_n(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
@@ -1082,7 +1086,8 @@ std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& inp
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()});
   }
 
-  auto const d_input = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()},
                                             input.size(),
                                             rmm::device_buffer{},

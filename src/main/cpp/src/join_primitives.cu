@@ -267,8 +267,10 @@ filter_gather_maps_by_ast(cudf::device_span<cudf::size_type const> left_indices,
                "The expression must produce a boolean output.");
 
   // Create device views of tables
-  auto left_table_view  = cudf::table_device_view::create(left_table, stream);
-  auto right_table_view = cudf::table_device_view::create(right_table, stream);
+  auto left_table_view =
+    cudf::table_device_view::create(left_table, stream, cudf::get_current_device_resource_ref());
+  auto right_table_view =
+    cudf::table_device_view::create(right_table, stream, cudf::get_current_device_resource_ref());
 
   // Filter by conditional expression
   if (has_nulls) {

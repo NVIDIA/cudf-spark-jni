@@ -416,7 +416,7 @@ std::unique_ptr<cudf::column> map_zip(
                                          stream,
                                          mr);
   auto [result_mask, null_count] =
-    cudf::bitmask_and(cudf::table_view({col1.parent(), col2.parent()}), stream);
+    cudf::bitmask_and(cudf::table_view({col1.parent(), col2.parent()}), stream, mr);
   return make_lists_column(search_keys_list.size(),
                            std::make_unique<column>(search_keys_list.offsets()),
                            std::move(map_structs),

@@ -427,7 +427,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
   auto const counts_col     = cudf::structs_column_view{histograms}.get_sliced_child(1);
 
   auto const default_mr    = rmm::mr::get_current_device_resource_ref();
-  auto const d_data        = cudf::column_device_view::create(data_col, stream);
+  auto const d_data        = cudf::column_device_view::create(data_col, stream, default_mr);
   auto const d_percentages = cudf::detail::make_device_uvector(percentages, stream, default_mr);
 
   // Attach histogram labels to the input.

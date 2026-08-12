@@ -355,7 +355,8 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
                                 cudaMemcpyHostToDevice,
                                 stream.value()));
 
-  auto const d_input = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             num_rows,
                                             rmm::device_buffer{},

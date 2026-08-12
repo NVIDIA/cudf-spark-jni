@@ -78,8 +78,9 @@ std::unique_ptr<cudf::column> find_literal_range_pattern(cudf::strings_column_vi
   CUDF_EXPECTS(prefix.is_valid(stream), "Parameter prefix must be valid.");
 
   auto const d_prefix       = cudf::string_view(prefix.data(), prefix.size());
-  auto const strings_column = cudf::column_device_view::create(strings.parent(), stream);
-  auto const d_strings      = *strings_column;
+  auto const strings_column = cudf::column_device_view::create(
+    strings.parent(), stream, cudf::get_current_device_resource_ref());
+  auto const d_strings = *strings_column;
 
   auto results         = make_numeric_column(cudf::data_type{cudf::type_id::BOOL8},
                                      strings_count,

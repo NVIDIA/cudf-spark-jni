@@ -568,9 +568,10 @@ std::unique_ptr<cudf::column> xxhash64(cudf::table_view const& input,
 
   check_nested_depth(input);
 
-  bool const nullable   = has_nested_nulls(input);
-  auto const input_view = cudf::table_device_view::create(input, stream);
-  auto output_view      = output->mutable_view();
+  bool const nullable = has_nested_nulls(input);
+  auto const input_view =
+    cudf::table_device_view::create(input, stream, cudf::get_current_device_resource_ref());
+  auto output_view = output->mutable_view();
 
   // Compute the hash value for each row
   thrust::tabulate(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),

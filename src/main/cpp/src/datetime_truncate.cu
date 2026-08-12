@@ -291,9 +291,11 @@ std::unique_ptr<cudf::column> truncate_datetime(cudf::column_view const& datetim
                                            truncate_date_fn<FormatDeviceT>,
                                            truncate_timestamp_fn<FormatDeviceT>>;
 
-  auto const d_datetime_ptr = cudf::column_device_view::create(datetime, stream);
+  auto const d_datetime_ptr =
+    cudf::column_device_view::create(datetime, stream, cudf::get_current_device_resource_ref());
   if constexpr (std::is_same_v<FormatT, cudf::column_view>) {
-    auto const d_format_ptr = cudf::column_device_view::create(format, stream);
+    auto const d_format_ptr =
+      cudf::column_device_view::create(format, stream, cudf::get_current_device_resource_ref());
     do_transform(TransformFunc{*d_datetime_ptr, *d_format_ptr});
   } else {
     auto const fmt = parse_format(format.data(), static_cast<cudf::size_type>(format.size()));

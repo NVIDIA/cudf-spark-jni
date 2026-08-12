@@ -270,8 +270,9 @@ cudf::size_type find_first_overflow_for_integral_type(cudf::column_view const& i
   // Compute safe range and check values against it
   auto [min_safe, max_safe] = compute_non_overflow_range<T>(decimal_places, method);
 
-  auto const input_cdv = cudf::column_device_view::create(input, stream);
-  auto overflow_iter   = thrust::make_transform_iterator(
+  auto const input_cdv =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
+  auto overflow_iter = thrust::make_transform_iterator(
     thrust::make_counting_iterator<cudf::size_type>(0),
     [input_view = *input_cdv, min_safe, max_safe] __device__(cudf::size_type idx) -> bool {
       if (input_view.is_null(idx)) { return false; }

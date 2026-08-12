@@ -1369,7 +1369,8 @@ struct floating_point_to_decimal_dispatcher {
   {
     using DecimalRepType = cudf::device_storage_type_t<DecimalType>;
 
-    auto const d_input_ptr     = cudf::column_device_view::create(input, stream);
+    auto const d_input_ptr =
+      cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
     auto const exclusive_bound = static_cast<DecimalRepType>(
       multiply_power10<DecimalRepType>(cuda::std::make_unsigned_t<DecimalRepType>{1}, precision));
 

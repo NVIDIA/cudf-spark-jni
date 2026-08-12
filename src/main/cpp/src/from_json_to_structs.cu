@@ -327,7 +327,8 @@ std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& 
   auto const input_sv = cudf::strings_column_view{input};
   auto const offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
   auto const output_it =
     thrust::make_zip_iterator(output->mutable_view().begin<bool>(), validity.begin());
@@ -377,7 +378,8 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr    = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const valid_input_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   // We need to nullify the invalid string rows.
@@ -443,7 +445,8 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   auto string_pairs = rmm::device_uvector<string_index_pair>(string_count, stream);
@@ -698,7 +701,8 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
 
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input_ptr = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   auto string_pairs = rmm::device_uvector<string_index_pair>(string_count, stream);

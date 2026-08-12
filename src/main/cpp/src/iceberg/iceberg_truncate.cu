@@ -150,7 +150,8 @@ std::unique_ptr<cudf::column> truncate_integral_impl(cudf::column_view const& in
   cudf::size_type num_rows = input.size();
   auto output              = cudf::make_fixed_width_column(
     input.type(), num_rows, cudf::copy_bitmask(input, stream, mr), input.null_count(), stream, mr);
-  auto d_input = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
 
   if (input_type_id == cudf::type_id::INT32 || input_type_id == cudf::type_id::DECIMAL32) {
     // treat DECIMAL32 column as int32 column

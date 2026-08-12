@@ -243,8 +243,10 @@ struct dispatch_multiply {
                                            rmm::device_async_resource_ref mr) const
   {
     if (left_cv != nullptr && right_cv != nullptr) {
-      auto const left_cdv  = cudf::column_device_view::create(*left_cv, stream);
-      auto const right_cdv = cudf::column_device_view::create(*right_cv, stream);
+      auto const left_cdv =
+        cudf::column_device_view::create(*left_cv, stream, cudf::get_current_device_resource_ref());
+      auto const right_cdv = cudf::column_device_view::create(
+        *right_cv, stream, cudf::get_current_device_resource_ref());
       if (left_cv->has_nulls()) {
         auto const left_accessor = cudf::detail::make_pair_iterator<T, true>(*left_cdv);
         if (right_cv->has_nulls()) {
@@ -270,8 +272,9 @@ struct dispatch_multiply {
       }
     } else if (left_cv != nullptr && right_scalar != nullptr) {
       auto const right_accessor = cudf::detail::make_pair_iterator<T>(*right_scalar);
-      auto const left_cdv       = cudf::column_device_view::create(*left_cv, stream);
-      bool const both_valid     = !left_cv->has_nulls() && right_scalar->is_valid();
+      auto const left_cdv =
+        cudf::column_device_view::create(*left_cv, stream, cudf::get_current_device_resource_ref());
+      bool const both_valid = !left_cv->has_nulls() && right_scalar->is_valid();
       if (left_cv->has_nulls()) {
         auto const left_accessor = cudf::detail::make_pair_iterator<T, true>(*left_cdv);
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
@@ -283,8 +286,9 @@ struct dispatch_multiply {
       }
     } else if (left_scalar != nullptr && right_cv != nullptr) {
       auto const left_accessor = cudf::detail::make_pair_iterator<T>(*left_scalar);
-      auto const right_cdv     = cudf::column_device_view::create(*right_cv, stream);
-      bool const both_valid    = left_scalar->is_valid() && !right_cv->has_nulls();
+      auto const right_cdv     = cudf::column_device_view::create(
+        *right_cv, stream, cudf::get_current_device_resource_ref());
+      bool const both_valid = left_scalar->is_valid() && !right_cv->has_nulls();
       if (right_cv->has_nulls()) {
         auto const right_accessor = cudf::detail::make_pair_iterator<T, true>(*right_cdv);
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(

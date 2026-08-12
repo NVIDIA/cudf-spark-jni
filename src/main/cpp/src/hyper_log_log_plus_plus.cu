@@ -421,7 +421,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
       auto input_table_view = cudf::table_view{{input}};
       auto hash_col         = xxhash64(input_table_view, SEED, stream, default_mr);
       hash_col->set_null_mask(cudf::copy_bitmask(input, stream, default_mr), input.null_count());
-      auto d_hashs = cudf::column_device_view::create(hash_col->view(), stream);
+      auto d_hashs = cudf::column_device_view::create(hash_col->view(), stream, default_mr);
 
       // 2. execute partial group by
       int64_t num_blocks_p1 =
@@ -739,7 +739,7 @@ std::unique_ptr<cudf::scalar> reduce_hllpp(cudf::column_view const& input,
   auto const default_mr = cudf::get_current_device_resource_ref();
   auto hash_col         = xxhash64(input_table_view, SEED, stream, default_mr);
   hash_col->set_null_mask(cudf::copy_bitmask(input, stream, default_mr), input.null_count());
-  auto d_hashs = cudf::column_device_view::create(hash_col->view(), stream);
+  auto d_hashs = cudf::column_device_view::create(hash_col->view(), stream, default_mr);
 
   // 2. generate long columns, the size of each long column is 1
   auto num_long_cols      = num_registers_per_sketch / REGISTERS_PER_LONG + 1;

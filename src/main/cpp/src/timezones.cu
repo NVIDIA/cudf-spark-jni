@@ -98,12 +98,14 @@ auto convert_timestamp_tz(column_view const& input,
                           rmm::device_async_resource_ref mr)
 {
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -212,12 +214,14 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                "microseconds column must be of type INT32");
 
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             input_seconds.size(),
@@ -229,7 +233,7 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                                                  input_seconds.size(),
                                                  cudf::mask_state::UNALLOCATED,
                                                  stream,
-                                                 mr);
+                                                 cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator<size_type>(0),
