@@ -859,12 +859,11 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   rmm::device_buffer d_indices_and_source_info(indices_size + src_buf_info_size + offset_stack_size,
                                                stream,
                                                rmm::mr::get_current_device_resource_ref());
-  auto* d_indices              = reinterpret_cast<size_type*>(d_indices_and_source_info.data());
+  auto* d_indices              = static_cast<size_type*>(d_indices_and_source_info.data());
   src_buf_info* d_src_buf_info = reinterpret_cast<src_buf_info*>(
-    reinterpret_cast<uint8_t*>(d_indices_and_source_info.data()) + indices_size);
-  size_type* d_offset_stack =
-    reinterpret_cast<size_type*>(reinterpret_cast<uint8_t*>(d_indices_and_source_info.data()) +
-                                 indices_size + src_buf_info_size);
+    static_cast<uint8_t*>(d_indices_and_source_info.data()) + indices_size);
+  size_type* d_offset_stack = reinterpret_cast<size_type*>(
+    static_cast<uint8_t*>(d_indices_and_source_info.data()) + indices_size + src_buf_info_size);
 
   // compute splits -> indices.
   h_indices[0]              = 0;
@@ -901,7 +900,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   rmm::device_buffer d_buf_sizes_and_dst_info(
     partition_sizes_size + dst_buf_info_size + partition_has_validity_size, stream, temp_mr);
   partition_size_info* d_partition_sizes_unpadded =
-    reinterpret_cast<partition_size_info*>(d_buf_sizes_and_dst_info.data());
+    static_cast<partition_size_info*>(d_buf_sizes_and_dst_info.data());
   partition_size_info* d_partition_sizes = d_partition_sizes_unpadded + num_partitions;
   dst_buf_info* d_dst_buf_info           = reinterpret_cast<dst_buf_info*>(
     static_cast<uint8_t*>(d_buf_sizes_and_dst_info.data()) + partition_sizes_size);
@@ -1144,7 +1143,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   pack_per_partition_metadata_kernel<<<grid.num_blocks,
                                        grid.num_threads_per_block,
                                        0,
-                                       stream.value()>>>(reinterpret_cast<uint8_t*>(dst_buf.data()),
+                                       stream.value()>>>(static_cast<uint8_t*>(dst_buf.data()),
                                                          d_partition_offsets.data(),
                                                          num_partitions,
                                                          total_flattened_columns,
@@ -1154,7 +1153,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
 
   // perform the copy.
   split_copy(
-    d_src_buf_info, reinterpret_cast<uint8_t*>(dst_buf.data()), num_bufs, d_dst_buf_info, stream);
+    d_src_buf_info, static_cast<uint8_t*>(dst_buf.data()), num_bufs, d_dst_buf_info, stream);
 
   // do this before the synchronize to take advantage of any gpu time we can overlap with (this
   // function only uses the cpu).

@@ -417,7 +417,7 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
       : cudf::column_view{cudf::data_type{cudf::type_id::STRING},
                           input_sv.size(),
                           input_sv.chars_begin(stream),
-                          reinterpret_cast<cudf::bitmask_type const*>(null_mask.data()),
+                          static_cast<cudf::bitmask_type const*>(null_mask.data()),
                           null_count,
                           input_sv.offset(),
                           std::vector<cudf::column_view>{input_sv.offsets()}};

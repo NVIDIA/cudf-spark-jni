@@ -31,6 +31,8 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuco/detail/hash_functions/murmurhash3.cuh>
+#include <cuda/std/array>
+#include <cuda/std/bit>
 #include <cuda/std/limits>
 #include <thrust/tabulate.h>
 
@@ -75,7 +77,8 @@ class iceberg_murmur_hash3_32 {
   __device__ static inline int32_t hash_long(int64_t input)
   {
     // Hash the 8 bytes of the long value in little-endian order
-    return hash_bytes(reinterpret_cast<uint8_t const*>(&input), 8);
+    auto const bytes = cuda::std::bit_cast<cuda::std::array<uint8_t, sizeof(input)>>(input);
+    return hash_bytes(bytes.data(), static_cast<int32_t>(bytes.size()));
   }
 
   /**

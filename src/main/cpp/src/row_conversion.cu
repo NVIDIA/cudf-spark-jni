@@ -43,6 +43,7 @@
 #include <cooperative_groups.h>
 #include <cuda/barrier>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
@@ -526,7 +527,7 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
         // so we have to rewrite the addresses to make sure that it is 4 byte aligned
         int8_t* valid_byte        = &row_vld_tmp[col_index / 8];
         size_type byte_bit_offset = col_index % 8;
-        uint64_t fixup_bytes      = reinterpret_cast<uint64_t>(valid_byte) % 4;
+        uint64_t fixup_bytes      = cuda::std::bit_cast<uint64_t>(valid_byte) % 4;
         int32_t* valid_int        = reinterpret_cast<int32_t*>(valid_byte - fixup_bytes);
         size_type int_bit_offset  = byte_bit_offset + (fixup_bytes * 8);
         // Now copy validity for the column

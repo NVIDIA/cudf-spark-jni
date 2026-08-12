@@ -343,7 +343,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
           std::vector<cudf::bitmask_type const*>{
             // Don't use values.null_mask(), to make sure no slicing.
             values_and_frequencies.front()->view().null_mask(),
-            reinterpret_cast<cudf::bitmask_type const*>(null_mask.data())},
+            static_cast<cudf::bitmask_type const*>(null_mask.data())},
           std::vector<cudf::size_type>{0, 0},
           values.size(),
           stream,
