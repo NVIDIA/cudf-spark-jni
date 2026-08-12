@@ -89,6 +89,7 @@ class protobuf_schema {
 struct field_descriptor_bundle {
   cudf::detail::host_vector<field_descriptor> host;
   rmm::device_uvector<field_descriptor> device;
+  rmm::device_uvector<int32_t> enum_values;
 };
 
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
@@ -251,10 +252,14 @@ inline repeated_field_work_bundle make_repeated_field_work_bundle(
     if (work.total_count > 0) {
       work.occurrences = std::make_unique<rmm::device_uvector<field_occurrence>>(
         work.total_count, stream, scratch_mr);
-      auto const& field = schema[schema_idx];
-      result.scan_descriptors.push_back(field_occurrence_scan_desc{
-        field.field_number, field.wire_type, work.offsets.data(), work.occurrences->data()});
     }
+    // Zero-count descriptors keep malformed rows aligned with the count pass.
+    auto const& field = schema[schema_idx];
+    result.scan_descriptors.push_back(
+      field_occurrence_scan_desc{field.field_number,
+                                 field.wire_type,
+                                 work.offsets.data(),
+                                 work.occurrences == nullptr ? nullptr : work.occurrences->data()});
   }
   return result;
 }
@@ -446,6 +451,16 @@ void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values
                                       protobuf_value_domain_view value_domain,
                                       rmm::cuda_stream_view stream);
 
+void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+                          rmm::device_uvector<bool>& valid,
+                          enum_domain_device_view enum_domain,
+                          rmm::cuda_stream_view stream);
+
+void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+                          rmm::device_uvector<bool>& valid,
+                          cudf::detail::host_vector<int32_t> const& valid_enums,
+                          rmm::cuda_stream_view stream);
+
 void validate_enum_and_propagate_rows(rmm::device_uvector<int32_t> const& values,
                                       rmm::device_uvector<bool>& valid,
                                       cudf::detail::host_vector<int32_t> const& valid_enums,
@@ -461,6 +476,10 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
                                                cudf::size_type num_rows,
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr);
+
+std::unique_ptr<cudf::column> drop_unknown_repeated_enum_values(std::unique_ptr<cudf::column> input,
+                                                                rmm::cuda_stream_view stream,
+                                                                rmm::device_async_resource_ref mr);
 
 // Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
 // in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce

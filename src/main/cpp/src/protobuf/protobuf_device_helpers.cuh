@@ -18,6 +18,7 @@
 
 #include "protobuf/protobuf_types.cuh"
 
+#include <cudf/strings/detail/utf8.hpp>
 #include <cudf/utilities/error.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -35,10 +36,15 @@ namespace spark_rapids_jni::protobuf::detail {
 // Device helper functions
 // ============================================================================
 
-__device__ inline bool read_varint(uint8_t const* cur,
-                                   uint8_t const* end,
-                                   uint64_t& out,
-                                   int& bytes)
+struct proto_tag {
+  int field_number;
+  proto_wire_type wire_type;
+};
+
+__device__ inline bool read_varint64(uint8_t const* cur,
+                                     uint8_t const* end,
+                                     uint64_t& out,
+                                     int& bytes)
 {
   out       = 0;
   bytes     = 0;
@@ -47,14 +53,33 @@ __device__ inline bool read_varint(uint8_t const* cur,
   // A 64-bit value requires at most ceil(64/7) = 10 bytes.
   while (cur < end && bytes < MAX_VARINT_BYTES) {
     uint8_t b = *cur++;
-    // For the 10th byte (bytes == 9, shift == 63), only the lowest bit is valid
-    if (bytes == 9 && (b & 0xFE) != 0) {
-      return false;  // Invalid: 10th byte has more than 1 significant bit
+    // Spark's protobuf-java parser sign-extends after the ninth continuation byte and uses the
+    // tenth byte only to determine whether the varint terminates.
+    if (bytes == 9) {
+      out |= uint64_t{1} << 63;
+    } else {
+      out |= static_cast<uint64_t>(b & 0x7Fu) << shift;
     }
-    out |= (static_cast<uint64_t>(b & 0x7Fu) << shift);
     bytes++;
     if ((b & 0x80u) == 0) { return true; }
     shift += 7;
+  }
+  return false;
+}
+
+__device__ inline bool read_varint32(uint8_t const* cur,
+                                     uint8_t const* end,
+                                     uint32_t& out,
+                                     int& bytes)
+{
+  // protobuf-java's raw-varint32 path consumes up to ten bytes and keeps the low 32 bits.
+  out   = 0;
+  bytes = 0;
+  while (cur < end && bytes < MAX_VARINT_BYTES) {
+    uint8_t const b = *cur++;
+    if (bytes < 5) { out |= static_cast<uint32_t>(b & 0x7Fu) << (bytes * 7); }
+    bytes++;
+    if ((b & 0x80u) == 0) { return true; }
   }
   return false;
 }
@@ -86,13 +111,9 @@ __device__ inline int get_wire_type_size(proto_wire_type wt, uint8_t const* cur,
 {
   switch (wt) {
     case proto_wire_type::VARINT: {
-      // Need to scan to find the end of varint
-      int count = 0;
-      while (cur < end && count < MAX_VARINT_BYTES) {
-        if ((*cur++ & 0x80u) == 0) { return count + 1; }
-        count++;
-      }
-      return -1;  // Invalid varint
+      uint64_t value;
+      int bytes;
+      return read_varint64(cur, end, value, bytes) ? bytes : -1;
     }
     case proto_wire_type::I64BIT:
       // Check if there's enough data for 8 bytes
@@ -103,77 +124,80 @@ __device__ inline int get_wire_type_size(proto_wire_type wt, uint8_t const* cur,
       if (end - cur < 4) return -1;
       return 4;
     case proto_wire_type::LEN: {
-      uint64_t len;
+      uint32_t len;
       int n;
-      if (!read_varint(cur, end, len, n)) return -1;
-      if (len > static_cast<uint64_t>(end - cur - n) ||
-          len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max() - n)) {
+      if (!read_varint32(cur, end, len, n)) return -1;
+      if (len > static_cast<uint32_t>(end - cur - n) ||
+          len > static_cast<uint32_t>(cuda::std::numeric_limits<int>::max() - n)) {
         return -1;
       }
       return n + static_cast<int>(len);
     }
-    case proto_wire_type::SGROUP: {
-      auto const* start = cur;
-      int depth         = 1;
-      while (cur < end && depth > 0) {
-        uint64_t key;
-        int key_bytes;
-        if (!read_varint(cur, end, key, key_bytes)) return -1;
-        cur += key_bytes;
-
-        auto const inner_wt = static_cast<proto_wire_type>(key & 0x7);
-        if (inner_wt == proto_wire_type::EGROUP) {
-          --depth;
-          if (depth == 0) { return static_cast<int>(cur - start); }
-        } else if (inner_wt == proto_wire_type::SGROUP) {
-          if (++depth > 32) return -1;
-        } else {
-          int inner_size = -1;
-          switch (inner_wt) {
-            case proto_wire_type::VARINT: {
-              uint64_t dummy;
-              int vbytes;
-              if (!read_varint(cur, end, dummy, vbytes)) return -1;
-              inner_size = vbytes;
-              break;
-            }
-            case proto_wire_type::I64BIT: inner_size = 8; break;
-            case proto_wire_type::LEN: {
-              uint64_t len;
-              int len_bytes;
-              if (!read_varint(cur, end, len, len_bytes)) return -1;
-              if (len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max() - len_bytes)) {
-                return -1;
-              }
-              inner_size = len_bytes + static_cast<int>(len);
-              break;
-            }
-            case proto_wire_type::I32BIT: inner_size = 4; break;
-            default: return -1;
-          }
-          if (inner_size < 0 || cur + inner_size > end) return -1;
-          cur += inner_size;
-        }
-      }
-      return -1;
-    }
-    case proto_wire_type::EGROUP: return 0;
+    case proto_wire_type::SGROUP:
+    case proto_wire_type::EGROUP: return -1;
     default: return -1;
   }
 }
 
+// Keep the rare group stack out of the scanner hot paths.
+static __device__ __noinline__ bool skip_group(uint8_t const* cur,
+                                               uint8_t const* end,
+                                               int field_number,
+                                               int max_group_depth,
+                                               uint8_t const*& out_cur)
+{
+  if (max_group_depth < 1) return false;
+  int group_fields[PROTOBUF_JAVA_RECURSION_LIMIT];
+  int depth       = 1;
+  group_fields[0] = field_number;
+
+  while (cur < end) {
+    uint32_t key;
+    int key_bytes;
+    if (!read_varint32(cur, end, key, key_bytes)) return false;
+    cur += key_bytes;
+
+    auto const inner_field_number = key >> 3;
+    if (inner_field_number == 0 || inner_field_number > static_cast<uint32_t>(MAX_FIELD_NUMBER)) {
+      return false;
+    }
+    auto const inner_wire_type = static_cast<proto_wire_type>(key & 0x7);
+    if (inner_wire_type == proto_wire_type::EGROUP) {
+      if (static_cast<int>(inner_field_number) != group_fields[depth - 1]) return false;
+      if (--depth == 0) {
+        out_cur = cur;
+        return true;
+      }
+      continue;
+    }
+    if (inner_wire_type == proto_wire_type::SGROUP) {
+      if (depth == max_group_depth) return false;
+      group_fields[depth++] = static_cast<int>(inner_field_number);
+      continue;
+    }
+
+    int const inner_size = get_wire_type_size(inner_wire_type, cur, end);
+    if (inner_size < 0 || inner_size > end - cur) return false;
+    cur += inner_size;
+  }
+  return false;
+}
+
 __device__ inline bool skip_field(uint8_t const* cur,
                                   uint8_t const* end,
-                                  proto_wire_type wt,
+                                  proto_tag tag,
+                                  int max_group_depth,
                                   uint8_t const*& out_cur)
 {
-  // A bare end-group is only valid while a start-group payload is being parsed recursively inside
-  // get_wire_type_size(proto_wire_type::SGROUP).
+  // A bare end-group is only valid while a start-group payload is being parsed by skip_group.
   // The scan/count kernels should never accept it as a standalone field because Spark CPU treats
   // unmatched end-groups as malformed protobuf.
-  if (wt == proto_wire_type::EGROUP) { return false; }
+  if (tag.wire_type == proto_wire_type::EGROUP) { return false; }
+  if (tag.wire_type == proto_wire_type::SGROUP) {
+    return skip_group(cur, end, tag.field_number, max_group_depth, out_cur);
+  }
 
-  int size = get_wire_type_size(wt, cur, end);
+  int size = get_wire_type_size(tag.wire_type, cur, end);
   if (size < 0) return false;
   // Ensure we don't skip past the end of the buffer
   if (cur + size > end) return false;
@@ -193,11 +217,11 @@ __device__ inline bool get_field_data_location(uint8_t const* cur,
 {
   if (wt == proto_wire_type::LEN) {
     // For length-delimited, read the length prefix
-    uint64_t len;
+    uint32_t len;
     int len_bytes;
-    if (!read_varint(cur, end, len, len_bytes)) return false;
-    if (len > static_cast<uint64_t>(end - cur - len_bytes) ||
-        len > static_cast<uint64_t>(cuda::std::numeric_limits<int>::max())) {
+    if (!read_varint32(cur, end, len, len_bytes)) return false;
+    if (len > static_cast<uint32_t>(end - cur - len_bytes) ||
+        len > static_cast<uint32_t>(cuda::std::numeric_limits<int>::max())) {
       return false;
     }
     data_offset = len_bytes;  // offset past the length prefix
@@ -232,6 +256,72 @@ __device__ inline bool checked_add_int32(int32_t lhs, int32_t rhs, int32_t& out)
   return true;
 }
 
+struct utf8_sequence {
+  int bytes;
+  bool valid;
+};
+
+__device__ inline utf8_sequence inspect_utf8_sequence(uint8_t const* cur, uint8_t const* end)
+{
+  auto const b0 = *cur;
+  if (b0 < 0x80u) return {1, true};
+  if (b0 < 0xC2u || b0 > 0xF4u) return {1, false};
+
+  if (b0 <= 0xDFu) {
+    return cur + 1 < end && cudf::strings::detail::is_utf8_continuation_char(cur[1])
+             ? utf8_sequence{2, true}
+             : utf8_sequence{1, false};
+  }
+
+  if (cur + 1 >= end) return {1, false};
+  auto const b1           = cur[1];
+  bool const valid_second = cudf::strings::detail::is_utf8_continuation_char(b1) &&
+                            (b0 != 0xE0u || b1 >= 0xA0u) && (b0 != 0xEDu || b1 < 0xA0u) &&
+                            (b0 != 0xF0u || b1 >= 0x90u) && (b0 != 0xF4u || b1 < 0x90u);
+  if (!valid_second) return {1, false};
+
+  if (cur + 2 >= end || !cudf::strings::detail::is_utf8_continuation_char(cur[2])) {
+    return {2, false};
+  }
+  if (b0 <= 0xEFu) return {3, true};
+  if (cur + 3 >= end || !cudf::strings::detail::is_utf8_continuation_char(cur[3])) {
+    return {3, false};
+  }
+  return {4, true};
+}
+
+__device__ inline int64_t repaired_utf8_length(uint8_t const* data, int32_t size)
+{
+  int64_t result  = 0;
+  auto const* cur = data;
+  auto const* end = data + size;
+  while (cur < end) {
+    auto const sequence = inspect_utf8_sequence(cur, end);
+    result += sequence.valid ? sequence.bytes : 3;
+    cur += sequence.bytes;
+  }
+  return result;
+}
+
+__device__ inline void copy_repaired_utf8(uint8_t const* data, int32_t size, char* output)
+{
+  auto const* cur = data;
+  auto const* end = data + size;
+  while (cur < end) {
+    auto const sequence = inspect_utf8_sequence(cur, end);
+    if (sequence.valid) {
+      for (int i = 0; i < sequence.bytes; ++i) {
+        *output++ = static_cast<char>(cur[i]);
+      }
+    } else {
+      *output++ = static_cast<char>(0xEFu);
+      *output++ = static_cast<char>(0xBFu);
+      *output++ = static_cast<char>(0xBDu);
+    }
+    cur += sequence.bytes;
+  }
+}
+
 // `T` defaults to int32 for the top-level callers; nested message offsets are computed in int64
 // (parent row offset + relative field offset) and instantiate the int64 form.
 template <std::integral T = int32_t>
@@ -247,26 +337,21 @@ __device__ inline bool check_message_bounds(T start,
   return true;
 }
 
-struct proto_tag {
-  int field_number;
-  proto_wire_type wire_type;
-};
-
 __device__ inline bool decode_tag(uint8_t const*& cur,
                                   uint8_t const* end,
                                   proto_tag& tag,
                                   protobuf_error* error_flag)
 {
-  uint64_t key;
+  uint32_t key;
   int key_bytes;
-  if (!read_varint(cur, end, key, key_bytes)) {
+  if (!read_varint32(cur, end, key, key_bytes)) {
     set_error_once(error_flag, protobuf_error::VARINT);
     return false;
   }
 
   cur += key_bytes;
-  uint64_t fn = key >> 3;
-  if (fn == 0 || fn > static_cast<uint64_t>(MAX_FIELD_NUMBER)) {
+  uint32_t fn = key >> 3;
+  if (fn == 0 || fn > static_cast<uint32_t>(MAX_FIELD_NUMBER)) {
     set_error_once(error_flag, protobuf_error::FIELD_NUMBER);
     return false;
   }

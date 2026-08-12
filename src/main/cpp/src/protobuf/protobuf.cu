@@ -311,7 +311,8 @@ void validate_decode_context(protobuf_decode_context const& context)
                    std::to_string(i),
                  std::invalid_argument);
 
-    auto const has_enum_metadata = !context.enum_valid_values[i].empty();
+    auto const& enum_values_for_field = context.enum_valid_values[i];
+    auto const has_enum_metadata      = !enum_values_for_field.empty();
     auto const is_numeric_enum =
       type.id() == cudf::type_id::INT32 && field.encoding == proto_encoding::DEFAULT;
     auto const is_string_enum =
@@ -323,9 +324,27 @@ void validate_decode_context(protobuf_decode_context const& context)
                    ", encoding=" + std::to_string(static_cast<int>(field.encoding)) + ")",
                  std::invalid_argument);
 
+    if (has_enum_metadata) {
+      for (size_t j = 1; j < enum_values_for_field.size(); ++j) {
+        CUDF_EXPECTS(
+          enum_values_for_field[j] > enum_values_for_field[j - 1],
+          "protobuf decode context: enum_valid_values must be strictly sorted at field " +
+            std::to_string(i),
+          std::invalid_argument);
+      }
+      CUDF_EXPECTS(!field.has_default_value ||
+                     std::binary_search(enum_values_for_field.begin(),
+                                        enum_values_for_field.end(),
+                                        static_cast<int32_t>(context.default_ints[i])),
+                   "protobuf decode context: enum default must be present in enum_valid_values "
+                   "at field " +
+                     std::to_string(i),
+                   std::invalid_argument);
+    }
+
     if (field.encoding == proto_encoding::ENUM_STRING) {
       CUDF_EXPECTS(
-        !(context.enum_valid_values[i].empty() || context.enum_names[i].empty()),
+        !(enum_values_for_field.empty() || context.enum_names[i].empty()),
         "protobuf decode context: enum-as-string field requires non-empty metadata at field " +
           std::to_string(i),
         std::invalid_argument);
@@ -333,14 +352,6 @@ void validate_decode_context(protobuf_decode_context const& context)
         context.enum_valid_values[i].size() == context.enum_names[i].size(),
         "protobuf decode context: enum-as-string metadata mismatch at field " + std::to_string(i),
         std::invalid_argument);
-      auto const& ev = context.enum_valid_values[i];
-      for (size_t j = 1; j < ev.size(); ++j) {
-        CUDF_EXPECTS(
-          ev[j] > ev[j - 1],
-          "protobuf decode context: enum_valid_values must be strictly sorted at field " +
-            std::to_string(i),
-          std::invalid_argument);
-      }
     }
   }
 
@@ -477,8 +488,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   auto d_error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(
     1, stream, cudf::get_current_device_resource_ref());
-  // PERMISSIVE-mode row nulling support. Unknown enum values and malformed rows should both
-  // surface as null structs instead of partially decoded data.
+  auto d_deferred_enum_error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(
+    1, stream, cudf::get_current_device_resource_ref());
+  // PERMISSIVE-mode row nulling support for malformed input, root enum mismatches, and missing
+  // required fields.
   bool const track_permissive_null_rows = !fail_on_errors;
   rmm::device_uvector<bool> d_row_force_null(
     track_permissive_null_rows ? num_rows : 0, stream, cudf::get_current_device_resource_ref());
@@ -527,9 +540,20 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                                    h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
                                    static_cast<int>(h_field_lookup.size())}},
                                  d_error.data(),
+                                 d_deferred_enum_error.data(),
                                  track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                                  stream);
   }
+
+  maybe_check_required_fields({d_nested_locations.data(),
+                               {num_rows, nullptr},
+                               binary_input.null_count() > 0 ? binary_input.null_mask() : nullptr,
+                               binary_input.offset(),
+                               nullptr},
+                              nested_field_indices,
+                              schema,
+                              decode_ctx,
+                              stream);
 
   // Store decoded columns by schema index for ordered assembly at the end.
   std::vector<std::unique_ptr<cudf::column>> column_map(num_fields);
@@ -556,6 +580,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                              h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
                              static_cast<int>(h_field_lookup.size())}},
                            d_error.data(),
+                           d_deferred_enum_error.data(),
                            track_permissive_null_rows ? d_row_force_null.data() : nullptr,
                            stream);
 
@@ -834,10 +859,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   {
     using enum protobuf_error;
     CUDF_CUDA_TRY(cudaPeekAtLastError());
-    protobuf_error h_error = NONE;
+    protobuf_error h_error               = NONE;
+    protobuf_error h_deferred_enum_error = NONE;
     CUDF_CUDA_TRY(
       cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(protobuf_error), stream));
+    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
+      &h_deferred_enum_error, d_deferred_enum_error.data(), sizeof(protobuf_error), stream));
     stream.synchronize();
+    if (h_error == NONE) { h_error = h_deferred_enum_error; }
     if (h_error == SCHEMA_TOO_LARGE || h_error == REPEATED_COUNT_MISMATCH) {
       throw cudf::logic_error(error_message(h_error));
     }

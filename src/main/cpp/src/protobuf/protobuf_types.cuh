@@ -24,7 +24,8 @@
 namespace spark_rapids_jni::protobuf::detail {
 
 // Protobuf varint encoding uses at most 10 bytes to represent a 64-bit value.
-constexpr int MAX_VARINT_BYTES = 10;
+constexpr int MAX_VARINT_BYTES              = 10;
+constexpr int PROTOBUF_JAVA_RECURSION_LIMIT = 100;
 
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
@@ -39,6 +40,7 @@ enum class protobuf_error : int {
   FIELD_SIZE,
   SKIP,
   FIXED_LEN,
+  INVALID_ENUM,
   REQUIRED,
   SCHEMA_TOO_LARGE,
   REPEATED_COUNT_MISMATCH,
@@ -68,6 +70,7 @@ inline std::string error_message(protobuf_error error)
     case FIELD_SIZE: return "Protobuf decode error: invalid field size";
     case SKIP: return "Protobuf decode error: unable to skip unknown field";
     case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
+    case INVALID_ENUM: return "Protobuf decode error: unknown enum value";
     case REQUIRED: return "Protobuf decode error: missing required field";
     case SCHEMA_TOO_LARGE:
       return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
@@ -95,6 +98,8 @@ struct field_descriptor {
   int field_number;                    // Protobuf field number
   proto_wire_type expected_wire_type;  // Expected wire type for this field
   bool is_repeated;                    // Repeated children are scanned via count/scan kernels
+  int32_t const* valid_enum_values;    // Sorted closed-enum values, or nullptr
+  int num_valid_enum_values;           // Size of valid_enum_values
   int output_index = -1;               // Matching output column, or -1 when unused
 };
 
