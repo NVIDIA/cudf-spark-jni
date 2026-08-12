@@ -174,6 +174,45 @@ public class JSONUtils {
         input, paths, memoryBudgetBytes, parallelOverride, matchPolicy, true);
   }
 
+  private static void validateFirstNonNullPaths(List<List<PathInstructionJni>> paths) {
+    for (List<PathInstructionJni> path : paths) {
+      if (path.isEmpty()) {
+        throw new IllegalArgumentException(
+            "FIRST_NON_NULL requires non-empty paths containing only named instructions");
+      }
+      for (PathInstructionJni instruction : path) {
+        if (instruction.type != (byte) PathInstructionType.NAMED.ordinal()) {
+          throw new IllegalArgumentException(
+              "FIRST_NON_NULL requires non-empty paths containing only named instructions");
+        }
+      }
+    }
+  }
+
+  private static void validateLastNonNullPaths(List<List<PathInstructionJni>> paths) {
+    for (List<PathInstructionJni> path : paths) {
+      if (path.size() != 1 ||
+          path.get(0).type != (byte) PathInstructionType.NAMED.ordinal()) {
+        throw new IllegalArgumentException(
+            "LAST_NON_NULL requires paths containing exactly one named instruction");
+      }
+    }
+  }
+
+  private static void validateMatchPolicyPaths(
+      List<List<PathInstructionJni>> paths,
+      NamedFieldMatchPolicy matchPolicy,
+      boolean useMatchPolicyNative) {
+    if (!useMatchPolicyNative) {
+      return;
+    }
+    if (matchPolicy == NamedFieldMatchPolicy.FIRST_NON_NULL) {
+      validateFirstNonNullPaths(paths);
+    } else if (matchPolicy == NamedFieldMatchPolicy.LAST_NON_NULL) {
+      validateLastNonNullPaths(paths);
+    }
+  }
+
   private static ColumnVector[] getJsonObjectMultiplePathsInternal(
       ColumnVector input,
       List<List<PathInstructionJni>> paths,
@@ -185,28 +224,7 @@ public class JSONUtils {
     if (matchPolicy == null) {
       throw new IllegalArgumentException("matchPolicy must not be null");
     }
-    if (useMatchPolicyNative && matchPolicy == NamedFieldMatchPolicy.FIRST_NON_NULL) {
-      for (List<PathInstructionJni> path : paths) {
-        if (path.isEmpty()) {
-          throw new IllegalArgumentException(
-              "FIRST_NON_NULL requires non-empty paths containing only named instructions");
-        }
-        for (PathInstructionJni instruction : path) {
-          if (instruction.type != (byte) PathInstructionType.NAMED.ordinal()) {
-            throw new IllegalArgumentException(
-                "FIRST_NON_NULL requires non-empty paths containing only named instructions");
-          }
-        }
-      }
-    } else if (useMatchPolicyNative && matchPolicy == NamedFieldMatchPolicy.LAST_NON_NULL) {
-      for (List<PathInstructionJni> path : paths) {
-        if (path.size() != 1 ||
-            path.get(0).type != (byte) PathInstructionType.NAMED.ordinal()) {
-          throw new IllegalArgumentException(
-              "LAST_NON_NULL requires paths containing exactly one named instruction");
-        }
-      }
-    }
+    validateMatchPolicyPaths(paths, matchPolicy, useMatchPolicyNative);
     int[] pathOffsets = new int[paths.size() + 1];
     int offset = 0;
     for (int i = 0; i < paths.size(); i++) {

@@ -96,7 +96,7 @@ jlongArray get_json_object_multiple_paths(JNIEnv* env,
         indexes.size() != static_cast<std::size_t>(num_entries) ||
         type_nums.size() != static_cast<std::size_t>(num_entries)) {
       JNI_THROW_NEW(
-        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", 0);
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", nullptr);
     }
 
     for (std::size_t i = 0; i < num_paths; ++i) {
