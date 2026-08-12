@@ -283,7 +283,7 @@ build_string_row_offsets(table_view const& tbl,
  */
 struct string_row_offset_functor {
   string_row_offset_functor(device_span<size_type const> d_row_offsets)
-    : d_row_offsets(d_row_offsets){};
+    : d_row_offsets(d_row_offsets) {};
 
   __device__ inline size_type operator()(int row_number, int) const
   {
@@ -299,7 +299,7 @@ struct string_row_offset_functor {
  */
 struct fixed_width_row_offset_functor {
   fixed_width_row_offset_functor(size_type fixed_width_only_row_size)
-    : _fixed_width_only_row_size(fixed_width_only_row_size){};
+    : _fixed_width_only_row_size(fixed_width_only_row_size) {};
 
   __device__ inline size_type operator()(int row_number, int tile_row_start) const
   {
