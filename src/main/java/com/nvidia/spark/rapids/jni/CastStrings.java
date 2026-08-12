@@ -373,12 +373,31 @@ public class CastStrings {
    *
    * @param input the input string column.
    * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
-   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED/EXCEPTION.
+   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED.
    * @return a timestamp_us column where invalid rows have nulls.
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
       boolean legacy) {
-    return new ColumnVector(parseTimestampWithFormat(input.getNativeView(), format, legacy));
+    return parseTimestampWithFormat(input, format, legacy, false);
+  }
+
+  /**
+   * Parse a string column using the selected time parser policy.
+   *
+   * @param input the input string column.
+   * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
+   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED/EXCEPTION.
+   * @param exceptionPolicy when true, throw {@link CastException} if CORRECTED rejects a row
+   *                        that LEGACY accepts.
+   * @return a timestamp_us column where invalid rows have nulls.
+   */
+  public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
+      boolean legacy, boolean exceptionPolicy) {
+    if (legacy && exceptionPolicy) {
+      throw new IllegalArgumentException("LEGACY and EXCEPTION policies cannot both be enabled");
+    }
+    return new ColumnVector(parseTimestampWithFormat(
+        input.getNativeView(), format, legacy, exceptionPolicy));
   }
 
   private static native long toInteger(long nativeColumnView, boolean ansi_enabled, boolean strip,
@@ -402,6 +421,7 @@ public class CastStrings {
 
   private static native long parseDateStringsToDate(long input);
 
-  private static native long parseTimestampWithFormat(long input, String format, boolean legacy);
+  private static native long parseTimestampWithFormat(
+      long input, String format, boolean legacy, boolean exceptionPolicy);
 
 }

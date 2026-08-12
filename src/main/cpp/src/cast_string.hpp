@@ -229,6 +229,8 @@ std::unique_ptr<cudf::column> parse_strings_to_date(
  * @param input The input string column.
  * @param format Spark format pattern (e.g. `"yyyy-MM-dd HH:mm:ss"`).
  * @param legacy True for `LegacyTimeParserPolicy`, false for CORRECTED/EXCEPTION.
+ * @param exception_policy If true, throw `cast_error` when CORRECTED rejects a row that LEGACY
+ *                         accepts.
  * @param stream Stream on which to operate.
  * @param mr Memory resource for the returned column.
  * @return A timestamp_us column, with nulls for invalid inputs.
@@ -237,6 +239,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
+  bool exception_policy,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
