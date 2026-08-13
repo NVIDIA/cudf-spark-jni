@@ -48,9 +48,9 @@ namespace {
 
 // One (key, value) entry of a raw-map row, in the exact textual content the raw-map engine emits.
 // A string value (or key) is stored WITHOUT surrounding quotes and JSON-unescaped; a non-string
-// scalar carries its Spark-rendered text, while a nested object or array is still stored verbatim
-// (see the RawMapOpt_* contract block below). A `std::nullopt` value models a SQL NULL value slot:
-// a JSON `null` value keeps the pair but nulls the corresponding entry of the values child.
+// value carries its Spark-rendered text (see the RawMapOpt_* contract block below). A
+// `std::nullopt` value models a SQL NULL value slot: a JSON `null` value keeps the pair but nulls
+// the corresponding entry of the values child.
 using kv = std::pair<std::string, std::optional<std::string>>;
 
 // Build the expected `LIST<STRUCT<STRING,STRING>>` raw-map column directly from host data.
@@ -253,7 +253,8 @@ TEST_F(FromJsonTest, RawMapOpt_UnquotedControlCharactersStrict)
 //     `\uXXXX` -> UTF-8, ...); escape-free strings are byte-identical to the raw extraction.
 //   * Numbers are re-rendered: floats via Java `Double.toString`; integer leading zeros and `-0`
 //     are stripped; `NaN`/`Infinity` spellings become their QUOTED canonical forms.
-//   * A nested object/array value keeps its VERBATIM raw JSON bytes (copied unchanged).
+//   * A nested object/array value is re-serialized compactly (whitespace dropped, inner strings
+//     re-escaped, inner numbers re-rendered); a nested `null` stays the literal `null`.
 //   * A JSON `null` VALUE keeps the pair but nulls the values-child entry (SQL NULL).
 //   * `true`/`false` and already-canonical scalars are byte-identical to the input.
 //   * A populated object yields a non-null list of its (key, value) pairs in INPUT TEXTUAL order;
@@ -735,6 +736,172 @@ TEST_F(FromJsonTest, RawMapOpt_Render_NonNumeric)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
 }
 
+// Nested object/array values re-serialize compactly: whitespace dropped, inner strings re-escaped
+// (`\t` stays escaped, `\uXXXX` decodes to UTF-8), inner lenient numbers re-rendered, and a nested
+// `null` stays the literal `null`. The last row covers empty containers nested INSIDE a value,
+// which close on the token immediately after their open.
+TEST_F(FromJsonTest, RawMapOpt_Render_Nested)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":{ "a" : 1 , "b" : [ 2 , 3 ] }})",
+                                       R"({"k":[007, NaN, 1.50, "x y"]})",
+                                       R"({"k":{"s":"a\tb","u":"中"}})",
+                                       R"({"k":[null,true,false]})",
+                                       R"({"k":{}})",
+                                       R"({"k":[]})",
+                                       R"({"k":{"a":[ ],"b":{ },"c":[[]]}})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"k", R"({"a":1,"b":[2,3]})"}},
+                                               {{"k", R"([7,"NaN",1.5,"x y"])"}},
+                                               {{"k", "{\"s\":\"a\\tb\",\"u\":\"中\"}"}},
+                                               {{"k", R"([null,true,false])"}},
+                                               {{"k", "{}"}},
+                                               {{"k", "[]"}},
+                                               {{"k", R"({"a":[],"b":{},"c":[[]]})"}}},
+                                              all_valid(7));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Re-escape round-trip inside a nested value: the inner strings are unescaped and RE-escaped, so
+// `\uXXXX` and a surrogate pair become raw UTF-8 and `\/` collapses to `/`, while `\"`, `\\` and
+// `\t` come back byte-identical. The escaped KEY takes the same path as the inner string values.
+TEST_F(FromJsonTest, RawMapOpt_Render_NestedStringEscapes)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":{"q\"k":"a\"b","bs":"p\\q",)"
+                                       R"("u":"\u4e2d\u56FD","e":"\ud83d\uDE00",)"
+                                       R"("sl":"x\/y","t":"a\tb"}})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"k",
+                             "{\"q\\\"k\":\"a\\\"b\",\"bs\":\"p\\\\q\",\"u\":\"中国\","
+                             "\"e\":\"\U0001F600\",\"sl\":\"x/y\",\"t\":\"a\\tb\"}"}}},
+                          all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Nested value deeper than 64 levels (the in-tree `json_parser` depth cap): the token-walk
+// renderer has no depth limit, so a 70-deep value must re-render, not error. The innermost lenient
+// scalar proves the walker composes with the number re-render at depth.
+TEST_F(FromJsonTest, RawMapOpt_Render_DeepNestedValue)
+{
+  constexpr int depth  = 70;
+  auto const open      = std::string(depth, '[');
+  auto const close     = std::string(depth, ']');
+  auto const input_col = cudf::test::strings_column_wrapper{"{\"k\":" + open + "007" + close + "}"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"k", open + "7" + close}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Companion to RawMapOpt_Render_DeepNestedValue (which stresses nesting DEPTH): a single nested
+// object VALUE with many sibling fields stresses render_nested's token-walk WIDTH, proving its
+// two-pass size and write passes agree over thousands of structural tokens -- a mismatch would
+// overflow the chars buffer.
+TEST_F(FromJsonTest, RawMapOpt_Render_WideNestedValue)
+{
+  constexpr int num_fields = 2000;
+  std::string obj          = R"({"k":{)";
+  std::string expected_val = "{";
+  for (int i = 0; i < num_fields; ++i) {
+    if (i > 0) {
+      obj += ",";
+      expected_val += ",";
+    }
+    obj += std::format(R"("f{}":{})", i, i);
+    expected_val += std::format(R"("f{}":{})", i, i);
+  }
+  obj += "}}";
+  expected_val += "}";
+
+  auto const input_col = cudf::test::strings_column_wrapper{obj};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map({{{"k", expected_val}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
+
+// Multi-block companion to the nested render tests above: enough rows that the nested arm of
+// `transform_fn` and the compaction that carries each node's token id both run across many thread
+// blocks. The rendered length varies per row (the digit count of the lenient inner integer), so a
+// two-pass sizing mismatch cannot cancel out. `RawMapOpt_StressInvariantsWithBadRows` below is the
+// other large map input, but every node there is verbatim, so it takes the raw fast path instead.
+TEST_F(FromJsonTest, RawMapOpt_Render_NestedManyRows)
+{
+  constexpr int num_rows = 50000;
+  std::vector<std::string> input_rows;
+  std::vector<std::vector<kv>> expected_rows;
+  input_rows.reserve(num_rows);
+  expected_rows.reserve(num_rows);
+  for (int r = 0; r < num_rows; ++r) {
+    input_rows.push_back(std::format(R"({{"k":{{ "a" : 00{0} , "b" : "x\ty" }}}})", r));
+    expected_rows.push_back({{"k", std::format(R"({{"a":{0},"b":"x\ty"}})", r)}});
+  }
+
+  auto const input_col = cudf::test::strings_column_wrapper(input_rows.begin(), input_rows.end());
+  auto const expected  = make_expected_raw_map(expected_rows, all_valid(num_rows));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(cudf::strings_column_view{input_col}), *expected);
+}
+
+// The digit cap reaches INSIDE a nested value: a number the parser refuses makes the record a Spark
+// bad record wherever it sits, so a nested value holding one nulls its whole row exactly as a
+// top-level value does. Row 0 keeps every arm at the cap to pin that the boundary did not move.
+TEST_F(FromJsonTest, RawMapOpt_Reject_NestedInnerDigitCapBoundary)
+{
+  auto const at_cap = digits(max_num_digits);
+  auto const over   = digits(max_num_digits + 1);
+  auto const input_col =
+    cudf::test::strings_column_wrapper{// Row 0: at the cap inside an object and inside a list.
+                                       R"({"o":{"a":)" + at_cap + R"(},"l":[)" + at_cap + "]}",
+                                       // Row 1: one digit over, inside an object -> row null.
+                                       R"({"o":{"a":)" + over + "}}",
+                                       // Row 2: one digit over, inside a list -> row null.
+                                       R"({"l":[1,)" + over + "]}",
+                                       // Row 3: one digit over, three levels deep -> row null.
+                                       R"({"d":{"x":[{"y":)" + over + "}]}}"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map(
+    {{{"o", R"({"a":)" + at_cap + "}"}, {"l", "[" + at_cap + "]"}}, {}, {}, {}},
+    {true, false, false, false});
+  auto const result = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_EQ(result->null_count(), 3);
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  for (cudf::size_type row = 1; row < 4; ++row) {
+    SCOPED_TRACE(std::format("row={}", row));
+    EXPECT_TRUE(row_is_null(result->view(), row));
+  }
+}
+
+// A refused number nested inside a value nulls the row even when valid pairs already rendered
+// before it, and leaves its neighbours untouched. The nulled row has materialized pairs, so the
+// outer list would carry a non-empty null without the sanitation step -- which
+// `CUDF_TEST_EXPECT_COLUMNS_EQUAL` would catch as an offsets mismatch.
+TEST_F(FromJsonTest, RawMapOpt_Reject_NestedInnerAfterValidPairs)
+{
+  auto const over      = digits(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{
+    R"({"ok":"keep"})",
+    R"({"a":"drop","n":{"deep":)" + over + R"(},"z":"drop too"})",
+    R"({"ok2":"keep2"})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"ok", "keep"}}, {}, {{"ok2", "keep2"}}}, {true, false, true});
+  auto const result = raw_map(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_EQ(result->null_count(), 1);
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_FALSE(row_is_null(result->view(), 2));
+}
+
 // All-canonical, escape-free column: every key/value classifies verbatim, so the extraction takes
 // the raw-copy fast path (the transform gate stays FALSE) and the output is byte-identical to the
 // input ranges. Covers escape-free strings, integers, booleans, an empty object, and duplicate
@@ -1094,7 +1261,7 @@ TEST_F(FromJsonTest, RawMapOpt_WarpBoundaryValueNullMask)
 //     row is nullified (Spark row-level bad-record semantics), even if other keys are valid arrays.
 //   * element = Spark-rendered like the string-map values: strings de-quoted and JSON-unescaped;
 //     numbers re-rendered (float canonical, leading-zero strip, quoted NaN/Infinity); nested
-//     object/array elements keep their VERBATIM raw JSON bytes; bools byte-identical.
+//     object/array elements re-serialized compactly; bools byte-identical.
 //   * element = literal `null` -> NULL element (mask #2); a JSON STRING "null" stays valid.
 //   * element = number past the JSON parser's digit cap -> Spark BAD RECORD: the WHOLE row is
 //     nullified, exactly as for a string-map value (a rejected number sitting directly as a value
@@ -1271,27 +1438,33 @@ TEST_F(FromJsonTest, RawMapArray_EmptyObject)
 //   * value = scalar (string/number/bool) or object (NOT an array, NOT null) -> WHOLE ROW null.
 // Each case is its own row so the kept-vs-nullified rows are pinned independently. The
 // `true`/`false` rows pin that a scalar boolean value takes the same hard-mismatch path as
-// string/number/object.
+// string/number/object. The last row is a number past the parser's digit cap sitting DIRECTLY as
+// the value: it nulls the row through this same category-blind mismatch rule, never through the
+// reject category, which is why the array path needs no nested-reject walk on value nodes.
 TEST_F(FromJsonTest, RawMapArray_NonArrayValuesNullInnerList)
 {
+  auto const over_int  = digits(max_num_digits + 1);
   auto const input_col = cudf::test::strings_column_wrapper{R"({"a":null})",
                                                             R"({"a":"s"})",
                                                             R"({"a":9})",
                                                             R"({"a":{"x":"y"}})",
                                                             R"({"a":true})",
-                                                            R"({"a":false})"};
+                                                            R"({"a":false})",
+                                                            R"({"a":)" + over_int + "}"};
   auto const input     = cudf::strings_column_view{input_col};
 
-  // Row 0 kept (null inner list); rows 1-5 are hard type mismatches -> whole row null. The pairs of
+  // Row 0 kept (null inner list); rows 1-6 are hard type mismatches -> whole row null. The pairs of
   // the nullified rows are ignored by `make_expected_raw_map_array`, so their content is
   // irrelevant.
-  auto const expected = make_expected_raw_map_array({{{"a", null_arr()}},
-                                                     {{"a", null_arr()}},
-                                                     {{"a", null_arr()}},
-                                                     {{"a", null_arr()}},
-                                                     {{"a", null_arr()}},
-                                                     {{"a", null_arr()}}},
-                                                    {true, false, false, false, false, false});
+  auto const expected =
+    make_expected_raw_map_array({{{"a", null_arr()}},
+                                 {{"a", null_arr()}},
+                                 {{"a", null_arr()}},
+                                 {{"a", null_arr()}},
+                                 {{"a", null_arr()}},
+                                 {{"a", null_arr()}},
+                                 {{"a", null_arr()}}},
+                                {true, false, false, false, false, false, false});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
@@ -1312,9 +1485,8 @@ TEST_F(FromJsonTest, RawMapArray_TypeMismatchValueNullsRow)
 }
 
 // One array mixing literal `null`, the STRING "null", a number, both bools, and nested obj/array
-// elements. Pins mask #2 (literal null -> null element) + de-quote together. The number, bools,
-// and nested `{"x":1}`/`[2,3]` elements are copied verbatim (already canonical), so only the
-// strings are de-quoted/unescaped.
+// elements. Pins mask #2 (literal null -> null element) + rendering + de-quote together. The
+// nested `{"x":1}` and `[2,3]` elements are already compact, so their re-render is byte-identical.
 TEST_F(FromJsonTest, RawMapArray_MixedElementKinds)
 {
   auto const input_col =
@@ -1511,6 +1683,75 @@ TEST_F(FromJsonTest, RawMapArray_Render_FloatElements)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
 }
 
+// Nested object/array ELEMENTS re-serialize compactly (whitespace dropped, inner strings
+// re-escaped, inner lenient numbers re-rendered). The empty object and empty array elements
+// close on the token immediately after their open.
+TEST_F(FromJsonTest, RawMapArray_Render_NestedElements)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":[{ "x" : 1 }, [ 2 , 3 ], { }, [ ], [007, "a b"]]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({R"({"x":1})", "[2,3]", "{}", "[]", R"([7,"a b"])"})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Array mirror of RawMapOpt_Render_NestedStringEscapes: the inner strings and the escaped KEY of
+// a nested ELEMENT take the same unescape-then-RE-escape walk, so `\uXXXX` and a surrogate pair
+// become raw UTF-8 and `\/` collapses to `/`, while `\"`, `\\` and `\t` come back byte-identical.
+TEST_F(FromJsonTest, RawMapArray_Render_NestedElementStringEscapes)
+{
+  auto const input_col =
+    cudf::test::strings_column_wrapper{R"({"k":[{"q\"k":"a\"b","bs":"p\\q",)"
+                                       R"("u":"\u4e2d\u56FD","e":"\ud83d\uDE00",)"
+                                       R"("sl":"x\/y","t":"a\tb"}]})"};
+  auto const input = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map_array({{{"k",
+                                   arr({"{\"q\\\"k\":\"a\\\"b\",\"bs\":\"p\\\\q\",\"u\":\"中国\","
+                                        "\"e\":\"\U0001F600\",\"sl\":\"x/y\",\"t\":\"a\\tb\"}"})}}},
+                                all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Nested element deeper than 64 levels (the in-tree `json_parser` depth cap): the token-walk
+// renderer has no depth limit, so a 70-deep element must re-render, not error.
+TEST_F(FromJsonTest, RawMapArray_Render_DeepNestedElement)
+{
+  constexpr int depth  = 70;
+  auto const open      = std::string(depth, '[');
+  auto const close     = std::string(depth, ']');
+  auto const input_col = cudf::test::strings_column_wrapper{"{\"k\":[" + open + "1" + close + "]}"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map_array({{{"k", arr({open + "1" + close})}}}, all_valid(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(input), *expected);
+}
+
+// Array-path mirror of RawMapOpt_Render_NestedManyRows: enough rows that the nested arm of
+// `transform_fn` runs across many thread blocks on the ELEMENT extraction, which passes its own
+// element ranges and categories. The rendered length varies per row so a two-pass sizing mismatch
+// cannot cancel out.
+TEST_F(FromJsonTest, RawMapArray_Render_NestedElementsManyRows)
+{
+  constexpr int num_rows = 50000;
+  std::vector<std::string> input_rows;
+  std::vector<std::vector<kva>> expected_rows;
+  input_rows.reserve(num_rows);
+  expected_rows.reserve(num_rows);
+  for (int r = 0; r < num_rows; ++r) {
+    input_rows.push_back(std::format(R"({{"k":[{{ "a" : 00{0} }}, [ "x\ty" ]]}})", r));
+    expected_rows.push_back({{"k", arr({std::format(R"({{"a":{0}}})", r), R"(["x\ty"])"})}});
+  }
+
+  auto const input_col = cudf::test::strings_column_wrapper(input_rows.begin(), input_rows.end());
+  auto const expected  = make_expected_raw_map_array(expected_rows, all_valid(num_rows));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map_array(cudf::strings_column_view{input_col}), *expected);
+}
+
 // All-canonical, escape-free column (clean strings/ints/bools, an empty array): every key/element
 // classifies verbatim, so the extraction takes the raw-copy fast path (the transform gate stays
 // FALSE) and the output is byte-identical to the raw extraction.
@@ -1590,8 +1831,8 @@ TEST_F(FromJsonTest, RawMapArray_Reject_ElementDigitCapBoundary)
 // A refused ELEMENT nullifies the whole row even when it sits among valid elements and valid keys,
 // and leaves neighbouring rows untouched. The nulled row has materialized pairs, so the outer list
 // would carry a non-empty null without the sanitation step -- `CUDF_TEST_EXPECT_COLUMNS_EQUAL`
-// compares offsets and would fail. A refused number sitting DIRECTLY as a value needs no case of
-// its own: it is already a hard type mismatch (see `RawMapArray_NonArrayValuesNullInnerList`).
+// compares offsets and would fail. A refused number sitting DIRECTLY as a value needs no case
+// here: it is already a hard type mismatch, pinned by `RawMapArray_NonArrayValuesNullInnerList`.
 TEST_F(FromJsonTest, RawMapArray_Reject_ElementNullsWholeRow)
 {
   auto const over      = digits(max_num_digits + 1);
@@ -1608,6 +1849,29 @@ TEST_F(FromJsonTest, RawMapArray_Reject_ElementNullsWholeRow)
   EXPECT_FALSE(row_is_null(result->view(), 0));
   EXPECT_TRUE(row_is_null(result->view(), 1));
   EXPECT_FALSE(row_is_null(result->view(), 2));
+}
+
+// The element mirror of the nested-inner reject: an element that is itself a nested object/array
+// holding a refused number nulls the whole row, at the cap it renders. Both classification paths
+// reach the same sink, so the two engines cannot drift on where the digit cap applies.
+TEST_F(FromJsonTest, RawMapArray_Reject_NestedElementInner)
+{
+  auto const at_cap    = digits(max_num_digits);
+  auto const over      = digits(max_num_digits + 1);
+  auto const input_col = cudf::test::strings_column_wrapper{R"({"k":[{"a":)" + at_cap + "}]}",
+                                                            R"({"k":[{"a":)" + over + "}]}",
+                                                            R"({"k":["ok",[1,)" + over + "]]}"};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected = make_expected_raw_map_array(
+    {{{"k", arr({R"({"a":)" + at_cap + "}"})}}, {}, {}}, {true, false, false});
+  auto const result = raw_map_array(input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
+
+  EXPECT_EQ(result->null_count(), 2);
+  EXPECT_FALSE(row_is_null(result->view(), 0));
+  EXPECT_TRUE(row_is_null(result->view(), 1));
+  EXPECT_TRUE(row_is_null(result->view(), 2));
 }
 
 // Whitespace around values: insignificant whitespace is not part of the element bytes. The

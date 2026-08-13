@@ -421,6 +421,7 @@ enum class token_category : int8_t {
   float_norm,       // float: parse and re-render via Java `Double.toString` semantics
   nonnumeric,       // NaN/Infinity spelling: fixed quoted canonical form
   rejected,         // number past the parser's digit cap: renders 0 bytes and nullifies its row
+  nested,           // object/array value or element: compact re-render from tokens
   null_value        // JSON `null` value in the string map: SQL NULL (empty span)
 };
 
@@ -731,10 +732,8 @@ __device__ token_category classify_value_bytes(char const* json,
 }
 
 // Rendering category of a selected node/element from its begin token and de-quoted byte range.
-// A string or key carrying a backslash escape needs JSON-unescaping, and a value's bytes decide
-// whether it needs number canonicalization or SQL NULL (`classify_value_bytes`); everything else --
-// an escape-free string/key, a bool, or a nested object/array -- is `verbatim` and copies its raw
-// byte range unchanged.
+// Escapes, nested values, and a value's own bytes each pick a renderer; an escape-free string or
+// key and a bool stay `verbatim`.
 __device__ inline token_category classify_token(char const* json,
                                                 PdaTokenT const token,
                                                 SymbolOffsetT const range_begin,
@@ -745,9 +744,35 @@ __device__ inline token_category classify_token(char const* json,
     case token_t::FieldNameBegin:
       return contains_backslash(json, range_begin, range_end) ? token_category::string_unescape
                                                               : token_category::verbatim;
+    case token_t::StructBegin:
+    case token_t::ListBegin: return token_category::nested;
     case token_t::ValueBegin: return classify_value_bytes(json, range_begin, range_end);
     default: return token_category::verbatim;
   }
+}
+
+// Does this nested value hold a number the parser refuses? Jackson throws while tokenizing such a
+// number at any depth, so one buried in a nested value makes the record a Spark bad record exactly
+// as a top-level value does. Walks the same token subrange `render_nested` renders, keeping the
+// nesting balance the same way, and stops at the first offender.
+__device__ inline bool nested_has_rejected_scalar(
+  cudf::device_span<PdaTokenT const> tokens,
+  cudf::device_span<SymbolOffsetT const> token_positions,
+  char const* json,
+  NodeIndexT const begin_token_idx)
+{
+  int32_t depth = 0;
+  for (auto i = begin_token_idx; i < static_cast<NodeIndexT>(tokens.size()); ++i) {
+    depth += nested_node_to_value(tokens[i]);
+    // The partner `ValueEnd` position is one past the scalar's last byte, as in `render_nested`.
+    if (tokens[i] == token_t::ValueBegin &&
+        classify_value_bytes(json, token_positions[i], token_positions[i + 1]) ==
+          token_category::rejected) {
+      return true;
+    }
+    if (depth == 0) { break; }  // the matching close was just consumed
+  }
+  return false;
 }
 
 // The two-pass write convention shared by all renderers below (and `make_strings_children`):
@@ -844,6 +869,104 @@ __device__ cudf::size_type render_nonnumeric(char const* json, SymbolOffsetT con
   return ftos_converter::double_normalization(value, out);
 }
 
+// Render one scalar (`ValueBegin` text) inside a nested value: lenient ints/floats/non-numerics
+// re-render; `true`/`false` and a nested `null` stay their literal bytes (Jackson keeps a nested
+// `null` literal -- only a top-level map value `null` becomes a SQL NULL).
+__device__ cudf::size_type render_scalar(char const* json,
+                                         SymbolOffsetT const begin,
+                                         SymbolOffsetT const end,
+                                         char* out)
+{
+  switch (classify_value_bytes(json, begin, end)) {
+    case token_category::int_strip: return render_stripped_int(json, begin, end, out);
+    case token_category::float_norm: return render_normalized_float(json, begin, end, out);
+    case token_category::nonnumeric: return render_nonnumeric(json, begin, out);
+    default: {
+      auto const size = static_cast<cudf::size_type>(end - begin);
+      if (out != nullptr) { memcpy(out, json + begin, size); }
+      return size;
+    }
+  }
+}
+
+// Compact re-render of a nested (object/array) node from its token subrange, matching Jackson's
+// `copyCurrentStructure`: structural bytes come from the tokens (whitespace vanishes by
+// construction), keys and inner strings are re-escaped, scalars re-rendered via `render_scalar`.
+// Walking the lenient libcudf token stream makes lenient scalars correct by construction and
+// imposes no nesting-depth limit (the per-string re-parses are flat root scalars). Begin/end
+// token pairs of terminal tokens are adjacent in the stream, so `i + 1` addresses each partner.
+__device__ cudf::size_type render_nested(cudf::device_span<PdaTokenT const> tokens,
+                                         cudf::device_span<SymbolOffsetT const> token_positions,
+                                         char const* json,
+                                         NodeIndexT const begin_token_idx,
+                                         char* out)
+{
+  cudf::size_type size = 0;
+  auto const emit      = [&](char const c) {
+    if (out != nullptr) { out[size] = c; }
+    ++size;
+  };
+  // Write a quoted key or string value re-escaped, via a root-scalar parse of its quoted bytes.
+  auto const emit_escaped_string = [&](SymbolOffsetT const quoted_begin,
+                                       SymbolOffsetT const quoted_end) {
+    json_parser parser(
+      char_range(json + quoted_begin, static_cast<cudf::size_type>(quoted_end - quoted_begin)));
+    parser.next_token();
+    size += parser.write_escaped_text(out != nullptr ? out + size : nullptr);
+  };
+
+  // A just-closed value makes a following sibling need a ',' separator.
+  bool prev_closed_value = false;
+  // The render loop keeps the nesting balance itself rather than paying a separate matching-close
+  // pre-scan, which would double the token walk in each of the two passes. The first token is
+  // always an open (only `StructBegin`/`ListBegin` classify `nested`) and every partner token the
+  // loop skips has weight 0, so the balance reaches 0 exactly at the matching close. An unbalanced
+  // stream cannot occur in a validated one; if it did, both passes would render the same partial
+  // text, so their sizes still agree.
+  int32_t depth = 0;
+  for (auto i = begin_token_idx; i < static_cast<NodeIndexT>(tokens.size()); ++i) {
+    depth += nested_node_to_value(tokens[i]);
+    switch (tokens[i]) {
+      case token_t::StructBegin:
+      case token_t::ListBegin:
+        if (prev_closed_value) { emit(','); }
+        emit(tokens[i] == token_t::StructBegin ? '{' : '[');
+        prev_closed_value = false;
+        break;
+      case token_t::StructEnd:
+      case token_t::ListEnd:
+        emit(tokens[i] == token_t::StructEnd ? '}' : ']');
+        prev_closed_value = true;
+        break;
+      case token_t::FieldNameBegin:
+        if (prev_closed_value) { emit(','); }
+        // Quoted key = [pos, partner pos + 1); the partner `FieldNameEnd` sits on the close quote.
+        emit_escaped_string(token_positions[i], token_positions[i + 1] + 1);
+        emit(':');
+        prev_closed_value = false;
+        ++i;  // skip the FieldNameEnd partner
+        break;
+      case token_t::StringBegin:
+        if (prev_closed_value) { emit(','); }
+        emit_escaped_string(token_positions[i], token_positions[i + 1] + 1);
+        prev_closed_value = true;
+        ++i;  // skip the StringEnd partner
+        break;
+      case token_t::ValueBegin:
+        if (prev_closed_value) { emit(','); }
+        // The partner `ValueEnd` position is one past the scalar's last byte.
+        size += render_scalar(
+          json, token_positions[i], token_positions[i + 1], out != nullptr ? out + size : nullptr);
+        prev_closed_value = true;
+        ++i;  // skip the ValueEnd partner
+        break;
+      default: break;  // StructMemberBegin/StructMemberEnd contribute no bytes
+    }
+    if (depth == 0) { break; }  // the matching close was just emitted
+  }
+  return size;
+}
+
 // Convert token positions to node ranges and rendering categories for each valid node, fused in
 // one pass (the category classification reads the same token and, for strings/scalars, scans the
 // just-computed byte range). Unselected nodes stay `{0, 0}`/`verbatim` and are never scanned.
@@ -853,6 +976,10 @@ struct node_classify_fn {
   cudf::device_span<SymbolOffsetT const> token_positions;
   cudf::device_span<NodeIndexT const> node_token_ids;
   cudf::device_span<node_kind const> key_or_value;
+  // Only the map path folds a value node's category into the row-null decision. The array path
+  // reads these categories for keys alone and catches a refused number through its own element
+  // classifier, so walking every array value's subtree there would be pure waste.
+  bool classify_nested_reject;
 
   cuda::std::pair<SymbolOffsetT, SymbolOffsetT>* node_ranges;
   token_category* node_categories;
@@ -883,6 +1010,13 @@ struct node_classify_fn {
 
       range    = compute_token_range(tokens, token_positions, token_idx, include_quote_char);
       category = classify_token(input_json.data(), tokens[token_idx], range.first, range.second);
+      // A refused number anywhere inside a nested value nullifies the row just as a top-level one
+      // does, so on the map path the nested node inherits `rejected` and the shared sink does the
+      // rest.
+      if (classify_nested_reject && category == token_category::nested &&
+          nested_has_rejected_scalar(tokens, token_positions, input_json.data(), token_idx)) {
+        category = token_category::rejected;
+      }
     }
     node_ranges[node_id]     = range;
     node_categories[node_id] = category;
@@ -901,6 +1035,7 @@ classified_nodes compute_node_ranges_and_categories(
   cudf::device_span<SymbolOffsetT const> token_positions,
   cudf::device_span<NodeIndexT const> node_token_ids,
   cudf::device_span<node_kind const> key_or_value,
+  bool classify_nested_reject,
   rmm::cuda_stream_view stream)
 {
   auto const num_nodes = node_token_ids.size();
@@ -916,6 +1051,7 @@ classified_nodes compute_node_ranges_and_categories(
                                     token_positions,
                                     node_token_ids,
                                     key_or_value,
+                                    classify_nested_reject,
                                     node_ranges.begin(),
                                     node_categories.begin()});
 
@@ -956,8 +1092,11 @@ struct substring_fn {
 // the caller from the same categories).
 struct transform_fn {
   cudf::device_span<char const> d_string;
+  cudf::device_span<PdaTokenT const> tokens;
+  cudf::device_span<SymbolOffsetT const> token_positions;
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> d_ranges;
   cudf::device_span<token_category const> d_categories;
+  cudf::device_span<NodeIndexT const> d_token_ids;
 
   cudf::size_type* d_sizes;
   char* d_chars;
@@ -988,6 +1127,9 @@ struct transform_fn {
       // The parser refuses this number, so the whole row is nullified: write nothing, in BOTH
       // passes, and never invoke the parser on bytes it already rejected.
       case token_category::rejected: break;
+      case token_category::nested:
+        size = render_nested(tokens, token_positions, json, d_token_ids[idx], out);
+        break;
       case token_category::null_value: break;  // SQL NULL: empty span, write nothing
     }
     if (out == nullptr) { d_sizes[idx] = size; }
@@ -1080,14 +1222,17 @@ conversion_gates compute_transform_gates(extraction_spec first,
 // selected node classified `verbatim` (`needs_transform == false`, precomputed by
 // `compute_transform_gates` and carried on the extraction itself), the extraction is exactly the
 // raw byte-range gather; otherwise the compaction additionally carries each node's category and
-// materializes through `transform_fn`. `attach_null_value_mask` turns each `null_value` slot into a
-// null entry of the returned strings column (the compacted categories provide the validity); the
-// caller passes it for the string-map VALUES extraction, and only when the gate pass actually found
-// such a value -- an all-valid mask would cost an allocation, a pass, and a `bools_to_mask` only to
-// be discarded.
+// token id and materializes through `transform_fn`. `attach_null_value_mask` turns each
+// `null_value` slot into a null entry of the returned strings column (the compacted categories
+// provide the validity); the caller passes it for the string-map VALUES extraction, and only when
+// the gate pass actually found such a value -- an all-valid mask would cost an allocation, a pass,
+// and a `bools_to_mask` only to be discarded.
 std::unique_ptr<cudf::column> extract_keys_or_values(
   gated_extraction const& extraction,
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
+  cudf::device_span<NodeIndexT const> node_token_ids,
+  cudf::device_span<PdaTokenT const> tokens,
+  cudf::device_span<SymbolOffsetT const> token_positions,
   cudf::device_span<char const> input_json,
   bool attach_null_value_mask,
   rmm::cuda_stream_view stream,
@@ -1125,15 +1270,17 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
       num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
   }
 
-  // Transform path: compact (range, category) with the same stencil in one pass, then
+  // Transform path: compact (range, category, token id) with the same stencil in one pass, then
   // materialize through the category dispatch.
   auto const num_nodes = node_ranges.size();
   auto extracted_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
   auto extracted_categories = rmm::device_uvector<token_category>(num_nodes, stream);
-  auto const zip_in = thrust::make_zip_iterator(node_ranges.begin(), spec.categories.begin());
-  auto const zip_out =
-    thrust::make_zip_iterator(extracted_ranges.begin(), extracted_categories.begin());
+  auto extracted_token_ids  = rmm::device_uvector<NodeIndexT>(num_nodes, stream);
+  auto const zip_in =
+    thrust::make_zip_iterator(node_ranges.begin(), spec.categories.begin(), node_token_ids.begin());
+  auto const zip_out = thrust::make_zip_iterator(
+    extracted_ranges.begin(), extracted_categories.begin(), extracted_token_ids.begin());
   auto const zip_end     = copy_if(zip_in,
                                zip_in + num_nodes,
                                thrust::make_counting_iterator(0),
@@ -1143,8 +1290,16 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
   auto const num_extract = static_cast<cudf::size_type>(zip_end - zip_out);
   if (num_extract == 0) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING}); }
 
-  auto [offsets, chars] = cudf::strings::detail::make_strings_children(
-    transform_fn{input_json, extracted_ranges, extracted_categories}, num_extract, stream, mr);
+  auto [offsets, chars] =
+    cudf::strings::detail::make_strings_children(transform_fn{input_json,
+                                                              tokens,
+                                                              token_positions,
+                                                              extracted_ranges,
+                                                              extracted_categories,
+                                                              extracted_token_ids},
+                                                 num_extract,
+                                                 stream,
+                                                 mr);
   auto output = cudf::make_strings_column(
     num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
 
@@ -1423,6 +1578,11 @@ struct element_classify_fn {
         range = {range_begin, range_begin};
       } else {
         category = classify_token(input_json.data(), token, range_begin, range_end);
+        // Same sink as the value path: a refused number inside a nested ELEMENT nullifies its row.
+        if (category == token_category::nested &&
+            nested_has_rejected_scalar(tokens, token_positions, input_json.data(), token_idx)) {
+          category = token_category::rejected;
+        }
       }
     }
 
@@ -1458,8 +1618,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
 
   // Compute the byte range and rendering category for each node. The ranges identify positions to
   // extract nodes from the unified json string; the categories drive the Spark-render dispatch.
-  auto const classified = compute_node_ranges_and_categories(
-    preprocessed_input, tokens, token_positions, node_token_ids, is_key_or_value_node, stream);
+  auto const classified       = compute_node_ranges_and_categories(preprocessed_input,
+                                                             tokens,
+                                                             token_positions,
+                                                             node_token_ids,
+                                                             is_key_or_value_node,
+                                                             /*classify_nested_reject=*/true,
+                                                             stream);
   auto const& node_ranges     = classified.ranges;
   auto const& node_categories = classified.categories;
 
@@ -1470,13 +1635,27 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
                             {node_kind::value, is_key_or_value_node, node_categories},
                             stream);
 
-  auto extracted_keys = extract_keys_or_values(
-    keys, node_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
+  auto extracted_keys = extract_keys_or_values(keys,
+                                               node_ranges,
+                                               node_token_ids,
+                                               tokens,
+                                               token_positions,
+                                               preprocessed_input,
+                                               /*attach_null_value_mask=*/false,
+                                               stream,
+                                               mr);
   // A JSON `null` VALUE keeps its pair but nulls the values-child entry (SQL NULL), so the values
   // extraction attaches the null mask derived from its `null_value` categories -- only when the
   // gate pass saw such a value, since otherwise the mask would be all-valid and thrown away.
-  auto extracted_values = extract_keys_or_values(
-    values, node_ranges, preprocessed_input, values_have_null_value, stream, mr);
+  auto extracted_values = extract_keys_or_values(values,
+                                                 node_ranges,
+                                                 node_token_ids,
+                                                 tokens,
+                                                 token_positions,
+                                                 preprocessed_input,
+                                                 values_have_null_value,
+                                                 stream,
+                                                 mr);
   CUDF_EXPECTS(extracted_keys->size() == extracted_values->size(),
                "Invalid key-value pair extraction.");
 
@@ -1598,9 +1777,16 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto const& is_key_or_value_node = tok.is_key_or_value_node;
 
   // Keys use the shared node-range/category computation; element ranges and categories come from
-  // the fused classifier below.
-  auto const classified = compute_node_ranges_and_categories(
-    preprocessed_input, tokens, token_positions, node_token_ids, is_key_or_value_node, stream);
+  // the fused classifier below. Value nodes need no nested-reject walk here: a refused number
+  // inside an array element is caught by `element_classify_fn`, and one that IS the value makes it
+  // a non-array, which the type-mismatch rule below already nullifies.
+  auto const classified       = compute_node_ranges_and_categories(preprocessed_input,
+                                                             tokens,
+                                                             token_positions,
+                                                             node_token_ids,
+                                                             is_key_or_value_node,
+                                                             /*classify_nested_reject=*/false,
+                                                             stream);
   auto const& node_ranges     = classified.ranges;
   auto const& node_categories = classified.categories;
 
@@ -1640,12 +1826,26 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   // element validity source.
   CUDF_EXPECTS(!elements_have_null_value, "Unexpected null-value category on the element path.");
 
-  auto extracted_keys = extract_keys_or_values(
-    keys, node_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
+  auto extracted_keys = extract_keys_or_values(keys,
+                                               node_ranges,
+                                               node_token_ids,
+                                               tokens,
+                                               token_positions,
+                                               preprocessed_input,
+                                               /*attach_null_value_mask=*/false,
+                                               stream,
+                                               mr);
 
   // Extract element strings with the shared extractor (a 0-null STRING column); attach mask #2.
-  auto extracted_elements = extract_keys_or_values(
-    elements, element_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
+  auto extracted_elements = extract_keys_or_values(elements,
+                                                   element_ranges,
+                                                   node_token_ids,
+                                                   tokens,
+                                                   token_positions,
+                                                   preprocessed_input,
+                                                   /*attach_null_value_mask=*/false,
+                                                   stream,
+                                                   mr);
   {
     // Mask #2 over only the selected (element-flagged) nodes, in element document order, matching
     // the order `extract_keys_or_values` emits.
