@@ -1895,6 +1895,34 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_exceptionPolicyReportsSliceRelativeRow() {
+    try (ColumnVector full = ColumnVector.fromStrings(
+            "outside", "2024-05-06", "2024-05-06xxx", " 2024-05-07 ");
+        ColumnVector in = full.subVector(1, 4)) {
+      CastException error = Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", false, true));
+      Assertions.assertEquals(1, error.getRowWithError());
+      Assertions.assertEquals("2024-05-06xxx", error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyReportsFirstDisagreementAcrossBlocks() {
+    String[] inputs = new String[4096];
+    Arrays.fill(inputs, "invalid");
+    inputs[17] = "2024-05-06xxx";
+    inputs[4095] = " 2024-05-07 ";
+    try (ColumnVector in = ColumnVector.fromStrings(inputs)) {
+      CastException error = Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", false, true));
+      Assertions.assertEquals(17, error.getRowWithError());
+      Assertions.assertEquals(inputs[17], error.getStringWithError());
+    }
+  }
+
+  @Test
   void parseTimestampWithFormat_rejectsConflictingPolicies() {
     try (ColumnVector in = ColumnVector.fromStrings("2024-05-06")) {
       Assertions.assertThrows(
