@@ -37,6 +37,7 @@
 #include <thrust/iterator/counting_iterator.h>
 
 #include <cctype>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
