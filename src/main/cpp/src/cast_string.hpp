@@ -226,6 +226,10 @@ std::unique_ptr<cudf::column> parse_strings_to_date(
  * silently accepts (and discards) any non-digit suffix including 'Z', so callers must not
  * infer a UTC offset from a trailing 'Z'.
  *
+ * @throws spark_rapids_jni::cast_error If CORRECTED rejects a row that LEGACY accepts while
+ *                                       exception policy is enabled.
+ * @throws std::invalid_argument If legacy and exception policies are both enabled.
+ *
  * @param input The input string column.
  * @param format Spark format pattern (e.g. `"yyyy-MM-dd HH:mm:ss"`).
  * @param legacy True for `LegacyTimeParserPolicy`, false for CORRECTED/EXCEPTION.
