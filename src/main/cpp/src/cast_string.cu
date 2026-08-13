@@ -626,7 +626,7 @@ void validate_ansi_column(column_view const& col,
     cudaMemcpyAsync(&string_bounds,
                     &source_col.offsets().data<size_type>()[*first_error],
                     sizeof(size_type) * 2,
-                    cudaMemcpyDeviceToHost,
+                    cudaMemcpyDefault,
                     stream.value());
     stream.synchronize();
 
@@ -636,7 +636,7 @@ void validate_ansi_column(column_view const& col,
     cudaMemcpyAsync(dest.data(),
                     &source_col.chars_begin(stream)[string_bounds[0]],
                     string_bounds[1] - string_bounds[0],
-                    cudaMemcpyDeviceToHost,
+                    cudaMemcpyDefault,
                     stream.value());
     stream.synchronize();
 

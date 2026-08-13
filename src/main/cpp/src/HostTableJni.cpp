@@ -86,7 +86,7 @@ uint8_t* copy_to_host_async(
   void const* src, uint8_t* dest, std::size_t size, uint8_t const* dest_end, cudaStream_t stream)
 {
   if (dest + size > dest_end) { throw std::runtime_error("buffer overflow"); }
-  CUDF_CUDA_TRY(cudaMemcpyAsync(dest, src, size, cudaMemcpyDeviceToHost, stream));
+  CUDF_CUDA_TRY(cudaMemcpyAsync(dest, src, size, cudaMemcpyDefault, stream));
   return dest + size;
 }
 

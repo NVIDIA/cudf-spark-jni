@@ -1648,7 +1648,7 @@ void assemble_copy(cudf::device_span<assemble_batch> batches,
   cudaMemcpyAsync(h_column_info.data(),
                   column_info.data(),
                   column_info.size() * sizeof(assemble_column_info),
-                  cudaMemcpyDeviceToHost,
+                  cudaMemcpyDefault,
                   stream);
   stream.synchronize();
 }

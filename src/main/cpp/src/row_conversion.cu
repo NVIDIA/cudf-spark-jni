@@ -1599,7 +1599,7 @@ batch_data build_batches(size_type num_rows,
       CUDF_CUDA_TRY(cudaMemcpyAsync(batch_row_offsets.data() + last_row_end,
                                     output_batch_row_offsets.data(),
                                     num_rows_in_batch * sizeof(size_type),
-                                    cudaMemcpyDeviceToDevice,
+                                    cudaMemcpyDefault,
                                     stream.value()));
     }
 

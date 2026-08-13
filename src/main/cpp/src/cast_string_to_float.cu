@@ -940,7 +940,7 @@ std::unique_ptr<column> string_to_float(data_type dtype,
       cudaMemcpyAsync(&string_bounds,
                       &string_col.offsets().data<size_type>()[error_row],
                       sizeof(size_type) * 2,
-                      cudaMemcpyDeviceToHost,
+                      cudaMemcpyDefault,
                       stream.value());
       stream.synchronize();
 
@@ -950,7 +950,7 @@ std::unique_ptr<column> string_to_float(data_type dtype,
       cudaMemcpyAsync(dest.data(),
                       &string_col.chars_begin(stream)[string_bounds[0]],
                       string_bounds[1] - string_bounds[0],
-                      cudaMemcpyDeviceToHost,
+                      cudaMemcpyDefault,
                       stream.value());
       stream.synchronize();
 

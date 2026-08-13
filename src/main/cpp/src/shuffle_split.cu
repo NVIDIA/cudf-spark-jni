@@ -1081,7 +1081,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   cudaMemcpyAsync(&dst_buf_total_size,
                   d_partition_offsets.begin() + num_partitions,
                   sizeof(size_t),
-                  cudaMemcpyDeviceToHost,
+                  cudaMemcpyDefault,
                   stream);
 
   // generate destination offsets for each of the source copies, by partition, by section.

@@ -352,7 +352,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
                                 host_tokens.data(),
                                 sizeof(format_token) * host_tokens.size(),
-                                cudaMemcpyHostToDevice,
+                                cudaMemcpyDefault,
                                 stream.value()));
 
   auto const d_input = cudf::column_device_view::create(

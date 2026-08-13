@@ -884,7 +884,7 @@ TEST_F(ShuffleSplitTests, MixedValidity)
         cudaMemcpy(static_cast<uint8_t*>(full.data()) + pos,
                    shuf[idx].result.partitions->data(),
                    shuf[idx].result.partitions->size(),
-                   cudaMemcpyDeviceToDevice);
+                   cudaMemcpyDefault);
         h_full_offsets[idx] = pos;
         pos += shuf[idx].result.partitions->size();
       }
@@ -892,7 +892,7 @@ TEST_F(ShuffleSplitTests, MixedValidity)
       cudaMemcpy(full_offsets.data(),
                  h_full_offsets.data(),
                  sizeof(size_t) * h_full_offsets.size(),
-                 cudaMemcpyHostToDevice);
+                 cudaMemcpyDefault);
 
       spark_rapids_jni::shuffle_split_metadata md;
       md.col_info.push_back({cudf::type_id::INT32, 0});
