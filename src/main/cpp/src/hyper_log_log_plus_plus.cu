@@ -396,7 +396,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
                                           int64_t const num_groups,
                                           cudf::device_span<cudf::size_type const> group_labels,
                                           int64_t const precision,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   int64_t num_registers_per_sketch   = 1 << precision;
@@ -427,7 +427,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
       int64_t num_blocks_p1 =
         cudf::util::div_rounding_up_safe(num_threads_partial_kernel, block_size);
       partial_group_sketches_from_hashs_kernel<block_size, num_hashs_per_thread>
-        <<<num_blocks_p1, block_size, 0, stream.value()>>>(*d_hashs,
+        <<<num_blocks_p1, block_size, 0, stream.get()>>>(*d_hashs,
                                                            group_labels,
                                                            precision,
                                                            sketches_output.begin(),
@@ -438,7 +438,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
     auto num_merge_threads = num_registers_per_sketch;
     auto num_merge_blocks  = cudf::util::div_rounding_up_safe(num_merge_threads, block_size);
     merge_sketches_vertically<block_size>
-      <<<num_merge_blocks, block_size, block_size, stream.value()>>>(
+      <<<num_merge_blocks, block_size, block_size, stream.get()>>>(
         num_threads_partial_kernel,  // num_sketches
         num_registers_per_sketch,
         sketches_output.begin(),
@@ -472,7 +472,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
   // 5. compact sketches
   auto num_phase3_threads = num_groups * num_long_cols;
   auto num_phase3_blocks  = cudf::util::div_rounding_up_safe(num_phase3_threads, block_size);
-  compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.value()>>>(
+  compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.get()>>>(
     num_groups, num_registers_per_sketch, d_results, sketches_output);
 
   return result;
@@ -589,7 +589,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
   int64_t const num_groups,
   cudf::device_span<cudf::size_type const> group_labels,
   int64_t const precision,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   int64_t num_registers_per_sketch        = 1 << precision;
@@ -618,7 +618,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
     auto d_inputs   = cudf::detail::make_device_uvector(input_cols, stream, default_mr);
     // 1st kernel: partially group
     partial_group_long_sketches_kernel<block_size, num_longs_per_threads>
-      <<<num_blocks, block_size, 0, stream.value()>>>(d_inputs,
+      <<<num_blocks, block_size, 0, stream.get()>>>(d_inputs,
                                                       num_sketches,
                                                       num_threads_per_col_phase1,
                                                       num_registers_per_sketch,
@@ -631,7 +631,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
     auto const num_phase2_blocks = cudf::util::div_rounding_up_safe(num_phase2_threads, block_size);
     // 2nd kernel: vertical merge
     merge_sketches_vertically<block_size>
-      <<<num_phase2_blocks, block_size, block_size, stream.value()>>>(
+      <<<num_phase2_blocks, block_size, block_size, stream.get()>>>(
         num_threads_per_col_phase1,  // num_sketches
         num_registers_per_sketch,
         registers_output_cache.begin(),
@@ -659,7 +659,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
   // 3rd kernel: compact
   auto num_phase3_threads = num_groups * num_long_cols;
   auto num_phase3_blocks  = cudf::util::div_rounding_up_safe(num_phase3_threads, block_size);
-  compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.value()>>>(
+  compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.get()>>>(
     num_groups, num_registers_per_sketch, d_sketches_output, registers_output_cache);
 
   return make_structs_column(num_groups, std::move(results), 0, rmm::device_buffer{});
@@ -730,7 +730,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
 
 std::unique_ptr<cudf::scalar> reduce_hllpp(cudf::column_view const& input,
                                            int64_t const precision,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   int64_t num_registers_per_sketch = 1L << precision;
@@ -767,12 +767,12 @@ std::unique_ptr<cudf::scalar> reduce_hllpp(cudf::column_view const& input,
     // use shared memory, max shared memory is 2^12 * 4 = 16M
     auto shared_mem_size = num_registers_per_sketch * sizeof(int32_t);
     reduce_hllpp_kernel<block_size>
-      <<<1, block_size, shared_mem_size, stream.value()>>>(*d_hashs, d_results, precision, nullptr);
+      <<<1, block_size, shared_mem_size, stream.get()>>>(*d_hashs, d_results, precision, nullptr);
   } else {
     // use global memory because shared memory may be not enough
     auto mem_cache = rmm::device_uvector<int32_t>(num_registers_per_sketch, stream, default_mr);
     reduce_hllpp_kernel<block_size>
-      <<<1, block_size, 0, stream.value()>>>(*d_hashs, d_results, precision, mem_cache.data());
+      <<<1, block_size, 0, stream.get()>>>(*d_hashs, d_results, precision, mem_cache.data());
   }
 
   // 3. create struct scalar
@@ -800,7 +800,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
 
 std::unique_ptr<cudf::scalar> reduce_merge_hllpp(cudf::column_view const& input,
                                                  int64_t const precision,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   // create device input
@@ -837,13 +837,13 @@ std::unique_ptr<cudf::scalar> reduce_merge_hllpp(cudf::column_view const& input,
   constexpr int64_t block_size = 256;
   auto num_blocks              = cudf::util::div_rounding_up_safe(num_threads, block_size);
   auto output_cache = rmm::device_uvector<int32_t>(num_registers_per_sketch, stream, default_mr);
-  reduce_merge_hll_kernel_vertically<block_size><<<num_blocks, block_size, 0, stream.value()>>>(
+  reduce_merge_hll_kernel_vertically<block_size><<<num_blocks, block_size, 0, stream.get()>>>(
     d_inputs, input.size(), num_registers_per_sketch, output_cache.begin());
 
   // compact to longs
   auto const num_compact_threads = num_long_cols;
   auto const num_compact_blocks = cudf::util::div_rounding_up_safe(num_compact_threads, block_size);
-  compact_kernel<block_size><<<num_compact_blocks, block_size, 0, stream.value()>>>(
+  compact_kernel<block_size><<<num_compact_blocks, block_size, 0, stream.get()>>>(
     1 /** num_groups **/, num_registers_per_sketch, d_results, output_cache);
 
   // create scalar
@@ -882,7 +882,7 @@ std::unique_ptr<cudf::column> group_hyper_log_log_plus_plus(
   int64_t const num_groups,
   cudf::device_span<cudf::size_type const> group_labels,
   int64_t const precision,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(precision >= 4, "HyperLogLogPlusPlus requires precision bigger than 4.");
@@ -895,7 +895,7 @@ std::unique_ptr<cudf::column> group_merge_hyper_log_log_plus_plus(
   int64_t const num_groups,
   cudf::device_span<cudf::size_type const> group_labels,
   int64_t const precision,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(precision >= 4, "HyperLogLogPlusPlus requires precision bigger than 4.");
@@ -914,7 +914,7 @@ std::unique_ptr<cudf::column> group_merge_hyper_log_log_plus_plus(
 
 std::unique_ptr<cudf::scalar> reduce_hyper_log_log_plus_plus(cudf::column_view const& input,
                                                              int64_t const precision,
-                                                             rmm::cuda_stream_view stream,
+                                                             cuda::stream_ref stream,
                                                              rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(precision >= 4, "HyperLogLogPlusPlus requires precision bigger than 4.");
@@ -925,7 +925,7 @@ std::unique_ptr<cudf::scalar> reduce_hyper_log_log_plus_plus(cudf::column_view c
 std::unique_ptr<cudf::scalar> reduce_merge_hyper_log_log_plus_plus(
   cudf::column_view const& input,
   int64_t const precision,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(precision >= 4, "HyperLogLogPlusPlus requires precision bigger than 4.");
@@ -944,7 +944,7 @@ std::unique_ptr<cudf::scalar> reduce_merge_hyper_log_log_plus_plus(
 
 std::unique_ptr<cudf::column> estimate_from_hll_sketches(cudf::column_view const& input,
                                                          int precision,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(precision >= 4, "HyperLogLogPlusPlus requires precision bigger than 4.");

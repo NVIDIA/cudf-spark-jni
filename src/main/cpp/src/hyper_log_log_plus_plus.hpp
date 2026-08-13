@@ -20,7 +20,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
+#include <cuda/stream_ref>
 
 namespace spark_rapids_jni {
 
@@ -34,7 +34,7 @@ std::unique_ptr<cudf::column> group_hyper_log_log_plus_plus(
   int64_t const num_groups,
   cudf::device_span<cudf::size_type const> group_labels,
   int64_t const precision,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream          = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -47,7 +47,7 @@ std::unique_ptr<cudf::column> group_merge_hyper_log_log_plus_plus(
   int64_t const num_groups,
   cudf::device_span<cudf::size_type const> group_labels,
   int64_t const precision,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream          = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -58,7 +58,7 @@ std::unique_ptr<cudf::column> group_merge_hyper_log_log_plus_plus(
 std::unique_ptr<cudf::scalar> reduce_hyper_log_log_plus_plus(
   cudf::column_view const& input,
   int64_t const precision,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream          = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -69,7 +69,7 @@ std::unique_ptr<cudf::scalar> reduce_hyper_log_log_plus_plus(
 std::unique_ptr<cudf::scalar> reduce_merge_hyper_log_log_plus_plus(
   cudf::column_view const& input,
   int64_t const precision,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream          = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -81,6 +81,6 @@ std::unique_ptr<cudf::scalar> reduce_merge_hyper_log_log_plus_plus(
 std::unique_ptr<cudf::column> estimate_from_hll_sketches(
   cudf::column_view const& input,
   int precision,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream          = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 }  // namespace spark_rapids_jni
