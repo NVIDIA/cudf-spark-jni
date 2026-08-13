@@ -1847,6 +1847,8 @@ public class CastStringsTest {
     // rejects them, while java.text.SimpleDateFormat accepts them.
     String[][] cases = {
         {"yyyy-MM-dd", "2024-05-06xxx"},
+        {"yyyy-MM-dd", "2024-05-06\u0000x"},
+        {"yyyy-MM-dd", "2024-05-06😀"},
         {"yyyy-MM-dd", " 2024-05-06 "},
         {"yyyy-MM-dd", "2024- 05- 06"},
         {"yyyy-MM-dd HH:mm:ss", "1999-12-31  11:59:59"}
