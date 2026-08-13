@@ -21,8 +21,10 @@
 #include <pthread.h>
 
 #include <exception>
+#include <format>
 #include <iostream>
 #include <map>
+#include <type_traits>
 
 // thread-safe ptree
 #define BOOST_SPIRIT_THREADSAFE
@@ -33,7 +35,22 @@
 #include <sys/time.h>
 
 // Format enums for logging
-auto format_as(CUpti_CallbackDomain domain) { return fmt::underlying(domain); }
+auto format_as(CUpti_CallbackDomain domain)
+{
+  return static_cast<std::underlying_type_t<CUpti_CallbackDomain>>(domain);
+}
+
+template <typename T>
+  requires std::is_enum_v<T> && requires(T t) { format_as(t); }
+struct std::formatter<T> : std::formatter<std::underlying_type_t<T>> {
+  auto format(T v, auto& ctx) const
+  {
+    return std::formatter<std::underlying_type_t<T>>::format(format_as(v), ctx);
+  }
+};
+
+template <>
+struct std::formatter<decltype(inotify_event::name)> : std::formatter<char const*> {};
 
 namespace {
 
