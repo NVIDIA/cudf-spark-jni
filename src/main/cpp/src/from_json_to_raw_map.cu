@@ -15,6 +15,7 @@
  */
 
 #include "from_json_to_raw_map_debug.cuh"
+#include "ftos_converter.cuh"
 #include "json_parser.cuh"
 #include "json_utils.hpp"
 #include "nvtx_ranges.hpp"
@@ -411,11 +412,16 @@ __device__ inline bool is_key_node(node_kind const k) { return k == node_kind::k
 __device__ inline bool is_value_node(node_kind const k) { return k == node_kind::value; }
 __device__ inline bool is_element_node(node_kind const k) { return k == node_kind::element; }
 
-// How the materializer emits a selected node. Every non-string value kind is `verbatim` here
-// because this layer renders string escapes only.
+// How the materializer emits a selected node. Anything but `verbatim` re-renders to match Spark's
+// `from_json` StringType conversion.
 enum class token_category : int8_t {
-  verbatim = 0,    // bytes already match (escape-free string/key, or any non-string value kind)
-  string_unescape  // string or key containing a backslash: JSON-unescape
+  verbatim = 0,     // bytes already match (escape-free string/key, canonical int, bool)
+  string_unescape,  // string or key containing a backslash: JSON-unescape
+  int_strip,        // integer with leading zeros or -0: textual strip
+  float_norm,       // float: parse and re-render via Java `Double.toString` semantics
+  nonnumeric,       // NaN/Infinity spelling: fixed quoted canonical form
+  rejected,         // number past the parser's digit cap: renders 0 bytes and nullifies its row
+  null_value        // JSON `null` value in the string map: SQL NULL (empty span)
 };
 
 // Per-token nesting weights for the nested-range balance scan. libcudf bounds JSON tree depth to
@@ -644,6 +650,21 @@ __device__ inline bool is_json_null_literal(char const* json,
   return p[0] == 'n' && p[1] == 'u' && p[2] == 'l' && p[3] == 'l';
 }
 
+__device__ inline bool is_ascii_digit(char const c) { return c >= '0' && c <= '9'; }
+
+// Advance past leading zero digits in [digits_begin, end); a '0' is skipped only while another
+// digit follows, so the returned position is the first byte the caller keeps.
+__device__ inline SymbolOffsetT skip_leading_zeros(char const* json,
+                                                   SymbolOffsetT const digits_begin,
+                                                   SymbolOffsetT const end)
+{
+  auto pos = digits_begin;
+  while (pos + 1 < end && json[pos] == '0' && is_ascii_digit(json[pos + 1])) {
+    ++pos;
+  }
+  return pos;
+}
+
 // A string/key without a backslash is byte-identical to Jackson's unescaped text (the range is
 // already de-quoted); one with a backslash needs the JSON unescape.
 __device__ inline bool contains_backslash(char const* json,
@@ -656,7 +677,64 @@ __device__ inline bool contains_backslash(char const* json,
   return false;
 }
 
-// Only a string or key holding a backslash needs work; every other kind already matches Spark.
+// Mirrors the private `json_parser::check_max_num_len`, reusing its `max_num_len` so the threshold
+// has one definition. Digits MUST be counted the way `try_unsigned_number` counts them, which the
+// 1000/1001 boundary test pins.
+__device__ inline bool within_max_num_len(int const number_digits_length)
+{
+  return max_num_len <= 0 || number_digits_length <= max_num_len;
+}
+
+// First-byte dispatch is total here: strict validation already reduced a `ValueBegin` scalar to a
+// `null`/`true`/`false` literal, one of the six non-numeric spellings, or a valid number.
+__device__ token_category classify_value_bytes(char const* json,
+                                               SymbolOffsetT const begin,
+                                               SymbolOffsetT const end)
+{
+  char const c0 = json[begin];
+  // `true`/`false` render as their own text.
+  if (c0 == 't' || c0 == 'f') { return token_category::verbatim; }
+  if (is_json_null_literal(json, begin, end)) { return token_category::null_value; }
+  // Non-numeric spellings: 'N'/'I'/'+' can only start NaN/Infinity/+INF/+Infinity, and a '-' is
+  // non-numeric exactly when followed by 'I' (-INF/-Infinity); otherwise it starts a number.
+  if (c0 == 'N' || c0 == 'I' || c0 == '+' ||
+      (c0 == '-' && begin + 1 < end && json[begin + 1] == 'I')) {
+    return token_category::nonnumeric;
+  }
+  // A number. Both the parser and Jackson skip the sign and the leading zeros before counting
+  // digits, so the tally below starts where they start.
+  auto const digits_begin = begin + (c0 == '-' ? 1 : 0);
+  auto const digits_pos   = skip_leading_zeros(json, digits_begin, end);
+  // One pass decides float-ness and the digit tally. The tally must stay in step with
+  // `json_parser::try_unsigned_number`: every ASCII digit counts, no sign, '.' or 'e'/'E'.
+  bool is_float            = false;
+  int number_digits_length = 0;
+  for (auto p = digits_pos; p < end; ++p) {
+    char const c = json[p];
+    if (c == '.' || c == 'e' || c == 'E') {
+      is_float = true;
+    } else if (is_ascii_digit(c)) {
+      ++number_digits_length;
+    }
+  }
+  // Past the cap the parser refuses the number, which makes the record a Spark bad record: the
+  // value renders nothing and nullifies its whole row. Integers reject as well as floats -- Jackson
+  // length-checks both token kinds against the same limit.
+  if (!within_max_num_len(number_digits_length)) { return token_category::rejected; }
+  if (is_float) { return token_category::float_norm; }
+  // An integer: re-render (strip) when it has leading zeros (tokenizer-valid only with
+  // `allow_leading_zeros`) or is `-0` (Jackson renders it as `0`).
+  if (json[digits_begin] == '0' && (digits_begin + 1 < end || c0 == '-')) {
+    return token_category::int_strip;
+  }
+  return token_category::verbatim;
+}
+
+// Rendering category of a selected node/element from its begin token and de-quoted byte range.
+// A string or key carrying a backslash escape needs JSON-unescaping, and a value's bytes decide
+// whether it needs number canonicalization or SQL NULL (`classify_value_bytes`); everything else --
+// an escape-free string/key, a bool, or a nested object/array -- is `verbatim` and copies its raw
+// byte range unchanged.
 __device__ inline token_category classify_token(char const* json,
                                                 PdaTokenT const token,
                                                 SymbolOffsetT const range_begin,
@@ -667,12 +745,13 @@ __device__ inline token_category classify_token(char const* json,
     case token_t::FieldNameBegin:
       return contains_backslash(json, range_begin, range_end) ? token_category::string_unescape
                                                               : token_category::verbatim;
+    case token_t::ValueBegin: return classify_value_bytes(json, range_begin, range_end);
     default: return token_category::verbatim;
   }
 }
 
-// The two-pass write convention of the renderer below (and `make_strings_children`): a null
-// destination means the sizing pass -- compute and return the byte count, write nothing.
+// The two-pass write convention shared by all renderers below (and `make_strings_children`):
+// a null destination means the sizing pass -- compute and return the byte count, write nothing.
 
 // Re-parses the QUOTED token, so the range is widened by the one quote byte on each side. A single
 // quote is always 1 byte here because single quotes are normalized to double before tokenizing.
@@ -690,8 +769,84 @@ __device__ inline cudf::size_type render_unescaped_string(char const* json,
   return parser.write_unescaped_text(out);
 }
 
-// Range and category are fused into one pass because classifying re-reads the same token and the
-// byte range it just computed. Unselected nodes keep `{0, 0}`/`verbatim` and are never scanned.
+// Strip integer leading zeros and `-0` textually. Jackson re-renders integers from the parsed
+// value (BigInteger beyond int64), which equals dropping zeros while another digit follows and
+// collapsing an all-zero run to `0` with the sign dropped. Textual stripping stays exact where an
+// int64 parse would overflow; a run past the parser's digit cap never arrives here, because
+// `classify_value_bytes` gives it `token_category::rejected` and nullifies its row instead.
+__device__ cudf::size_type render_stripped_int(char const* json,
+                                               SymbolOffsetT const begin,
+                                               SymbolOffsetT const end,
+                                               char* out)
+{
+  bool const negative = json[begin] == '-';
+  auto const pos      = skip_leading_zeros(json, begin + (negative ? 1 : 0), end);
+  if (json[pos] == '0' && pos + 1 == end) {  // 0, -0, 000, -000, ...: all render as plain `0`.
+    if (out != nullptr) { *out = '0'; }
+    return 1;
+  }
+  auto const num_digits = static_cast<cudf::size_type>(end - pos);
+  if (out != nullptr) {
+    if (negative) { *out++ = '-'; }
+    memcpy(out, json + pos, num_digits);
+  }
+  return num_digits + (negative ? 1 : 0);
+}
+
+// Re-render a float via the in-tree `json_parser` float path (`stod` + Java `Double.toString`
+// rendering, NaN/Infinity results quoted). The strict parser rejects leading zeros, so those are
+// stripped first (reachable only with `allow_leading_zeros`); a clean float, sign included, parses
+// whole. When zeros were stripped from a NEGATIVE float the sign is re-applied to the rendered
+// text, landing INSIDE the quote for a quoted special (`-007e309` renders `"-Infinity"`).
+__device__ cudf::size_type render_normalized_float(char const* json,
+                                                   SymbolOffsetT const begin,
+                                                   SymbolOffsetT const end,
+                                                   char* out)
+{
+  bool const negative     = json[begin] == '-';
+  auto const digits_begin = begin + (negative ? 1 : 0);
+  auto const pos          = skip_leading_zeros(json, digits_begin, end);
+  if (pos == digits_begin) {
+    json_parser parser(char_range(json + begin, static_cast<cudf::size_type>(end - begin)));
+    parser.next_token();
+    return parser.write_unescaped_text(out);
+  }
+  json_parser parser(char_range(json + pos, static_cast<cudf::size_type>(end - pos)));
+  parser.next_token();
+  if (!negative) { return parser.write_unescaped_text(out); }
+  // The parser was handed the digits without their sign, so it renders the POSITIVE value and the
+  // answer is always exactly one byte longer. Sizing therefore only needs the parser's own length,
+  // and writing renders one byte in and fills the prefix -- no staging buffer to bound.
+  if (out == nullptr) { return parser.write_unescaped_text(nullptr) + 1; }
+  auto const len = parser.write_unescaped_text(out + 1);
+  // `out[1]` is the parser's first byte; the only quoted special reachable from digits is
+  // `"Infinity"`, whose sign belongs inside the quote. A zero-length render means the parser
+  // refused the token, which `classify_value_bytes` reproduces as `rejected` before it can arrive
+  // here; the guard keeps that drift from reading a byte the parser never wrote.
+  if (len > 0 && out[1] == '"') {
+    out[1] = '-';
+    out[0] = '"';
+  } else {
+    out[0] = '-';
+  }
+  return len + 1;
+}
+
+// Render a non-numeric spelling as its fixed quoted canonical form, selected by the first byte:
+// 'N' -> "NaN"; '-' -> "-Infinity"; '+'/'I' -> "Infinity". Emitting through
+// `double_normalization` reuses the exact bytes the float path produces for the same values.
+__device__ cudf::size_type render_nonnumeric(char const* json, SymbolOffsetT const begin, char* out)
+{
+  char const c0      = json[begin];
+  double const value = c0 == 'N'   ? cuda::std::numeric_limits<double>::quiet_NaN()
+                       : c0 == '-' ? -cuda::std::numeric_limits<double>::infinity()
+                                   : cuda::std::numeric_limits<double>::infinity();
+  return ftos_converter::double_normalization(value, out);
+}
+
+// Convert token positions to node ranges and rendering categories for each valid node, fused in
+// one pass (the category classification reads the same token and, for strings/scalars, scans the
+// just-computed byte range). Unselected nodes stay `{0, 0}`/`verbatim` and are never scanned.
 struct node_classify_fn {
   cudf::device_span<char const> input_json;
   cudf::device_span<PdaTokenT const> tokens;
@@ -793,8 +948,12 @@ struct substring_fn {
   }
 };
 
-// Used only when the extraction holds at least one `string_unescape` node. Stored ranges are
-// assumed in-bounds for `d_string`; a `verbatim` node here still takes the raw copy.
+// Spark-render materializer used when the extraction holds at least one non-verbatim node. Same
+// two-pass sizing/write convention as `substring_fn`, dispatching per compacted category. The
+// stored ranges are assumed in-bounds for `d_string`; no bound check is performed. The `verbatim`
+// arm keeps `substring_fn`'s zero-read sizing and raw memcpy, so canonical tokens in a flagged
+// column still take the raw copy; a `null_value` slot writes nothing (its null mask is attached by
+// the caller from the same categories).
 struct transform_fn {
   cudf::device_span<char const> d_string;
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> d_ranges;
@@ -819,13 +978,33 @@ struct transform_fn {
       case token_category::string_unescape:
         size = render_unescaped_string(json, range.first, range.second, out);
         break;
+      case token_category::int_strip:
+        size = render_stripped_int(json, range.first, range.second, out);
+        break;
+      case token_category::float_norm:
+        size = render_normalized_float(json, range.first, range.second, out);
+        break;
+      case token_category::nonnumeric: size = render_nonnumeric(json, range.first, out); break;
+      // The parser refuses this number, so the whole row is nullified: write nothing, in BOTH
+      // passes, and never invoke the parser on bytes it already rejected.
+      case token_category::rejected: break;
+      case token_category::null_value: break;  // SQL NULL: empty span, write nothing
     }
     if (out == nullptr) { d_sizes[idx] = size; }
   }
 };
 
-// All three are indexed by node id and must travel together: pairing a selector with another
-// extraction's categories reads the wrong node.
+// Raise a sticky flag that only ever goes 0 -> 1. Re-reading before the store keeps every node
+// after the first from serializing a redundant atomic onto the same 4-byte address.
+__device__ inline void raise_gate(int32_t* gate)
+{
+  cuda::atomic_ref<int32_t, cuda::thread_scope_device> ref{*gate};
+  if (ref.load(cuda::memory_order_relaxed) == 0) { ref.store(1, cuda::memory_order_relaxed); }
+}
+
+// What one extraction selects and how it renders: the nodes tagged `sentinel` in `selector`, each
+// materialized per its `categories` entry. All three are indexed by node id and must travel
+// together -- pairing a selector with another extraction's categories reads the wrong node.
 struct extraction_spec {
   node_kind sentinel;
   cudf::device_span<node_kind const> selector;
@@ -839,48 +1018,78 @@ struct gated_extraction {
   bool needs_transform;
 };
 
-// Both gates are fused into one pass and one device-to-host copy, replacing a blocking round trip
-// per extraction.
-cuda::std::pair<gated_extraction, gated_extraction> compute_transform_gates(
-  extraction_spec first, extraction_spec second, rmm::cuda_stream_view stream)
+// Every host flag of one map conversion, read back in one transfer: each extraction already bound
+// to the gate computed for it, plus the two conversion-level flags that only a number-rejecting or
+// `null`-valued input raises. `any_rejected` is true when either extraction selected a `rejected`
+// number, and gates the row-nullification work that only such an input needs.
+// `second_has_null_value` is true when the SECOND extraction selected a JSON `null` value, and
+// gates building that column's validity.
+struct conversion_gates {
+  gated_extraction first;
+  gated_extraction second;
+  bool any_rejected;
+  bool second_has_null_value;
+};
+
+// Compute all host flags of one map conversion in a single fused pass and a single device-to-host
+// copy, instead of one blocking `thrust::any_of` round trip per flag. Both specs are indexed by the
+// same node ids, and each is returned already bound to its own gate.
+conversion_gates compute_transform_gates(extraction_spec first,
+                                         extraction_spec second,
+                                         rmm::cuda_stream_view stream)
 {
   auto const num_nodes = first.selector.size();
   CUDF_EXPECTS(first.categories.size() == num_nodes && second.selector.size() == num_nodes &&
                  second.categories.size() == num_nodes,
                "Transform gates require equally sized node metadata.");
-  auto gates = rmm::device_uvector<int32_t>(2, stream);
-  CUDF_CUDA_TRY(cudaMemsetAsync(gates.data(), 0, 2 * sizeof(int32_t), stream));
+  static constexpr int num_gates = 4;
+  auto gates                     = rmm::device_uvector<int32_t>(num_gates, stream);
+  CUDF_CUDA_TRY(cudaMemsetAsync(gates.data(), 0, num_gates * sizeof(int32_t), stream));
   auto const node_id_it = thrust::make_counting_iterator<cudf::size_type>(0);
   thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    node_id_it,
                    node_id_it + num_nodes,
                    [first, second, gates = gates.data()] __device__(auto const node_id) {
-                     // Concurrent relaxed stores of the same value: a gate only ever flips to 1.
-                     if (first.selector[node_id] == first.sentinel &&
-                         first.categories[node_id] != token_category::verbatim) {
-                       cuda::atomic_ref<int32_t, cuda::thread_scope_device>{gates[0]}.store(
-                         1, cuda::memory_order_relaxed);
+                     // Each selected node's category is loaded once and answers every question.
+                     bool rejected = false;
+                     if (first.selector[node_id] == first.sentinel) {
+                       auto const category = first.categories[node_id];
+                       if (category != token_category::verbatim) { raise_gate(&gates[0]); }
+                       rejected = category == token_category::rejected;
                      }
-                     if (second.selector[node_id] == second.sentinel &&
-                         second.categories[node_id] != token_category::verbatim) {
-                       cuda::atomic_ref<int32_t, cuda::thread_scope_device>{gates[1]}.store(
-                         1, cuda::memory_order_relaxed);
+                     if (second.selector[node_id] == second.sentinel) {
+                       auto const category = second.categories[node_id];
+                       if (category != token_category::verbatim) { raise_gate(&gates[1]); }
+                       rejected = rejected || category == token_category::rejected;
+                       if (category == token_category::null_value) { raise_gate(&gates[3]); }
                      }
+                     if (rejected) { raise_gate(&gates[2]); }
                    });
 
-  int32_t gates_host[2];
+  int32_t gates_host[num_gates];
   CUDF_CUDA_TRY(
     cudaMemcpyAsync(gates_host, gates.data(), sizeof(gates_host), cudaMemcpyDeviceToHost, stream));
   stream.synchronize();
-  return {{first, gates_host[0] != 0}, {second, gates_host[1] != 0}};
+  return {{first, gates_host[0] != 0},
+          {second, gates_host[1] != 0},
+          gates_host[2] != 0,
+          gates_host[3] != 0};
 }
 
-// With `needs_transform == false` this is exactly the old raw byte-range gather; otherwise the
-// compaction also carries each node's category and materializes through `transform_fn`.
+// Extract key-value string pairs from the input json string, rendered to match Spark. When every
+// selected node classified `verbatim` (`needs_transform == false`, precomputed by
+// `compute_transform_gates` and carried on the extraction itself), the extraction is exactly the
+// raw byte-range gather; otherwise the compaction additionally carries each node's category and
+// materializes through `transform_fn`. `attach_null_value_mask` turns each `null_value` slot into a
+// null entry of the returned strings column (the compacted categories provide the validity); the
+// caller passes it for the string-map VALUES extraction, and only when the gate pass actually found
+// such a value -- an all-valid mask would cost an allocation, a pass, and a `bools_to_mask` only to
+// be discarded.
 std::unique_ptr<cudf::column> extract_keys_or_values(
   gated_extraction const& extraction,
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
   cudf::device_span<char const> input_json,
+  bool attach_null_value_mask,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -893,8 +1102,8 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
       return selector[node_id] == sentinel;
     });
 
-  // With every selected node `verbatim` (escape-free strings/keys, or any non-string value kind),
-  // the raw copy below is already byte-identical to Spark's rendering.
+  // With every selected node `verbatim` (escape-free strings/keys, canonical numbers, bools), the
+  // raw copy below is already byte-identical to Spark's rendering.
   if (!extraction.needs_transform) {
     auto extracted_ranges = rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(
       node_ranges.size(), stream);
@@ -916,8 +1125,8 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
       num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
   }
 
-  // Transform path: compact (range, category) with the same stencil in one pass, then materialize
-  // through the category dispatch.
+  // Transform path: compact (range, category) with the same stencil in one pass, then
+  // materialize through the category dispatch.
   auto const num_nodes = node_ranges.size();
   auto extracted_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
@@ -936,8 +1145,25 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
 
   auto [offsets, chars] = cudf::strings::detail::make_strings_children(
     transform_fn{input_json, extracted_ranges, extracted_categories}, num_extract, stream, mr);
-  return cudf::make_strings_column(
+  auto output = cudf::make_strings_column(
     num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
+
+  if (attach_null_value_mask) {
+    // Validity is derivable from the compacted categories: exactly the `null_value` slots are
+    // null. The raw path never reaches here -- a `null_value` node forces the transform gate.
+    auto validity = rmm::device_uvector<bool>(num_extract, stream);
+    thrust::transform(rmm::exec_policy_nosync(stream),
+                      extracted_categories.begin(),
+                      extracted_categories.begin() + num_extract,
+                      validity.begin(),
+                      cuda::proclaim_return_type<bool>([] __device__(token_category const cat) {
+                        return cat != token_category::null_value;
+                      }));
+    auto [null_mask, null_count] =
+      cudf::bools_to_mask(cudf::device_span<bool const>(validity), stream, mr);
+    if (null_count > 0) { output->set_null_mask(std::move(*null_mask), null_count); }
+  }
+  return output;
 }
 
 // Compute the offsets for the final lists of Struct<String,String>.
@@ -1042,6 +1268,17 @@ struct is_line_begin {
            parent_node_ids[node_idx] < 0;
   }
 };
+
+// The input row an arbitrary node belongs to: the last line-begin `StructBegin` id not exceeding
+// it. `line_begin` holds one such id per row, sorted by construction (see `is_line_begin`). Every
+// row-nullifying fold shares this one lookup so they cannot drift apart.
+__device__ inline cudf::size_type row_of_node(NodeIndexT const* line_begin,
+                                              cudf::size_type const num_rows,
+                                              NodeIndexT const node_id)
+{
+  return static_cast<cudf::size_type>(
+    thrust::upper_bound(thrust::seq, line_begin, line_begin + num_rows, node_id) - line_begin - 1);
+}
 
 std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
   cudf::size_type num_rows,
@@ -1226,15 +1463,20 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto const& node_ranges     = classified.ranges;
   auto const& node_categories = classified.categories;
 
-  // Both extractions' transform gates in one fused pass and one sync.
-  auto const [keys, values] =
+  // Both extractions' transform gates, plus the reject and null-value flags, in one fused pass and
+  // one sync.
+  auto const [keys, values, any_rejected, values_have_null_value] =
     compute_transform_gates({node_kind::key, is_key_or_value_node, node_categories},
                             {node_kind::value, is_key_or_value_node, node_categories},
                             stream);
 
-  auto extracted_keys = extract_keys_or_values(keys, node_ranges, preprocessed_input, stream, mr);
-  auto extracted_values =
-    extract_keys_or_values(values, node_ranges, preprocessed_input, stream, mr);
+  auto extracted_keys = extract_keys_or_values(
+    keys, node_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
+  // A JSON `null` VALUE keeps its pair but nulls the values-child entry (SQL NULL), so the values
+  // extraction attaches the null mask derived from its `null_value` categories -- only when the
+  // gate pass saw such a value, since otherwise the mask would be all-valid and thrown away.
+  auto extracted_values = extract_keys_or_values(
+    values, node_ranges, preprocessed_input, values_have_null_value, stream, mr);
   CUDF_EXPECTS(extracted_keys->size() == extracted_values->size(),
                "Invalid key-value pair extraction.");
 
@@ -1253,11 +1495,58 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto structs_col = cudf::make_structs_column(
     num_pairs, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
 
-  // Do not use `cudf::make_lists_column` since we do not need to call `purge_nonempty_nulls`
-  // on the children columns as they do not have non-empty nulls.
+  // The children need no `purge_nonempty_nulls` sanitization: their only nulls are the SQL-NULL
+  // value slots, written with empty byte spans by construction. The one row shape that can leave a
+  // NON-empty null is a row nullified for a rejected number, and the outer list is sanitized for
+  // that case after assembly below.
   std::vector<std::unique_ptr<cudf::column>> list_children;
   list_children.emplace_back(std::move(list_offsets));
   list_children.emplace_back(std::move(structs_col));
+
+  // Row-level bad-record semantics (Spark `from_json`): a value the JSON parser refuses -- a number
+  // past its digit cap -- makes the whole record a bad record, so the entire output row is
+  // nullified. Folding this into `should_be_nullified` before `create_null_mask` lets the shared
+  // row null-mask computation absorb it with the correct `null_count`. Every step is behind
+  // `any_rejected`, so an input that rejects nothing launches nothing extra here.
+  rmm::device_uvector<NodeIndexT> line_begin_indices(0, stream);
+  // Stays empty unless the fold runs, in which case `create_null_mask` computes the list itself.
+  auto line_begin_span = cudf::device_span<NodeIndexT const>{};
+  if (any_rejected) {
+    auto const num_nodes  = node_token_ids.size();
+    auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
+
+    // Line-begin `StructBegin` node ids, one per input row, sorted by construction. Also handed to
+    // `create_null_mask` below so it skips its own identical scan.
+    line_begin_indices.resize(num_nodes, stream);
+    auto const line_begin_copy_end = copy_if(node_id_it,
+                                             node_id_it + num_nodes,
+                                             line_begin_indices.begin(),
+                                             is_line_begin{tokens, node_token_ids, parent_node_ids},
+                                             stream);
+    auto const num_line_begin =
+      cuda::std::distance(line_begin_indices.begin(), line_begin_copy_end);
+    CUDF_EXPECTS(num_line_begin == input.size(), "Incorrect count of JSON objects.");
+    line_begin_span = cudf::device_span<NodeIndexT const>{line_begin_indices.data(),
+                                                          static_cast<std::size_t>(input.size())};
+
+    // A rejected value's row is the last line-begin `StructBegin` id not exceeding it.
+    thrust::for_each(
+      rmm::exec_policy_nosync(stream),
+      node_id_it,
+      node_id_it + num_nodes,
+      [key_or_value       = is_key_or_value_node.begin(),
+       node_categories    = node_categories.begin(),
+       line_begin_indices = line_begin_indices.begin(),
+       num_rows           = input.size(),
+       should_be_nullified =
+         should_be_nullified->mutable_view().begin<bool>()] __device__(NodeIndexT const node_id) {
+        if (!is_value_node(key_or_value[node_id]) ||
+            node_categories[node_id] != token_category::rejected) {
+          return;
+        }
+        should_be_nullified[row_of_node(line_begin_indices, num_rows, node_id)] = true;
+      });
+  }
 
   auto [null_mask, null_count] = create_null_mask(input.size(),
                                                   should_be_nullified,
@@ -1265,16 +1554,25 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
                                                   token_positions,
                                                   node_token_ids,
                                                   parent_node_ids,
-                                                  /*precomputed_line_begin*/ {},
+                                                  line_begin_span,
                                                   stream,
                                                   mr);
 
-  return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
-                                        input.size(),
-                                        rmm::device_buffer{},
-                                        std::move(null_mask),
-                                        null_count,
-                                        std::move(list_children));
+  auto result = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
+                                               input.size(),
+                                               rmm::device_buffer{},
+                                               std::move(null_mask),
+                                               null_count,
+                                               std::move(list_children));
+
+  // A row nulled for a rejected number is a well-formed object whose pairs were already
+  // materialized, so the outer list can carry non-empty nulls and must be sanitized here. No other
+  // row shape this path nullifies has any pairs, which is what keeps the check behind
+  // `any_rejected` and the common paths at zero cost.
+  if (any_rejected && null_count > 0 && cudf::has_nonempty_nulls(result->view(), stream)) {
+    return cudf::purge_nonempty_nulls(result->view(), stream, mr);
+  }
+  return result;
 }
 
 std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
@@ -1331,17 +1629,23 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                                          element_categories.begin()});
   }
 
-  // Both extractions' transform gates in one fused pass and one sync.
-  auto const [keys, elements] =
+  // Both extractions' transform gates, plus the reject and null-value flags, in one fused pass and
+  // one sync.
+  auto const [keys, elements, any_rejected, elements_have_null_value] =
     compute_transform_gates({node_kind::key, is_key_or_value_node, node_categories},
                             {node_kind::element, element_flag, element_categories},
                             stream);
+  // `element_classify_fn` records a `null` element in `element_valid` and leaves its category
+  // `verbatim`, so the element categories carry no `null_value` and mask #2 below is the only
+  // element validity source.
+  CUDF_EXPECTS(!elements_have_null_value, "Unexpected null-value category on the element path.");
 
-  auto extracted_keys = extract_keys_or_values(keys, node_ranges, preprocessed_input, stream, mr);
+  auto extracted_keys = extract_keys_or_values(
+    keys, node_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
 
   // Extract element strings with the shared extractor (a 0-null STRING column); attach mask #2.
-  auto extracted_elements =
-    extract_keys_or_values(elements, element_ranges, preprocessed_input, stream, mr);
+  auto extracted_elements = extract_keys_or_values(
+    elements, element_ranges, preprocessed_input, /*attach_null_value_mask=*/false, stream, mr);
   {
     // Mask #2 over only the selected (element-flagged) nodes, in element document order, matching
     // the order `extract_keys_or_values` emits.
@@ -1499,9 +1803,12 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
 
   // Row-level bad-record semantics (Spark `from_json`): a row is nullified if any of its value
   // nodes is a hard type mismatch -- a value that is neither a `ListBegin` (valid array) nor the
-  // JSON `null` literal (kept, with a null inner list). Folding this into `should_be_nullified`
-  // before `create_null_mask` lets the shared row null-mask computation absorb it with the correct
-  // `null_count`. A value node's row is the last line-begin `StructBegin` id not exceeding it.
+  // JSON `null` literal (kept, with a null inner list) -- or if any of its ARRAY ELEMENTS is a
+  // number the JSON parser refuses, which makes the whole record a bad record. Folding both into
+  // `should_be_nullified` before `create_null_mask` lets the shared row null-mask computation
+  // absorb them with the correct `null_count`. A node's row is the last line-begin `StructBegin`
+  // id not exceeding it. A rejected number sitting directly as a scalar map VALUE needs no case of
+  // its own: it is already a hard type mismatch, and both rules store the same `true`.
   {
     auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
     thrust::for_each(
@@ -1515,8 +1822,19 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
        input_json         = preprocessed_input.data(),
        line_begin_indices = line_begin_indices.begin(),
        num_rows           = input.size(),
+       // Init-capture, not a plain capture: `any_rejected` is a structured binding, which not
+       // every supported compiler lets a lambda capture directly.
+       any_rejected       = any_rejected,
+       element_flag       = element_flag.begin(),
+       element_categories = element_categories.begin(),
        should_be_nullified =
          should_be_nullified->mutable_view().begin<bool>()] __device__(NodeIndexT const node_id) {
+        // `any_rejected` is a host flag, uniform across every thread, so this costs nothing but a
+        // predicted branch on the far more common input that rejects no number at all.
+        if (any_rejected && is_element_node(element_flag[node_id]) &&
+            element_categories[node_id] == token_category::rejected) {
+          should_be_nullified[row_of_node(line_begin_indices, num_rows, node_id)] = true;
+        }
         if (!is_value_node(key_or_value[node_id])) { return; }
         auto const token = tokens[node_token_ids[node_id]];
         if (token == token_t::ListBegin) { return; }  // valid array.
@@ -1528,12 +1846,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
           if (is_json_null_literal(input_json, range.first, range.second)) { return; }
         }
         // Hard type mismatch (scalar string/number/bool, object, or any non-array, non-null value):
-        // nullify the entire row. Row = last line-begin id not exceeding `node_id`.
-        auto const row_idx =
-          thrust::upper_bound(
-            thrust::seq, line_begin_indices, line_begin_indices + num_rows, node_id) -
-          line_begin_indices - 1;
-        should_be_nullified[row_idx] = true;
+        // nullify the entire row.
+        should_be_nullified[row_of_node(line_begin_indices, num_rows, node_id)] = true;
       });
   }
 
@@ -1556,11 +1870,11 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                                                null_count,
                                                std::move(list_children));
 
-  // A row nulled for a hard value type mismatch still spans the key/value pairs that were
-  // materialized before the mismatch was detected, so the outer list can carry non-empty nulls.
-  // This manual assembly skips the factory's `purge_nonempty_nulls` scan, so sanitize the outer
-  // list here (the children are already empty under their nulls by construction). Gated on a cheap
-  // check so the common all-valid / empty-null paths keep the zero-copy build.
+  // A row nulled for a hard value type mismatch, or for a rejected number in one of its arrays,
+  // still spans the key/value pairs that were materialized before the fold ran, so the outer list
+  // can carry non-empty nulls and must be sanitized here (the children are already empty under
+  // their nulls by construction). Gated on a cheap check so the common all-valid / empty-null paths
+  // keep the zero-copy build.
   if (null_count > 0 && cudf::has_nonempty_nulls(result->view(), stream)) {
     return cudf::purge_nonempty_nulls(result->view(), stream, mr);
   }

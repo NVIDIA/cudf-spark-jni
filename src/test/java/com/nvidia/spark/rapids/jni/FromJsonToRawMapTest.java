@@ -175,11 +175,33 @@ public class FromJsonToRawMapTest {
     }
   }
 
+  // A JSON `null` VALUE keeps its pair and nulls the corresponding entry of the values child (SQL
+  // NULL), which is what the extractRawMapFromJsonString contract promises. Sibling pairs of the
+  // same row, and neighbouring rows, are unaffected.
+  @Test
+  void testFromJsonNullLiteralValue() {
+    try (ColumnVector input =
+             ColumnVector.fromStrings("{\"a\":null,\"b\":\"x\"}", null, "{\"c\":null}");
+         ColumnVector outputMap = JSONUtils.extractRawMapFromJsonString(input, getOptions());
+
+         ColumnVector expectedKeys = ColumnVector.fromStrings("a", "b", "c");
+         ColumnVector expectedValues = ColumnVector.fromStrings(null, "x", null);
+         ColumnVector expectedStructs = ColumnVector.makeStruct(expectedKeys, expectedValues);
+         ColumnVector expectedOffsets = ColumnVector.fromInts(0, 2, 2, 3);
+         ColumnVector tmpMap = expectedStructs.makeListFromOffsets(3, expectedOffsets);
+         ColumnVector templateBitmask = ColumnVector.fromBoxedInts(1, null, 1);
+         ColumnVector expectedMap = tmpMap.mergeAndSetValidity(BinaryOp.BITWISE_AND,
+             templateBitmask);
+    ) {
+      assertColumnsAreEqual(expectedMap, outputMap);
+    }
+  }
+
   // ===== MAP<STRING,ARRAY<STRING>> (array-valued map) =====
 
-  // ARRAY_OF_STRING: a single object whose one key maps to a two-element string array. The engine
-  // copies the elements verbatim with their surrounding quotes stripped, so {"k":["a","b"]} yields
-  // one non-null row holding the pair (k -> ["a", "b"]).
+  // ARRAY_OF_STRING: a single object whose one key maps to a two-element string array. Elements are
+  // de-quoted and JSON-unescaped; both elements here are escape-free, so {"k":["a","b"]} yields one
+  // non-null row holding the pair (k -> ["a", "b"]).
   @Test
   void testExtractRawMapArrayFromJsonString() {
     List<HostColumnVector.StructData> row0 =
