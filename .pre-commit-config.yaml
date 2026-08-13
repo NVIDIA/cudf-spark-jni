@@ -52,6 +52,13 @@ repos:
         language: pygrep
         types_or: [c, c++, cuda]
         files: '^src/main/cpp/'
+      - id: use-rmm-exec-policy-nosync
+        name: Use rmm::exec_policy_nosync
+        description: Enforce rmm::exec_policy_nosync instead of rmm::exec_policy
+        entry: '\brmm::exec_policy\s*\('
+        language: pygrep
+        types_or: [c, c++, cuda]
+        files: '^src/main/cpp/'
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v20.1.8
     hooks:
