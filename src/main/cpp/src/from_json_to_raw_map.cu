@@ -15,6 +15,7 @@
  */
 
 #include "from_json_to_raw_map_debug.cuh"
+#include "json_parser.cuh"
 #include "json_utils.hpp"
 #include "nvtx_ranges.hpp"
 
@@ -49,6 +50,7 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/permutation_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
+#include <thrust/iterator/zip_iterator.h>
 #include <thrust/scan.h>
 #include <thrust/sequence.h>
 #include <thrust/transform.h>
@@ -409,6 +411,13 @@ __device__ inline bool is_key_node(node_kind const k) { return k == node_kind::k
 __device__ inline bool is_value_node(node_kind const k) { return k == node_kind::value; }
 __device__ inline bool is_element_node(node_kind const k) { return k == node_kind::element; }
 
+// How the materializer emits a selected node. Every non-string value kind is `verbatim` here
+// because this layer renders string escapes only.
+enum class token_category : int8_t {
+  verbatim = 0,    // bytes already match (escape-free string/key, or any non-string value kind)
+  string_unescape  // string or key containing a backslash: JSON-unescape
+};
+
 // Per-token nesting weights for the nested-range balance scan. libcudf bounds JSON tree depth to
 // 127
 // (`TreeDepthT` is `int8_t`), so the list weight (256) keeps list nesting (+/-256) from colliding
@@ -581,8 +590,8 @@ __device__ inline NodeIndexT matching_close_index(cudf::device_span<PdaTokenT co
   return static_cast<NodeIndexT>(tokens.size());
 }
 
-// De-quote a token's start position; shared by node_ranges_fn and element_classify_fn so the two
-// paths can't drift apart. With include_quote_char == false, StringEnd matches default (return
+// De-quote a token's start position; shared by node_classify_fn and element_classify_fn so the
+// two paths can't drift apart. With include_quote_char == false, StringEnd matches default (return
 // pos); with include_quote_char == true it keeps the trailing quote, which default would not.
 __device__ inline SymbolOffsetT dequote_token_position(PdaTokenT const token,
                                                        SymbolOffsetT const token_index,
@@ -623,18 +632,80 @@ __device__ inline cuda::std::pair<SymbolOffsetT, SymbolOffsetT> compute_token_ra
   return {range_begin, range_end};
 }
 
-// Convert token positions to node ranges for each valid node.
-struct node_ranges_fn {
+// True iff the byte range `[begin, end)` of `json` is exactly the 4-byte literal `null`. Callers
+// gate on a `ValueBegin` token first, so a JSON STRING "null" (a `StringBegin`) never reaches here;
+// the length-4 guard separates the literal from a 4-byte number like `1000`.
+__device__ inline bool is_json_null_literal(char const* json,
+                                            SymbolOffsetT begin,
+                                            SymbolOffsetT end)
+{
+  if (end - begin != 4) { return false; }
+  auto const* p = json + begin;
+  return p[0] == 'n' && p[1] == 'u' && p[2] == 'l' && p[3] == 'l';
+}
+
+// A string/key without a backslash is byte-identical to Jackson's unescaped text (the range is
+// already de-quoted); one with a backslash needs the JSON unescape.
+__device__ inline bool contains_backslash(char const* json,
+                                          SymbolOffsetT const begin,
+                                          SymbolOffsetT const end)
+{
+  for (auto pos = begin; pos < end; ++pos) {
+    if (json[pos] == '\\') { return true; }
+  }
+  return false;
+}
+
+// Only a string or key holding a backslash needs work; every other kind already matches Spark.
+__device__ inline token_category classify_token(char const* json,
+                                                PdaTokenT const token,
+                                                SymbolOffsetT const range_begin,
+                                                SymbolOffsetT const range_end)
+{
+  switch (token) {
+    case token_t::StringBegin:
+    case token_t::FieldNameBegin:
+      return contains_backslash(json, range_begin, range_end) ? token_category::string_unescape
+                                                              : token_category::verbatim;
+    default: return token_category::verbatim;
+  }
+}
+
+// The two-pass write convention of the renderer below (and `make_strings_children`): a null
+// destination means the sizing pass -- compute and return the byte count, write nothing.
+
+// Re-parses the QUOTED token, so the range is widened by the one quote byte on each side. A single
+// quote is always 1 byte here because single quotes are normalized to double before tokenizing.
+__device__ inline cudf::size_type render_unescaped_string(char const* json,
+                                                          SymbolOffsetT const begin,
+                                                          SymbolOffsetT const end,
+                                                          char* out)
+{
+  cudf_assert(begin >= 1 && "unescaped string token must have a preceding open quote");
+  json_parser parser(char_range(json + begin - 1, static_cast<cudf::size_type>(end - begin) + 2));
+  // The tokenizer's `strict_validation` escape set is a subset of this parser's, so the re-parse
+  // cannot disagree; were it to, `write_unescaped_text` would silently render an empty string.
+  [[maybe_unused]] auto const token = parser.next_token();
+  cudf_assert(token == json_token::VALUE_STRING && "escaped string/key must re-parse as a string");
+  return parser.write_unescaped_text(out);
+}
+
+// Range and category are fused into one pass because classifying re-reads the same token and the
+// byte range it just computed. Unselected nodes keep `{0, 0}`/`verbatim` and are never scanned.
+struct node_classify_fn {
+  cudf::device_span<char const> input_json;
   cudf::device_span<PdaTokenT const> tokens;
   cudf::device_span<SymbolOffsetT const> token_positions;
   cudf::device_span<NodeIndexT const> node_token_ids;
-  cudf::device_span<NodeIndexT const> parent_node_ids;
   cudf::device_span<node_kind const> key_or_value;
+
+  cuda::std::pair<SymbolOffsetT, SymbolOffsetT>* node_ranges;
+  token_category* node_categories;
 
   // Whether the extracted string values from json map will have the quote character.
   static bool const include_quote_char{false};
 
-  __device__ cuda::std::pair<SymbolOffsetT, SymbolOffsetT> operator()(cudf::size_type node_id) const
+  __device__ void operator()(cudf::size_type node_id) const
   {
     [[maybe_unused]] auto const is_begin_of_section =
       cuda::proclaim_return_type<bool>([] __device__(PdaTokenT const token) {
@@ -648,50 +719,62 @@ struct node_ranges_fn {
         };
       });
 
-    if (!is_key_node(key_or_value[node_id]) && !is_value_node(key_or_value[node_id])) {
-      return {0, 0};
+    // Locals so each output is written exactly once, leaving unselected nodes at the defaults.
+    auto range    = cuda::std::pair<SymbolOffsetT, SymbolOffsetT>{0, 0};
+    auto category = token_category::verbatim;
+    if (is_key_node(key_or_value[node_id]) || is_value_node(key_or_value[node_id])) {
+      auto const token_idx = node_token_ids[node_id];
+      cudf_assert(is_begin_of_section(tokens[token_idx]) && "Invalid node category.");
+
+      range    = compute_token_range(tokens, token_positions, token_idx, include_quote_char);
+      category = classify_token(input_json.data(), tokens[token_idx], range.first, range.second);
     }
-
-    auto const token_idx = node_token_ids[node_id];
-    cudf_assert(is_begin_of_section(tokens[token_idx]) && "Invalid node category.");
-
-    return compute_token_range(tokens, token_positions, token_idx, include_quote_char);
+    node_ranges[node_id]     = range;
+    node_categories[node_id] = category;
   }
 };
 
-// Compute position range for each node.
-// These ranges identify positions to extract nodes from the unified json string.
-rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> compute_node_ranges(
+// Both vectors are indexed by node id.
+struct classified_nodes {
+  rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> ranges;
+  rmm::device_uvector<token_category> categories;
+};
+
+classified_nodes compute_node_ranges_and_categories(
+  cudf::device_span<char const> input_json,
   cudf::device_span<PdaTokenT const> tokens,
   cudf::device_span<SymbolOffsetT const> token_positions,
   cudf::device_span<NodeIndexT const> node_token_ids,
-  cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<node_kind const> key_or_value,
   rmm::cuda_stream_view stream)
 {
   auto const num_nodes = node_token_ids.size();
   auto node_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
-  auto const transform_it = thrust::counting_iterator<int>(0);
-  thrust::transform(
-    rmm::exec_policy_nosync(stream),
-    transform_it,
-    transform_it + num_nodes,
-    node_ranges.begin(),
-    node_ranges_fn{tokens, token_positions, node_token_ids, parent_node_ids, key_or_value});
+  auto node_categories    = rmm::device_uvector<token_category>(num_nodes, stream);
+  auto const transform_it = thrust::counting_iterator<cudf::size_type>(0);
+  thrust::for_each(rmm::exec_policy_nosync(stream),
+                   transform_it,
+                   transform_it + num_nodes,
+                   node_classify_fn{input_json,
+                                    tokens,
+                                    token_positions,
+                                    node_token_ids,
+                                    key_or_value,
+                                    node_ranges.begin(),
+                                    node_categories.begin()});
 
 #ifdef DEBUG_FROM_JSON
   print_pair_debug(node_ranges, "Node ranges", stream);
 #endif
-  return node_ranges;
+  return {std::move(node_ranges), std::move(node_categories)};
 }
 
-// Function logic for substring API.
-// This both calculates the output size and executes the substring.
-// No bound check is performed, assuming that the substring bounds are all valid.
-struct substring_fn {
+// Stored ranges are assumed in-bounds for `d_string`; no bound check is performed.
+struct render_node_fn {
   cudf::device_span<char const> d_string;
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> d_ranges;
+  cudf::device_span<token_category const> d_categories;
 
   cudf::size_type* d_sizes;
   char* d_chars;
@@ -700,19 +783,29 @@ struct substring_fn {
   __device__ void operator()(cudf::size_type idx)
   {
     auto const range = d_ranges[idx];
-    auto const size  = range.second - range.first;
-    if (d_chars) {
-      memcpy(d_chars + d_offsets[idx], d_string.data() + range.first, size);
-    } else {
-      d_sizes[idx] = size;
+    auto* const out  = d_chars ? d_chars + d_offsets[idx] : nullptr;
+    auto const* json = d_string.data();
+
+    cudf::size_type size = 0;
+    switch (d_categories[idx]) {
+      case token_category::verbatim:
+        size = range.second - range.first;
+        if (out != nullptr) { memcpy(out, json + range.first, size); }
+        break;
+      case token_category::string_unescape:
+        size = render_unescaped_string(json, range.first, range.second, out);
+        break;
     }
+    if (out == nullptr) { d_sizes[idx] = size; }
   }
 };
 
-// Extract key-value string pairs from the input json string.
+// The compaction carries each node's category alongside its range, so the materializer needs no
+// second classification pass.
 std::unique_ptr<cudf::column> extract_keys_or_values(
   node_kind key_value_sentinel,
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
+  cudf::device_span<token_category const> node_categories,
   cudf::device_span<node_kind const> key_or_value,
   cudf::device_span<char const> input_json,
   rmm::cuda_stream_view stream,
@@ -723,19 +816,24 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
       return key_or_value[node_id] == key_value_sentinel;
     });
 
-  auto extracted_ranges = rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(
-    node_ranges.size(), stream, mr);
-  auto const range_end   = copy_if(node_ranges.begin(),
-                                 node_ranges.end(),
-                                 thrust::make_counting_iterator(0),
-                                 extracted_ranges.begin(),
-                                 is_key_or_value,
-                                 stream);
-  auto const num_extract = cuda::std::distance(extracted_ranges.begin(), range_end);
+  auto const num_nodes = node_ranges.size();
+  auto extracted_ranges =
+    rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
+  auto extracted_categories = rmm::device_uvector<token_category>(num_nodes, stream);
+  auto const zip_in = thrust::make_zip_iterator(node_ranges.begin(), node_categories.begin());
+  auto const zip_out =
+    thrust::make_zip_iterator(extracted_ranges.begin(), extracted_categories.begin());
+  auto const zip_end     = copy_if(zip_in,
+                               zip_in + num_nodes,
+                               thrust::make_counting_iterator(0),
+                               zip_out,
+                               is_key_or_value,
+                               stream);
+  auto const num_extract = static_cast<cudf::size_type>(zip_end - zip_out);
   if (num_extract == 0) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING}); }
 
   auto [offsets, chars] = cudf::strings::detail::make_strings_children(
-    substring_fn{input_json, extracted_ranges}, num_extract, stream, mr);
+    render_node_fn{input_json, extracted_ranges, extracted_categories}, num_extract, stream, mr);
   return cudf::make_strings_column(
     num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
 }
@@ -929,18 +1027,6 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
 // Array-value path: parse `Map[String, Array[String]]` JSON into
 // `List<Struct<String, List<String>>>`, reusing the shared device helpers above.
 
-// True iff the byte range `[begin, end)` of `json` is exactly the 4-byte literal `null`. Callers
-// gate on a `ValueBegin` token first, so a JSON STRING "null" (a `StringBegin`) never reaches here;
-// the length-4 guard separates the literal from a 4-byte number like `1000`.
-__device__ inline bool is_json_null_literal(char const* json,
-                                            SymbolOffsetT begin,
-                                            SymbolOffsetT end)
-{
-  if (end - begin != 4) { return false; }
-  auto const* p = json + begin;
-  return p[0] == 'n' && p[1] == 'u' && p[2] == 'l' && p[3] == 'l';
-}
-
 // Zero-row `List<Struct<String, List<String>>>` for empty input. Sibling of `make_empty_map`;
 // the struct's value child is an empty `List<String>` instead of an empty `STRING`.
 std::unique_ptr<cudf::column> make_empty_map_array(rmm::cuda_stream_view stream,
@@ -950,11 +1036,8 @@ std::unique_ptr<cudf::column> make_empty_map_array(rmm::cuda_stream_view stream,
     cudf::make_empty_lists_column(cudf::data_type{cudf::type_id::STRING}), stream, mr);
 }
 
-// Classify each node as a value-array element and, if so, compute its de-quoted byte range and
-// element validity (mask #2: null iff it is the literal `null`). Emitted as three parallel device
-// vectors in one fused pass so the element extraction, inner offsets, and masks need no extra
-// classification pass. The de-quote/range logic is shared with `node_ranges_fn` via
-// `dequote_token_position`/`compute_token_range` so element strings match the value semantics.
+// Fused into one pass so the element extraction, inner offsets, and masks need no second
+// classification. Range logic is shared with `node_classify_fn` so elements and values agree.
 struct element_classify_fn {
   cudf::device_span<char const> input_json;
   cudf::device_span<PdaTokenT const> tokens;
@@ -963,45 +1046,50 @@ struct element_classify_fn {
   cudf::device_span<NodeIndexT const> parent_node_ids;
   cudf::device_span<node_kind const> key_or_value;
 
-  // Outputs.
   node_kind* element_flag;
   cuda::std::pair<SymbolOffsetT, SymbolOffsetT>* element_ranges;
   bool* element_valid;
+  token_category* element_categories;
 
   __device__ void operator()(cudf::size_type node_id) const
   {
-    element_flag[node_id]   = node_kind::none;
-    element_ranges[node_id] = {0, 0};
-    element_valid[node_id]  = true;
+    // Locals so each output is written exactly once, leaving non-element nodes at the defaults.
+    auto flag     = node_kind::none;
+    auto range    = cuda::std::pair<SymbolOffsetT, SymbolOffsetT>{0, 0};
+    auto valid    = true;
+    auto category = token_category::verbatim;
 
     auto const token_idx = node_token_ids[node_id];
     auto const token     = tokens[token_idx];
+    auto const parent    = parent_node_ids[node_id];
 
-    // Exclude error nodes; they are not array elements.
-    if (token == token_t::ErrorBegin) { return; }
+    // An element is a non-error node whose parent is the value array's `ListBegin`. The value
+    // guard is required: a nested inner `[` is also a `ListBegin`, but its parent is not
+    // value-tagged.
+    if (token != token_t::ErrorBegin && parent >= 0 && is_value_node(key_or_value[parent]) &&
+        tokens[node_token_ids[parent]] == token_t::ListBegin) {
+      auto const [range_begin, range_end] =
+        compute_token_range(tokens, token_positions, token_idx, /*include_quote_char=*/false);
 
-    // An element is a node whose parent is the value array's `ListBegin`. The value guard is
-    // required: a nested inner `[` is also a `ListBegin`, but its parent is not value-tagged.
-    auto const parent = parent_node_ids[node_id];
-    if (parent < 0 || !is_value_node(key_or_value[parent]) ||
-        tokens[node_token_ids[parent]] != token_t::ListBegin) {
-      return;
+      flag  = node_kind::element;
+      range = {range_begin, range_end};
+
+      // Mask #2: a literal `null` element is a null element, and gets an empty byte span -- it
+      // materializes as a null string with no non-empty-null payload, which the manual list
+      // assembly requires. Its category stays `verbatim`, so the empty span copies zero bytes.
+      if (token == token_t::ValueBegin &&
+          is_json_null_literal(input_json.data(), range_begin, range_end)) {
+        valid = false;
+        range = {range_begin, range_begin};
+      } else {
+        category = classify_token(input_json.data(), token, range_begin, range_end);
+      }
     }
 
-    auto const [range_begin, range_end] =
-      compute_token_range(tokens, token_positions, token_idx, /*include_quote_char=*/false);
-
-    element_flag[node_id]   = node_kind::element;
-    element_ranges[node_id] = {range_begin, range_end};
-
-    // Mask #2: a literal `null` element is a null element, and gets an empty byte span -- it
-    // materializes as a null string with no non-empty-null payload, which the manual list assembly
-    // requires.
-    if (token == token_t::ValueBegin &&
-        is_json_null_literal(input_json.data(), range_begin, range_end)) {
-      element_valid[node_id]  = false;
-      element_ranges[node_id] = {range_begin, range_begin};
-    }
+    element_flag[node_id]       = flag;
+    element_ranges[node_id]     = range;
+    element_valid[node_id]      = valid;
+    element_categories[node_id] = category;
   }
 };
 
@@ -1028,15 +1116,27 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto const& parent_node_ids      = tok.parent_node_ids;
   auto const& is_key_or_value_node = tok.is_key_or_value_node;
 
-  // Compute index range for each node.
-  // These ranges identify positions to extract nodes from the unified json string.
-  auto const node_ranges = compute_node_ranges(
-    tokens, token_positions, node_token_ids, parent_node_ids, is_key_or_value_node, stream);
+  // Compute the byte range and rendering category for each node. The ranges identify positions to
+  // extract nodes from the unified json string; the categories drive the Spark-render dispatch.
+  auto const classified = compute_node_ranges_and_categories(
+    preprocessed_input, tokens, token_positions, node_token_ids, is_key_or_value_node, stream);
+  auto const& node_ranges     = classified.ranges;
+  auto const& node_categories = classified.categories;
 
-  auto extracted_keys = extract_keys_or_values(
-    node_kind::key, node_ranges, is_key_or_value_node, preprocessed_input, stream, mr);
-  auto extracted_values = extract_keys_or_values(
-    node_kind::value, node_ranges, is_key_or_value_node, preprocessed_input, stream, mr);
+  auto extracted_keys   = extract_keys_or_values(node_kind::key,
+                                               node_ranges,
+                                               node_categories,
+                                               is_key_or_value_node,
+                                               preprocessed_input,
+                                               stream,
+                                               mr);
+  auto extracted_values = extract_keys_or_values(node_kind::value,
+                                                 node_ranges,
+                                                 node_categories,
+                                                 is_key_or_value_node,
+                                                 preprocessed_input,
+                                                 stream,
+                                                 mr);
   CUDF_EXPECTS(extracted_keys->size() == extracted_values->size(),
                "Invalid key-value pair extraction.");
 
@@ -1101,19 +1201,21 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto const& parent_node_ids      = tok.parent_node_ids;
   auto const& is_key_or_value_node = tok.is_key_or_value_node;
 
-  // Keys use the shared node-range computation; element ranges come from the fused classifier
-  // below.
-  auto const node_ranges = compute_node_ranges(
-    tokens, token_positions, node_token_ids, parent_node_ids, is_key_or_value_node, stream);
-  auto extracted_keys = extract_keys_or_values(
-    node_kind::key, node_ranges, is_key_or_value_node, preprocessed_input, stream, mr);
+  // Keys use the shared node-range/category computation; element ranges and categories come from
+  // the fused classifier below.
+  auto const classified = compute_node_ranges_and_categories(
+    preprocessed_input, tokens, token_positions, node_token_ids, is_key_or_value_node, stream);
+  auto const& node_ranges     = classified.ranges;
+  auto const& node_categories = classified.categories;
 
   // Fused classification pass: per node emit the element flag, the de-quoted element byte range,
-  // and element validity (mask #2) in one transform.
+  // element validity (mask #2), and the rendering category in one transform. Runs before the
+  // element extraction, which consumes the ranges and categories it produces.
   auto element_flag = rmm::device_uvector<node_kind>(num_nodes, stream);
   auto element_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
-  auto element_valid = rmm::device_uvector<bool>(num_nodes, stream);
+  auto element_valid      = rmm::device_uvector<bool>(num_nodes, stream);
+  auto element_categories = rmm::device_uvector<token_category>(num_nodes, stream);
   {
     auto const node_id_it = thrust::counting_iterator<cudf::size_type>(0);
     thrust::for_each(rmm::exec_policy_nosync(stream),
@@ -1127,12 +1229,26 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                                          is_key_or_value_node,
                                          element_flag.begin(),
                                          element_ranges.begin(),
-                                         element_valid.begin()});
+                                         element_valid.begin(),
+                                         element_categories.begin()});
   }
 
+  auto extracted_keys = extract_keys_or_values(node_kind::key,
+                                               node_ranges,
+                                               node_categories,
+                                               is_key_or_value_node,
+                                               preprocessed_input,
+                                               stream,
+                                               mr);
+
   // Extract element strings with the shared extractor (a 0-null STRING column); attach mask #2.
-  auto extracted_elements = extract_keys_or_values(
-    node_kind::element, element_ranges, element_flag, preprocessed_input, stream, mr);
+  auto extracted_elements = extract_keys_or_values(node_kind::element,
+                                                   element_ranges,
+                                                   element_categories,
+                                                   element_flag,
+                                                   preprocessed_input,
+                                                   stream,
+                                                   mr);
   {
     // Mask #2 over only the selected (element-flagged) nodes, in element document order, matching
     // the order `extract_keys_or_values` emits.
