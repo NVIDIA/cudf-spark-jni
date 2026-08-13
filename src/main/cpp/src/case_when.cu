@@ -84,7 +84,7 @@ std::unique_ptr<cudf::column> select_first_true_index(cudf::table_view const& wh
   // select first true index
   auto const d_table_ptr = cudf::table_device_view::create(
     when_bool_columns, stream, cudf::get_current_device_resource_ref());
-  thrust::transform(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator<cudf::size_type>(0),
                     thrust::make_counting_iterator<cudf::size_type>(row_count),
                     ret->mutable_view().begin<cudf::size_type>(),

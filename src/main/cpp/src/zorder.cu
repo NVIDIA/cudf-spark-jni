@@ -171,7 +171,7 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
     *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     output_size,
     [col = *output_dv_ptr, num_columns, data_type_size, input = *input_dv] __device__(
@@ -249,7 +249,7 @@ std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,
     *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::transform(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     cuda::make_counting_iterator<cudf::size_type>(num_rows),
     output_dv_ptr->begin<int64_t>(),

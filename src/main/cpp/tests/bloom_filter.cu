@@ -226,8 +226,8 @@ TEST_F(BloomFilterTest, InitializationV2)
 
     auto bytes =
       (bloom_filter->view().data<int8_t>()) + spark_rapids_jni::bloom_filter_header_v2_size_bytes;
-    CUDF_EXPECTS(thrust::all_of(rmm::exec_policy(cudf::get_default_stream(),
-                                                 cudf::get_current_device_resource_ref()),
+    CUDF_EXPECTS(thrust::all_of(rmm::exec_policy_nosync(cudf::get_default_stream(),
+                                                        cudf::get_current_device_resource_ref()),
                                 bytes,
                                 bytes + bloom_filter_size,
                                 is_zero{}),
@@ -320,7 +320,7 @@ TEST_F(BloomFilterTest, ProbeMergedV2)
   auto premerge_children = cudf::concatenate(cols);
   auto premerge_offsets  = cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::INT32}, 4);
   thrust::transform(
-    rmm::exec_policy(cudf::get_default_stream(), cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(cudf::get_default_stream(), cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(0) + 4,
     premerge_offsets->mutable_view().begin<cudf::size_type>(),

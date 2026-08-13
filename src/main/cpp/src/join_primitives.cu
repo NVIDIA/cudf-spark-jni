@@ -148,7 +148,7 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
 
   // Count the number of true values in the mask
   auto const num_matches =
-    thrust::count(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                   keep_mask.begin(),
                   keep_mask.end(),
                   true);

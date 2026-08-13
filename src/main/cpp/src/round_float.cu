@@ -116,7 +116,7 @@ std::unique_ptr<cudf::column> round_with(cudf::column_view const& input,
   auto out_view = result->mutable_view();
   T const n     = std::pow(10, std::abs(decimal_places));
 
-  thrust::transform(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     input.begin<T>(),
                     input.end<T>(),
                     out_view.begin<T>(),

@@ -617,7 +617,7 @@ void validate_ansi_column(column_view const& col,
   auto const num_errors     = num_nulls - incoming_nulls;
   if (num_errors > 0) {
     auto const first_error =
-      thrust::find_if(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+      thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       thrust::make_counting_iterator(0),
                       thrust::make_counting_iterator(col.size()),
                       row_valid_fn{col.null_mask(), source_col.null_mask()});

@@ -67,7 +67,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
       auto const ri = remaps[i];
       return i >= num_partitions ? 0 : partition_offsets[ri + 1] - partition_offsets[ri];
     }));
-  thrust::exclusive_scan(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          remapped_size_iter,
                          remapped_size_iter + num_partitions + 1,
                          remapped_offsets.begin());

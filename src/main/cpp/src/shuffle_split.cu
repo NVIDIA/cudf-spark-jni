@@ -806,7 +806,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   CUDF_EXPECTS(input.num_columns() != 0, "Encountered input with no columns.");
   if (input.num_rows() == 0) {
     rmm::device_uvector<size_t> empty_offsets(1, stream, mr);
-    thrust::fill(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                  empty_offsets.begin(),
                  empty_offsets.end(),
                  0);

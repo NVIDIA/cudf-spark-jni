@@ -994,7 +994,7 @@ std::unique_ptr<cudf::table> multiply_decimal128(cudf::column_view const& a,
   auto product_view   = columns[1]->mutable_view();
   check_scale_divisor(a.type().scale() + b.type().scale(), product_scale);
   thrust::for_each(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     dec128_multiplier(overflows_view.begin<bool>(), product_view, a, b, cast_interim_result));
@@ -1028,7 +1028,7 @@ std::unique_ptr<cudf::table> divide_decimal128(cudf::column_view const& a,
   auto overflows_view = columns[0]->mutable_view();
   auto quotient_view  = columns[1]->mutable_view();
   thrust::for_each(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     dec128_divider<__int128_t, false>(overflows_view.begin<bool>(), quotient_view, a, b));
@@ -1061,7 +1061,7 @@ std::unique_ptr<cudf::table> integer_divide_decimal128(cudf::column_view const& 
   auto overflows_view = columns[0]->mutable_view();
   auto quotient_view  = columns[1]->mutable_view();
   thrust::for_each(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     dec128_divider<uint64_t, true>(overflows_view.begin<bool>(), quotient_view, a, b));
@@ -1094,7 +1094,7 @@ std::unique_ptr<cudf::table> remainder_decimal128(cudf::column_view const& a,
                                   stream));
   auto overflows_view = columns[0]->mutable_view();
   auto remainder_view = columns[1]->mutable_view();
-  thrust::for_each(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator<cudf::size_type>(0),
                    thrust::make_counting_iterator<cudf::size_type>(num_rows),
                    dec128_remainder(overflows_view.begin<bool>(), remainder_view, a, b));
@@ -1127,7 +1127,7 @@ std::unique_ptr<cudf::table> add_decimal128(cudf::column_view const& a,
                                   stream));
   auto overflows_view = columns[0]->mutable_view();
   auto sum_view       = columns[1]->mutable_view();
-  thrust::for_each(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(num_rows),
                    dec128_add(overflows_view.begin<bool>(), sum_view, a, b));
@@ -1160,7 +1160,7 @@ std::unique_ptr<cudf::table> sub_decimal128(cudf::column_view const& a,
                                   stream));
   auto overflows_view = columns[0]->mutable_view();
   auto sub_view       = columns[1]->mutable_view();
-  thrust::for_each(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(num_rows),
                    dec128_sub(overflows_view.begin<bool>(), sub_view, a, b));

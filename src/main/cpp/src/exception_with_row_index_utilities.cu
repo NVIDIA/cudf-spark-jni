@@ -103,7 +103,7 @@ void throw_row_error_if_any(cudf::column_view const& input,
     auto const itr_begin = thrust::make_counting_iterator(0);
     auto const itr_end   = thrust::make_counting_iterator(result.size());
     auto const first_row_idx_with_error =
-      thrust::find_if(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+      thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       itr_begin,
                       itr_end,
                       row_invalid_unary_fn{input.null_mask(), result.null_mask()});
@@ -126,7 +126,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
   auto const itr_begin                = thrust::make_counting_iterator(0);
   auto const itr_end                  = thrust::make_counting_iterator(result.size());
   auto const first_row_idx_with_error = thrust::find_if(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     itr_begin,
     itr_end,
     row_invalid_binary_fn{input1.null_mask(), input2.null_mask(), result.null_mask()});
@@ -150,7 +150,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
   auto const itr_begin                = thrust::make_counting_iterator(0);
   auto const itr_end                  = thrust::make_counting_iterator(result.size());
   auto const first_row_idx_with_error = thrust::find_if(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     itr_begin,
     itr_end,
     row_invalid_ternary_fn{

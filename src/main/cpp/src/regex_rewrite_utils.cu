@@ -91,7 +91,7 @@ std::unique_ptr<cudf::column> find_literal_range_pattern(cudf::strings_column_vi
   auto const d_results = results->mutable_view().data<bool>();
   // set the bool values by evaluating the passed function
   thrust::transform(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(strings_count),
     d_results,

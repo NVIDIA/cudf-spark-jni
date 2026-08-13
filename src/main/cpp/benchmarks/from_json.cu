@@ -315,7 +315,7 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
   rmm::device_uvector<cudf::size_type> sizes(num_rows, stream);
   fn.d_chars = nullptr;
   fn.d_sizes = sizes.data();
-  thrust::for_each_n(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::counting_iterator<cudf::size_type>{0},
                      row_count,
                      fn);
@@ -330,7 +330,7 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
       [d_sizes = sizes.data(), row_count] __device__(cudf::size_type i) {
         return i < row_count ? static_cast<int64_t>(d_sizes[i]) : int64_t{0};
       }));
-  thrust::exclusive_scan(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          sizes_in,
                          sizes_in + (num_rows + 1),
                          offsets.begin(),
@@ -341,7 +341,7 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
   rmm::device_uvector<char> chars(total_bytes, stream);
   fn.d_chars   = chars.data();
   fn.d_offsets = offsets.data();
-  thrust::for_each_n(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::counting_iterator<cudf::size_type>{0},
                      row_count,
                      fn);

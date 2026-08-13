@@ -969,7 +969,7 @@ int64_t calc_scratch_size(cudf::strings_column_view const& input,
                           rmm::cuda_stream_view stream)
 {
   auto const max_row_size = thrust::transform_reduce(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     cuda::proclaim_return_type<int64_t>(

@@ -213,7 +213,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
 
   // Compute the hash value for each row
   thrust::tabulate(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     output_view.begin<murmur_hash_value_type>(),
     output_view.end<murmur_hash_value_type>(),
     row_hasher.device_hasher<MurmurHash3_32, murmur_device_row_hasher>(nullable, seed));

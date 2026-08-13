@@ -68,7 +68,7 @@ std::unique_ptr<cudf::column> gregorian_to_julian_days(cudf::column_view const& 
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_D>(),
@@ -138,7 +138,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_days(cudf::column_view const& 
                                             stream,
                                             mr);
 
-  thrust::transform(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator(0),
                     thrust::make_counting_iterator(input.size()),
                     output->mutable_view().begin<cudf::timestamp_D>(),
@@ -239,7 +239,7 @@ std::unique_ptr<cudf::column> gregorian_to_julian_micros(cudf::column_view const
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_us>(),
@@ -302,7 +302,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_micros(cudf::column_view const
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_us>(),

@@ -491,7 +491,7 @@ std::unique_ptr<cudf::column> hive_hash(cudf::table_view const& input,
   auto output_view = output->mutable_view();
 
   // Compute the hash value for each row
-  thrust::tabulate(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output_view.begin<hive_hash_value_t>(),
                    output_view.end<hive_hash_value_t>(),
                    hive_device_row_hasher<hive_hash_function, bool>(nullable, *input_view));

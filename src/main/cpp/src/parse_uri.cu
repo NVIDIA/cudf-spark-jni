@@ -930,7 +930,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
     d_matches ? cuda::std::optional<column_device_view const>{*d_matches} : cuda::std::nullopt);
 
   // use scan to transform number of bytes into offsets
-  thrust::exclusive_scan(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          offsets_view.begin<size_type>(),
                          offsets_view.end<size_type>(),
                          offsets_mutable_view.begin<size_type>());

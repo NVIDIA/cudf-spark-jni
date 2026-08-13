@@ -60,7 +60,7 @@ std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
 
   std::unique_ptr<rmm::device_buffer> out =
     std::make_unique<rmm::device_buffer>(mask_size * sizeof(cudf::bitmask_type), stream, mr);
-  thrust::transform(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator(0),
                     thrust::make_counting_iterator(0) + mask_size,
                     static_cast<cudf::bitmask_type*>(out->data()),
