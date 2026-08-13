@@ -655,11 +655,12 @@ public class GetJsonObjectTest {
         "{\"k\":null,\"k\":\"value\"}",
         "{\"k\":\"value\",\"k\":null}",
         "{\"k\":null,\"k\":null}",
-        "{\"k\":\"value\",\"broken\":}");
+        "{\"k\":\"value\",\"broken\":}",
+        (String) null);
          ColumnVector expectedFirst = ColumnVector.fromStrings(
-             "first", "value", "value", null, null);
+             "first", "value", "value", null, null, null);
          ColumnVector expectedLast = ColumnVector.fromStrings(
-             "last", "value", "value", null, null);
+             "last", "value", "value", null, null, null);
          ColumnVector actualFirst = JSONUtils.getJsonObject(input, path)) {
       assertColumnsAreEqual(expectedFirst, actualFirst);
       ColumnVector[] actualExplicitFirst = JSONUtils.getJsonObjectMultiplePaths(
@@ -682,6 +683,27 @@ public class GetJsonObjectTest {
         assertColumnsAreEqual(expectedLast, actualLast[0]);
       } finally {
         actualLast[0].close();
+      }
+    }
+  }
+
+  @Test
+  void getJsonObjectEmbeddedNulPathNameTest() {
+    String pathName = new String(new char[] {'a', '\0', 'b'});
+    JSONUtils.PathInstructionJni[] path = new JSONUtils.PathInstructionJni[] {
+        namedPath(pathName) };
+    List<List<JSONUtils.PathInstructionJni>> paths = Arrays.asList(Arrays.asList(path[0]));
+    try (ColumnVector input = ColumnVector.fromStrings(
+        "{\"a\":\"wrong\",\"a\\u0000b\":\"right\"}");
+         ColumnVector expected = ColumnVector.fromStrings("right");
+         ColumnVector actual = JSONUtils.getJsonObject(input, path)) {
+      assertColumnsAreEqual(expected, actual);
+      ColumnVector[] actualMultiple = JSONUtils.getJsonObjectMultiplePaths(
+          input, paths, JSONUtils.NamedFieldMatchPolicy.FIRST_NON_NULL);
+      try {
+        assertColumnsAreEqual(expected, actualMultiple[0]);
+      } finally {
+        actualMultiple[0].close();
       }
     }
   }

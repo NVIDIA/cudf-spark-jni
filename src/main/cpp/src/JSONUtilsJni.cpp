@@ -47,7 +47,7 @@ jlong get_json_object(JNIEnv* env,
   std::vector<std::tuple<path_instruction_type, std::string, int32_t>> instructions;
   {
     auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
-    auto const names     = cudf::jni::native_jstringArray(env, j_names);
+    auto const names     = cudf::jni::native_jstringArray(env, j_names).as_cpp_vector();
     auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
     auto const size      = type_nums.size();
     if (static_cast<std::size_t>(names.size()) != size || indexes.size() != size) {
@@ -58,9 +58,8 @@ jlong get_json_object(JNIEnv* env,
     instructions.reserve(size);
     for (std::size_t i = 0; i < size; i++) {
       auto const instruction_type = static_cast<path_instruction_type>(type_nums[i]);
-      char const* name_str        = names[i].get();
       auto const index            = indexes[i];
-      instructions.emplace_back(instruction_type, name_str, index);
+      instructions.emplace_back(instruction_type, names[i], index);
     }
   }
 
@@ -85,7 +84,7 @@ jlongArray get_json_object_multiple_paths(JNIEnv* env,
     auto const path_offsets = cudf::jni::native_jintArray(env, j_path_offsets).to_vector();
     CUDF_EXPECTS(path_offsets.size() > 1, "Invalid path offsets.");
     auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
-    auto const names     = cudf::jni::native_jstringArray(env, j_names);
+    auto const names     = cudf::jni::native_jstringArray(env, j_names).as_cpp_vector();
     auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
     auto const num_paths = path_offsets.size() - 1;
     paths.resize(num_paths);
@@ -108,9 +107,8 @@ jlongArray get_json_object_multiple_paths(JNIEnv* env,
       path.reserve(path_size);
       for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
         auto const instruction_type = static_cast<path_instruction_type>(type_nums[j]);
-        char const* name_str        = names[j].get();
         auto const index            = indexes[j];
-        path.emplace_back(instruction_type, name_str, index);
+        path.emplace_back(instruction_type, names[j], index);
       }
 
       paths[i] = std::move(path);

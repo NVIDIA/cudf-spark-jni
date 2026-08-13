@@ -139,3 +139,6 @@ ConfigureTest(MULTIPLY
 
 ConfigureTest(FROM_JSON
     from_json.cpp)
+
+ConfigureTest(GET_JSON_OBJECT
+    get_json_object.cpp)
