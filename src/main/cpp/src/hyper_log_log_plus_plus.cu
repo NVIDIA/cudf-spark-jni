@@ -428,11 +428,11 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
         cudf::util::div_rounding_up_safe(num_threads_partial_kernel, block_size);
       partial_group_sketches_from_hashs_kernel<block_size, num_hashs_per_thread>
         <<<num_blocks_p1, block_size, 0, stream.get()>>>(*d_hashs,
-                                                           group_labels,
-                                                           precision,
-                                                           sketches_output.begin(),
-                                                           registers_thread_cache.begin(),
-                                                           group_labels_thread_cache.begin());
+                                                         group_labels,
+                                                         precision,
+                                                         sketches_output.begin(),
+                                                         registers_thread_cache.begin(),
+                                                         group_labels_thread_cache.begin());
     }
     // 3. merge the intermidate result
     auto num_merge_threads = num_registers_per_sketch;
@@ -619,14 +619,14 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
     // 1st kernel: partially group
     partial_group_long_sketches_kernel<block_size, num_longs_per_threads>
       <<<num_blocks, block_size, 0, stream.get()>>>(d_inputs,
-                                                      num_sketches,
-                                                      num_threads_per_col_phase1,
-                                                      num_registers_per_sketch,
-                                                      num_groups,
-                                                      group_labels,
-                                                      registers_output_cache.begin(),
-                                                      registers_thread_cache.begin(),
-                                                      group_labels_thread_cache.begin());
+                                                    num_sketches,
+                                                    num_threads_per_col_phase1,
+                                                    num_registers_per_sketch,
+                                                    num_groups,
+                                                    group_labels,
+                                                    registers_output_cache.begin(),
+                                                    registers_thread_cache.begin(),
+                                                    group_labels_thread_cache.begin());
     auto const num_phase2_threads = num_registers_per_sketch;
     auto const num_phase2_blocks = cudf::util::div_rounding_up_safe(num_phase2_threads, block_size);
     // 2nd kernel: vertical merge
