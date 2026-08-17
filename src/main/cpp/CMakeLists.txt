@@ -217,6 +217,7 @@ add_library(
   src/CharsetDecodeJni.cpp
   src/DateTimeUtilsJni.cpp
   src/DecimalUtilsJni.cpp
+  src/DeletionVectorUtilsJni.cpp
   src/DeviceAttrJni.cpp
   src/GpuTimeZoneDBJni.cpp
   src/HistogramJni.cpp
