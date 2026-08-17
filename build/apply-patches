@@ -20,7 +20,14 @@ set -e
 
 BASE_DIR=$( git rev-parse --show-toplevel )
 
-PATCH_DIR=${PATCH_DIR:-$(realpath "$BASE_DIR/patches/")}
+PATCH_DIR=${PATCH_DIR:-"$BASE_DIR/patches/"}
+
+if [ ! -d "$PATCH_DIR" ] ; then
+  echo "No patches to apply"
+  exit 0
+fi
+
+PATCH_DIR=$(realpath "$PATCH_DIR")
 
 CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
 
