@@ -26,6 +26,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/exec_policy.hpp>
@@ -384,8 +385,10 @@ void generate_buckets(GeneratorFunc generator,
                       cudf::mutable_column_view output,
                       rmm::cuda_stream_view stream)
 {
-  thrust::tabulate(
-    rmm::exec_policy_nosync(stream), output.begin<int32_t>(), output.end<int32_t>(), generator);
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   output.begin<int32_t>(),
+                   output.end<int32_t>(),
+                   generator);
 }
 
 std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input,
@@ -406,7 +409,8 @@ std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input
                                               stream,
                                               mr);
 
-  auto d_input     = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto output_view = output->mutable_view();
 
   auto type_id = input.type().id();

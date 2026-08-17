@@ -25,6 +25,7 @@
 #include <cudf/reduction.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/unary.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <cuda/functional>
@@ -179,7 +180,7 @@ std::unique_ptr<column> indices_of(
   auto values_sizes_offsets = make_numeric_column(
     data_type(type_to_id<size_type>()), num_keys + 1, cudf::mask_state::UNALLOCATED, stream);
   auto d_values_sizes_offsets = values_sizes_offsets->mutable_view().template data<size_type>();
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          search_key_to_num_search_values,
                          search_key_to_num_search_values + num_keys + 1,
                          d_values_sizes_offsets);
@@ -201,8 +202,10 @@ std::unique_ptr<column> indices_of(
         }
       }));
   // Sum up all comparisons across all rows
-  auto const total_compares = thrust::reduce(
-    rmm::exec_policy(stream), total_compares_per_row, total_compares_per_row + num_lists);
+  auto const total_compares =
+    thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   total_compares_per_row,
+                   total_compares_per_row + num_lists);
 
   // Calculate indices for search values
   // Calculate offsets for the total comparisons per row
@@ -210,14 +213,14 @@ std::unique_ptr<column> indices_of(
   auto total_compares_offsets = make_numeric_column(
     data_type(type_to_id<size_type>()), num_lists + 1, cudf::mask_state::UNALLOCATED, stream);
   auto d_total_compares_offsets = total_compares_offsets->mutable_view().template data<size_type>();
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          total_compares_per_row,
                          total_compares_per_row + num_lists + 1,
                          d_total_compares_offsets);
 
   // Check for any overflow in getting the total number of compares
   CUDF_EXPECTS(
-    !thrust::any_of(rmm::exec_policy(stream),
+    !thrust::any_of(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     d_total_compares_offsets,
                     d_total_compares_offsets + num_lists + 1,
                     cuda::proclaim_return_type<bool>(
@@ -278,7 +281,7 @@ std::unique_ptr<column> indices_of(
   // index which is filled in at the start
   auto results = make_numeric_column(
     data_type(type_to_id<size_type>()), num_keys, cudf::mask_state::UNALLOCATED, stream);
-  thrust::fill(rmm::exec_policy(stream),
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                results->mutable_view().template begin<size_type>(),
                results->mutable_view().template end<size_type>(),
                -total_compares - 1);
@@ -286,7 +289,7 @@ std::unique_ptr<column> indices_of(
   // Since there are no duplicate keys, we can immediately write the found index into the output
   // as there will be only one match per map
   thrust::for_each(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(total_compares),
     [values_idx,
@@ -413,7 +416,7 @@ std::unique_ptr<cudf::column> map_zip(
                                          stream,
                                          mr);
   auto [result_mask, null_count] =
-    cudf::bitmask_and(cudf::table_view({col1.parent(), col2.parent()}), stream);
+    cudf::bitmask_and(cudf::table_view({col1.parent(), col2.parent()}), stream, mr);
   return make_lists_column(search_keys_list.size(),
                            std::make_unique<column>(search_keys_list.offsets()),
                            std::move(map_structs),
