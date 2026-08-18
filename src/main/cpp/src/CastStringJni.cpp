@@ -47,7 +47,7 @@ constexpr char const* JNI_CAST_ERROR_CLASS = "com/nvidia/spark/rapids/jni/CastEx
     if (ex_class != NULL) {                                                                   \
       jmethodID ctor_id = env->GetMethodID(ex_class, "<init>", "([BI)V");                     \
       if (ctor_id != NULL) {                                                                  \
-        std::string n_msg = e.get_string_with_error();                                        \
+        std::string const& n_msg = e.get_string_with_error();                                 \
         cudf::jni::native_jbyteArray j_msg{                                                   \
           env, reinterpret_cast<jbyte const*>(n_msg.data()), static_cast<int>(n_msg.size())}; \
         if (!j_msg.is_null()) {                                                               \

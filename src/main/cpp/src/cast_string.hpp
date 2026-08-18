@@ -52,9 +52,9 @@ struct cast_error : public std::runtime_error {
   /**
    * @brief Get the string that caused a parsing error
    *
-   * @return char const* const problematic string
+   * @return std::string const& problematic string
    */
-  [[nodiscard]] char const* get_string_with_error() const { return _string_with_error.c_str(); }
+  [[nodiscard]] std::string const& get_string_with_error() const { return _string_with_error; }
 
  private:
   cudf::size_type _row_number;

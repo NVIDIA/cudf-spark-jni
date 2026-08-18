@@ -93,7 +93,7 @@ TYPED_TEST(StringToIntegerTests, Ansi)
     }();
 
     EXPECT_EQ(e.get_row_number(), row);
-    EXPECT_STREQ(e.get_string_with_error(), first_error_string);
+    EXPECT_EQ(e.get_string_with_error(), first_error_string);
   }
 
   auto const result = spark_rapids_jni::string_to_integer(
