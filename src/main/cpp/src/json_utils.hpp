@@ -20,8 +20,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
+
+#include <cuda/stream>
 
 #include <memory>
 
@@ -43,7 +44,7 @@ struct json_parse_options {
 std::unique_ptr<cudf::column> from_json_to_raw_map(
   cudf::strings_column_view const& input,
   json_parse_options options,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -65,7 +66,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(
 std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   cudf::strings_column_view const& input,
   json_parse_options options,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -85,7 +86,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(
   bool allow_nonnumeric_numbers,
   bool allow_unquoted_control,
   bool is_us_locale,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -101,7 +102,7 @@ std::unique_ptr<cudf::column> convert_from_strings(
   std::vector<int> const& precisions,
   bool allow_nonnumeric_numbers,
   bool is_us_locale,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -113,7 +114,7 @@ std::unique_ptr<cudf::column> convert_from_strings(
 std::unique_ptr<cudf::column> remove_quotes(
   cudf::strings_column_view const& input,
   bool nullify_if_not_quoted,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -139,7 +140,7 @@ std::unique_ptr<cudf::column> remove_quotes(
 std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
   cudf::strings_column_view const& input,
   bool nullify_invalid_rows         = false,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

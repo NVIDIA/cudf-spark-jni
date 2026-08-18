@@ -969,7 +969,7 @@ std::unique_ptr<cudf::table> multiply_decimal128(cudf::column_view const& a,
                                                  cudf::column_view const& b,
                                                  int32_t product_scale,
                                                  bool const cast_interim_result,
-                                                 rmm::cuda_stream_view stream)
+                                                 cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1004,7 +1004,7 @@ std::unique_ptr<cudf::table> multiply_decimal128(cudf::column_view const& a,
 std::unique_ptr<cudf::table> divide_decimal128(cudf::column_view const& a,
                                                cudf::column_view const& b,
                                                int32_t quotient_scale,
-                                               rmm::cuda_stream_view stream)
+                                               cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1038,7 +1038,7 @@ std::unique_ptr<cudf::table> divide_decimal128(cudf::column_view const& a,
 std::unique_ptr<cudf::table> integer_divide_decimal128(cudf::column_view const& a,
                                                        cudf::column_view const& b,
                                                        int32_t quotient_scale,
-                                                       rmm::cuda_stream_view stream)
+                                                       cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1071,7 +1071,7 @@ std::unique_ptr<cudf::table> integer_divide_decimal128(cudf::column_view const& 
 std::unique_ptr<cudf::table> remainder_decimal128(cudf::column_view const& a,
                                                   cudf::column_view const& b,
                                                   int32_t remainder_scale,
-                                                  rmm::cuda_stream_view stream)
+                                                  cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1104,7 +1104,7 @@ std::unique_ptr<cudf::table> remainder_decimal128(cudf::column_view const& a,
 std::unique_ptr<cudf::table> add_decimal128(cudf::column_view const& a,
                                             cudf::column_view const& b,
                                             int32_t target_scale,
-                                            rmm::cuda_stream_view stream)
+                                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1137,7 +1137,7 @@ std::unique_ptr<cudf::table> add_decimal128(cudf::column_view const& a,
 std::unique_ptr<cudf::table> sub_decimal128(cudf::column_view const& a,
                                             cudf::column_view const& b,
                                             int32_t target_scale,
-                                            rmm::cuda_stream_view stream)
+                                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
@@ -1365,7 +1365,7 @@ struct floating_point_to_decimal_dispatcher {
                   cudf::size_type* failure_row_id,
                   int32_t decimal_places,
                   int32_t precision,
-                  rmm::cuda_stream_view stream) const
+                  cuda::stream_ref stream) const
   {
     using DecimalRepType = cudf::device_storage_type_t<DecimalType>;
 
@@ -1388,7 +1388,7 @@ std::pair<std::unique_ptr<cudf::column>, cudf::size_type> floating_point_to_deci
   cudf::column_view const& input,
   cudf::data_type output_type,
   int32_t precision,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto output = cudf::make_fixed_point_column(

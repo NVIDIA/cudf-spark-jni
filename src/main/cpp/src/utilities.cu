@@ -20,12 +20,12 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/device_vector.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -38,7 +38,7 @@ bool is_basic_spark_numeric(cudf::data_type type)
 
 std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.size() > 0, "Empty input");

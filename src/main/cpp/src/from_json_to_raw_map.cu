@@ -30,7 +30,6 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -42,6 +41,7 @@
 #include <cuda/std/functional>
 #include <cuda/std/limits>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/copy.h>
 #include <thrust/count.h>
@@ -69,7 +69,7 @@ OutputIterator copy_if(InputIterator begin,
                        StencilIterator stencil,
                        OutputIterator result,
                        Predicate predicate,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   auto const num_items = cuda::std::distance(begin, end);
 
@@ -85,7 +85,7 @@ OutputIterator copy_if(InputIterator begin,
                                              num_selected.data(),
                                              num_items,
                                              predicate,
-                                             stream.value()));
+                                             stream.get()));
 
   auto d_temp_storage =
     rmm::device_buffer(temp_storage_bytes, stream, cudf::get_current_device_resource_ref());
@@ -98,7 +98,7 @@ OutputIterator copy_if(InputIterator begin,
                                              num_selected.data(),
                                              num_items,
                                              predicate,
-                                             stream.value()));
+                                             stream.get()));
 
   return result + num_selected.value(stream);
 }
@@ -108,7 +108,7 @@ OutputIterator copy_if(InputIterator begin,
                        InputIterator end,
                        OutputIterator output,
                        Predicate predicate,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   auto const num_items = cuda::std::distance(begin, end);
 
@@ -125,7 +125,7 @@ OutputIterator copy_if(InputIterator begin,
                                       num_selected.data(),
                                       num_items,
                                       predicate,
-                                      stream.value()));
+                                      stream.get()));
 
   // Allocate temporary storage
   rmm::device_buffer d_temp_storage(
@@ -139,7 +139,7 @@ OutputIterator copy_if(InputIterator begin,
                                       num_selected.data(),
                                       num_items,
                                       predicate,
-                                      stream.value()));
+                                      stream.get()));
 
   // Copy number of selected elements back to host via pinned memory
   return output + num_selected.value(stream);
@@ -149,7 +149,7 @@ OutputIterator copy_if(InputIterator begin,
 // value-child type selects the map flavor: an empty `STRING` gives `make_empty_map`'s output, an
 // empty `List<String>` gives `make_empty_map_array`'s.
 std::unique_ptr<cudf::column> make_empty_map_from_value(std::unique_ptr<cudf::column> value_child,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(value_child->size() == 0, "value_child must be an empty column.");
@@ -163,7 +163,7 @@ std::unique_ptr<cudf::column> make_empty_map_from_value(std::unique_ptr<cudf::co
   return cudf::make_lists_column(0, std::move(offsets), std::move(child), 0, rmm::device_buffer{});
 }
 
-std::unique_ptr<cudf::column> make_empty_map(rmm::cuda_stream_view stream,
+std::unique_ptr<cudf::column> make_empty_map(cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 {
   return make_empty_map_from_value(
@@ -173,7 +173,7 @@ std::unique_ptr<cudf::column> make_empty_map(rmm::cuda_stream_view stream,
 // Concatenating all input strings into one string, for which each input string is appended by a
 // delimiter character that does not exist in the input column.
 std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_strings(
-  cudf::strings_column_view const& input, rmm::cuda_stream_view stream)
+  cudf::strings_column_view const& input, cuda::stream_ref stream)
 {
   auto const default_mr = cudf::get_current_device_resource_ref();
   auto [concatenated_buff, delimiter, should_be_nullified] =
@@ -224,7 +224,7 @@ struct is_node {
 // This is copied from cudf's `json_tree.cu`.
 rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
                                                     cudf::device_span<PdaTokenT const> tokens,
-                                                    rmm::cuda_stream_view stream)
+                                                    cuda::stream_ref stream)
 {
   auto token_levels = rmm::device_uvector<TreeDepthT>(tokens.size(), stream);
 
@@ -279,7 +279,7 @@ rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
 
 // Compute the map from nodes to their indices in the list of all tokens.
 rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
-  std::size_t num_nodes, cudf::device_span<PdaTokenT const> tokens, rmm::cuda_stream_view stream)
+  std::size_t num_nodes, cudf::device_span<PdaTokenT const> tokens, cuda::stream_ref stream)
 {
   auto node_token_ids   = rmm::device_uvector<NodeIndexT>(num_nodes, stream);
   auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
@@ -301,7 +301,7 @@ rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
 // This is copied from cudf's `json_tree.cu`.
 template <typename KeyType, typename IndexType = cudf::size_type>
 std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_sorted_key_order(
-  cudf::device_span<KeyType const> keys, rmm::cuda_stream_view stream)
+  cudf::device_span<KeyType const> keys, cuda::stream_ref stream)
 {
   // Buffers used for storing intermediate results during sorting.
   rmm::device_uvector<KeyType> keys_buffer1(keys.size(), stream);
@@ -330,7 +330,7 @@ std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_s
                                   keys.size(),
                                   0,
                                   sizeof(KeyType) * 8,
-                                  stream.value());
+                                  stream.get());
 
   return std::pair{keys_buffer.Current() == keys_buffer1.data() ? std::move(keys_buffer1)
                                                                 : std::move(keys_buffer2),
@@ -341,7 +341,7 @@ std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_s
 // This is copied from cudf's `json_tree.cu`.
 void propagate_parent_to_siblings(cudf::device_span<TreeDepthT const> node_levels,
                                   cudf::device_span<NodeIndexT> parent_node_ids,
-                                  rmm::cuda_stream_view stream)
+                                  cuda::stream_ref stream)
 {
   auto const [sorted_node_levels, sorted_order] = stable_sorted_key_order(node_levels, stream);
 
@@ -360,7 +360,7 @@ void propagate_parent_to_siblings(cudf::device_span<TreeDepthT const> node_level
 rmm::device_uvector<NodeIndexT> compute_parent_node_ids(
   cudf::device_span<PdaTokenT const> tokens,
   cudf::device_span<NodeIndexT const> node_token_ids,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const first_childs_parent_token_id =
     cuda::proclaim_return_type<NodeIndexT>([tokens] __device__(auto i) -> NodeIndexT {
@@ -423,7 +423,7 @@ constexpr int32_t list_nesting_weight{1 << 8};
 
 // Check for each node if it is a key or a value field.
 rmm::device_uvector<node_kind> check_key_or_value_nodes(
-  cudf::device_span<NodeIndexT const> parent_node_ids, rmm::cuda_stream_view stream)
+  cudf::device_span<NodeIndexT const> parent_node_ids, cuda::stream_ref stream)
 {
   auto key_or_value       = rmm::device_uvector<node_kind>(parent_node_ids.size(), stream);
   auto const transform_it = thrust::counting_iterator<int>(0);
@@ -475,7 +475,7 @@ struct tokenized_input {
 // this and diverge only after it returns.
 tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
                                       json_parse_options const& options,
-                                      rmm::cuda_stream_view stream)
+                                      cuda::stream_ref stream)
 {
   auto [concat_json_buff, delimiter, should_be_nullified] = unify_json_strings(input, stream);
   auto concat_buff_wrapper =
@@ -675,7 +675,7 @@ rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> compute_node_
   cudf::device_span<NodeIndexT const> node_token_ids,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<node_kind const> key_or_value,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const num_nodes = node_token_ids.size();
   auto node_ranges =
@@ -723,7 +723,7 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
   cudf::device_span<node_kind const> key_or_value,
   cudf::device_span<char const> input_json,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const is_key_or_value = cuda::proclaim_return_type<bool>(
@@ -753,7 +753,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
   cudf::size_type n_lists,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<node_kind const> key_or_value,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   // Count the number of children nodes for the json object nodes.
@@ -859,7 +859,7 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
   cudf::device_span<NodeIndexT const> node_token_ids,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<NodeIndexT const> precomputed_line_begin,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const num_nodes = node_token_ids.size();
@@ -951,7 +951,7 @@ __device__ inline bool is_json_null_literal(char const* json,
 
 // Zero-row `List<Struct<String, List<String>>>` for empty input. Sibling of `make_empty_map`;
 // the struct's value child is an empty `List<String>` instead of an empty `STRING`.
-std::unique_ptr<cudf::column> make_empty_map_array(rmm::cuda_stream_view stream,
+std::unique_ptr<cudf::column> make_empty_map_array(cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   return make_empty_map_from_value(
@@ -1017,7 +1017,7 @@ struct element_classify_fn {
 
 std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view const& input,
                                                    json_parse_options options,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1090,7 +1090,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
 std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   cudf::strings_column_view const& input,
   json_parse_options options,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

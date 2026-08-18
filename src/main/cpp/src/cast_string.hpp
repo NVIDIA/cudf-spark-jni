@@ -25,6 +25,8 @@
 
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/stream>
+
 #include <memory>
 
 namespace spark_rapids_jni {
@@ -78,7 +80,7 @@ std::unique_ptr<cudf::column> string_to_integer(
   cudf::strings_column_view const& string_col,
   bool ansi_mode,
   bool strip,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -100,7 +102,7 @@ std::unique_ptr<cudf::column> string_to_decimal(
   cudf::strings_column_view const& string_col,
   bool ansi_mode,
   bool strip,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -118,34 +120,34 @@ std::unique_ptr<cudf::column> string_to_float(
   cudf::data_type dtype,
   cudf::strings_column_view const& string_col,
   bool ansi_mode,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 std::unique_ptr<cudf::column> format_float(
   cudf::column_view const& input,
   int const digits,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 std::unique_ptr<cudf::column> float_to_string(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 [[nodiscard]] std::unique_ptr<cudf::column> float_to_string(
   cudf::column_view const& input,
   bool json_string,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 std::unique_ptr<cudf::column> decimal_to_non_ansi_string(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 std::unique_ptr<cudf::column> long_to_binary_string(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -176,7 +178,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
   cudf::column_view const& tz_name_to_index_map,
   cudf::table_view const& tz_info_table,
   spark_rapids_jni::spark_system const& spark_system,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -198,7 +200,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
  */
 std::unique_ptr<cudf::column> parse_strings_to_date(
   cudf::strings_column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -237,7 +239,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -253,7 +255,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
  */
 std::unique_ptr<cudf::column> bytes_to_hex(
   cudf::strings_column_view const& input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

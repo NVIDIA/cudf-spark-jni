@@ -24,8 +24,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -96,7 +97,7 @@ CUDF_KERNEL void long_to_binary_string_kernel(cudf::column_device_view d_longs,
 }  // namespace
 
 std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& input,
-                                                    rmm::cuda_stream_view stream,
+                                                    cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::INT64, "Input column must be long type");
@@ -113,8 +114,7 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
   cudf::size_type* d_sizes  = output_sizes.data();
   auto constexpr block_size = 256;
   auto grid                 = cudf::detail::grid_1d{strings_count, block_size};
-  compute_output_size_kernel<<<grid.num_blocks, block_size, 0, stream.value()>>>(*d_column,
-                                                                                 d_sizes);
+  compute_output_size_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(*d_column, d_sizes);
 
   // Convert the sizes to offsets
   auto [offsets, bytes] = cudf::strings::detail::make_offsets_child_column(
@@ -131,7 +131,7 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
   auto new_grid = cudf::detail::grid_1d{strings_count * num_threads_per_row, block_size};
   if (bytes > 0) {
     long_to_binary_string_kernel<num_threads_per_row>
-      <<<new_grid.num_blocks, block_size, 0, stream.value()>>>(*d_column, d_chars, d_offsets);
+      <<<new_grid.num_blocks, block_size, 0, stream.get()>>>(*d_column, d_chars, d_offsets);
   }
 
   return cudf::make_strings_column(input.size(),
@@ -145,7 +145,7 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
 
 // external API
 std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& input,
-                                                    rmm::cuda_stream_view stream,
+                                                    cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

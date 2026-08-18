@@ -32,12 +32,12 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
 #include <cuda/functional>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/logical.h>
 
 #include <byteswap.h>
@@ -154,7 +154,7 @@ struct bloom_probe_functor {
 
 void pack_bloom_filter_header(cudf::device_span<uint8_t> buf,
                               bloom_filter_header const& header,
-                              rmm::cuda_stream_view stream,
+                              cuda::stream_ref stream,
                               int32_t seed)
 {
   if (header.version == bloom_filter_version_1) {
@@ -188,7 +188,7 @@ void pack_bloom_filter_header(cudf::device_span<uint8_t> buf,
       for V2, the value stored in the serialized header.
 */
 std::tuple<bloom_filter_header, cudf::device_span<cudf::bitmask_type const>, int64_t, int32_t>
-unpack_bloom_filter(cudf::device_span<uint8_t const> bloom_filter, rmm::cuda_stream_view stream)
+unpack_bloom_filter(cudf::device_span<uint8_t const> bloom_filter, cuda::stream_ref stream)
 {
   CUDF_EXPECTS(bloom_filter.size() >= static_cast<size_t>(bloom_filter_header_v1_size_bytes),
                "Encountered truncated bloom filter");
@@ -201,7 +201,7 @@ unpack_bloom_filter(cudf::device_span<uint8_t const> bloom_filter, rmm::cuda_str
   // Refer to https://github.com/NVIDIA/spark-rapids-jni/issues/4407.
   CUDF_CUDA_TRY(
     cudaMemcpyAsync(raw_ints, bloom_filter.data(), read_size, cudaMemcpyDefault, stream));
-  stream.synchronize();
+  stream.sync();
 
   int const version = byte_swap_int32(raw_ints[0]);
   CUDF_EXPECTS(version == bloom_filter_version_1 || version == bloom_filter_version_2,
@@ -237,7 +237,7 @@ unpack_bloom_filter(cudf::device_span<uint8_t const> bloom_filter, rmm::cuda_str
 }
 
 std::tuple<bloom_filter_header, cudf::device_span<cudf::bitmask_type const>, int64_t, int32_t>
-unpack_bloom_filter(cudf::column_view const& bloom_filter, rmm::cuda_stream_view stream)
+unpack_bloom_filter(cudf::column_view const& bloom_filter, cuda::stream_ref stream)
 {
   return unpack_bloom_filter(
     cudf::device_span<uint8_t const>{bloom_filter.data<uint8_t>(),
@@ -300,7 +300,7 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(int version,
                                                        int num_hashes,
                                                        int bloom_filter_longs,
                                                        int seed,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -333,7 +333,7 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(int version,
 
 void bloom_filter_put(cudf::list_scalar& bloom_filter,
                       cudf::column_view const& input,
-                      rmm::cuda_stream_view stream)
+                      cuda::stream_ref stream)
 {
   SRJ_FUNC_RANGE();
   auto [header, buffer, bloom_filter_bits, seed] = unpack_bloom_filter(bloom_filter.view(), stream);
@@ -351,7 +351,7 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
 
   auto launch = [&](auto version_tag, auto nullable_tag) {
     gpu_bloom_filter_put<decltype(version_tag)::value, decltype(nullable_tag)::value>
-      <<<grid.num_blocks, block_size, 0, stream.value()>>>(
+      <<<grid.num_blocks, block_size, 0, stream.get()>>>(
         mutable_buffer, bloom_filter_bits, *d_input, header.num_hashes, seed);
   };
 
@@ -373,7 +373,7 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
 }
 
 std::unique_ptr<cudf::list_scalar> bloom_filter_merge(cudf::column_view const& bloom_filters,
-                                                      rmm::cuda_stream_view stream,
+                                                      cuda::stream_ref stream,
                                                       rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -450,7 +450,7 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_merge(cudf::column_view const& b
 
 std::unique_ptr<cudf::column> bloom_filter_probe(cudf::column_view const& input,
                                                  cudf::device_span<uint8_t const> bloom_filter,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -489,7 +489,7 @@ std::unique_ptr<cudf::column> bloom_filter_probe(cudf::column_view const& input,
 
 std::unique_ptr<cudf::column> bloom_filter_probe(cudf::column_view const& input,
                                                  cudf::list_scalar& bloom_filter,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

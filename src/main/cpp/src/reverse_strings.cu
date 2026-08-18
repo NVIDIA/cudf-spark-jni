@@ -25,11 +25,11 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/iterator>
 #include <cuda/std/algorithm>
+#include <cuda/stream>
 #include <thrust/for_each.h>
 
 #include <stdint.h>
@@ -94,7 +94,7 @@ struct reverse_characters_fn {
 }  // namespace
 
 std::unique_ptr<cudf::column> reverse_strings(cudf::strings_column_view const& input,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::type_id::STRING); }
@@ -118,7 +118,7 @@ std::unique_ptr<cudf::column> reverse_strings(cudf::strings_column_view const& i
 }  // namespace detail
 
 std::unique_ptr<cudf::column> reverse_strings(cudf::strings_column_view const& input,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

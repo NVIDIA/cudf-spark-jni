@@ -23,10 +23,10 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/for_each.h>
 
 namespace {
@@ -136,7 +136,7 @@ __device__ uint_backed_array<uint64_t> hilbert_transposed_index(
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   auto num_columns = tbl.num_columns();
@@ -220,7 +220,7 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
 
 std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,
                                             cudf::table_view const& tbl,
-                                            rmm::cuda_stream_view stream,
+                                            cuda::stream_ref stream,
                                             rmm::device_async_resource_ref mr)
 {
   auto const num_rows    = tbl.num_rows();

@@ -31,10 +31,10 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <cuda_runtime_api.h>
 #include <thrust/copy.h>
 #include <thrust/count.h>
@@ -96,7 +96,7 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
                            cudf::table_device_view const& right_table,
                            cudf::ast::detail::expression_device_view device_expression_data,
                            cudf::size_type num_intermediates,
-                           rmm::cuda_stream_view stream,
+                           cuda::stream_ref stream,
                            rmm::device_async_resource_ref mr)
 {
   auto const num_pairs = left_indices.size();
@@ -135,13 +135,13 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
   auto const shmem_size = static_cast<size_t>(block_size) * static_cast<size_t>(per_thread_bytes);
 
   filter_join_indices_kernel<has_nulls>
-    <<<grid_size, block_size, shmem_size, stream.value()>>>(left_indices.data(),
-                                                            right_indices.data(),
-                                                            num_pairs,
-                                                            left_table,
-                                                            right_table,
-                                                            device_expression_data,
-                                                            keep_mask.data());
+    <<<grid_size, block_size, shmem_size, stream.get()>>>(left_indices.data(),
+                                                          right_indices.data(),
+                                                          num_pairs,
+                                                          left_table,
+                                                          right_table,
+                                                          device_expression_data,
+                                                          keep_mask.data());
 
   // Surface any kernel launch errors immediately
   CUDF_CUDA_TRY(cudaPeekAtLastError());
@@ -183,7 +183,7 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::sorted is_left_sorted,
                       cudf::sorted is_right_sorted,
                       cudf::null_equality compare_nulls,
-                      rmm::cuda_stream_view stream,
+                      cuda::stream_ref stream,
                       rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -208,7 +208,7 @@ std::pair<rmm::device_uvector<cudf::size_type>, rmm::device_uvector<cudf::size_t
 hash_inner_join(cudf::table_view const& left_keys,
                 cudf::table_view const& right_keys,
                 cudf::null_equality compare_nulls,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -240,7 +240,7 @@ filter_gather_maps_by_ast(cudf::device_span<cudf::size_type const> left_indices,
                           cudf::table_view const& left_table,
                           cudf::table_view const& right_table,
                           cudf::ast::expression const& binary_predicate,
-                          rmm::cuda_stream_view stream,
+                          cuda::stream_ref stream,
                           rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -308,13 +308,13 @@ namespace {
 std::pair<rmm::device_uvector<bool>, cudf::size_type> compute_side_match_info(
   cudf::device_span<cudf::size_type const> indices,
   cudf::size_type table_size,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   // Create a boolean mask to track which rows have matches
   // Note: Temporary buffers use current device resource for allocation
   auto has_match =
     rmm::device_uvector<bool>(table_size, stream, cudf::get_current_device_resource_ref());
-  CUDF_CUDA_TRY(cudaMemsetAsync(has_match.data(), 0, has_match.size(), stream.value()));
+  CUDF_CUDA_TRY(cudaMemsetAsync(has_match.data(), 0, has_match.size(), stream.get()));
 
   // Mark rows that have matches
   thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
@@ -343,7 +343,7 @@ void populate_outer_result(cudf::size_type table_size,
                            cudf::size_type unmatched_offset,
                            rmm::device_uvector<cudf::size_type>& out_indices,
                            rmm::device_uvector<cudf::size_type>& out_other_indices,
-                           rmm::cuda_stream_view stream)
+                           cuda::stream_ref stream)
 {
   // Copy unmatched rows
   auto unmatched_iter = out_indices.begin() + unmatched_offset;
@@ -369,7 +369,7 @@ make_left_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -414,7 +414,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -476,7 +476,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
 rmm::device_uvector<cudf::size_type> make_semi(
   cudf::device_span<cudf::size_type const> left_indices,
   cudf::size_type left_table_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -520,7 +520,7 @@ rmm::device_uvector<cudf::size_type> make_semi(
 rmm::device_uvector<cudf::size_type> make_anti(
   cudf::device_span<cudf::size_type const> left_indices,
   cudf::size_type left_table_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -567,7 +567,7 @@ rmm::device_uvector<cudf::size_type> make_anti(
 
 std::unique_ptr<cudf::column> get_matched_rows(cudf::device_span<cudf::size_type const> gather_map,
                                                cudf::size_type table_size,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -580,7 +580,7 @@ std::unique_ptr<cudf::column> get_matched_rows(cudf::device_span<cudf::size_type
   auto result_data = result_view.data<bool>();
 
   // Initialize all to false
-  CUDF_CUDA_TRY(cudaMemsetAsync(result_data, 0, table_size, stream.value()));
+  CUDF_CUDA_TRY(cudaMemsetAsync(result_data, 0, table_size, stream.get()));
 
   // Mark rows that appear in the gather map as true
   thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),

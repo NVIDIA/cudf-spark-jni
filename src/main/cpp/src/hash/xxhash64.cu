@@ -22,13 +22,13 @@
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
 #include <cuda/std/array>
 #include <cuda/std/bit>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/tabulate.h>
 
 namespace spark_rapids_jni {
@@ -552,7 +552,7 @@ void check_nested_depth(cudf::table_view const& input)
 
 std::unique_ptr<cudf::column> xxhash64(cudf::table_view const& input,
                                        int64_t _seed,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   hash_value_type seed = static_cast<hash_value_type>(_seed);

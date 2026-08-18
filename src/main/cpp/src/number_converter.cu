@@ -368,7 +368,7 @@ std::unique_ptr<cudf::column> convert_impl(cudf::size_type num_rows,
                                            STR_ITERATOR input,
                                            FROM_BASE_ITERATOR from_base,
                                            TO_BASE_ITERATOR to_base,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   static constexpr bool IS_CONST_BASES = cuda::std::is_same_v<const_base, FROM_BASE_ITERATOR> &&
@@ -454,7 +454,7 @@ bool is_convert_overflow_impl(cudf::size_type num_rows,
                               STR_ITERATOR input,
                               FROM_BASE_ITERATOR from_base,
                               TO_BASE_ITERATOR to_base,
-                              rmm::cuda_stream_view stream,
+                              cuda::stream_ref stream,
                               rmm::device_async_resource_ref mr)
 {
   static constexpr bool IS_CONST_BASES = cuda::std::is_same_v<const_base, FROM_BASE_ITERATOR> &&
@@ -479,7 +479,7 @@ bool is_cv(convert_number_t const& t) { return std::holds_alternative<cudf::colu
 void check_types(convert_number_t const& input,
                  convert_number_t const& from_base,
                  convert_number_t const& to_base,
-                 rmm::cuda_stream_view stream)
+                 cuda::stream_ref stream)
 {
   // check input type
   if (is_cv(input)) {
@@ -513,7 +513,7 @@ void check_types(convert_number_t const& input,
 std::unique_ptr<cudf::column> convert(convert_number_t const& input,
                                       convert_number_t const& from_base,
                                       convert_number_t const& to_base,
-                                      rmm::cuda_stream_view stream,
+                                      cuda::stream_ref stream,
                                       rmm::device_async_resource_ref mr)
 {
   check_types(input, from_base, to_base, stream);
@@ -627,7 +627,7 @@ std::unique_ptr<cudf::column> convert(convert_number_t const& input,
 bool is_convert_overflow(convert_number_t const& input,
                          convert_number_t const& from_base,
                          convert_number_t const& to_base,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr)
 {
   check_types(input, from_base, to_base, stream);

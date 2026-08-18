@@ -886,7 +886,7 @@ CUDF_KERNEL void string_to_float_kernel(T* out,
 std::unique_ptr<column> string_to_float(data_type dtype,
                                         strings_column_view const& string_col,
                                         bool ansi_mode,
-                                        rmm::cuda_stream_view stream,
+                                        cuda::stream_ref stream,
                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(dtype == data_type{type_id::FLOAT32} || dtype == data_type{type_id::FLOAT64},
@@ -941,8 +941,8 @@ std::unique_ptr<column> string_to_float(data_type dtype,
                       &string_col.offsets().data<size_type>()[error_row],
                       sizeof(size_type) * 2,
                       cudaMemcpyDefault,
-                      stream.value());
-      stream.synchronize();
+                      stream.get());
+      stream.sync();
 
       std::string dest;
       dest.resize(string_bounds[1] - string_bounds[0]);
@@ -951,8 +951,8 @@ std::unique_ptr<column> string_to_float(data_type dtype,
                       &string_col.chars_begin(stream)[string_bounds[0]],
                       string_bounds[1] - string_bounds[0],
                       cudaMemcpyDefault,
-                      stream.value());
-      stream.synchronize();
+                      stream.get());
+      stream.sync();
 
       throw cast_error(error_row, dest);
     }

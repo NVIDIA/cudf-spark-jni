@@ -49,7 +49,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
   cudf::device_span<uint8_t const> partitions,
   cudf::device_span<size_t const> partition_offsets,
   std::vector<int> const& remaps,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(remaps.size() == partition_offsets.size() - 1, "Invaid remaps vector size");

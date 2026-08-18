@@ -383,7 +383,7 @@ struct bucket_decimal128_fn {
 template <typename GeneratorFunc>
 void generate_buckets(GeneratorFunc generator,
                       cudf::mutable_column_view output,
-                      rmm::cuda_stream_view stream)
+                      cuda::stream_ref stream)
 {
   thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output.begin<int32_t>(),
@@ -393,7 +393,7 @@ void generate_buckets(GeneratorFunc generator,
 
 std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input,
                                                   int32_t num_buckets,
-                                                  rmm::cuda_stream_view stream,
+                                                  cuda::stream_ref stream,
                                                   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(num_buckets > 0, "num_buckets must be positive");
@@ -467,7 +467,7 @@ std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input
 
 std::unique_ptr<cudf::column> compute_bucket(cudf::column_view const& input,
                                              int32_t num_buckets,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

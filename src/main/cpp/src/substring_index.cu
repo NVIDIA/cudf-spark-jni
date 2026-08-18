@@ -28,8 +28,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
-
+#include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/iterator/constant_iterator.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -55,7 +54,7 @@ void compute_substring_indices(column_device_view const& d_column,
                                size_type delimiter_count,
                                size_type* start_char_pos,
                                size_type* end_char_pos,
-                               rmm::cuda_stream_view stream,
+                               cuda::stream_ref stream,
                                rmm::device_async_resource_ref)
 {
   auto strings_count = d_column.size();
@@ -112,7 +111,7 @@ template <typename DelimiterItrT>
 std::unique_ptr<column> substring_index(strings_column_view const& strings,
                                         DelimiterItrT const delimiter_itr,
                                         size_type count,
-                                        rmm::cuda_stream_view stream,
+                                        cuda::stream_ref stream,
                                         rmm::device_async_resource_ref mr)
 {
   auto strings_count = strings.size();

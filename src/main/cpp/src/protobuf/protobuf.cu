@@ -42,14 +42,14 @@ namespace detail {
 namespace {
 
 void propagate_nulls_to_descendants(cudf::column& col,
-                                    rmm::cuda_stream_view stream,
+                                    cuda::stream_ref stream,
                                     rmm::device_async_resource_ref mr);
 
 void apply_parent_mask_to_row_aligned_column(cudf::column& col,
                                              cudf::bitmask_type const* parent_mask_ptr,
                                              cudf::size_type parent_null_count,
                                              cudf::size_type num_rows,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 {
   if (parent_null_count == 0) { return; }
@@ -78,7 +78,7 @@ void apply_parent_mask_to_row_aligned_column(cudf::column& col,
 }
 
 void propagate_list_nulls_to_descendants(cudf::column& list_col,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   if (list_col.type().id() != cudf::type_id::LIST || list_col.null_count() == 0) { return; }
@@ -118,7 +118,7 @@ void propagate_list_nulls_to_descendants(cudf::column& list_col,
 }
 
 void propagate_struct_nulls_to_descendants(cudf::column& struct_col,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   if (struct_col.type().id() != cudf::type_id::STRUCT || struct_col.null_count() == 0) { return; }
@@ -137,7 +137,7 @@ void propagate_struct_nulls_to_descendants(cudf::column& struct_col,
 }
 
 void propagate_nulls_to_descendants(cudf::column& col,
-                                    rmm::cuda_stream_view stream,
+                                    cuda::stream_ref stream,
                                     rmm::device_async_resource_ref mr)
 {
   switch (col.type().id()) {
@@ -152,7 +152,7 @@ void propagate_nulls_to_descendants(cudf::column& col,
 std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const& schema,
                                                            int schema_idx,
                                                            cudf::size_type num_rows,
-                                                           rmm::cuda_stream_view stream,
+                                                           cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr)
 {
   auto const& field = schema[schema_idx];
@@ -404,7 +404,7 @@ bool protobuf_schema::is_output(int schema_idx) const
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   protobuf_schema schema_context{context};
@@ -485,7 +485,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     track_permissive_null_rows ? num_rows : 0, stream, cudf::get_current_device_resource_ref());
   if (track_permissive_null_rows) {
     CUDF_CUDA_TRY(
-      cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.value()));
+      cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.get()));
   }
   auto const decode_ctx = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
 
@@ -627,7 +627,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           auto const batch_input = batched_scalar_input_view<T>{
             input, d_locations.data(), num_scalar, d_descs.data(), nf, d_error.data()};
           extract_scalar_batched_kernel<T, DecodeFn>
-            <<<grid, threads, 0, stream.value()>>>(batch_input);
+            <<<grid, threads, 0, stream.get()>>>(batch_input);
         }
 
         for (int j = 0; j < nf; j++) {
@@ -838,7 +838,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     protobuf_error h_error = NONE;
     CUDF_CUDA_TRY(
       cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(protobuf_error), stream));
-    stream.synchronize();
+    stream.sync();
     if (h_error == SCHEMA_TOO_LARGE || h_error == REPEATED_COUNT_MISMATCH) {
       throw cudf::logic_error(error_message(h_error));
     }
@@ -891,7 +891,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

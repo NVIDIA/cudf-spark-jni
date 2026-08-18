@@ -202,7 +202,7 @@ struct gbk_decode_fn {
 
 decode_result decode_gbk(cudf::column_view const& input,
                          error_action action,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,
@@ -256,7 +256,7 @@ decode_result decode_gbk(cudf::column_view const& input,
 decode_result decode_charset(cudf::column_view const& input,
                              charset_type charset,
                              error_action action,
-                             rmm::cuda_stream_view stream,
+                             cuda::stream_ref stream,
                              rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

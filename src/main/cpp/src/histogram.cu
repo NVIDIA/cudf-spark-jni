@@ -164,7 +164,7 @@ struct percentile_dispatcher {
                          cudf::device_span<double const> percentages,
                          bool has_null,
                          cudf::size_type num_histograms,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr) const
   {
     // Returns all nulls for totally empty input.
@@ -255,7 +255,7 @@ std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   if (input->size() == 0) { return cudf::make_empty_lists_column(input->type()); }
@@ -275,7 +275,7 @@ std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input
 std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const& values,
                                                         cudf::column_view const& frequencies,
                                                         bool output_as_lists,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(
@@ -416,7 +416,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
 std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
                                                         std::vector<double> const& percentages,
                                                         bool output_as_list,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   check_input(input, percentages);

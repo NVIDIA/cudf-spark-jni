@@ -126,7 +126,7 @@ __launch_bounds__(block_size) CUDF_KERNEL void generate_uuids_kernel(
 
 std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
                                              long seed,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 
 {
@@ -170,7 +170,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
   rmm::device_uvector<char> chars(num_chars, stream, mr);
   auto grid = cudf::detail::grid_1d(num_states, block_size);
   generate_uuids_kernel<block_size>
-    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(
+    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.get()>>>(
       row_count, chars.data(), states.data(), num_states);
 
   return cudf::make_strings_column(
@@ -186,7 +186,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
 
 std::unique_ptr<cudf::column> random_uuids(int row_count,
                                            long seed,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 
 {

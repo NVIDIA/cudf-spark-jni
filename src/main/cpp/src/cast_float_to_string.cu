@@ -24,8 +24,9 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -76,7 +77,7 @@ template <bool json_string>
 struct dispatch_float_to_string_fn {
   template <typename FloatType, CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& floats,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
   {
     auto const strings_count = floats.size();
@@ -98,7 +99,7 @@ struct dispatch_float_to_string_fn {
   // non-float types throw an exception
   template <typename T, CUDF_ENABLE_IF(not cuda::std::is_floating_point_v<T>)>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const&,
-                                           rmm::cuda_stream_view,
+                                           cuda::stream_ref,
                                            rmm::device_async_resource_ref)
   {
     CUDF_FAIL("Values for float_to_string function must be a float type.");
@@ -110,7 +111,7 @@ struct dispatch_float_to_string_fn {
 // This will convert all float column types into a strings column.
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
                                               bool json_string,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   return json_string
@@ -123,7 +124,7 @@ std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
 
 // external API
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   return float_to_string(floats, false, stream, mr);
@@ -131,7 +132,7 @@ std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
 
 std::unique_ptr<cudf::column> float_to_string(cudf::column_view const& floats,
                                               bool json_string,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

@@ -27,10 +27,10 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/type_traits>
+#include <cuda/stream>
 #include <thrust/find.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
@@ -100,7 +100,7 @@ struct half_even_negative {
 template <typename T, template <typename> typename RoundFunctor>
 std::unique_ptr<cudf::column> round_with(cudf::column_view const& input,
                                          int32_t decimal_places,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
   requires(std::is_floating_point_v<T>)
 {
@@ -139,7 +139,7 @@ struct round_type_dispatcher {
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& input,
                                            int32_t decimal_places,
                                            cudf::rounding_method method,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
     requires(std::is_floating_point_v<T>)
   {
@@ -162,7 +162,7 @@ struct round_type_dispatcher {
 std::unique_ptr<cudf::column> round(cudf::column_view const& input,
                                     int32_t decimal_places,
                                     cudf::rounding_method method,
-                                    rmm::cuda_stream_view stream,
+                                    cuda::stream_ref stream,
                                     rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -260,7 +260,7 @@ template <typename T>
 cudf::size_type find_first_overflow_for_integral_type(cudf::column_view const& input,
                                                       int32_t decimal_places,
                                                       cudf::rounding_method method,
-                                                      rmm::cuda_stream_view stream)
+                                                      cuda::stream_ref stream)
 {
   static_assert(std::is_integral_v<T>, "T must be an integral type");
 
@@ -297,7 +297,7 @@ struct find_overflow_dispatcher {
   cudf::size_type operator()(cudf::column_view const& input,
                              int32_t decimal_places,
                              cudf::rounding_method method,
-                             rmm::cuda_stream_view stream) const
+                             cuda::stream_ref stream) const
   {
     if constexpr (std::is_integral_v<T>) {
       return find_first_overflow_for_integral_type<T>(input, decimal_places, method, stream);
@@ -313,7 +313,7 @@ std::unique_ptr<cudf::column> round(cudf::column_view const& input,
                                     int32_t decimal_places,
                                     cudf::rounding_method method,
                                     bool is_ansi_mode,
-                                    rmm::cuda_stream_view stream,
+                                    cuda::stream_ref stream,
                                     rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

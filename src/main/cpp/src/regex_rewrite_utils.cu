@@ -26,9 +26,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
@@ -69,7 +69,7 @@ std::unique_ptr<cudf::column> find_literal_range_pattern(cudf::strings_column_vi
                                                          int const range_len,
                                                          int const start,
                                                          int const end,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   auto const strings_count = strings.size();
@@ -126,7 +126,7 @@ std::unique_ptr<cudf::column> literal_range_pattern(cudf::strings_column_view co
                                                     int const range_len,
                                                     int const start,
                                                     int const end,
-                                                    rmm::cuda_stream_view stream,
+                                                    cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

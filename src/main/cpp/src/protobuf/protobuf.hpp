@@ -21,8 +21,9 @@
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/types.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream>
 
 #include <cstdint>
 #include <memory>
@@ -98,7 +99,7 @@ void validate_decode_context(protobuf_decode_context const& context);
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr);
 
 }  // namespace spark_rapids_jni::protobuf

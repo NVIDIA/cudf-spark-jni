@@ -136,7 +136,7 @@ struct hours_from_epoch_for_ts_fn {
 };
 
 std::unique_ptr<cudf::column> compute_years_from_epoch(cudf::column_view const& input,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::INT32}); }
@@ -165,7 +165,7 @@ std::unique_ptr<cudf::column> compute_years_from_epoch(cudf::column_view const& 
 }
 
 std::unique_ptr<cudf::column> compute_months_from_epoch(cudf::column_view const& input,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::INT32}); }
@@ -194,7 +194,7 @@ std::unique_ptr<cudf::column> compute_months_from_epoch(cudf::column_view const&
 }
 
 std::unique_ptr<cudf::column> compute_days_from_epoch(cudf::column_view const& input,
-                                                      rmm::cuda_stream_view stream,
+                                                      cuda::stream_ref stream,
                                                       rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) {
@@ -225,7 +225,7 @@ std::unique_ptr<cudf::column> compute_days_from_epoch(cudf::column_view const& i
 }
 
 std::unique_ptr<cudf::column> compute_hours_from_epoch(cudf::column_view const& input,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::INT32}); }
@@ -251,7 +251,7 @@ std::unique_ptr<cudf::column> compute_hours_from_epoch(cudf::column_view const& 
 }  // anonymous namespace
 
 std::unique_ptr<cudf::column> years_from_epoch(cudf::column_view const& input,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -259,7 +259,7 @@ std::unique_ptr<cudf::column> years_from_epoch(cudf::column_view const& input,
 }
 
 std::unique_ptr<cudf::column> months_from_epoch(cudf::column_view const& input,
-                                                rmm::cuda_stream_view stream,
+                                                cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -267,7 +267,7 @@ std::unique_ptr<cudf::column> months_from_epoch(cudf::column_view const& input,
 }
 
 std::unique_ptr<cudf::column> days_from_epoch(cudf::column_view const& input,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -275,7 +275,7 @@ std::unique_ptr<cudf::column> days_from_epoch(cudf::column_view const& input,
 }
 
 std::unique_ptr<cudf::column> hours_from_epoch(cudf::column_view const& input,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

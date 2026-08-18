@@ -23,12 +23,12 @@
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
 #include <cuda/std/bit>
 #include <cuda/std/type_traits>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/tabulate.h>
 
@@ -471,7 +471,7 @@ void check_nested_depth(cudf::table_view const& input)
 }  // namespace
 
 std::unique_ptr<cudf::column> hive_hash(cudf::table_view const& input,
-                                        rmm::cuda_stream_view stream,
+                                        cuda::stream_ref stream,
                                         rmm::device_async_resource_ref mr)
 {
   auto output = cudf::make_numeric_column(cudf::data_type(cudf::type_to_id<hive_hash_value_t>()),

@@ -27,10 +27,10 @@
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
@@ -337,7 +337,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -353,7 +353,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
                                 host_tokens.data(),
                                 sizeof(format_token) * host_tokens.size(),
                                 cudaMemcpyDefault,
-                                stream.value()));
+                                stream.get()));
 
   auto const d_input = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());

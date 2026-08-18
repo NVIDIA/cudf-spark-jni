@@ -20,6 +20,8 @@
 
 #include <cudf/io/types.hpp>
 
+#include <cuda/stream>
+
 #include <cast_string.hpp>
 #include <nvbench/nvbench.cuh>
 
@@ -30,7 +32,7 @@ static void long_to_binary_string(nvbench::state& state)
   auto const input_table = create_random_table({cudf::type_id::INT64}, row_count{num_rows});
   auto const long_col    = input_table->get_column(0);
   auto const stream      = cudf::get_default_stream();
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
     spark_rapids_jni::long_to_binary_string(long_col, stream);
   });

@@ -24,7 +24,6 @@
 #include <cudf/transform.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
@@ -32,6 +31,7 @@
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/tuple>
+#include <cuda/stream>
 #include <thrust/fill.h>
 #include <thrust/find.h>
 #include <thrust/for_each.h>
@@ -119,7 +119,7 @@ __host__ __device__ constexpr std::uint8_t delimiter_candidate(int candidate_ind
 std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
   cudf::strings_column_view const& input,
   bool nullify_invalid_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) {
@@ -209,7 +209,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
                                                     lower_level,
                                                     upper_level,
                                                     num_chars,
-                                                    stream.value()));
+                                                    stream.get()));
   {
     rmm::device_buffer d_temp(temp_storage_bytes, stream);
     CUDF_CUDA_TRY(cub::DeviceHistogram::HistogramEven(d_temp.data(),
@@ -220,7 +220,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
                                                       lower_level,
                                                       upper_level,
                                                       num_chars,
-                                                      stream.value()));
+                                                      stream.get()));
   }
 
   auto const candidates_begin         = thrust::make_counting_iterator(0);
@@ -303,7 +303,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
 std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
   cudf::strings_column_view const& input,
   bool nullify_invalid_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

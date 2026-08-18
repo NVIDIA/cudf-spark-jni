@@ -25,10 +25,10 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
@@ -83,7 +83,7 @@ struct write_hex_fn {
 }  // namespace
 
 std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& input,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::type_id::STRING); }
@@ -119,7 +119,7 @@ std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& inpu
 }  // namespace detail
 
 std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& input,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

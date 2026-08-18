@@ -24,10 +24,10 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/type_traits>
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -80,7 +80,7 @@ struct dispatch_format_float_fn {
   template <typename FloatType, CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& floats,
                                            int const digits,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr) const
   {
     auto const strings_count = floats.size();
@@ -103,7 +103,7 @@ struct dispatch_format_float_fn {
   template <typename T, CUDF_ENABLE_IF(not cuda::std::is_floating_point_v<T>)>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const&,
                                            int const,
-                                           rmm::cuda_stream_view,
+                                           cuda::stream_ref,
                                            rmm::device_async_resource_ref) const
   {
     CUDF_FAIL("Values for format_float function must be a float type.");
@@ -115,7 +115,7 @@ struct dispatch_format_float_fn {
 // This will convert all float column types into a strings column.
 std::unique_ptr<cudf::column> format_float(cudf::column_view const& floats,
                                            int const digits,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   return type_dispatcher(floats.type(), dispatch_format_float_fn{}, floats, digits, stream, mr);
@@ -126,7 +126,7 @@ std::unique_ptr<cudf::column> format_float(cudf::column_view const& floats,
 // external API
 std::unique_ptr<cudf::column> format_float(cudf::column_view const& floats,
                                            int const digits,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

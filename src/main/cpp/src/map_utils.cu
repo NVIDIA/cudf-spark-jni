@@ -32,7 +32,6 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
@@ -40,6 +39,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/device/device_reduce.cuh>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/scan.h>
 
@@ -174,7 +174,7 @@ struct phase1_state_summary {
 
 phase1_state_summary run_phase1_state(cudf::column_view const& input,
                                       bool throw_on_null_key,
-                                      rmm::cuda_stream_view stream,
+                                      cuda::stream_ref stream,
                                       rmm::device_async_resource_ref temp_mr)
 {
   auto const num_rows = input.size();
@@ -189,15 +189,15 @@ phase1_state_summary run_phase1_state(cudf::column_view const& input,
   {
     constexpr int block_size = 256;
     auto const grid_size     = cudf::util::div_rounding_up_safe(num_rows, block_size);
-    compute_row_state_kernel<<<grid_size, block_size, 0, stream.value()>>>(input.null_mask(),
-                                                                           lists_cv.offsets_begin(),
-                                                                           structs.null_mask(),
-                                                                           keys.null_mask(),
-                                                                           throw_on_null_key,
-                                                                           num_rows,
-                                                                           row_state.data(),
-                                                                           row_size.data());
-    CUDF_CHECK_CUDA(stream.value());
+    compute_row_state_kernel<<<grid_size, block_size, 0, stream.get()>>>(input.null_mask(),
+                                                                         lists_cv.offsets_begin(),
+                                                                         structs.null_mask(),
+                                                                         keys.null_mask(),
+                                                                         throw_on_null_key,
+                                                                         num_rows,
+                                                                         row_state.data(),
+                                                                         row_size.data());
+    CUDF_CHECK_CUDA(stream.get());
   }
 
   // Max + Min reductions on row_state — the state ordering encodes both "must throw?" and
@@ -207,28 +207,28 @@ phase1_state_summary run_phase1_state(cudf::column_view const& input,
   {
     std::size_t bytes = 0;
     CUDF_CUDA_TRY(cub::DeviceReduce::Max(
-      nullptr, bytes, row_state.data(), max_state_d.data(), num_rows, stream.value()));
+      nullptr, bytes, row_state.data(), max_state_d.data(), num_rows, stream.get()));
     rmm::device_buffer tmp(bytes, stream, temp_mr);
     CUDF_CUDA_TRY(cub::DeviceReduce::Max(
-      tmp.data(), bytes, row_state.data(), max_state_d.data(), num_rows, stream.value()));
+      tmp.data(), bytes, row_state.data(), max_state_d.data(), num_rows, stream.get()));
   }
   {
     std::size_t bytes = 0;
     CUDF_CUDA_TRY(cub::DeviceReduce::Min(
-      nullptr, bytes, row_state.data(), min_state_d.data(), num_rows, stream.value()));
+      nullptr, bytes, row_state.data(), min_state_d.data(), num_rows, stream.get()));
     rmm::device_buffer tmp(bytes, stream, temp_mr);
     CUDF_CUDA_TRY(cub::DeviceReduce::Min(
-      tmp.data(), bytes, row_state.data(), min_state_d.data(), num_rows, stream.value()));
+      tmp.data(), bytes, row_state.data(), min_state_d.data(), num_rows, stream.get()));
   }
 
   // Bundled D→H pull — two async copies, one stream sync.
   std::uint8_t max_state{};
   std::uint8_t min_state{};
   CUDF_CUDA_TRY(cudaMemcpyAsync(
-    &max_state, max_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.value()));
+    &max_state, max_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.get()));
   CUDF_CUDA_TRY(cudaMemcpyAsync(
-    &min_state, min_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.value()));
-  stream.synchronize();
+    &min_state, min_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.get()));
+  stream.sync();
 
   return phase1_state_summary{std::move(row_state), std::move(row_size), max_state, min_state};
 }
@@ -237,7 +237,7 @@ phase1_state_summary run_phase1_state(cudf::column_view const& input,
 
 bool is_valid_map(cudf::column_view const& input,
                   bool throw_on_null_key,
-                  rmm::cuda_stream_view stream,
+                  cuda::stream_ref stream,
                   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -257,7 +257,7 @@ bool is_valid_map(cudf::column_view const& input,
 
 std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
                                                bool throw_on_null_key,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -284,7 +284,7 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   auto const structs  = lists_cv.child();
 
   rmm::device_uvector<cudf::size_type> out_offsets(num_rows + 1, stream, mr);
-  CUDF_CUDA_TRY(cudaMemsetAsync(out_offsets.data(), 0, sizeof(cudf::size_type), stream.value()));
+  CUDF_CUDA_TRY(cudaMemsetAsync(out_offsets.data(), 0, sizeof(cudf::size_type), stream.get()));
   thrust::inclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                          p1.row_size.begin(),
                          p1.row_size.end(),
@@ -295,8 +295,8 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
                                 out_offsets.data() + num_rows,
                                 sizeof(cudf::size_type),
                                 cudaMemcpyDefault,
-                                stream.value()));
-  stream.synchronize();
+                                stream.get()));
+  stream.sync();
 
   // ── Phase 2: clean output construction (no dirty intermediate result) ─────
   // 2a. Null mask from row_state via an explicit `state == STATE_VALID` predicate.  Avoids
@@ -317,12 +317,12 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   {
     constexpr int block_size = 256;
     auto const grid_size     = cudf::util::div_rounding_up_safe(num_rows, block_size);
-    build_gather_map_kernel<<<grid_size, block_size, 0, stream.value()>>>(p1.row_state.data(),
-                                                                          lists_cv.offsets_begin(),
-                                                                          out_offsets.data(),
-                                                                          num_rows,
-                                                                          gather_map.data());
-    CUDF_CHECK_CUDA(stream.value());
+    build_gather_map_kernel<<<grid_size, block_size, 0, stream.get()>>>(p1.row_state.data(),
+                                                                        lists_cv.offsets_begin(),
+                                                                        out_offsets.data(),
+                                                                        num_rows,
+                                                                        gather_map.data());
+    CUDF_CHECK_CUDA(stream.get());
   }
 
   // 2c. Single gather over the struct child — handles arbitrary nested key/value types.

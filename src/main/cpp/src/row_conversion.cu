@@ -36,7 +36,6 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -48,6 +47,7 @@
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/scan.h>
 
@@ -219,7 +219,7 @@ struct batch_data {
 std::pair<rmm::device_uvector<size_type>, rmm::device_uvector<cudf::detail::input_offsetalator>>
 build_string_row_offsets(table_view const& tbl,
                          size_type fixed_width_and_validity_size,
-                         rmm::cuda_stream_view stream)
+                         cuda::stream_ref stream)
 {
   auto const num_rows = tbl.num_rows();
   rmm::device_uvector<size_type> d_row_sizes(num_rows, stream);
@@ -1269,7 +1269,7 @@ static std::unique_ptr<column> fixed_width_convert_to_rows(
   rmm::device_uvector<bitmask_type const*>& input_nm,
   scalar const& zero,
   scalar const& scalar_size_per_row,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   int64_t const total_allocation = size_per_row * num_rows;
@@ -1292,7 +1292,7 @@ static std::unique_ptr<column> fixed_width_convert_to_rows(
   int shared_size =
     detail::calc_fixed_width_kernel_dims(num_columns, num_rows, size_per_row, blocks, threads);
 
-  copy_to_rows_fixed_width_optimized<<<blocks, threads, shared_size, stream.value()>>>(
+  copy_to_rows_fixed_width_optimized<<<blocks, threads, shared_size, stream.get()>>>(
     start_row,
     num_rows,
     num_columns,
@@ -1507,7 +1507,7 @@ template <typename RowSize>
 batch_data build_batches(size_type num_rows,
                          RowSize row_sizes,
                          bool all_fixed_width,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr)
 {
   auto const total_size =
@@ -1601,7 +1601,7 @@ batch_data build_batches(size_type num_rows,
                                     output_batch_row_offsets.data(),
                                     num_rows_in_batch * sizeof(size_type),
                                     cudaMemcpyDefault,
-                                    stream.value()));
+                                    stream.get()));
     }
 
     batch_row_boundaries.push_back(row_end);
@@ -1627,7 +1627,7 @@ batch_data build_batches(size_type num_rows,
  */
 int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries,
                         int desired_tile_height,
-                        rmm::cuda_stream_view stream)
+                        cuda::stream_ref stream)
 {
   size_type const num_batches = batch_row_boundaries.size() - 1;
   device_uvector<size_type> num_tiles(num_batches, stream);
@@ -1668,7 +1668,7 @@ size_type build_tiles(
   int column_end,
   int desired_tile_height,
   int total_number_of_rows,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   size_type const num_batches = batch_row_boundaries.size() - 1;
   device_uvector<size_type> num_tiles(num_batches, stream);
@@ -1831,7 +1831,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   offsetFunctor offset_functor,
   column_info_s const& column_info,
   std::optional<rmm::device_uvector<cudf::detail::input_offsetalator>> variable_width_offsets,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   int device_id;
@@ -1948,7 +1948,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
 
   // blast through the entire table and convert it
   detail::copy_to_rows<BLOCK_SIZE>
-    <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+    <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
       num_rows,
       tbl.num_columns(),
       shmem_limit_per_tile,
@@ -1962,7 +1962,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
 
   // note that validity gets the entire table and not the fixed-width portion
   detail::copy_validity_to_rows<BLOCK_SIZE>
-    <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+    <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
       num_rows,
       tbl.num_columns(),
       shmem_limit_per_tile,
@@ -2005,7 +2005,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
       // batch_num_rows) so the inner loop guard `row < num_rows` works for every batch,
       // including batches whose start lies past per-batch row_count.
       detail::copy_strings_to_rows<NUM_STRING_ROWS_PER_BLOCK_TO_ROWS>
-        <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_TO_ROWS, 0, stream.value()>>>(
+        <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_TO_ROWS, 0, stream.get()>>>(
           batch_row_offset + batch_num_rows,
           variable_width_table.num_columns(),
           dev_variable_input_data.data(),
@@ -2019,7 +2019,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
 
     // Drain the async H2D uploads above before variable_width_input_data goes out of scope:
     // CUDA 13+ may read the host source only when the stream executes the copy.
-    stream.synchronize();
+    stream.sync();
   }
 
   // split up the output buffer into multiple buffers based on row batch sizes and create list of
@@ -2054,7 +2054,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   // Drain the async H2D uploads above before input_data, input_nm, output_data and
   // validity_tile_infos go out of scope: CUDA 13+ may read the host source only when the stream
   // executes the copy.
-  stream.synchronize();
+  stream.sync();
 
   return ret;
 }
@@ -2121,7 +2121,7 @@ inline void check_supported_schema(std::vector<data_type> const& schema, bool fi
  * @return vector of list columns containing byte columns of the JCUDF row data
  */
 std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -2184,7 +2184,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
 }
 
 std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
-  table_view const& tbl, rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr)
+  table_view const& tbl, cuda::stream_ref stream, rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
   // check_supported_columns rejects non-fixed-width columns up front, so the body below does not
@@ -2225,11 +2225,11 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
   auto dev_input_nm   = make_device_uvector_async(input_nm, stream, mr);
 
   using ScalarType = scalar_type_t<size_type>;
-  auto zero        = make_numeric_scalar(data_type(type_id::INT32), stream.value());
+  auto zero        = make_numeric_scalar(data_type(type_id::INT32), stream.get());
   zero->set_valid_async(true, stream);
   static_cast<ScalarType*>(zero.get())->set_value(0, stream);
 
-  auto step = make_numeric_scalar(data_type(type_id::INT32), stream.value());
+  auto step = make_numeric_scalar(data_type(type_id::INT32), stream.get());
   step->set_valid_async(true, stream);
   static_cast<ScalarType*>(step.get())->set_value(static_cast<size_type>(size_per_row), stream);
 
@@ -2253,7 +2253,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
 
   // Drain the async H2D uploads above before column_start, column_size, input_data and input_nm
   // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
-  stream.synchronize();
+  stream.sync();
 
   return ret;
 }
@@ -2262,7 +2262,7 @@ namespace {
 
 /// @brief Calculates and sets null counts for specified columns
 void fixup_null_counts(std::vector<std::unique_ptr<column>>& output_columns,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   for (auto& col : output_columns) {
     col->set_null_count(cudf::null_count(col->view().null_mask(), 0, col->size(), stream));
@@ -2282,7 +2282,7 @@ void fixup_null_counts(std::vector<std::unique_ptr<column>>& output_columns,
  */
 std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
                                          std::vector<data_type> const& schema,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -2353,7 +2353,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
     auto make_col = [&output_data, &output_nm](data_type type,
                                                size_type num_rows,
                                                bool include_nm,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr) {
       auto column =
         make_fixed_width_column(type,
@@ -2458,7 +2458,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
     detail::fixed_width_row_offset_functor offset_functor(size_per_row);
 
     detail::copy_from_rows<BLOCK_SIZE>
-      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
         num_rows,
         num_columns,
         shmem_limit_per_tile,
@@ -2471,7 +2471,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         child.data<int8_t>());
 
     detail::copy_validity_from_rows<BLOCK_SIZE>
-      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
         num_rows,
         num_columns,
         shmem_limit_per_tile,
@@ -2485,7 +2485,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   } else {
     detail::string_row_offset_functor offset_functor(device_span<size_type const>{input.offsets()});
     detail::copy_from_rows<BLOCK_SIZE>
-      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+      <<<gpu_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
         num_rows,
         num_columns,
         shmem_limit_per_tile,
@@ -2498,7 +2498,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         child.data<int8_t>());
 
     detail::copy_validity_from_rows<BLOCK_SIZE>
-      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.value()>>>(
+      <<<validity_tile_infos.size(), BLOCK_SIZE, total_shmem_in_bytes, stream.get()>>>(
         num_rows,
         num_columns,
         shmem_limit_per_tile,
@@ -2545,7 +2545,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
                MAX_STRING_BLOCKS));
 
     detail::copy_strings_from_rows<NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS>
-      <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS, 0, stream.value()>>>(
+      <<<string_blocks, NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS, 0, stream.get()>>>(
         offset_functor,
         dev_string_row_offsets.data(),
         dev_string_lengths.data(),
@@ -2575,7 +2575,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
 
     // Drain the async H2D uploads above before string_col_offset_ptrs and string_data_col_ptrs
     // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
-    stream.synchronize();
+    stream.sync();
   }
 
   // Set null counts, because output_columns are modified via mutable-view,
@@ -2586,14 +2586,14 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   // Explicitly drain async H2D uploads before the host staging vectors go out of scope
   // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
   // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
-  stream.synchronize();
+  stream.sync();
 
   return std::make_unique<table>(std::move(output_columns));
 }
 
 std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view const& input,
                                                                std::vector<data_type> const& schema,
-                                                               rmm::cuda_stream_view stream,
+                                                               cuda::stream_ref stream,
                                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -2646,7 +2646,7 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   int shared_size =
     detail::calc_fixed_width_kernel_dims(num_columns, num_rows, size_per_row, blocks, threads);
 
-  detail::copy_from_rows_fixed_width_optimized<<<blocks, threads, shared_size, stream.value()>>>(
+  detail::copy_from_rows_fixed_width_optimized<<<blocks, threads, shared_size, stream.get()>>>(
     num_rows,
     num_columns,
     size_per_row,
@@ -2664,7 +2664,7 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   // Explicitly drain async H2D uploads before the host staging vectors go out of scope
   // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
   // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
-  stream.synchronize();
+  stream.sync();
 
   return std::make_unique<table>(std::move(output_columns));
 }
