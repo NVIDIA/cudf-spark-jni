@@ -389,6 +389,8 @@ public class CastStrings {
    * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED/EXCEPTION.
    * @param exceptionPolicy when true, throw {@link CastException} if CORRECTED rejects a row
    *                        that LEGACY accepts.
+   * @throws CastException if CORRECTED rejects a row that LEGACY accepts.
+   * @throws IllegalArgumentException if both LEGACY and EXCEPTION policies are enabled.
    * @return a timestamp_us column where invalid rows have nulls.
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
