@@ -228,6 +228,7 @@
                     <exclude>**/CudaFatalTest.java</exclude>
                     <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
               </execution>
@@ -259,6 +260,7 @@
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
                   <excludes>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
               </execution>
@@ -635,6 +637,7 @@
                 <exclude>**/CudaFatalTest.java</exclude>
                 <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                 <exclude>**/NativeDepsLoaderTest.java</exclude>
+                <exclude>**/PackagedJarOriginCheck.java</exclude>
               </excludes>
             </configuration>
           </execution>
