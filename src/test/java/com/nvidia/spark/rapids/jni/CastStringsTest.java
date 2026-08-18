@@ -1851,7 +1851,8 @@ public class CastStringsTest {
         {"yyyy-MM-dd", "2024-05-06😀"},
         {"yyyy-MM-dd", " 2024-05-06 "},
         {"yyyy-MM-dd", "2024- 05- 06"},
-        {"yyyy-MM-dd HH:mm:ss", "1999-12-31  11:59:59"}
+        {"yyyy-MM-dd HH:mm:ss", "1999-12-31  11:59:59"},
+        {"yyyy/MM/dd", "2024/5/6"}
     };
     for (String[] testCase : cases) {
       CastException error = assertExceptionPolicyDisagreement(testCase[1], testCase[0]);

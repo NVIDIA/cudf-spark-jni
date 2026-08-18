@@ -179,12 +179,15 @@ uint8_t letter_to_field(char c)
   }
 }
 
-std::vector<format_token> compile_format(std::string const& fmt, bool legacy)
+std::vector<format_token> compile_format(std::string const& fmt,
+                                         bool legacy,
+                                         bool strict_corrected = false)
 {
   std::vector<format_token> out;
-  size_t const n                                 = fmt.size();
-  bool saw_digit_field                           = false;
-  bool const corrected_variable_width_slash_date = !legacy && fmt == "yyyy/MM/dd";
+  size_t const n       = fmt.size();
+  bool saw_digit_field = false;
+  bool const corrected_variable_width_slash_date =
+    !legacy && !strict_corrected && fmt == "yyyy/MM/dd";
   for (size_t i = 0; i < n;) {
     char const c = fmt[i];
     if (std::isalpha(static_cast<unsigned char>(c))) {
@@ -361,7 +364,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   CUDF_EXPECTS(!(legacy && exception_policy),
                "LEGACY and EXCEPTION policies cannot both be enabled",
                std::invalid_argument);
-  auto const host_tokens = compile_format(format, legacy);
+  auto const host_tokens = compile_format(format, legacy, exception_policy);
   auto const host_legacy_tokens =
     exception_policy ? compile_format(format, true) : std::vector<format_token>{};
   auto const num_rows = input.size();
