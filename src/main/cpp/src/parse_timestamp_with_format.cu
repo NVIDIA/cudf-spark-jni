@@ -21,17 +21,17 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
-#include <cudf/detail/device_scalar.hpp>
-#include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
@@ -375,23 +375,27 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
 
   auto const temp_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<format_token> device_tokens(host_tokens.size(), stream, temp_mr);
-  cudf::detail::cuda_memcpy_async(
-    cudf::device_span<format_token>{device_tokens.data(), device_tokens.size()},
-    cudf::host_span<format_token const>{host_tokens},
-    stream);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
+                                host_tokens.data(),
+                                sizeof(format_token) * host_tokens.size(),
+                                cudaMemcpyDefault,
+                                stream.value()));
   rmm::device_uvector<format_token> device_legacy_tokens(
     host_legacy_tokens.size(), stream, temp_mr);
   if (exception_policy) {
-    cudf::detail::cuda_memcpy_async(
-      cudf::device_span<format_token>{device_legacy_tokens.data(), device_legacy_tokens.size()},
-      cudf::host_span<format_token const>{host_legacy_tokens},
-      stream);
+    CUDF_CUDA_TRY(cudaMemcpyAsync(device_legacy_tokens.data(),
+                                  host_legacy_tokens.data(),
+                                  sizeof(format_token) * host_legacy_tokens.size(),
+                                  cudaMemcpyDefault,
+                                  stream.value()));
   }
+  // CUDA 13 may defer reading pageable host memory until the stream executes the copy.
+  stream.synchronize();
 
-  std::unique_ptr<cudf::detail::device_scalar<cudf::size_type>> first_exception_row;
+  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
   if (exception_policy) {
     first_exception_row =
-      std::make_unique<cudf::detail::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
+      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
   }
 
   auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
