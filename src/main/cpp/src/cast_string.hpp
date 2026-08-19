@@ -26,6 +26,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <memory>
+#include <string>
 
 namespace spark_rapids_jni {
 
