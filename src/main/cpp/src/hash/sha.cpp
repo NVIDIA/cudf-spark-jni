@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/hashing.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
@@ -40,7 +41,9 @@ std::unique_ptr<cudf::column> sha_impl(HashFunction hash_function,
     // that will be re-copied when purged of non-empty nulls.
     auto hash_from_cudf =
       hash_function(cudf::table_view{{input}}, stream, cudf::get_current_device_resource_ref());
-    hash_from_cudf->set_null_mask(cudf::copy_bitmask(input, stream), input.null_count());
+    hash_from_cudf->set_null_mask(
+      cudf::copy_bitmask(input, stream, cudf::get_current_device_resource_ref()),
+      input.null_count());
     return cudf::purge_nonempty_nulls(*hash_from_cudf, stream, mr);
   } else {
     // Using the provided memory resource, because `hash_from_cudf` is not a temporary.

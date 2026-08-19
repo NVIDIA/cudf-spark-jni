@@ -32,6 +32,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -924,7 +925,8 @@ construct_path_commands(
     }
     return all_names;
   }();
-  auto d_inst_names = cudf::string_scalar(h_inst_names, true, stream);
+  auto d_inst_names =
+    cudf::string_scalar(h_inst_names, true, stream, cudf::get_current_device_resource_ref());
 
   std::size_t name_pos{0};
   auto h_path_commands = std::make_unique<std::vector<std::vector<path_instruction>>>();
@@ -967,7 +969,7 @@ int64_t calc_scratch_size(cudf::strings_column_view const& input,
                           rmm::cuda_stream_view stream)
 {
   auto const max_row_size = thrust::transform_reduce(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     cuda::proclaim_return_type<int64_t>(
@@ -1055,7 +1057,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   auto d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), d_error_check.begin(), d_error_check.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_error_check.begin(),
+    d_error_check.end(),
+    0);
 
   kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, stream);
   auto h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
@@ -1138,7 +1143,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), d_error_check.begin(), d_error_check.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_error_check.begin(),
+    d_error_check.end(),
+    0);
   kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, stream);
   h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
   has_no_oob    = check_error(h_error_check);
@@ -1193,7 +1201,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   if (memory_budget_bytes <= 0 && parallel_override <= 0) {
     parallel_override = static_cast<int>(sorted_indices.size());
   }
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input_ptr = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
 
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;

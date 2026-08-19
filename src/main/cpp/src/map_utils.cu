@@ -225,9 +225,9 @@ phase1_state_summary run_phase1_state(cudf::column_view const& input,
   std::uint8_t max_state{};
   std::uint8_t min_state{};
   CUDF_CUDA_TRY(cudaMemcpyAsync(
-    &max_state, max_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDeviceToHost, stream.value()));
+    &max_state, max_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.value()));
   CUDF_CUDA_TRY(cudaMemcpyAsync(
-    &min_state, min_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDeviceToHost, stream.value()));
+    &min_state, min_state_d.data(), sizeof(std::uint8_t), cudaMemcpyDefault, stream.value()));
   stream.synchronize();
 
   return phase1_state_summary{std::move(row_state), std::move(row_size), max_state, min_state};
@@ -294,7 +294,7 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   CUDF_CUDA_TRY(cudaMemcpyAsync(&total_entries,
                                 out_offsets.data() + num_rows,
                                 sizeof(cudf::size_type),
-                                cudaMemcpyDeviceToHost,
+                                cudaMemcpyDefault,
                                 stream.value()));
   stream.synchronize();
 

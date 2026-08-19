@@ -105,7 +105,8 @@ std::unique_ptr<cudf::column> reverse_strings(cudf::strings_column_view const& i
   auto const d_offsets = cudf::detail::offsetalator_factory::make_input_iterator(sv.offsets());
   auto* d_chars        = result->mutable_view().head<char>();
 
-  auto const d_column = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_column = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      cuda::counting_iterator<cudf::size_type>{0},
                      input.size(),

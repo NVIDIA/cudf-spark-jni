@@ -322,7 +322,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     githubHelper.updateCommitStatus("", "Success", GitHubCommitState.SUCCESS)
                 } else {
                     // upload log only in case of build failure
-                    def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com"]
+                    def guardWords = [
+                        "artifactory.*?\\.com",
+                        "gitlab.*?\\.com",
+                        "sonar.*?\\.com",
+                        "urm.*?\\.com",
+                    ]
                     guardWords.add("nvidia-smi(?s)(.*?)(?=git)") // hide GPU info
                     guardWords.add("sc-ipp*") // hide cloud info
                     githubHelper.uploadLogs(this, env.JOB_NAME, env.BUILD_NUMBER, null, guardWords)

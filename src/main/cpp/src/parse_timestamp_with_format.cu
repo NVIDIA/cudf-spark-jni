@@ -27,6 +27,7 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
@@ -393,7 +394,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
       std::make_unique<cudf::detail::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
   }
 
-  auto const d_input = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             num_rows,
                                             rmm::device_buffer{},
@@ -405,7 +406,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   auto validity = rmm::device_uvector<bool>(num_rows, stream, temp_mr);
 
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, temp_mr),
     thrust::make_counting_iterator(0),
     num_rows,
     parse_with_format_fn{

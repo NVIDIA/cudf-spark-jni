@@ -20,6 +20,7 @@
 #include <cudf/detail/row_operator/hashing.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/table/table_device_view.cuh>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -212,7 +213,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
 
   // Compute the hash value for each row
   thrust::tabulate(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     output_view.begin<murmur_hash_value_type>(),
     output_view.end<murmur_hash_value_type>(),
     row_hasher.device_hasher<MurmurHash3_32, murmur_device_row_hasher>(nullable, seed));

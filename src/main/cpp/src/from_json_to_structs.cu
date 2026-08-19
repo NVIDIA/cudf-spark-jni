@@ -32,6 +32,7 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -225,7 +226,7 @@ void nullify_rows(cudf::column& input,
     h_word_updates.insert(h_word_updates.end(), word_updates.begin(), word_updates.end());
     auto d_word_updates = cudf::detail::make_device_uvector_async(
       h_word_updates, stream, cudf::get_current_device_resource_ref());
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      d_word_updates.begin(),
                      d_word_updates.end(),
                      [mask_ptr] __device__(auto const update) -> void {
@@ -237,7 +238,7 @@ void nullify_rows(cudf::column& input,
     h_row_indices.insert(h_row_indices.end(), row_indices.begin(), row_indices.end());
     auto d_row_indices = cudf::detail::make_device_uvector_async(
       h_row_indices, stream, cudf::get_current_device_resource_ref());
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      d_row_indices.begin(),
                      d_row_indices.end(),
                      [mask_ptr] __device__(auto const row) -> void {
@@ -326,12 +327,13 @@ std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& 
   auto const input_sv = cudf::strings_column_view{input};
   auto const offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
   auto const output_it =
     thrust::make_zip_iterator(output->mutable_view().begin<bool>(), validity.begin());
   thrust::tabulate(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     output_it,
     output_it + string_count,
     [chars = input_sv.chars_begin(stream), offsets = offsets_it, is_valid = is_valid_it] __device__(
@@ -376,7 +378,8 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr    = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const valid_input_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   // We need to nullify the invalid string rows.
@@ -386,7 +389,7 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
 
   // Since the strings store integer numbers, they should be very short.
   // As such, using one thread per string should be fine.
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    valids.begin(),
                    valids.end(),
                    [chars       = input_sv.chars_begin(stream),
@@ -442,11 +445,12 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input, stream);
+  auto const d_input_ptr =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   auto string_pairs = rmm::device_uvector<string_index_pair>(string_count, stream);
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    string_pairs.begin(),
                    string_pairs.end(),
                    [chars    = input_sv.chars_begin(stream),
@@ -641,7 +645,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 
   // Since the strings store decimal numbers, they should not be very long.
   // As such, using one thread per string should be fine.
-  thrust::for_each(rmm::exec_policy_nosync(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(string_count),
                    [in_offsets,
@@ -697,11 +701,12 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
 
   auto const input_offsets_it =
     cudf::detail::offsetalator_factory::make_input_iterator(input.offsets());
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input_ptr = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
 
   auto string_pairs = rmm::device_uvector<string_index_pair>(string_count, stream);
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    string_pairs.begin(),
                    string_pairs.end(),
                    [nullify_if_not_quoted,

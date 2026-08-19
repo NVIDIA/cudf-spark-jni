@@ -22,6 +22,7 @@
 #include <cudf/null_mask.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -103,7 +104,8 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
   if (input.is_empty()) return cudf::make_empty_column(cudf::type_id::STRING);
 
   auto const strings_count = input.size();
-  auto const d_column      = cudf::column_device_view::create(input, stream);
+  auto const d_column =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
 
   // The following code is adapted from `cudf::strings::detail::make_strings_children()`
   // Compute the output sizes

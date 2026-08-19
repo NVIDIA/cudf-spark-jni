@@ -25,6 +25,7 @@
 #include <cudf/strings/detail/utf8.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
@@ -132,7 +133,7 @@ void truncate_integral_and_fill(std::unique_ptr<cudf::column>& output,
                                 int32_t width,
                                 rmm::cuda_stream_view stream)
 {
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output->mutable_view().begin<RepT>(),
                    output->mutable_view().end<RepT>(),
                    truncate_integral_fn<RepT>{d_input, width});
@@ -149,7 +150,8 @@ std::unique_ptr<cudf::column> truncate_integral_impl(cudf::column_view const& in
   cudf::size_type num_rows = input.size();
   auto output              = cudf::make_fixed_width_column(
     input.type(), num_rows, cudf::copy_bitmask(input, stream, mr), input.null_count(), stream, mr);
-  auto d_input = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
 
   if (input_type_id == cudf::type_id::INT32 || input_type_id == cudf::type_id::DECIMAL32) {
     // treat DECIMAL32 column as int32 column
