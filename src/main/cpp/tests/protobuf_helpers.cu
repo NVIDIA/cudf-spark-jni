@@ -89,7 +89,7 @@ TEST_F(ProtobufHelpersTest, NullMaskFromAllValidRowsIsEmpty)
   CUDF_CUDA_TRY(cudaMemcpyAsync(valid.data(),
                                 h_valid.data(),
                                 h_valid.size() * sizeof(h_valid[0]),
-                                cudaMemcpyHostToDevice,
+                                cudaMemcpyDefault,
                                 stream.value()));
 
   auto [mask, null_count] = spark_rapids_jni::protobuf::detail::make_null_mask_from_valid(
