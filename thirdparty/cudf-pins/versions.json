@@ -90,7 +90,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "efad266c1fd9de6d8486c6ba71bfa74df063eb1f",
+      "git_tag" : "a9f63f8cdd4b0b41a2d88a9f705576a61b4222ec",
       "git_url" : "https://github.com/rapidsai/librtcx.git",
       "version" : "0.1"
     },
