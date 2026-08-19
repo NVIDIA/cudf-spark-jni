@@ -27,6 +27,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/pinned_memory.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
@@ -39,6 +40,7 @@
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
+#include <algorithm>
 #include <cctype>
 #include <memory>
 #include <stdexcept>
@@ -373,29 +375,46 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()});
   }
 
-  auto const temp_mr = cudf::get_current_device_resource_ref();
+  auto const temp_mr   = cudf::get_current_device_resource_ref();
+  auto const pinned_mr = cudf::get_pinned_memory_resource();
+  rmm::device_uvector<format_token> host_token_staging(host_tokens.size(), stream, pinned_mr);
+  rmm::device_uvector<format_token> host_legacy_token_staging(
+    host_legacy_tokens.size(), stream, pinned_mr);
+  rmm::device_uvector<cudf::size_type> host_exception_row_staging(
+    exception_policy ? 1 : 0, stream, pinned_mr);
+  // Pinned allocations are stream ordered, so wait before initializing them from the host.
+  stream.synchronize();
+  std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.data());
+  if (exception_policy) {
+    std::copy(
+      host_legacy_tokens.begin(), host_legacy_tokens.end(), host_legacy_token_staging.data());
+    *host_exception_row_staging.data() = num_rows;
+  }
+
   rmm::device_uvector<format_token> device_tokens(host_tokens.size(), stream, temp_mr);
   CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
-                                host_tokens.data(),
-                                sizeof(format_token) * host_tokens.size(),
+                                host_token_staging.data(),
+                                sizeof(format_token) * host_token_staging.size(),
                                 cudaMemcpyDefault,
                                 stream.value()));
   rmm::device_uvector<format_token> device_legacy_tokens(
     host_legacy_tokens.size(), stream, temp_mr);
   if (exception_policy) {
     CUDF_CUDA_TRY(cudaMemcpyAsync(device_legacy_tokens.data(),
-                                  host_legacy_tokens.data(),
-                                  sizeof(format_token) * host_legacy_tokens.size(),
+                                  host_legacy_token_staging.data(),
+                                  sizeof(format_token) * host_legacy_token_staging.size(),
                                   cudaMemcpyDefault,
                                   stream.value()));
   }
-  // CUDA 13 may defer reading pageable host memory until the stream executes the copy.
-  stream.synchronize();
 
   std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
   if (exception_policy) {
-    first_exception_row =
-      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
+    first_exception_row = std::make_unique<rmm::device_scalar<cudf::size_type>>(stream, temp_mr);
+    CUDF_CUDA_TRY(cudaMemcpyAsync(first_exception_row->data(),
+                                  host_exception_row_staging.data(),
+                                  sizeof(cudf::size_type),
+                                  cudaMemcpyDefault,
+                                  stream.value()));
   }
 
   auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
@@ -424,7 +443,13 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
       result->mutable_view().begin<cudf::timestamp_us>()});
 
   if (first_exception_row) {
-    auto const row = first_exception_row->value(stream);
+    CUDF_CUDA_TRY(cudaMemcpyAsync(host_exception_row_staging.data(),
+                                  first_exception_row->data(),
+                                  sizeof(cudf::size_type),
+                                  cudaMemcpyDefault,
+                                  stream.value()));
+    stream.synchronize();
+    auto const row = *host_exception_row_staging.data();
     if (row < num_rows) {
       auto const error         = cudf::get_element(input.parent(), row, stream, temp_mr);
       auto const& string_error = static_cast<cudf::string_scalar const&>(*error);
