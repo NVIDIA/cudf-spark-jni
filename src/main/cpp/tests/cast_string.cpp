@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -39,11 +40,22 @@ struct StringToIntegerTests : public test::BaseFixture {};
 
 struct StringToDecimalTests : public test::BaseFixture {};
 
+struct ParseTimestampWithFormatTests : public test::BaseFixture {};
+
 template <typename T>
 struct StringToFloatTests : public test::BaseFixture {};
 
 TYPED_TEST_SUITE(StringToIntegerTests, cudf::test::IntegralTypesNotBool);
 TYPED_TEST_SUITE(StringToFloatTests, cudf::test::FloatingPointTypes);
+
+TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
+{
+  auto const strings = test::strings_column_wrapper{"2024-05-06"};
+  strings_column_view scv{strings};
+
+  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
+               std::invalid_argument);
+}
 
 TYPED_TEST(StringToIntegerTests, Simple)
 {
