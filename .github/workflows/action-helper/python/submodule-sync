@@ -66,6 +66,7 @@ def main():
 
         pr.comment(number, content=f"HEAD commit SHA: {args.sha}, "
                                    f"CUDF commit SHA: https://github.com/NVIDIA/cudf/commit/{args.cudf_sha}\n"
+                                   f"CUDF commit SHA: https://github.com/nvidia/cudf/commit/{args.cudf_sha}\n"
                                    f"Test passed: **{args.passed}**")
 
         if args.passed:

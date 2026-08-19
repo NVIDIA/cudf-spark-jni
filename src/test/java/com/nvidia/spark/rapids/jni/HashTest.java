@@ -91,7 +91,7 @@ public class HashTest {
   @Test
   void testSpark32BitMurmur3HashTimestamps() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.timestampMicroSecondsFromBoxedLongs(
         0L, null, 100L, -100L, 0x123456789abcdefL, null, -0x123456789abcdefL);
          ColumnVector result = Hash.murmurHash32(42, new ColumnVector[]{v});
@@ -103,7 +103,7 @@ public class HashTest {
   @Test
   void testSpark32BitMurmur3HashDecimal64() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.decimalFromLongs(-7,
         0L, 100L, -100L, 0x123456789abcdefL, -0x123456789abcdefL);
          ColumnVector result = Hash.murmurHash32(42, new ColumnVector[]{v});
@@ -115,7 +115,7 @@ public class HashTest {
   @Test
   void testSpark32BitMurmur3HashDecimal32() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.decimalFromInts(-3,
         0, 100, -100, 0x12345678, -0x12345678);
          ColumnVector result = Hash.murmurHash32(42, new ColumnVector[]{v});
@@ -127,7 +127,7 @@ public class HashTest {
   @Test
   void testSpark32BitMurmur3HashDates() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.timestampDaysFromBoxedInts(
         0, null, 100, -100, 0x12345678, null, -0x12345678);
          ColumnVector result = Hash.murmurHash32(42, new ColumnVector[]{v});
@@ -310,7 +310,7 @@ public class HashTest {
   @Test
   void testXXHash64Timestamps() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.timestampMicroSecondsFromBoxedLongs(
         0L, null, 100L, -100L, 0x123456789abcdefL, null, -0x123456789abcdefL);
          ColumnVector result = Hash.xxhash64(new ColumnVector[]{v});
@@ -322,7 +322,7 @@ public class HashTest {
   @Test
   void testXXHash64Decimal64() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.decimalFromLongs(-7,
         0L, 100L, -100L, 0x123456789abcdefL, -0x123456789abcdefL);
          ColumnVector result = Hash.xxhash64(new ColumnVector[]{v});
@@ -334,7 +334,7 @@ public class HashTest {
   @Test
   void testXXHash64Decimal32() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.decimalFromInts(-3,
         0, 100, -100, 0x12345678, -0x12345678);
          ColumnVector result = Hash.xxhash64(new ColumnVector[]{v});
@@ -346,7 +346,7 @@ public class HashTest {
   @Test
   void testXXHash64Dates() {
     // The hash values were derived from Apache Spark in a manner similar to the one documented at
-    // https://github.com/rapidsai/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
+    // https://github.com/nvidia/cudf/blob/aa7ca46dcd9e/cpp/tests/hashing/hash_test.cpp#L281-L307
     try (ColumnVector v = ColumnVector.timestampDaysFromBoxedInts(
         0, null, 100, -100, 0x12345678, null, -0x12345678);
          ColumnVector result = Hash.xxhash64(new ColumnVector[]{v});
