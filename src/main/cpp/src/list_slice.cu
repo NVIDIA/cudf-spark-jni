@@ -24,6 +24,7 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/null_mask.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -42,7 +43,7 @@ namespace {
 void assert_start_is_not_zero(column_device_view const& start, rmm::cuda_stream_view stream)
 {
   bool start_valid =
-    thrust::all_of(rmm::exec_policy(stream),
+    thrust::all_of(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(start.size()),
                    cuda::proclaim_return_type<bool>([start] __device__(size_type index) {
@@ -55,7 +56,7 @@ void assert_start_is_not_zero(column_device_view const& start, rmm::cuda_stream_
 void assert_length_is_not_negative(column_device_view const& length, rmm::cuda_stream_view stream)
 {
   bool length_valid =
-    thrust::all_of(rmm::exec_policy(stream),
+    thrust::all_of(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(length.size()),
                    cuda::proclaim_return_type<bool>([length] __device__(size_type index) {

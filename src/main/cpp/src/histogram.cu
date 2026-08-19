@@ -31,6 +31,7 @@
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
@@ -193,7 +194,7 @@ struct percentile_dispatcher {
     auto const fill_percentile = [&](auto const sorted_validity_it) {
       auto const sorted_input_it =
         cuda::make_permutation_iterator(data.begin<T>(), ordered_indices);
-      thrust::for_each_n(rmm::exec_policy(stream),
+      thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          cuda::make_counting_iterator(0),
                          num_histograms * static_cast<cudf::size_type>(percentages.size()),
                          fill_percentile_fn{offsets,
@@ -307,7 +308,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
   // We need to check and remember which rows are valid (positive) so we can do filtering later on.
   auto check_valid = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
 
-  thrust::for_each_n(rmm::exec_policy(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      cuda::make_counting_iterator(0),
                      frequencies.size(),
                      [frequencies   = frequencies.begin<int64_t>(),
@@ -343,7 +344,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
           std::vector<cudf::bitmask_type const*>{
             // Don't use values.null_mask(), to make sure no slicing.
             values_and_frequencies.front()->view().null_mask(),
-            reinterpret_cast<cudf::bitmask_type const*>(null_mask.data())},
+            static_cast<cudf::bitmask_type const*>(null_mask.data())},
           std::vector<cudf::size_type>{0, 0},
           values.size(),
           stream,
@@ -356,7 +357,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
       // cudf MERGE_HISTOGRAM aggregation.
       // Therefore, we manually set `1` for the frequencies of nulls.
       thrust::for_each_n(
-        rmm::exec_policy(stream),
+        rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
         cuda::make_counting_iterator(0),
         frequencies.size(),
         [frequencies = values_and_frequencies.back()->mutable_view().begin<int64_t>(),
@@ -426,7 +427,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
   auto const counts_col     = cudf::structs_column_view{histograms}.get_sliced_child(1);
 
   auto const default_mr    = rmm::mr::get_current_device_resource_ref();
-  auto const d_data        = cudf::column_device_view::create(data_col, stream);
+  auto const d_data        = cudf::column_device_view::create(data_col, stream, default_mr);
   auto const d_percentages = cudf::detail::make_device_uvector(percentages, stream, default_mr);
 
   // Attach histogram labels to the input.
@@ -458,11 +459,12 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
     auto accumulated_counts = rmm::device_uvector<int64_t>(counts_col.size(), stream, default_mr);
     // We don't need a permutation iterator for the labels, since the same labels always
     // stay together after sorting.
-    thrust::inclusive_scan_by_key(rmm::exec_policy(stream),
-                                  histogram_labels.begin(),
-                                  histogram_labels.end(),
-                                  sorted_counts,
-                                  accumulated_counts.begin());
+    thrust::inclusive_scan_by_key(
+      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+      histogram_labels.begin(),
+      histogram_labels.end(),
+      sorted_counts,
+      accumulated_counts.begin());
     return accumulated_counts;
   }();
 

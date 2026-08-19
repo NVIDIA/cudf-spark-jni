@@ -40,6 +40,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <thrust/binary_search.h>
@@ -662,7 +663,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
       return i >= value_count ? 0 : first[i];
     }));
   rmm::device_uvector<size_t> group_offsets(value_count + 1, stream, temp_mr);
-  thrust::exclusive_scan(rmm::exec_policy(stream, temp_mr),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                          size_wrapper,
                          size_wrapper + group_offsets.size(),
                          group_offsets.begin());
@@ -671,7 +672,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
   using OutputType = std::invoke_result_t<GroupFunction>;
   rmm::device_uvector<OutputType> result(total_size, stream, mr);
   auto iter = thrust::make_counting_iterator(0);
-  thrust::transform(rmm::exec_policy(stream, temp_mr),
+  thrust::transform(rmm::exec_policy_nosync(stream, temp_mr),
                     iter,
                     iter + total_size,
                     result.begin(),
@@ -1029,7 +1030,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     auto const num_column_instances = column_instance_info.size();
     auto iter                       = thrust::make_counting_iterator(0);
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [buffers_per_partition,
@@ -1065,7 +1066,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
       0, cuda::proclaim_return_type<size_t>([num_columns] __device__(size_t i) {
         return (i / num_columns);
       }));
-    thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+    thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                   section_keys,
                                   section_keys + num_src_buffers,
                                   src_sizes_unpadded.begin(),
@@ -1075,7 +1076,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // - add metadata offset
     // - add partition offset
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [num_columns,
@@ -1132,7 +1133,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
           return src_sizes_unpadded[src_buf_index] -
                  ((is_offsets_buffer && src_sizes_unpadded[src_buf_index] > 0) ? 4 : 0);
         }));
-      thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+      thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                     dst_buf_key,
                                     dst_buf_key + num_src_buffers,
                                     size_iter,
@@ -1144,7 +1145,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // this implies we will potentially be writing our leading bits into the same word as another
     // copy is writing it's trailing bits, so atomics will be necessary.
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [column_info          = column_info.begin(),
@@ -1380,7 +1381,7 @@ __global__ void copy_validity(cudf::device_span<assemble_batch> batches)
 
   // how many leading bytes we have. that is, how many bytes will be read by the initial read, which
   // accounts for misaligned source buffers.
-  int const leading_bytes = (4 - (reinterpret_cast<uint64_t>(batch.src) % 4));
+  int const leading_bytes = (4 - (cuda::std::bit_cast<uint64_t>(batch.src) % 4));
   int remaining_rows      = batch.validity_row_count;
 
   // - if the address is misaligned, load byte-by-byte and only store up to that many bits/rows off
@@ -1647,7 +1648,7 @@ void assemble_copy(cudf::device_span<assemble_batch> batches,
   cudaMemcpyAsync(h_column_info.data(),
                   column_info.data(),
                   column_info.size() * sizeof(assemble_column_info),
-                  cudaMemcpyDeviceToHost,
+                  cudaMemcpyDefault,
                   stream);
   stream.synchronize();
 }
@@ -1964,7 +1965,7 @@ shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
           reinterpret_cast<partition_header const*>(partitions.data() + _partition_offsets[pindex]);
         return cudf::hashing::detail::swap_endian(pheader->num_rows) > 0 ? pindex + 1 : 0;
       }));
-  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy(stream, temp_mr),
+  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy_nosync(stream, temp_mr),
                                                    iter,
                                                    iter + (_partition_offsets.size() - 1),
                                                    size_t{0},

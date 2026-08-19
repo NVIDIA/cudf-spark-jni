@@ -22,6 +22,7 @@
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
@@ -128,8 +129,8 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
               rmm::device_uvector<bool>{0, stream, mr}, rmm::device_buffer{}, 0)};
   }
 
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
   auto const default_mr  = rmm::mr::get_current_device_resource_ref();
+  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream, default_mr);
 
   // Check if the input rows are null, empty (containing only whitespaces), and invalid JSON.
   // This will be used for masking out the null/empty/invalid input rows when doing string
@@ -142,7 +143,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
   rmm::device_uvector<bool> should_be_nullified(input.size(), stream, mr);
 
   thrust::for_each(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0L),
     thrust::make_counting_iterator(input.size() * static_cast<int64_t>(cudf::detail::warp_size)),
     [nullify_invalid_rows,
@@ -193,7 +194,10 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
 
   rmm::device_uvector<uint32_t> histogram(num_bins, stream, default_mr);
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), histogram.begin(), histogram.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    histogram.begin(),
+    histogram.end(),
+    0);
 
   auto const byte_samples   = reinterpret_cast<std::uint8_t const*>(input.chars_begin(stream));
   size_t temp_storage_bytes = 0;
@@ -222,7 +226,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
   auto const candidates_begin         = thrust::make_counting_iterator(0);
   auto const candidates_end           = candidates_begin + num_delimiter_candidates;
   auto const find_available_delimiter = [&] {
-    return thrust::find_if(rmm::exec_policy_nosync(stream),
+    return thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                            candidates_begin,
                            candidates_end,
                            [counts = histogram.begin()] __device__(auto candidate_index) -> bool {
@@ -235,9 +239,12 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
   if (first_available == candidates_end) {
     // Invalid rows are replaced with "{}" before parsing, so their original bytes do not need
     // to reserve a delimiter. Retry with a row-aware histogram only on this rare exhausted path.
-    thrust::fill(rmm::exec_policy_nosync(stream), histogram.begin(), histogram.end(), 0);
+    thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                 histogram.begin(),
+                 histogram.end(),
+                 0);
     thrust::for_each(
-      rmm::exec_policy_nosync(stream),
+      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
       thrust::make_counting_iterator(0L),
       thrust::make_counting_iterator(input.size() * static_cast<int64_t>(cudf::detail::warp_size)),
       [input      = *d_input_ptr,
@@ -274,7 +281,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
       : cudf::column_view{cudf::data_type{cudf::type_id::STRING},
                           input.size(),
                           input.chars_begin(stream),
-                          reinterpret_cast<cudf::bitmask_type const*>(null_mask->data()),
+                          static_cast<cudf::bitmask_type const*>(null_mask->data()),
                           null_count,
                           input.offset(),
                           std::vector<cudf::column_view>{input.offsets()}};

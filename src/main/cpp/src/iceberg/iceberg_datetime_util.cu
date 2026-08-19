@@ -22,6 +22,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
@@ -147,13 +148,13 @@ std::unique_ptr<cudf::column> compute_years_from_epoch(cudf::column_view const& 
                                               stream,
                                               mr);
   if (input.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      years_from_epoch_for_date_fn{input.begin<int32_t>()});
     return result;
   } else if (input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      years_from_epoch_for_ts_fn{input.begin<int64_t>()});
@@ -176,13 +177,13 @@ std::unique_ptr<cudf::column> compute_months_from_epoch(cudf::column_view const&
                                               stream,
                                               mr);
   if (input.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      months_from_epoch_for_date_fn{input.begin<int32_t>()});
     return result;
   } else if (input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      months_from_epoch_for_ts_fn{input.begin<int64_t>()});
@@ -207,13 +208,13 @@ std::unique_ptr<cudf::column> compute_days_from_epoch(cudf::column_view const& i
                                               stream,
                                               mr);
   if (input.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      days_from_epoch_for_date_fn{input.begin<int32_t>()});
     return result;
   } else if (input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      days_from_epoch_for_ts_fn{input.begin<int64_t>()});
@@ -237,7 +238,7 @@ std::unique_ptr<cudf::column> compute_hours_from_epoch(cudf::column_view const& 
                                               mr);
 
   if (input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS) {
-    thrust::tabulate(rmm::exec_policy_nosync(stream),
+    thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      result->mutable_view().begin<int32_t>(),
                      result->mutable_view().end<int32_t>(),
                      hours_from_epoch_for_ts_fn{input.begin<int64_t>()});

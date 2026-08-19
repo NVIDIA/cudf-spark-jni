@@ -18,6 +18,8 @@
 #include "reverse_strings.hpp"
 #include "uuid.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_StringUtils_randomUUIDs(JNIEnv* env,
@@ -40,7 +42,7 @@ Java_com_nvidia_spark_rapids_jni_StringUtils_reverseStrings(JNIEnv* env, jclass,
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_handle);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_handle);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::reverse_strings(cudf::strings_column_view{*input}));
   }

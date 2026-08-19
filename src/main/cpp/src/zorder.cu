@@ -21,6 +21,7 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -160,15 +161,17 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
 
   cudf::size_type output_size = static_cast<cudf::size_type>(total_output_size);
 
-  auto input_dv = cudf::table_device_view::create(tbl, stream);
+  auto input_dv =
+    cudf::table_device_view::create(tbl, stream, cudf::get_current_device_resource_ref());
 
   auto output_data_col = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::UINT8}, output_size, cudf::mask_state::UNALLOCATED, stream, mr);
 
-  auto output_dv_ptr = cudf::mutable_column_device_view::create(*output_data_col, stream);
+  auto output_dv_ptr = cudf::mutable_column_device_view::create(
+    *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     output_size,
     [col = *output_dv_ptr, num_columns, data_type_size, input = *input_dv] __device__(
@@ -236,15 +239,17 @@ std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,
                            }),
                "All columns of the input table must be INT32.");
 
-  auto const input_dv = cudf::table_device_view::create(tbl, stream);
+  auto const input_dv =
+    cudf::table_device_view::create(tbl, stream, cudf::get_current_device_resource_ref());
 
   auto output_data_col = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::INT64}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr);
 
-  auto const output_dv_ptr = cudf::mutable_column_device_view::create(*output_data_col, stream);
+  auto const output_dv_ptr = cudf::mutable_column_device_view::create(
+    *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     cuda::make_counting_iterator<cudf::size_type>(num_rows),
     output_dv_ptr->begin<int64_t>(),

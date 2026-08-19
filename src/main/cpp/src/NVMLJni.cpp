@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include <nvml.h>
 #include <stdio.h>
 
+#include <bit>
 #include <cstdint>
 
 // NVML JNI implementation with comprehensive GPU metrics for Spark Rapids
@@ -473,14 +474,13 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetDevice
 
   if (nvml_error != NVML_SUCCESS) { return 0; }
 
-  return static_cast<jlong>(
-    reinterpret_cast<std::intptr_t>(device));  // Return the handle as a long
+  return static_cast<jlong>(std::bit_cast<std::intptr_t>(device));  // Return the handle as a long
 }
 
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetGPUInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
 
   // Use common helper to populate GPUInfo object
   nvml_result result = populate_gpu_info_from_device(env, device);
@@ -538,7 +538,7 @@ Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetAllGPUInfo(JNIEnv* env, jclass
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetDeviceInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_device_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -546,7 +546,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetDevi
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetUtilizationInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_utilization_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -554,7 +554,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetUtil
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetMemoryInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_memory_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -562,7 +562,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetMemo
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetTemperatureInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_temperature_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -570,7 +570,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetTemp
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetPowerInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_power_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -578,7 +578,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetPowe
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetClockInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_clock_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -586,7 +586,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetCloc
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetHardwareInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_hardware_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -594,7 +594,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetHard
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetPCIeInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_pcie_info(env, device);
   return create_nvml_result(env, result);
 }
@@ -602,7 +602,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetPCIe
 JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_nvml_NVML_nvmlGetECCInfo(
   JNIEnv* env, jclass cls, jlong deviceHandle)
 {
-  nvmlDevice_t device = reinterpret_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
+  nvmlDevice_t device = std::bit_cast<nvmlDevice_t>(static_cast<std::intptr_t>(deviceHandle));
   nvml_result result  = populate_ecc_info(env, device);
   return create_nvml_result(env, result);
 }

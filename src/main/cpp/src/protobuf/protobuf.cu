@@ -20,6 +20,7 @@
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <thrust/iterator/counting_iterator.h>
@@ -339,7 +340,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   // only buffers that flow into the returned column should use the caller-supplied `mr`.
   auto const scratch_mr = cudf::get_current_device_resource_ref();
 
-  auto d_in = cudf::column_device_view::create(binary_input, stream);
+  auto d_in = cudf::column_device_view::create(binary_input, stream, scratch_mr);
   // Identify repeated and nested fields at depth 0
   std::vector<int> repeated_field_indices;
   std::vector<int> nested_field_indices;

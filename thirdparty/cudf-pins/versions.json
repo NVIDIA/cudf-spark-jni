@@ -45,19 +45,11 @@
       "git_url" : "https://github.com/google/flatbuffers.git",
       "version" : "24.3.25"
     },
-    "fmt" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "0c9fce2ffefecfdce794e1859584e25877b7b592",
-      "git_url" : "https://github.com/fmtlib/fmt.git",
-      "version" : "11.0.2"
-    },
     "kvikio" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "38de17dbc2a91e5230d68f25b846ea536433b198",
+      "git_tag" : "3f20304d7e6e0b81c49a6a0951cbd509b05995f1",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.10"
@@ -81,15 +73,15 @@
     "rapids_logger" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/rapidsai/rapids-logger/archive/4c72b598f99c8aa06af49468b3fc82f3931c6bf6.tar.gz",
-      "url_hash" : "SHA256=4e7cbbde62ba8517dabd1a327b45955d50db2dfa1240d0124662071ce8f1afc9",
-      "version" : "0.2.3"
+      "url" : "https://github.com/rapidsai/rapids-logger/archive/1124de618517654cce3636d69d022ee76e9df4b0.tar.gz",
+      "url_hash" : "SHA256=96a2f4ef04ad06d55546dbeee355cfe6e4fc94a33dee156d40f4f55dddc31686",
+      "version" : "0.3.0"
     },
     "rmm" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "9a851be611723a5d07fde67e09eca92831d30d45",
+      "git_tag" : "1b233b2044c142407d25e51f432a884dd04e700d",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.10"

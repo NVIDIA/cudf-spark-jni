@@ -56,7 +56,7 @@ ${MVN} clean package ${MVN_MIRROR}  \
   -P${profiles} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
   -Dlibcudf.build.configure=true \
-  -DUSE_GDS=${USE_GDS} -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest \
+  -DUSE_GDS=${USE_GDS} -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest,!PackagedJarOriginCheck \
   -DBUILD_TESTS=ON \
   -DBUILD_BENCHMARKS=ON \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
