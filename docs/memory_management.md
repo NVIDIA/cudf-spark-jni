@@ -1,12 +1,12 @@
 ## Memory Management Overview
 
 Effective memory management is crucial for processing queries successfully with limited memory resources.
-The Spark-RAPIDS plugin leverages the [RAPIDS Memory Manager (RMM)](https://github.com/rapidsai/rmm) to handle and recover from out-of-memory (OOM) errors during query processing. This document describes the mechanisms and the state management implemented in [SparkResourceAdaptorJni.cpp](../src/main/cpp/src/SparkResourceAdaptorJni.cpp). The plugin tracks every memory allocation and deallocation request to handle various OOM situations. It chooses the appropriate recovery mechanism, such as spilling, rollback-and-retry, or split-and-retry, based on the situation. If recovery is not possible, the plugin fails gracefully.
+The NVIDIA cuDF plugin for Apache Spark leverages the [RAPIDS Memory Manager (RMM)](https://github.com/rapidsai/rmm) to handle and recover from out-of-memory (OOM) errors during query processing. This document describes the mechanisms and the state management implemented in [SparkResourceAdaptorJni.cpp](../src/main/cpp/src/SparkResourceAdaptorJni.cpp). The plugin tracks every memory allocation and deallocation request to handle various OOM situations. It chooses the appropriate recovery mechanism, such as spilling, rollback-and-retry, or split-and-retry, based on the situation. If recovery is not possible, the plugin fails gracefully.
 
 
 ### Handling Out-of-Memory Errors
 
-The Spark-RAPIDS plugin manages both device memory and host memory (optional). It tracks all memory allocations to detect OOM errors. While an allocation request succeeds, the plugin does not interfere with the running threads. However, when the allocation request fails due to insufficient memory, the plugin pauses the requesting thread and allows it to retry later when more memory becomes available. The plugin employs several strategies to free up memory:
+The cuDF plugin manages both device memory and host memory (optional). It tracks all memory allocations to detect OOM errors. While an allocation request succeeds, the plugin does not interfere with the running threads. However, when the allocation request fails due to insufficient memory, the plugin pauses the requesting thread and allows it to retry later when more memory becomes available. The plugin employs several strategies to free up memory:
 
 - Spilling: Data marked as spillable is moved out of memory.
 - Rollback: If no thread can make progress even after spilling, the plugin starts rolling back threads to the point where their inputs are spillable, allowing other thread to proceed.
@@ -16,7 +16,7 @@ If no further splitting is possible, the plugin gracefully cancels the query and
 
 ### State Machine for OOM Handler
 
-To handle various OOM situations, the Spark-RAPIDS plugin keeps track of the state of individual threads. Note that one Spark task can use multiple threads during execution.
+To handle various OOM situations, the cuDF plugin keeps track of the state of individual threads. Note that one Spark task can use multiple threads during execution.
 
 A thread can have one of these states at a time:
 
@@ -37,7 +37,7 @@ The thread state can change based on the diagram below. Note that the thread sta
 
 ### Thread Priority
 
-The Spark-RAPIDS plugin uses thread priority to break ties between threads.
+The cuDF plugin uses thread priority to break ties between threads.
 Note that the thread priority is currently decoupled from query priority. Each task thread is assigned a priority based on their `task_id` and `thread_id`. 
 Shuffle threads have the highest priority to avoid priority inversion as the task threads may depend on the shuffle indirectly.
 
@@ -58,7 +58,7 @@ The selected thread transitions its state to `THREAD_SPLIT_THROW` and throws an 
 From the view of the OOM state machine, each task has one or more "dedicated threads", along with zero or more "pool threads" (background threads). When checking whether a task is blocked, OOM state machine is lenient on dedicated threads (only require any one of the dedicated threads to be blocked), but stringent on pool threads (all pool threads must be blocked). Being treated leniently is not always a good thing, it increases the chance of being mistakenly identified as a blocked task, thus causing unnecessary deadlock resolution. So we don't want a thread to be treated as a dedicated thread unless it is really necessary. There are two ways of avoiding a thread being treated as a dedicated thread:
 
 1. Avoid calling TaskContext.setTaskContext() in the current thread, this will prevent OOM state machine connecting the current thread to the task as a dedicated thread. 
-2. Proactively register thread itself as a pool thread instead of a dedicated thread. An example can be found [here](https://github.com/NVIDIA/spark-rapids/blob/c39f6a6004b0cf684ca526172e87b2bd4481eb3a/sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuOrcScan.scala#L2056) for registering threads. (Don't forget to unregister the thread when it is done.)
+2. Proactively register thread itself as a pool thread instead of a dedicated thread. An example can be found [here](https://github.com/NVIDIA/cudf-spark/blob/c39f6a6004b0cf684ca526172e87b2bd4481eb3a/sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuOrcScan.scala#L2056) for registering threads. (Don't forget to unregister the thread when it is done.)
 
 In most cases, we recommend the second approach, because typically the main task and the background thread will form a producer-consumer relationship. The main task thread, which plays as a consumer, will typically wait for the background thread to produce data. If we choose approach 1 then while consumer is waiting, its Java thread state will be `WAITING`, and even if the producer is actively working (so the whole task should NOT be considered as blocked), the OOM state machine will mistakenly consider it as a blocked task because it cannot find any "pool thread" connected with this task. So "has at least one dedicated thread blocked on memory allocation, and all of the pool threads working on that task are also blocked" stands. 
 

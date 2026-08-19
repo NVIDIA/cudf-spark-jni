@@ -32,7 +32,7 @@ PATCH_DIR=$(realpath "$PATCH_DIR")
 CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
 
 # Apply pattches to CUDF is problematic in a number of ways. But ultimately it comes down to
-# making sure that a user can do development work in spark-rapids-jni without the patches
+# making sure that a user can do development work in cudf-spark-jni without the patches
 # getting in the way
 # The operations I really want to support no matter what state CUDF is in are
 # 1) Build the repo from scratch

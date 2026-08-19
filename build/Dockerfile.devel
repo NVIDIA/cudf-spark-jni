@@ -15,7 +15,7 @@
 #
 
 ###
-# Build the image for spark-rapids-jni local development environment.
+# Build the image for cudf-spark-jni local development environment.
 
 # Inherit from the CICD docker image
 ARG JNI_DOCKER_CICD_IMAGE

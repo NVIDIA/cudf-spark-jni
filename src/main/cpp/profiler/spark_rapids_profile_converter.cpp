@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/* A tool that converts a spark-rapids profile binary into other forms. */
+/* A tool that converts a cuDF plugin profile binary into other forms. */
 
 #if 0
 #include <stdexcept>

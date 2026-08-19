@@ -17,7 +17,7 @@
 
 /**
  *
- * Jenkinsfile for building spark-rapids-jni on blossom
+ * Jenkinsfile for building cudf-spark-jni on blossom
  *
  */
 import hudson.model.Result
