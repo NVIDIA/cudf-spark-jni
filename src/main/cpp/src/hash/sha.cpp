@@ -19,19 +19,20 @@
 #include <cudf/hashing.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream_ref>
 
 #include <hash/hash.hpp>
 
 namespace {
 using HashFunction = std::unique_ptr<cudf::column> (*)(cudf::table_view const&,
-                                                       rmm::cuda_stream_view,
+                                                       cuda::stream_ref,
                                                        rmm::device_async_resource_ref);
 
 std::unique_ptr<cudf::column> sha_impl(HashFunction hash_function,
                                        cudf::column_view const& input,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING}); }
@@ -55,28 +56,28 @@ std::unique_ptr<cudf::column> sha_impl(HashFunction hash_function,
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> sha224_nulls_preserved(cudf::column_view const& input,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   return sha_impl(cudf::hashing::sha224, input, stream, mr);
 }
 
 std::unique_ptr<cudf::column> sha256_nulls_preserved(cudf::column_view const& input,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   return sha_impl(cudf::hashing::sha256, input, stream, mr);
 }
 
 std::unique_ptr<cudf::column> sha384_nulls_preserved(cudf::column_view const& input,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   return sha_impl(cudf::hashing::sha384, input, stream, mr);
 }
 
 std::unique_ptr<cudf::column> sha512_nulls_preserved(cudf::column_view const& input,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   return sha_impl(cudf::hashing::sha512, input, stream, mr);
