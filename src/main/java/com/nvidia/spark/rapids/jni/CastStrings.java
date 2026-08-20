@@ -364,11 +364,10 @@ public class CastStrings {
    * must have length 2; longer runs (e.g. {@code MMM} for month name) are rejected because
    * this kernel does not implement text forms. Unsupported letters, including lowercase
    * {@code h} for 12-hour clock, {@code S} for fractional seconds, and timezone pattern
-   * letters, are rejected. Space matches space or 'T' (Spark's
-   * permissive date/time separator); quoted literals ({@code 'T'}) are not supported, use
-   * a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year digit fields
-   * accept 1 or 2 digits unless adjacent to another digit field (which forces exact width
-   * for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
+   * letters, are rejected. Space matches exactly one space; quoted literals ({@code 'T'}) are
+   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year
+   * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
+   * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
    * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
    *
    * @param input the input string column.
