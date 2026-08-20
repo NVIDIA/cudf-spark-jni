@@ -37,6 +37,10 @@
 #include <bit>
 
 constexpr char const* JNI_CAST_ERROR_CLASS = "com/nvidia/spark/rapids/jni/CastException";
+// Keep these values synchronized with CastStrings.TIME_PARSER_POLICY_*.
+constexpr jint TIME_PARSER_POLICY_CORRECTED = 0;
+constexpr jint TIME_PARSER_POLICY_LEGACY    = 1;
+constexpr jint TIME_PARSER_POLICY_EXCEPTION = 2;
 
 #define CATCH_CAST_EXCEPTION(env, ret_val)                                     \
   JNI_CATCH_BEGIN(env, ret_val)                                                \
@@ -387,30 +391,28 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseDateSt
   JNI_CATCH(env, 0);
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimestampWithFormat(JNIEnv* env,
-                                                                      jclass,
-                                                                      jlong input_column,
-                                                                      jstring j_format,
-                                                                      jboolean legacy,
-                                                                      jboolean exception_policy)
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimestampWithFormat(
+  JNIEnv* env, jclass, jlong input_column, jstring j_format, jint time_parser_policy)
 {
   JNI_NULL_CHECK(env, input_column, "input column is null", 0);
   JNI_NULL_CHECK(env, j_format, "format is null", 0);
+  JNI_ARG_CHECK(env,
+                time_parser_policy >= TIME_PARSER_POLICY_CORRECTED &&
+                  time_parser_policy <= TIME_PARSER_POLICY_EXCEPTION,
+                "invalid time parser policy",
+                0);
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
 
     auto const input_view =
       cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
-    auto const format_jstr = cudf::jni::native_jstring(env, j_format);
-    auto const format      = std::string(format_jstr.get(), format_jstr.size_bytes());
-    return cudf::jni::release_as_jlong(
-      spark_rapids_jni::parse_timestamp_strings_with_format(input_view,
-                                                            format,
-                                                            static_cast<bool>(legacy),
-                                                            static_cast<bool>(exception_policy),
-                                                            cudf::get_default_stream()));
+    auto const format_jstr      = cudf::jni::native_jstring(env, j_format);
+    auto const format           = std::string(format_jstr.get(), format_jstr.size_bytes());
+    auto const legacy           = time_parser_policy == TIME_PARSER_POLICY_LEGACY;
+    auto const exception_policy = time_parser_policy == TIME_PARSER_POLICY_EXCEPTION;
+    return cudf::jni::release_as_jlong(spark_rapids_jni::parse_timestamp_strings_with_format(
+      input_view, format, legacy, exception_policy, cudf::get_default_stream()));
   }
   CATCH_CAST_EXCEPTION(env, 0);
 }

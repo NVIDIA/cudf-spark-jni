@@ -1543,7 +1543,18 @@ public class CastStringsTest {
     try (ColumnVector in = ColumnVector.fromStrings(input)) {
       return Assertions.assertThrows(
           CastException.class,
-          () -> CastStrings.parseTimestampWithFormat(in, format, false, true));
+          () -> CastStrings.parseTimestampWithFormat(
+              in, format, CastStrings.TIME_PARSER_POLICY_EXCEPTION));
+    }
+  }
+
+  private static void assertParsedTimestamp(String[] inputs, String format, int timeParserPolicy,
+      Long[] expected) {
+    try (ColumnVector in = ColumnVector.fromStrings(inputs);
+        ColumnVector actual =
+            CastStrings.parseTimestampWithFormat(in, format, timeParserPolicy);
+        ColumnVector exp = ColumnVector.timestampMicroSecondsFromBoxedLongs(expected)) {
+      AssertUtils.assertColumnsAreEqual(exp, actual);
     }
   }
 
@@ -1825,6 +1836,17 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_integerPolicies() {
+    long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"2024-05-06"}, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_CORRECTED,
+        new Long[]{y2024_05_06});
+    assertParsedTimestamp(
+        new String[]{"2024-5-6"}, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_LEGACY,
+        new Long[]{y2024_05_06});
+  }
+
+  @Test
   void parseTimestampWithFormat_exceptionPolicyCorrectedSuccessReturnsResult() {
     try (ColumnVector dateInput = ColumnVector.fromStrings("2024-05-06", null);
         ColumnVector dateActual =
@@ -1929,6 +1951,18 @@ public class CastStringsTest {
       Assertions.assertThrows(
           IllegalArgumentException.class,
           () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", true, true));
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_rejectsInvalidIntegerPolicy() {
+    try (ColumnVector in = ColumnVector.fromStrings("2024-05-06")) {
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", -1));
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", 3));
     }
   }
 

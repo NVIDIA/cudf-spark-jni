@@ -27,6 +27,15 @@ public class CastStrings {
     NativeDepsLoader.loadNativeDeps();
   }
 
+  /** Corrected time parser policy. */
+  public static final int TIME_PARSER_POLICY_CORRECTED = 0;
+
+  /** Legacy time parser policy. */
+  public static final int TIME_PARSER_POLICY_LEGACY = 1;
+
+  /** Exception time parser policy. */
+  public static final int TIME_PARSER_POLICY_EXCEPTION = 2;
+
   /**
    * Convert a string column to an integer column of a specified type stripping away leading and
    * trailing spaces.
@@ -370,6 +379,9 @@ public class CastStrings {
    * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
    * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
    *
+   * <p>This compatibility overload is retained for existing callers. New callers should use
+   * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
+   *
    * @param input the input string column.
    * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
    * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED.
@@ -382,6 +394,9 @@ public class CastStrings {
 
   /**
    * Parse a string column using the selected time parser policy.
+   *
+   * <p>This compatibility overload is retained for existing callers. New callers should use
+   * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
    *
    * @param input the input string column.
    * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
@@ -397,8 +412,35 @@ public class CastStrings {
     if (legacy && exceptionPolicy) {
       throw new IllegalArgumentException("LEGACY and EXCEPTION policies cannot both be enabled");
     }
-    return new ColumnVector(parseTimestampWithFormat(
-        input.getNativeView(), format, legacy, exceptionPolicy));
+    int timeParserPolicy = TIME_PARSER_POLICY_CORRECTED;
+    if (legacy) {
+      timeParserPolicy = TIME_PARSER_POLICY_LEGACY;
+    } else if (exceptionPolicy) {
+      timeParserPolicy = TIME_PARSER_POLICY_EXCEPTION;
+    }
+    return parseTimestampWithFormat(input, format, timeParserPolicy);
+  }
+
+  /**
+   * Parse a string column using the selected time parser policy.
+   *
+   * @param input the input string column.
+   * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
+   * @param timeParserPolicy one of {@link #TIME_PARSER_POLICY_CORRECTED},
+   *                         {@link #TIME_PARSER_POLICY_LEGACY}, or
+   *                         {@link #TIME_PARSER_POLICY_EXCEPTION}.
+   * @throws CastException if CORRECTED rejects a row that LEGACY accepts under EXCEPTION policy.
+   * @throws IllegalArgumentException if {@code timeParserPolicy} is invalid.
+   * @return a timestamp_us column where invalid rows have nulls.
+   */
+  public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
+      int timeParserPolicy) {
+    if (timeParserPolicy < TIME_PARSER_POLICY_CORRECTED ||
+        timeParserPolicy > TIME_PARSER_POLICY_EXCEPTION) {
+      throw new IllegalArgumentException("Invalid time parser policy: " + timeParserPolicy);
+    }
+    return new ColumnVector(
+        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy));
   }
 
   private static native long toInteger(long nativeColumnView, boolean ansi_enabled, boolean strip,
@@ -423,6 +465,6 @@ public class CastStrings {
   private static native long parseDateStringsToDate(long input);
 
   private static native long parseTimestampWithFormat(
-      long input, String format, boolean legacy, boolean exceptionPolicy);
+      long input, String format, int timeParserPolicy);
 
 }
