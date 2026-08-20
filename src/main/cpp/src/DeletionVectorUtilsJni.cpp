@@ -26,8 +26,7 @@
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_DeletionVectorUtils_computeNumDeletedRows(
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DeletionVectorUtils_computeNumDeletedRows(
   JNIEnv* env,
   jclass,
   jlong serialized_bitmap_address,
