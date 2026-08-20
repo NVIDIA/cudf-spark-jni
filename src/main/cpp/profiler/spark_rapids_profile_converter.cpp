@@ -114,7 +114,7 @@ void print_usage()
 {
   std::cout << "spark_rapids_profile_converter [OPTION]... profilebin" << std::endl;
   std::cout << R"(
-Converts the spark-rapids profile in profile.bin into other forms.
+Converts the cuDF plugin profile in profile.bin into other forms.
 
   -h, --help                show this usage message
   -j, --json                convert to JSON, default output is stdout
@@ -366,7 +366,7 @@ void verify_profile_header(std::ifstream& in)
   auto header = validate_fb<spark_rapids_jni::profiler::ProfileHeader>(*fb_ptr, "profile header");
   auto magic  = header->magic();
   if (magic == nullptr) {
-    throw std::runtime_error("does not appear to be a spark-rapids profile");
+    throw std::runtime_error("does not appear to be a cuDF plugin profile");
   }
   if (magic->str() != "spark-rapids profile") {
     std::ostringstream oss;

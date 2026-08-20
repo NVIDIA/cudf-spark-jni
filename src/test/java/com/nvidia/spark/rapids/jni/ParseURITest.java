@@ -299,7 +299,7 @@ public class ParseURITest {
     String[] testData = {
       "https://nvidia.com/https&#://nvidia.com",
       "https://http://www.nvidia.com",
-      // commented out until https://github.com/NVIDIA/spark-rapids/issues/10036 is fixed
+      // commented out until https://github.com/NVIDIA/cudf-spark/issues/10036 is fixed
       //"http://www.nvidia.com/object.php?object=ะก-Ð%9Fะฑ-ะฟ-ะกÑ%82Ñ%80ะตะปÑ%8Cะฝะฐ-Ñ%83ะป-Ð%97ะฐะฒะพะดÑ%81ะบะฐÑ%8F.htm",
       "http://www.nvidia.com/object.php?object=ะก-Ðะฑ-ะฟ-ะกÑÑะตะปÑ%20ะฝะฐ-Ñะป-ÐะฐะฒะพะดÑะบะฐÑ.htm",
       "filesystemmagicthing://bob.yaml",
@@ -359,7 +359,7 @@ public class ParseURITest {
       String[] queries = {
         "a",
         "h",
-        // commented out until https://github.com/NVIDIA/spark-rapids/issues/10036 is fixed
+        // commented out until https://github.com/NVIDIA/cudf-spark/issues/10036 is fixed
         //"object",
         "object",
         "a",

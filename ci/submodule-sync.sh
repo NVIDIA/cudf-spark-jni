@@ -28,8 +28,8 @@ REPO=${REPO:-"cudf-spark-jni"}
 PARALLEL_LEVEL=${PARALLEL_LEVEL:-4}
 REPO_LOC="github.com/${OWNER}/${REPO}.git"
 
-GIT_AUTHOR_NAME="spark-rapids automation"
-GIT_COMMITTER_NAME="spark-rapids automation"
+GIT_AUTHOR_NAME="cudf-spark automation"
+GIT_COMMITTER_NAME="cudf-spark automation"
 GIT_AUTHOR_EMAIL="70000568+nvauto@users.noreply.github.com"
 GIT_COMMITTER_EMAIL="70000568+nvauto@users.noreply.github.com"
 git submodule update --init --recursive

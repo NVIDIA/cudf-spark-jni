@@ -555,7 +555,7 @@ __device__ result_type parse_timestamp_string(bool is_spark_320,
   }
 
   // Spark400+ and DB14.3+: do not support pattern: spaces + Thh:mm:ss
-  // Refer to https://github.com/NVIDIA/spark-rapids-jni/issues/3401
+  // Refer to https://github.com/NVIDIA/cudf-spark-jni/issues/3401
   // Refer to https://issues.apache.org/jira/browse/SPARK-52351
   // Check if Spark is Spark400+ or DB14.3+ and has left spaces
   bool match_issue_52351 = is_spark_400_or_later_or_db_14_3_or_later && pos > 0;

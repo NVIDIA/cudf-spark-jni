@@ -543,7 +543,7 @@ std::unique_ptr<cudf::column> cast_strings_to_floats(cudf::column_view const& in
     output_type, cudf::strings_column_view{input}, /*ansi_mode*/ false, stream, mr);
 }
 
-// TODO there is a bug here around 0 https://github.com/NVIDIA/spark-rapids/issues/10898
+// TODO there is a bug here around 0 https://github.com/NVIDIA/cudf-spark/issues/10898
 std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& input,
                                                        cudf::data_type output_type,
                                                        int precision,
@@ -798,7 +798,7 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
 
   if (d_type == cudf::type_id::STRING) {
     if (cudf::is_chrono(schema.type)) {
-      // Date/time is not processed here - it should be handled separately in spark-rapids.
+      // Date/time is not processed here - it should be handled separately in cudf-spark.
       if constexpr (input_is_column_ptr) {
         return std::move(input);
       } else {
