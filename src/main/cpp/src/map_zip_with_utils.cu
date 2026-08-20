@@ -270,8 +270,8 @@ std::unique_ptr<column> indices_of(
   auto const keys_tview   = cudf::table_view{{all_keys}};
   auto const values_tview = cudf::table_view{{all_values}};
   auto const has_nulls    = has_nested_nulls(values_tview) || has_nested_nulls(keys_tview);
-  auto const comparator =
-    cudf::detail::row::equality::two_table_comparator(values_tview, keys_tview, stream);
+  auto const comparator   = cudf::detail::row::equality::two_table_comparator(
+    values_tview, keys_tview, stream, cudf::get_current_device_resource_ref());
   auto const d_comp    = comparator.equal_to<false>(cudf::nullate::DYNAMIC{has_nulls});
   using lhs_index_type = cudf::detail::row::lhs_index_type;
   using rhs_index_type = cudf::detail::row::rhs_index_type;
