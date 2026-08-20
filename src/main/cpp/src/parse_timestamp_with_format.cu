@@ -23,6 +23,7 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
@@ -351,10 +352,11 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
                                 host_tokens.data(),
                                 sizeof(format_token) * host_tokens.size(),
-                                cudaMemcpyHostToDevice,
+                                cudaMemcpyDefault,
                                 stream.value()));
 
-  auto const d_input = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             num_rows,
                                             rmm::device_buffer{},
@@ -366,7 +368,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   auto validity =
     rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(0),
                      num_rows,
                      parse_with_format_fn{*d_input,

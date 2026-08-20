@@ -30,6 +30,7 @@
 #include <cudf/strings/detail/utilities.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -924,12 +925,12 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
     chunk,
     input.chars_begin(stream),
     offsets_mutable_view.begin<size_type>(),
-    reinterpret_cast<size_type*>(src_offsets.data()),
-    reinterpret_cast<bitmask_type*>(null_mask.data()),
+    src_offsets.data(),
+    static_cast<bitmask_type*>(null_mask.data()),
     d_matches ? cuda::std::optional<column_device_view const>{*d_matches} : cuda::std::nullopt);
 
   // use scan to transform number of bytes into offsets
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          offsets_view.begin<size_type>(),
                          offsets_view.end<size_type>(),
                          offsets_mutable_view.begin<size_type>());
@@ -948,12 +949,12 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   parse_uri<<<num_threadblocks, threadblock_size, 0, stream.value()>>>(
     *d_strings,
     input.chars_begin(stream),
-    reinterpret_cast<size_type*>(src_offsets.data()),
+    src_offsets.data(),
     offsets_column->view().begin<size_type>(),
     static_cast<char*>(d_out_chars.data()));
 
   auto null_count =
-    cudf::null_count(reinterpret_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
+    cudf::null_count(static_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
@@ -973,7 +974,7 @@ void validate_input_uris(strings_column_view const& input, rmm::cuda_stream_view
   auto validity_flags = rmm::device_uvector<bool>(input.size(), stream);
 
   thrust::tabulate(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     validity_flags.begin(),
     validity_flags.end(),
     cuda::proclaim_return_type<bool>([input = *d_strings] __device__(cudf::size_type row_idx) {

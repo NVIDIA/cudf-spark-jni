@@ -22,6 +22,7 @@
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -151,15 +152,18 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
   rmm::device_uvector<curandState> states(
     num_states, stream, cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(0),
                      num_states,
                      init_curand_fn{states.data(), seed});
 
   // generate offsets for the UUIDs
   rmm::device_uvector<cudf::size_type> offsets(row_count + 1, stream, mr);
-  thrust::sequence(
-    rmm::exec_policy_nosync(stream), offsets.begin(), offsets.end(), 0, CHAR_COUNT_PER_UUID);
+  thrust::sequence(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   offsets.begin(),
+                   offsets.end(),
+                   0,
+                   CHAR_COUNT_PER_UUID);
 
   // generate chars for the UUIDs
   auto const num_chars = row_count * CHAR_COUNT_PER_UUID;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "datetime_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DateTimeUtils_rebaseGregorianToJulian(
@@ -27,9 +29,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DateTimeUtils_rebaseGre
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::rebase_gregorian_to_julian(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -42,9 +44,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DateTimeUtils_rebaseJul
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::rebase_julian_to_gregorian(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -59,9 +61,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DateTimeUtils_truncateW
   {
     cudf::jni::auto_set_device(env);
 
-    auto const datetime_cv = reinterpret_cast<cudf::column_view const*>(datetime);
-    auto const format_cv   = reinterpret_cast<cudf::column_view const*>(format);
-    return reinterpret_cast<jlong>(spark_rapids_jni::truncate(*datetime_cv, *format_cv).release());
+    auto const datetime_cv = std::bit_cast<cudf::column_view const*>(datetime);
+    auto const format_cv   = std::bit_cast<cudf::column_view const*>(format);
+    return std::bit_cast<jlong>(spark_rapids_jni::truncate(*datetime_cv, *format_cv).release());
   }
   JNI_CATCH(env, 0);
 }
@@ -75,10 +77,10 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_DateTimeUtils_truncateW
   {
     cudf::jni::auto_set_device(env);
 
-    auto const datetime_cv = reinterpret_cast<cudf::column_view const*>(datetime);
+    auto const datetime_cv = std::bit_cast<cudf::column_view const*>(datetime);
     auto const format_jstr = cudf::jni::native_jstring(env, format);
     auto const format      = std::string(format_jstr.get(), format_jstr.size_bytes());
-    return reinterpret_cast<jlong>(spark_rapids_jni::truncate(*datetime_cv, format).release());
+    return std::bit_cast<jlong>(spark_rapids_jni::truncate(*datetime_cv, format).release());
   }
   JNI_CATCH(env, 0);
 }

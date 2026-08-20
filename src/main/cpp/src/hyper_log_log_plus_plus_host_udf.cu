@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
    * @brief Perform the main groupby computation for HLLPP UDF.
    */
   [[nodiscard]] std::unique_ptr<cudf::column> operator()(
-    rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) const override
+    cuda::stream_ref stream, rmm::device_async_resource_ref mr) const override
   {
     auto const group_values = get_grouped_values();
     if (group_values.size() == 0) { return get_empty_output(stream, mr); }
@@ -53,7 +53,7 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
    * @brief Create an empty column when the input is empty.
    */
   [[nodiscard]] std::unique_ptr<cudf::column> get_empty_output(
-    rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr) const override
+    cuda::stream_ref stream, rmm::device_async_resource_ref mr) const override
   {
     int num_registers       = 1 << precision;
     int num_long_cols       = num_registers / REGISTERS_PER_LONG + 1;
@@ -96,7 +96,7 @@ struct hllpp_reduct_udf : cudf::reduce_host_udf {
   /**
    * @brief Create an empty scalar when the input is empty.
    */
-  std::unique_ptr<cudf::scalar> get_empty_scalar(rmm::cuda_stream_view stream,
+  std::unique_ptr<cudf::scalar> get_empty_scalar(cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr) const
   {
     int num_registers       = 1 << precision;
@@ -116,7 +116,7 @@ struct hllpp_reduct_udf : cudf::reduce_host_udf {
     cudf::column_view const& input,
     cudf::data_type,                                           /** output_dtype is useless */
     std::optional<std::reference_wrapper<cudf::scalar const>>, /** init is useless */
-    rmm::cuda_stream_view stream,
+    cuda::stream_ref stream,
     rmm::device_async_resource_ref mr) const override
   {
     if (input.size() == 0) { return get_empty_scalar(stream, mr); }

@@ -32,11 +32,13 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/launch>
+#include <cuda/std/bit>
 #include <cuda/std/chrono>
 #include <cuda/std/functional>
 #include <thrust/binary_search.h>
@@ -96,12 +98,14 @@ auto convert_timestamp_tz(column_view const& input,
                           rmm::device_async_resource_ref mr)
 {
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -111,7 +115,7 @@ auto convert_timestamp_tz(column_view const& input,
                                              mr);
 
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     input.begin<timestamp_type>(),
     input.end<timestamp_type>(),
     results->mutable_view().begin<timestamp_type>(),
@@ -210,12 +214,14 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                "microseconds column must be of type INT32");
 
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             input_seconds.size(),
@@ -227,9 +233,9 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                                                  input_seconds.size(),
                                                  cudf::mask_state::UNALLOCATED,
                                                  stream,
-                                                 mr);
+                                                 cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator<size_type>(0),
                      input_seconds.size(),
                      convert_with_timezones_fn{input_seconds.begin<int64_t>(),
@@ -643,7 +649,8 @@ __device__ static void stage_side_transitions(int64_t const* __restrict__ g_tran
   int32_t* s_offsets = nullptr;
 
   if (fits && trans_count > 0) {
-    ptr     = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
+    ptr =
+      cuda::std::bit_cast<char*>(align_up(cuda::std::bit_cast<uintptr_t>(ptr), alignof(int64_t)));
     s_trans = reinterpret_cast<int64_t*>(ptr);
     ptr += trans_count * sizeof(int64_t);
     s_offsets = reinterpret_cast<int32_t*>(ptr);

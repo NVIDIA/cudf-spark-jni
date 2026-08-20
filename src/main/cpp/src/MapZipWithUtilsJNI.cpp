@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 #include "cudf_jni_apis.hpp"
 #include "map_zip_with_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuMapZipWithUtils_mapZip(
@@ -26,8 +28,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuMapZipWithUtils_mapZ
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::lists_column_view col1{*reinterpret_cast<cudf::column_view const*>(input_column1)};
-    cudf::lists_column_view col2{*reinterpret_cast<cudf::column_view const*>(input_column2)};
+    cudf::lists_column_view col1{*std::bit_cast<cudf::column_view const*>(input_column1)};
+    cudf::lists_column_view col2{*std::bit_cast<cudf::column_view const*>(input_column2)};
     return cudf::jni::release_as_jlong(spark_rapids_jni::map_zip(col1, col2));
   }
   JNI_CATCH(env, 0);

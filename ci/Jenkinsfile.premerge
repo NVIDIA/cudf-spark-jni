@@ -278,6 +278,35 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         }
                     }
                 }
+
+                stage ('sonarqube') {
+                    steps {
+                        script {
+                            def prNumber = githubHelper.getIssue().number
+
+                            def sonarBuild = build(
+                                job: 'sonar-scan',
+                                wait: true,
+                                propagate: false,
+                                parameters: [
+                                    string(name: 'REPO_URL', value: githubHelper.getCloneUrl()),
+                                    string(name: 'REF', value: githubHelper.getMergedSHA()),
+                                    string(name: 'BRANCH_NAME', value: "PR-${prNumber}"),
+                                    string(name: 'REFSPEC', value:
+                                        "+refs/pull/${prNumber}/merge:" +
+                                        "refs/remotes/origin/pr/${prNumber}"),
+                                    booleanParam(name: 'CHECK_QUALITY_GATE', value: true),
+                                    booleanParam(name: 'MUTE_SLACK', value: true),
+                                ])
+
+                            if (sonarBuild.result == 'UNSTABLE') {
+                                unstable('SonarQube Quality Gate failed')
+                            } else if (sonarBuild.result != 'SUCCESS') {
+                                error("SonarQube pipeline was ${sonarBuild.result}")
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -293,7 +322,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     githubHelper.updateCommitStatus("", "Success", GitHubCommitState.SUCCESS)
                 } else {
                     // upload log only in case of build failure
-                    def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com"]
+                    def guardWords = [
+                        "artifactory.*?\\.com",
+                        "gitlab.*?\\.com",
+                        "sonar.*?\\.com",
+                        "urm.*?\\.com",
+                    ]
                     guardWords.add("nvidia-smi(?s)(.*?)(?=git)") // hide GPU info
                     guardWords.add("sc-ipp*") // hide cloud info
                     githubHelper.uploadLogs(this, env.JOB_NAME, env.BUILD_NUMBER, null, guardWords)

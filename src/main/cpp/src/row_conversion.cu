@@ -33,6 +33,7 @@
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -43,6 +44,7 @@
 #include <cooperative_groups.h>
 #include <cuda/barrier>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
@@ -221,7 +223,11 @@ build_string_row_offsets(table_view const& tbl,
 {
   auto const num_rows = tbl.num_rows();
   rmm::device_uvector<size_type> d_row_sizes(num_rows, stream);
-  thrust::uninitialized_fill(rmm::exec_policy(stream), d_row_sizes.begin(), d_row_sizes.end(), 0);
+  thrust::uninitialized_fill(
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_row_sizes.begin(),
+    d_row_sizes.end(),
+    0);
 
   auto d_offsets_iterators = [&]() {
     std::vector<cudf::detail::input_offsetalator> offsets_iterators;
@@ -244,7 +250,7 @@ build_string_row_offsets(table_view const& tbl,
 
   auto const num_columns = static_cast<size_type>(d_offsets_iterators.size());
 
-  thrust::for_each(rmm::exec_policy(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    cuda::make_counting_iterator(0),
                    cuda::make_counting_iterator(num_columns * num_rows),
                    [d_offsets_iterators = d_offsets_iterators.data(),
@@ -259,7 +265,7 @@ build_string_row_offsets(table_view const& tbl,
                    });
 
   // transform the row sizes to include fixed width size and alignment
-  thrust::transform(rmm::exec_policy(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     d_row_sizes.begin(),
                     d_row_sizes.end(),
                     d_row_sizes.begin(),
@@ -526,7 +532,7 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
         // so we have to rewrite the addresses to make sure that it is 4 byte aligned
         int8_t* valid_byte        = &row_vld_tmp[col_index / 8];
         size_type byte_bit_offset = col_index % 8;
-        uint64_t fixup_bytes      = reinterpret_cast<uint64_t>(valid_byte) % 4;
+        uint64_t fixup_bytes      = cuda::std::bit_cast<uint64_t>(valid_byte) % 4;
         int32_t* valid_int        = reinterpret_cast<int32_t*>(valid_byte - fixup_bytes);
         size_type int_bit_offset  = byte_bit_offset + (fixup_bytes * 8);
         // Now copy validity for the column
@@ -1504,7 +1510,10 @@ batch_data build_batches(size_type num_rows,
                          rmm::cuda_stream_view stream,
                          rmm::device_async_resource_ref mr)
 {
-  auto const total_size = thrust::reduce(rmm::exec_policy(stream), row_sizes, row_sizes + num_rows);
+  auto const total_size =
+    thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   row_sizes,
+                   row_sizes + num_rows);
   auto const num_batches = static_cast<int32_t>(
     cudf::util::div_rounding_up_safe(total_size, static_cast<uint64_t>(MAX_BATCH_SIZE)));
   auto const num_offsets = num_batches + 1;
@@ -1518,8 +1527,10 @@ batch_data build_batches(size_type num_rows,
   size_type last_row_end = 0;
   device_uvector<uint64_t> cumulative_row_sizes(num_rows, stream);
 
-  thrust::inclusive_scan(
-    rmm::exec_policy(stream), row_sizes, row_sizes + num_rows, cumulative_row_sizes.begin());
+  thrust::inclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                         row_sizes,
+                         row_sizes + num_rows,
+                         cumulative_row_sizes.begin());
 
   // This needs to be split this into 2 gig batches. Care must be taken to avoid a batch larger than
   // 2 gigs. Imagine a table with 900 meg rows. The batches should occur every 2 rows, but if a
@@ -1546,7 +1557,10 @@ batch_data build_batches(size_type num_rows,
 
     // find the first row that would exceed MAX_BATCH_SIZE
     auto const ub =
-      thrust::upper_bound(rmm::exec_policy(stream), search_start, search_end, MAX_BATCH_SIZE);
+      thrust::upper_bound(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                          search_start,
+                          search_end,
+                          MAX_BATCH_SIZE);
     size_type const batch_size = ub - search_start;
 
     // If fewer than 32 rows fit before exceeding MAX_BATCH_SIZE, round_down_safe(batch_size, 32)
@@ -1572,7 +1586,7 @@ batch_data build_batches(size_type num_rows,
     auto row_size_iter_bounded = spark_rapids_jni::util::make_counting_transform_iterator(
       0, row_size_functor(row_end, row_sizes, last_row_end));
 
-    thrust::exclusive_scan(rmm::exec_policy(stream),
+    thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                            row_size_iter_bounded,
                            row_size_iter_bounded + num_entries,
                            output_batch_row_offsets.begin());
@@ -1586,7 +1600,7 @@ batch_data build_batches(size_type num_rows,
       CUDF_CUDA_TRY(cudaMemcpyAsync(batch_row_offsets.data() + last_row_end,
                                     output_batch_row_offsets.data(),
                                     num_rows_in_batch * sizeof(size_type),
-                                    cudaMemcpyDeviceToDevice,
+                                    cudaMemcpyDefault,
                                     stream.value()));
     }
 
@@ -1619,7 +1633,7 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
   device_uvector<size_type> num_tiles(num_batches, stream);
   auto iter = cuda::make_counting_iterator(0);
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + num_batches,
     num_tiles.begin(),
@@ -1630,7 +1644,9 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
           batch_row_boundaries[batch_index + 1] - batch_row_boundaries[batch_index],
           desired_tile_height);
       }));
-  return thrust::reduce(rmm::exec_policy(stream), num_tiles.begin(), num_tiles.end());
+  return thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                        num_tiles.begin(),
+                        num_tiles.end());
 }
 
 /**
@@ -1658,7 +1674,7 @@ size_type build_tiles(
   device_uvector<size_type> num_tiles(num_batches, stream);
   auto iter = cuda::make_counting_iterator(0);
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + num_batches,
     num_tiles.begin(),
@@ -1671,7 +1687,9 @@ size_type build_tiles(
       }));
 
   size_type const total_tiles =
-    thrust::reduce(rmm::exec_policy(stream), num_tiles.begin(), num_tiles.end());
+    thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   num_tiles.begin(),
+                   num_tiles.end());
 
   device_uvector<size_type> tile_starts(num_batches + 1, stream);
   auto tile_iter = spark_rapids_jni::util::make_counting_transform_iterator(
@@ -1680,13 +1698,13 @@ size_type build_tiles(
       [num_tiles = num_tiles.data(), num_batches] __device__(auto i) {
         return (i < num_batches) ? num_tiles[i] : 0;
       }));
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          tile_iter,
                          tile_iter + num_batches + 1,
                          tile_starts.begin());  // in tiles
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + total_tiles,
     tiles.begin(),
@@ -2384,7 +2402,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   constexpr auto num_batches = 2;
   device_uvector<size_type> gpu_batch_row_boundaries(num_batches, stream);
 
-  thrust::transform(rmm::exec_policy(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     cuda::make_counting_iterator(0),
                     cuda::make_counting_iterator(num_batches),
                     gpu_batch_row_boundaries.begin(),
@@ -2502,10 +2520,11 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
           return i < num_rows ? col_string_lengths[i] : 0;
         });
       auto bounded_iter = spark_rapids_jni::util::make_counting_transform_iterator(0, tmp);
-      thrust::exclusive_scan(rmm::exec_policy(stream),
-                             bounded_iter,
-                             bounded_iter + num_rows + 1,
-                             output_string_offsets.begin());
+      thrust::exclusive_scan(
+        rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+        bounded_iter,
+        bounded_iter + num_rows + 1,
+        output_string_offsets.begin());
 
       // allocate destination string column
       rmm::device_uvector<char> string_data(

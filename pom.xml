@@ -228,6 +228,7 @@
                     <exclude>**/CudaFatalTest.java</exclude>
                     <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
               </execution>
@@ -263,6 +264,7 @@
                   <testFailureIgnore>true</testFailureIgnore>
                   <excludes>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
               </execution>
@@ -684,6 +686,7 @@
                 <exclude>**/CudaFatalTest.java</exclude>
                 <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                 <exclude>**/NativeDepsLoaderTest.java</exclude>
+                <exclude>**/PackagedJarOriginCheck.java</exclude>
               </excludes>
             </configuration>
           </execution>
