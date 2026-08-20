@@ -21,13 +21,13 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
-#include <cudf/utilities/pinned_memory.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
@@ -148,50 +148,6 @@ struct format_token {
   uint8_t b;
   uint8_t c;
 };
-
-struct parser_staging_context {
-  std::vector<format_token> tokens;
-  std::vector<format_token> legacy_tokens;
-  format_token* token_staging;
-  format_token* legacy_token_staging;
-  cudf::size_type* exception_row_staging;
-  cudf::size_type num_rows;
-};
-
-void CUDART_CB initialize_parser_staging(void* user_data)
-{
-  auto context =
-    std::unique_ptr<parser_staging_context>{static_cast<parser_staging_context*>(user_data)};
-  std::copy(context->tokens.begin(), context->tokens.end(), context->token_staging);
-  if (context->exception_row_staging != nullptr) {
-    std::copy(
-      context->legacy_tokens.begin(), context->legacy_tokens.end(), context->legacy_token_staging);
-    *context->exception_row_staging = context->num_rows;
-  }
-}
-
-void enqueue_parser_staging_init(std::vector<format_token>&& tokens,
-                                 std::vector<format_token>&& legacy_tokens,
-                                 format_token* token_staging,
-                                 format_token* legacy_token_staging,
-                                 cudf::size_type* exception_row_staging,
-                                 cudf::size_type num_rows,
-                                 rmm::cuda_stream_view stream)
-{
-  auto context =
-    std::make_unique<parser_staging_context>(parser_staging_context{std::move(tokens),
-                                                                    std::move(legacy_tokens),
-                                                                    token_staging,
-                                                                    legacy_token_staging,
-                                                                    exception_row_staging,
-                                                                    num_rows});
-  // The callback takes ownership of the context and runs after the stream-ordered allocations.
-  auto* callback_context = context.release();
-  auto const status =
-    cudaLaunchHostFunc(stream.value(), initialize_parser_staging, callback_context);
-  if (status != cudaSuccess) { context.reset(callback_context); }
-  CUDF_CUDA_TRY(status);
-}
 
 // ---- Host-side: compile a Spark-style pattern string to a token stream. -------------------------
 //
@@ -420,45 +376,23 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()});
   }
 
-  auto const temp_mr   = cudf::get_current_device_resource_ref();
-  auto const pinned_mr = cudf::get_pinned_memory_resource();
-  rmm::device_uvector<format_token> host_token_staging(host_tokens.size(), stream, pinned_mr);
-  rmm::device_uvector<format_token> host_legacy_token_staging(
-    host_legacy_tokens.size(), stream, pinned_mr);
-  rmm::device_uvector<cudf::size_type> host_exception_row_staging(
-    exception_policy ? 1 : 0, stream, pinned_mr);
-  rmm::device_uvector<format_token> device_tokens(host_tokens.size(), stream, temp_mr);
-  rmm::device_uvector<format_token> device_legacy_tokens(
-    host_legacy_tokens.size(), stream, temp_mr);
-  enqueue_parser_staging_init(std::move(host_tokens),
-                              std::move(host_legacy_tokens),
-                              host_token_staging.data(),
-                              host_legacy_token_staging.data(),
-                              exception_policy ? host_exception_row_staging.data() : nullptr,
-                              num_rows,
-                              stream);
+  auto const temp_mr = cudf::get_current_device_resource_ref();
+  auto host_token_staging =
+    cudf::detail::make_pinned_vector_async<format_token>(host_tokens.size(), stream);
+  std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.begin());
+  auto device_tokens = cudf::detail::make_device_uvector_async(host_token_staging, stream, temp_mr);
 
-  CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
-                                host_token_staging.data(),
-                                sizeof(format_token) * host_token_staging.size(),
-                                cudaMemcpyDefault,
-                                stream.value()));
-  if (exception_policy) {
-    CUDF_CUDA_TRY(cudaMemcpyAsync(device_legacy_tokens.data(),
-                                  host_legacy_token_staging.data(),
-                                  sizeof(format_token) * host_legacy_token_staging.size(),
-                                  cudaMemcpyDefault,
-                                  stream.value()));
-  }
+  auto host_legacy_token_staging =
+    cudf::detail::make_pinned_vector_async<format_token>(host_legacy_tokens.size(), stream);
+  std::copy(
+    host_legacy_tokens.begin(), host_legacy_tokens.end(), host_legacy_token_staging.begin());
+  auto device_legacy_tokens =
+    cudf::detail::make_device_uvector_async(host_legacy_token_staging, stream, temp_mr);
 
   std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
   if (exception_policy) {
-    first_exception_row = std::make_unique<rmm::device_scalar<cudf::size_type>>(stream, temp_mr);
-    CUDF_CUDA_TRY(cudaMemcpyAsync(first_exception_row->data(),
-                                  host_exception_row_staging.data(),
-                                  sizeof(cudf::size_type),
-                                  cudaMemcpyDefault,
-                                  stream.value()));
+    first_exception_row =
+      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
   }
 
   auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
@@ -487,13 +421,8 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
       result->mutable_view().begin<cudf::timestamp_us>()});
 
   if (first_exception_row) {
-    CUDF_CUDA_TRY(cudaMemcpyAsync(host_exception_row_staging.data(),
-                                  first_exception_row->data(),
-                                  sizeof(cudf::size_type),
-                                  cudaMemcpyDefault,
-                                  stream.value()));
-    stream.synchronize();
-    auto const row = *host_exception_row_staging.data();
+    // value(stream) synchronizes the stream before returning the device value to the host.
+    auto const row = first_exception_row->value(stream);
     if (row < num_rows) {
       auto const error         = cudf::get_element(input.parent(), row, stream, temp_mr);
       auto const& string_error = static_cast<cudf::string_scalar const&>(*error);
