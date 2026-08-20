@@ -389,36 +389,8 @@ public class CastStrings {
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
       boolean legacy) {
-    return parseTimestampWithFormat(input, format, legacy, false);
-  }
-
-  /**
-   * Parse a string column using the selected time parser policy.
-   *
-   * <p>This compatibility overload is retained for existing callers. New callers should use
-   * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
-   *
-   * @param input the input string column.
-   * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
-   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED/EXCEPTION.
-   * @param exceptionPolicy when true, throw {@link CastException} if CORRECTED rejects a row
-   *                        that LEGACY accepts.
-   * @throws CastException if CORRECTED rejects a row that LEGACY accepts.
-   * @throws IllegalArgumentException if both LEGACY and EXCEPTION policies are enabled.
-   * @return a timestamp_us column where invalid rows have nulls.
-   */
-  public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
-      boolean legacy, boolean exceptionPolicy) {
-    if (legacy && exceptionPolicy) {
-      throw new IllegalArgumentException("LEGACY and EXCEPTION policies cannot both be enabled");
-    }
-    int timeParserPolicy = TIME_PARSER_POLICY_CORRECTED;
-    if (legacy) {
-      timeParserPolicy = TIME_PARSER_POLICY_LEGACY;
-    } else if (exceptionPolicy) {
-      timeParserPolicy = TIME_PARSER_POLICY_EXCEPTION;
-    }
-    return parseTimestampWithFormat(input, format, timeParserPolicy);
+    return parseTimestampWithFormat(input, format,
+        legacy ? TIME_PARSER_POLICY_LEGACY : TIME_PARSER_POLICY_CORRECTED);
   }
 
   /**
