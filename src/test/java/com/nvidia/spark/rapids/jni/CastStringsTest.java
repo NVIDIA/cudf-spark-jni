@@ -217,7 +217,7 @@ public class CastStringsTest {
     }
   }
 
-  // Regression test for https://github.com/NVIDIA/spark-rapids/issues/10773.
+  // Regression test for https://github.com/NVIDIA/cudf-spark/issues/10773.
   // Inputs whose decimal mantissa exceeds 2^53 used to lose 1 ULP because the
   // kernel cast the uint64 digits to double *before* applying the exp10 factor.
   // After the correctly-rounded fallback was added, the GPU result must match
@@ -238,7 +238,7 @@ public class CastStringsTest {
     // case where the mantissa rounding rolls into the exponent. These take
     // the new correctly-rounded fallback path and MUST match Double.parseDouble
     // bit-for-bit. A 1-ULP regression here means the helper is broken and
-    // NVIDIA/spark-rapids#10773 has regressed.
+    // NVIDIA/cudf-spark#10773 has regressed.
     String[] helperInputs = new String[] {
         // --- happy path: helper, q <= 0 ---
         "1.7976931348623157",        // the literal that broke RapidsJsonSuite
@@ -1478,7 +1478,7 @@ public class CastStringsTest {
 
   /**
    * Spark400+ and DB14.3+: do not support pattern: spaces + Thh:mm:ss
-   * Refer to https://github.com/NVIDIA/spark-rapids-jni/issues/3401
+   * Refer to https://github.com/NVIDIA/cudf-spark-jni/issues/3401
    */
   @Test
   void castStringToTimestampForSpark400PlusDB14_3Plus() {
@@ -1824,7 +1824,7 @@ public class CastStringsTest {
 
   @Test
   void parseTimestampWithFormat_correctedSlashDateDeviation() {
-    // CORRECTED yyyy/MM/dd accepts 1-2 digit month/day to preserve the pre-existing spark-rapids
+    // CORRECTED yyyy/MM/dd accepts 1-2 digit month/day to preserve the pre-existing cudf-spark
     // compatibility contract. This DEVIATES from Spark CPU, whose STRICT DateTimeFormatter rejects
     // single-digit fields ("2024/5/6" is null on CPU). This test pins the deviation so a future
     // refactor of compile_format's corrected_variable_width_slash_date cannot silently change it.

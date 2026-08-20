@@ -440,7 +440,7 @@ TEST_F(ColumnToRowTests, Biggest)
   }
 }
 
-// Regression test for https://github.com/NVIDIA/spark-rapids/issues/10062.
+// Regression test for https://github.com/NVIDIA/cudf-spark/issues/10062.
 //
 // AcceleratedColumnarToRowIterator packs columns by size descending, so a
 // pivot-shaped schema of N INT64 columns plus one INT32 places the INT32
@@ -498,7 +498,7 @@ TEST_F(ColumnToRowTests, PivotLikeLayout)
   }
 }
 
-// Regression test for spark-rapids-jni#4586: the default branch of the type-size switch in
+// Regression test for cudf-spark-jni#4586: the default branch of the type-size switch in
 // copy_to_rows wrote to the same byte col_size times rather than advancing the offset, so any
 // fixed-width column wider than 8 bytes (DECIMAL128 in practice) was silently corrupted.
 TEST_F(ColumnToRowTests, Decimal128RoundTrip)
@@ -523,7 +523,7 @@ TEST_F(ColumnToRowTests, Decimal128RoundTrip)
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(in, *result);
 }
 
-// Regression test for spark-rapids-jni#4590: when a tile boundary falls at a byte offset that
+// Regression test for cudf-spark-jni#4590: when a tile boundary falls at a byte offset that
 // is not 8-aligned, the old code wrote `round_up_8(actual_size)` bytes from the shared tile to
 // global memory. The trailing padding bytes overlapped with the next tile's destination range,
 // causing a non-deterministic race between adjacent CUDA blocks. With the fix, the write length
@@ -565,7 +565,7 @@ TEST_F(ColumnToRowTests, TileBoundaryWideInt32RoundTrip)
   }
 }
 
-// Regression test for spark-rapids-jni#4586: nested types (LIST, STRUCT, MAP) and other
+// Regression test for cudf-spark-jni#4586: nested types (LIST, STRUCT, MAP) and other
 // unsupported data types must be rejected at the entry point with a clear exception, rather
 // than producing silently corrupted output (which happened when LIST/STRUCT columns reached
 // the variable-width path that assumes STRING).
@@ -585,7 +585,7 @@ TEST_F(ColumnToRowTests, RejectStructColumn)
   EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
 }
 
-// Regression test for spark-rapids-jni#4586: column_view::data<int8_t>() returns
+// Regression test for cudf-spark-jni#4586: column_view::data<int8_t>() returns
 // `head + offset_in_elements` interpreted as bytes, so a sliced column produced a misaligned
 // input pointer and could either crash or silently corrupt data. With the entry-point guard
 // the caller now gets a clear exception.
@@ -645,7 +645,7 @@ TEST_F(RowToColumnTests, RejectSlicedRowList)
                cudf::logic_error);
 }
 
-// Regression repro for spark-rapids-jni#4587. Disabled by default because it requires ~2.5 GB
+// Regression repro for cudf-spark-jni#4587. Disabled by default because it requires ~2.5 GB
 // of free GPU memory to build the input; enable manually with --gtest_also_run_disabled_tests.
 //
 // With fewer than 32 rows whose cumulative encoded size exceeds 2 GiB, the old
@@ -666,7 +666,7 @@ TEST_F(ColumnToRowTests, DISABLED_HugeStringRowThrows)
   EXPECT_THROW(spark_rapids_jni::convert_to_rows(in), cudf::logic_error);
 }
 
-// Regression repro for spark-rapids-jni#4588. Disabled by default for the same memory reason as
+// Regression repro for cudf-spark-jni#4588. Disabled by default for the same memory reason as
 // HugeStringRowThrows.
 //
 // The old kernel launch passed batch_num_rows (a per-batch count) as the kernel's `num_rows`

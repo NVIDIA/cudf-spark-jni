@@ -23,11 +23,11 @@
   <artifactId>spark-rapids-jni</artifactId>
   <version>26.10.0-SNAPSHOT</version>
   <packaging>jar</packaging>
-  <name>RAPIDS Accelerator JNI for Apache Spark</name>
+  <name>cuDF plugin JNI for Apache Spark</name>
   <description>
-    Native code and CUDA kernels specific to the RAPIDS Accelerator for Apache Spark
+    Native code and CUDA kernels specific to the NVIDIA cuDF plugin for Apache Spark
   </description>
-  <url>http://github.com/NVIDIA/spark-rapids-jni</url>
+  <url>http://github.com/NVIDIA/cudf-spark-jni</url>
 
   <licenses>
     <license>
@@ -38,10 +38,10 @@
     </license>
   </licenses>
   <scm>
-    <connection>scm:git:https://github.com/NVIDIA/spark-rapids-jni.git</connection>
-    <developerConnection>scm:git:git@github.com:NVIDIA/spark-rapids-jni.git</developerConnection>
+    <connection>scm:git:https://github.com/NVIDIA/cudf-spark-jni.git</connection>
+    <developerConnection>scm:git:git@github.com:NVIDIA/cudf-spark-jni.git</developerConnection>
     <tag>HEAD</tag>
-    <url>https://github.com/NVIDIA/spark-rapids-jni</url>
+    <url>https://github.com/NVIDIA/cudf-spark-jni</url>
   </scm>
   <developers>
     <developer>

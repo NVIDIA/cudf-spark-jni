@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -202,7 +202,7 @@ TEST_F(SparkMurmurHash3Test, MultiValueWithSeeds)
 {
   // The hash values were determined by running the following Scala code in Apache Spark.
   // Note that Spark >= 3.2 normalizes the float/double value of -0. to +0. and both values hash
-  // to the same result. This is normalized in the calling code (Spark RAPIDS plugin) for Spark
+  // to the same result. This is normalized in the calling code (cuDF plugin) for Spark
   // >= 3.2. However, the reference values for -0. below must be obtained with Spark < 3.2 and
   // libcudf will continue to implement the Spark < 3.2 behavior until Spark >= 3.2 is required and
   // the workaround in the calling code is removed. This also affects the combined hash values.
@@ -617,7 +617,7 @@ TEST_F(SparkXXHash64Test, MultiValueWithSeeds)
 {
   // The hash values were determined by running the following Scala code in Apache Spark.
   // Note that Spark >= 3.2 normalizes the float/double value of -0. to +0. and both values hash
-  // to the same result. This is normalized in the calling code (Spark RAPIDS plugin) for Spark
+  // to the same result. This is normalized in the calling code (cuDF plugin) for Spark
   // >= 3.2. However, the reference values for -0. below must be obtained with Spark < 3.2 and
   // libcudf will continue to implement the Spark < 3.2 behavior until Spark >= 3.2 is required and
   // the workaround in the calling code is removed. This also affects the combined hash values.

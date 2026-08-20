@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ public class IcebergTruncateTest {
   @BeforeAll
   static void setup() {
     // Use a fixed seed because Iceberg truncate can not handle overflows well
-    // Refer to https://github.com/NVIDIA/spark-rapids-jni/issues/4016
+    // Refer to https://github.com/NVIDIA/cudf-spark-jni/issues/4016
     seed = 0L;
     System.out.println("IcebergTruncateTest seed: " + seed);
   }
