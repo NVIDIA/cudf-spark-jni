@@ -20,23 +20,32 @@
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/atomic>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
+#include <algorithm>
 #include <cctype>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // This kernel mirrors the formatters Spark uses for to_timestamp / unix_timestamp /
@@ -176,12 +185,15 @@ uint8_t letter_to_field(char c)
   }
 }
 
-std::vector<format_token> compile_format(std::string const& fmt, bool legacy)
+std::vector<format_token> compile_format(std::string const& fmt,
+                                         bool legacy,
+                                         bool strict_corrected = false)
 {
   std::vector<format_token> out;
-  size_t const n                                 = fmt.size();
-  bool saw_digit_field                           = false;
-  bool const corrected_variable_width_slash_date = !legacy && fmt == "yyyy/MM/dd";
+  size_t const n       = fmt.size();
+  bool saw_digit_field = false;
+  bool const corrected_variable_width_slash_date =
+    !legacy && !strict_corrected && fmt == "yyyy/MM/dd";
   for (size_t i = 0; i < n;) {
     char const c = fmt[i];
     if (std::isalpha(static_cast<unsigned char>(c))) {
@@ -276,9 +288,10 @@ __device__ bool walk_tokens(unsigned char const* p,
 
 struct parse_with_format_fn {
   cudf::column_device_view d_strings;
-  format_token const* __restrict__ tokens;
-  int num_tokens;
+  cudf::device_span<format_token const> tokens;
   bool legacy;
+  cudf::device_span<format_token const> legacy_tokens;
+  cudf::size_type* first_exception_row;
   bool* validity;
   cudf::timestamp_us* output;
 
@@ -286,48 +299,58 @@ struct parse_with_format_fn {
   // convention, masked-off positions are not read by downstream consumers.
   __device__ void set_invalid(cudf::size_type idx) const { validity[idx] = false; }
 
+  __device__ bool parse(unsigned char const* p,
+                        int size,
+                        cudf::device_span<format_token const> parse_tokens,
+                        bool parse_legacy,
+                        cudf::timestamp_us& parsed) const
+  {
+    int pos = 0;
+    int end = size;
+
+    if (parse_legacy) {
+      if (has_leading_newline(p, end)) { return false; }
+      trim(p, pos, end);
+      if (pos >= end) { return false; }
+    }
+
+    parsed_dt d{};
+    if (!walk_tokens(p, pos, end, parse_tokens.data(), static_cast<int>(parse_tokens.size()), d) ||
+        !date_time_utils::is_valid_date_for_timestamp(d.year, d.month, d.day) ||
+        !date_time_utils::is_valid_time(d.hour, d.minute, d.second, /*us*/ 0)) {
+      return false;
+    }
+
+    int64_t const days    = date_time_utils::to_epoch_day(d.year, d.month, d.day);
+    int64_t const seconds = days * 86400L + d.hour * 3600L + d.minute * 60L + d.second;
+    int64_t result_us     = 0;
+    if (overflow_checker::get_timestamp_overflow(seconds, /*us*/ 0, result_us)) { return false; }
+    parsed = cudf::timestamp_us{cudf::duration_us{result_us}};
+    return true;
+  }
+
   __device__ void operator()(cudf::size_type idx) const
   {
     if (d_strings.is_null(idx)) {
       set_invalid(idx);
       return;
     }
-    auto const sv  = d_strings.element<cudf::string_view>(idx);
-    auto const* p  = reinterpret_cast<unsigned char const*>(sv.data());
-    int const size = sv.size_bytes();
+    auto const sv = d_strings.element<cudf::string_view>(idx);
+    auto const* p = reinterpret_cast<unsigned char const*>(sv.data());
 
-    int pos = 0;
-    int end = size;
-
-    if (legacy) {
-      if (has_leading_newline(p, end)) {
-        set_invalid(idx);
-        return;
-      }
-      trim(p, pos, end);
-      if (pos >= end) {
-        set_invalid(idx);
-        return;
-      }
-    }
-
-    parsed_dt d{};
-    if (!walk_tokens(p, pos, end, tokens, num_tokens, d) ||
-        !date_time_utils::is_valid_date_for_timestamp(d.year, d.month, d.day) ||
-        !date_time_utils::is_valid_time(d.hour, d.minute, d.second, /*us*/ 0)) {
-      set_invalid(idx);
+    cudf::timestamp_us parsed;
+    if (parse(p, sv.size_bytes(), tokens, legacy, parsed)) {
+      validity[idx] = true;
+      output[idx]   = parsed;
       return;
     }
 
-    int64_t const days    = date_time_utils::to_epoch_day(d.year, d.month, d.day);
-    int64_t const seconds = days * 86400L + d.hour * 3600L + d.minute * 60L + d.second;
-    int64_t result_us     = 0;
-    if (overflow_checker::get_timestamp_overflow(seconds, /*us*/ 0, result_us)) {
-      set_invalid(idx);
-      return;
+    set_invalid(idx);
+    if (first_exception_row != nullptr && parse(p, sv.size_bytes(), legacy_tokens, true, parsed)) {
+      auto first_exception_row_ref =
+        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*first_exception_row};
+      first_exception_row_ref.fetch_min(idx, cuda::memory_order_relaxed);
     }
-    validity[idx] = true;
-    output[idx]   = cudf::timestamp_us{cudf::duration_us{result_us}};
   }
 };
 
@@ -337,26 +360,42 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
+  bool exception_policy,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
-  auto const host_tokens = compile_format(format, legacy);
-  auto const num_rows    = input.size();
+  CUDF_EXPECTS(!(legacy && exception_policy),
+               "LEGACY and EXCEPTION policies cannot both be enabled",
+               std::invalid_argument);
+  auto host_tokens = compile_format(format, legacy, exception_policy);
+  auto host_legacy_tokens =
+    exception_policy ? compile_format(format, true) : std::vector<format_token>{};
+  auto const num_rows = input.size();
   if (num_rows == 0) {
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()});
   }
 
-  rmm::device_uvector<format_token> device_tokens(
-    host_tokens.size(), stream, cudf::get_current_device_resource_ref());
-  CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
-                                host_tokens.data(),
-                                sizeof(format_token) * host_tokens.size(),
-                                cudaMemcpyDefault,
-                                stream.value()));
+  auto const temp_mr = cudf::get_current_device_resource_ref();
+  auto host_token_staging =
+    cudf::detail::make_pinned_vector_async<format_token>(host_tokens.size(), stream);
+  std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.begin());
+  auto device_tokens = cudf::detail::make_device_uvector_async(host_token_staging, stream, temp_mr);
 
-  auto const d_input = cudf::column_device_view::create(
-    input.parent(), stream, cudf::get_current_device_resource_ref());
+  auto host_legacy_token_staging =
+    cudf::detail::make_pinned_vector_async<format_token>(host_legacy_tokens.size(), stream);
+  std::copy(
+    host_legacy_tokens.begin(), host_legacy_tokens.end(), host_legacy_token_staging.begin());
+  auto device_legacy_tokens =
+    cudf::detail::make_device_uvector_async(host_legacy_token_staging, stream, temp_mr);
+
+  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
+  if (exception_policy) {
+    first_exception_row =
+      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
+  }
+
+  auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             num_rows,
                                             rmm::device_buffer{},
@@ -365,18 +404,31 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
                                             mr);
   // Every code path in parse_with_format_fn::operator() writes validity[idx], so leaving the
   // buffer uninitialized is safe.
-  auto validity =
-    rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
+  auto validity = rmm::device_uvector<bool>(num_rows, stream, temp_mr);
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                     thrust::make_counting_iterator(0),
-                     num_rows,
-                     parse_with_format_fn{*d_input,
-                                          device_tokens.data(),
-                                          static_cast<int>(device_tokens.size()),
-                                          legacy,
-                                          validity.begin(),
-                                          result->mutable_view().begin<cudf::timestamp_us>()});
+  thrust::for_each_n(
+    rmm::exec_policy_nosync(stream, temp_mr),
+    thrust::make_counting_iterator(0),
+    num_rows,
+    parse_with_format_fn{
+      *d_input,
+      cudf::device_span<format_token const>{device_tokens.data(), device_tokens.size()},
+      legacy,
+      cudf::device_span<format_token const>{device_legacy_tokens.data(),
+                                            device_legacy_tokens.size()},
+      first_exception_row ? first_exception_row->data() : nullptr,
+      validity.begin(),
+      result->mutable_view().begin<cudf::timestamp_us>()});
+
+  if (first_exception_row) {
+    // value(stream) synchronizes the stream before returning the device value to the host.
+    auto const row = first_exception_row->value(stream);
+    if (row < num_rows) {
+      auto const error         = cudf::get_element(input.parent(), row, stream, temp_mr);
+      auto const& string_error = static_cast<cudf::string_scalar const&>(*error);
+      throw cast_error(row, string_error.to_string(stream));
+    }
+  }
 
   auto [output_bitmask, null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(validity), stream, mr);

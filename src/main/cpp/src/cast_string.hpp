@@ -26,6 +26,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <memory>
+#include <string>
 
 namespace spark_rapids_jni {
 
@@ -52,9 +53,9 @@ struct cast_error : public std::runtime_error {
   /**
    * @brief Get the string that caused a parsing error
    *
-   * @return char const* const problematic string
+   * @return std::string const& problematic string
    */
-  [[nodiscard]] char const* get_string_with_error() const { return _string_with_error.c_str(); }
+  [[nodiscard]] std::string const& get_string_with_error() const { return _string_with_error; }
 
  private:
   cudf::size_type _row_number;
@@ -226,9 +227,15 @@ std::unique_ptr<cudf::column> parse_strings_to_date(
  * silently accepts (and discards) any non-digit suffix including 'Z', so callers must not
  * infer a UTC offset from a trailing 'Z'.
  *
+ * @throws spark_rapids_jni::cast_error If CORRECTED rejects a row that LEGACY accepts while
+ *                                       exception policy is enabled.
+ * @throws std::invalid_argument If legacy and exception policies are both enabled.
+ *
  * @param input The input string column.
  * @param format Spark format pattern (e.g. `"yyyy-MM-dd HH:mm:ss"`).
  * @param legacy True for `LegacyTimeParserPolicy`, false for CORRECTED/EXCEPTION.
+ * @param exception_policy If true, throw `cast_error` when CORRECTED rejects a row that LEGACY
+ *                         accepts.
  * @param stream Stream on which to operate.
  * @param mr Memory resource for the returned column.
  * @return A timestamp_us column, with nulls for invalid inputs.
@@ -237,6 +244,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
+  bool exception_policy,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

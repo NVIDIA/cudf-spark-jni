@@ -1539,6 +1539,25 @@ public class CastStringsTest {
     }
   }
 
+  private static CastException assertExceptionPolicyDisagreement(String input, String format) {
+    try (ColumnVector in = ColumnVector.fromStrings(input)) {
+      return Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(
+              in, format, CastStrings.TIME_PARSER_POLICY_EXCEPTION));
+    }
+  }
+
+  private static void assertParsedTimestamp(String[] inputs, String format, int timeParserPolicy,
+      Long[] expected) {
+    try (ColumnVector in = ColumnVector.fromStrings(inputs);
+        ColumnVector actual =
+            CastStrings.parseTimestampWithFormat(in, format, timeParserPolicy);
+        ColumnVector exp = ColumnVector.timestampMicroSecondsFromBoxedLongs(expected)) {
+      AssertUtils.assertColumnsAreEqual(exp, actual);
+    }
+  }
+
   @Test
   void parseTimestampWithFormat_correctedDateOnlyFormats() {
     long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
@@ -1817,11 +1836,139 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_integerPolicies() {
+    long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"2024-05-06"}, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_CORRECTED,
+        new Long[]{y2024_05_06});
+    assertParsedTimestamp(
+        new String[]{"2024-5-6"}, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_LEGACY,
+        new Long[]{y2024_05_06});
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyCorrectedSuccessReturnsResult() {
+    try (ColumnVector dateInput = ColumnVector.fromStrings("2024-05-06", null);
+        ColumnVector dateActual = CastStrings.parseTimestampWithFormat(
+            dateInput, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION);
+        ColumnVector dateExpected = ColumnVector.timestampMicroSecondsFromBoxedLongs(
+            expectedUs(2024, 5, 6, 0, 0, 0), null);
+        ColumnVector timestampInput = ColumnVector.fromStrings("1999-12-31 11:59:59");
+        ColumnVector timestampActual = CastStrings.parseTimestampWithFormat(timestampInput,
+            "yyyy-MM-dd HH:mm:ss", CastStrings.TIME_PARSER_POLICY_EXCEPTION);
+        ColumnVector timestampExpected = ColumnVector.timestampMicroSecondsFromBoxedLongs(
+            expectedUs(1999, 12, 31, 11, 59, 59))) {
+      AssertUtils.assertColumnsAreEqual(dateExpected, dateActual);
+      AssertUtils.assertColumnsAreEqual(timestampExpected, timestampActual);
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyCorrectedFailureLegacySuccessThrows() {
+    // These cases are parser disagreements in Spark 3.3 through 4.1: the strict corrected parser
+    // rejects them, while java.text.SimpleDateFormat accepts them.
+    String[][] cases = {
+        {"yyyy-MM-dd", "2024-05-06xxx"},
+        {"yyyy-MM-dd", "2024-05-06\u0000x"},
+        {"yyyy-MM-dd", "2024-05-06😀"},
+        {"yyyy-MM-dd", " 2024-05-06 "},
+        {"yyyy-MM-dd", "2024- 05- 06"},
+        {"yyyy-MM-dd HH:mm:ss", "1999-12-31  11:59:59"},
+        {"yyyy/MM/dd", "2024/5/6"}
+    };
+    for (String[] testCase : cases) {
+      CastException error = assertExceptionPolicyDisagreement(testCase[1], testCase[0]);
+      Assertions.assertEquals(0, error.getRowWithError());
+      Assertions.assertEquals(testCase[1], error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyBothParsersFailUsesCorrectedNullBehavior() {
+    // Spark returns null for these inputs under EXCEPTION when ANSI is disabled: either both
+    // parsers reject the input, or the corrected parser returns an invalid-date result without
+    // raising the parse exception that triggers Spark's legacy fallback.
+    try (ColumnVector dateInput = ColumnVector.fromStrings(
+            "invalid", "2024/05/06", "2024-05-061", "2023-02-29", "2024-13-01", null);
+        ColumnVector dateActual = CastStrings.parseTimestampWithFormat(
+            dateInput, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION);
+        ColumnVector dateExpected = ColumnVector.timestampMicroSecondsFromBoxedLongs(
+            null, null, null, null, null, null);
+        ColumnVector timestampInput = ColumnVector.fromStrings(
+            "invalid", "1999-12-31 25:61:61");
+        ColumnVector timestampActual = CastStrings.parseTimestampWithFormat(timestampInput,
+            "yyyy-MM-dd HH:mm:ss", CastStrings.TIME_PARSER_POLICY_EXCEPTION);
+        ColumnVector timestampExpected =
+            ColumnVector.timestampMicroSecondsFromBoxedLongs(null, null)) {
+      AssertUtils.assertColumnsAreEqual(dateExpected, dateActual);
+      AssertUtils.assertColumnsAreEqual(timestampExpected, timestampActual);
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyReportsFirstDisagreement() {
+    try (ColumnVector in = ColumnVector.fromStrings(
+        "2024-05-06", "invalid", "2024-05-06xxx", " 2024-05-07 ")) {
+      CastException error = Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(
+              in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION));
+      Assertions.assertEquals(2, error.getRowWithError());
+      Assertions.assertEquals("2024-05-06xxx", error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyReportsSliceRelativeRow() {
+    try (ColumnVector full = ColumnVector.fromStrings(
+            "outside", "2024-05-06", "2024-05-06xxx", " 2024-05-07 ");
+        ColumnVector in = full.subVector(1, 4)) {
+      CastException error = Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(
+              in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION));
+      Assertions.assertEquals(1, error.getRowWithError());
+      Assertions.assertEquals("2024-05-06xxx", error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exceptionPolicyReportsFirstDisagreementAcrossBlocks() {
+    String[] inputs = new String[4096];
+    Arrays.fill(inputs, "invalid");
+    inputs[17] = "2024-05-06xxx";
+    inputs[4095] = " 2024-05-07 ";
+    try (ColumnVector in = ColumnVector.fromStrings(inputs)) {
+      CastException error = Assertions.assertThrows(
+          CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(
+              in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION));
+      Assertions.assertEquals(17, error.getRowWithError());
+      Assertions.assertEquals(inputs[17], error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_rejectsInvalidIntegerPolicy() {
+    try (ColumnVector in = ColumnVector.fromStrings("2024-05-06")) {
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", -1));
+      Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", 3));
+    }
+  }
+
+  @Test
   void parseTimestampWithFormat_emptyColumn() {
     try (ColumnVector in = ColumnVector.fromStrings(new String[]{});
         ColumnVector actual = CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", false);
+        ColumnVector exceptionPolicyActual = CastStrings.parseTimestampWithFormat(
+            in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION);
         ColumnVector exp = ColumnVector.timestampMicroSecondsFromBoxedLongs(new Long[]{})) {
       AssertUtils.assertColumnsAreEqual(exp, actual);
+      AssertUtils.assertColumnsAreEqual(exp, exceptionPolicyActual);
     }
     try (ColumnVector in = ColumnVector.fromStrings(new String[]{})) {
       Assertions.assertThrows(CudfException.class,
