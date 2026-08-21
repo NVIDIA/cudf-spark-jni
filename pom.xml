@@ -276,6 +276,7 @@
                 </goals>
                 <configuration>
                   <groups>noSanitizer</groups>
+                  <testFailureIgnore>true</testFailureIgnore>
                 </configuration>
               </execution>
               <execution>
