@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream_ref>
 
 namespace spark_rapids_jni {
 
@@ -85,7 +87,7 @@ std::unique_ptr<cudf::column> hive_hash(
  */
 std::unique_ptr<cudf::column> sha224_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -100,7 +102,7 @@ std::unique_ptr<cudf::column> sha224_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha256_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -115,7 +117,7 @@ std::unique_ptr<cudf::column> sha256_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha384_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -130,7 +132,7 @@ std::unique_ptr<cudf::column> sha384_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha512_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni
