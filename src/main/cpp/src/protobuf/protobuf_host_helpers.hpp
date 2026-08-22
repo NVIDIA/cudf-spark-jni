@@ -502,14 +502,12 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> build_repeated_string_column(
-  cudf::column_view const& binary_input,
-  protobuf_input_view input,
-  repeated_field_work work,
-  bool is_bytes,
-  rmm::device_uvector<protobuf_error>& d_error,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view const& binary_input,
+                                                           protobuf_input_view input,
+                                                           repeated_field_work work,
+                                                           bool is_bytes,
+                                                           rmm::cuda_stream_view stream,
+                                                           rmm::device_async_resource_ref mr);
 
 std::unique_ptr<cudf::column> build_nested_struct_column(
   protobuf_input_view input,
