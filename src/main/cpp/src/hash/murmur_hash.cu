@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include <cudf/detail/row_operator/hashing.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/table/table_device_view.cuh>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -126,9 +127,9 @@ class murmur_device_row_hasher {
         if (curr_col.type().id() == cudf::type_id::STRUCT) {
           if (curr_col.num_child_columns() == 0) { return _seed; }
           // Non-empty structs are assumed to be decomposed and contain only one child
-          curr_col = cudf::detail::structs_column_device_view(curr_col).get_sliced_child(0);
+          curr_col = cudf::structs_column_device_view(curr_col).get_sliced_child(0);
         } else if (curr_col.type().id() == cudf::type_id::LIST) {
-          curr_col = cudf::detail::lists_column_device_view(curr_col).get_sliced_child();
+          curr_col = cudf::lists_column_device_view(curr_col).get_sliced_child();
         }
       }
 
@@ -206,13 +207,14 @@ std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
   // Lists of structs are not supported
   check_hash_compatibility(input);
 
-  bool const nullable   = has_nested_nulls(input);
-  auto const row_hasher = cudf::detail::row::hash::row_hasher(input, stream);
-  auto output_view      = output->mutable_view();
+  bool const nullable = has_nested_nulls(input);
+  auto const row_hasher =
+    cudf::detail::row::hash::row_hasher(input, stream, cudf::get_current_device_resource_ref());
+  auto output_view = output->mutable_view();
 
   // Compute the hash value for each row
   thrust::tabulate(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     output_view.begin<murmur_hash_value_type>(),
     output_view.end<murmur_hash_value_type>(),
     row_hasher.device_hasher<MurmurHash3_32, murmur_device_row_hasher>(nullable, seed));

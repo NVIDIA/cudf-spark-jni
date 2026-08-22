@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
+import ai.rapids.cudf.CloseableArray;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
@@ -36,6 +37,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collections;
 
 /**
  * Tests for the Protobuf GPU decoder.
@@ -153,6 +155,21 @@ public class ProtobufTest {
     }
   }
 
+  private static void assertListOffsets(ColumnView list, int... expected) {
+    try (ColumnView offsetsView = list.getListOffsetsView();
+         ColumnVector offsets = offsetsView.copyToColumnVector();
+         HostColumnVector hostOffsets = offsets.copyToHost()) {
+      assertEquals(expected.length, hostOffsets.getRowCount(), "Unexpected list offsets count");
+      for (int i = 0; i < expected.length; i++) {
+        assertEquals(expected[i], hostOffsets.getInt(i), "Unexpected list offset at " + i);
+      }
+    }
+  }
+
+  private static StructData struct(Object... values) {
+    return new StructData(values);
+  }
+
   // ============================================================================
   // Basic Type Tests
   // ============================================================================
@@ -176,10 +193,13 @@ public class ProtobufTest {
     // Row2: null input message
     Byte[] row2 = null;
 
+    StructType expectedType = new StructType(
+        true,
+        new BasicType(true, DType.INT64),
+        new BasicType(true, DType.STRING));
     try (Table input = new Table.TestBuilder().column(row0, row1, row2).build();
-         ColumnVector expectedId = ColumnVector.fromBoxedLongs(100L, 200L, null);
-         ColumnVector expectedName = ColumnVector.fromStrings("alice", null, null);
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedId, expectedName);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             expectedType, struct(100L, "alice"), struct(200L, null), null);
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -187,24 +207,7 @@ public class ProtobufTest {
                  .addField(2, DType.STRING)
                  .build(),
              true)) {
-      // Row 2 is a null input row — the output struct row should also be null.
-      assertEquals(3, actualStruct.getRowCount());
-      assertEquals(1, actualStruct.getNullCount());
-      try (HostColumnVector hcv = actualStruct.copyToHost()) {
-        assertFalse(hcv.isNull(0));
-        assertFalse(hcv.isNull(1));
-        assertTrue(hcv.isNull(2), "Null input row should produce null struct row");
-      }
-      // Children for non-null rows should still match
-      try (ColumnVector childId = actualStruct.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostId = childId.copyToHost();
-           ColumnVector childName = actualStruct.getChildColumnView(1).copyToColumnVector();
-           HostColumnVector hostName = childName.copyToHost()) {
-        assertEquals(100L, hostId.getLong(0));
-        assertEquals(200L, hostId.getLong(1));
-        assertEquals("alice", hostName.getJavaString(0));
-        assertTrue(hostName.isNull(1));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -366,6 +369,30 @@ public class ProtobufTest {
       assertEquals(DType.STRUCT, result.getType());
       assertEquals(1, result.getRowCount());
       assertEquals(0, result.getNumChildren());
+    }
+  }
+
+  @Test
+  void testEmptySchemaStillValidatesMalformedWireData() {
+    Byte[] malformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    ProtobufSchemaDescriptor emptySchema = new ProtobufSchemaDescriptorBuilder().build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed}).build();
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), emptySchema, false)) {
+      assertEquals(0, actual.getNumChildren());
+      assertSingleNullStructRow(actual, "Malformed wire data should null an empty-schema row");
+    }
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed}).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(
+          ai.rapids.cudf.CudfException.class,
+          () -> {
+            try (ColumnVector ignored = Protobuf.decodeToStruct(
+                input.getColumn(0), emptySchema, true)) {
+            }
+          });
+      assertTrue(error.getMessage().contains("unable to skip unknown field"));
     }
   }
 
@@ -1542,27 +1569,18 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(2)),
         box(tag(1, WT_VARINT)), box(encodeVarint(3)));
 
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
-      try (ColumnVector result = Protobuf.decodeToStruct(
-          input.getColumn(0),
-          new ProtobufSchemaDescriptorBuilder()
-              .addField(1, DType.INT32).repeated()  // ids
-              .build(),
-          false)) {
-        // Result should be STRUCT<ids: LIST<INT32>> containing [1, 2, 3]
-        assertNotNull(result);
-        assertEquals(DType.STRUCT, result.getType());
-        try (ColumnVector listCol = result.getChildColumnView(0).copyToColumnVector();
-             ColumnVector children = listCol.getChildColumnView(0).copyToColumnVector();
-             HostColumnVector hostChildren = children.copyToHost()) {
-          assertEquals(DType.LIST, listCol.getType());
-          assertEquals(DType.INT32, children.getType());
-          assertEquals(3, children.getRowCount());
-          assertEquals(1, hostChildren.getInt(0));
-          assertEquals(2, hostChildren.getInt(1));
-          assertEquals(3, hostChildren.getInt(2));
-        }
-      }
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(1, 2, 3));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32).repeated()  // ids
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -1576,9 +1594,6 @@ public class ProtobufTest {
     //   repeated bool bool_values = 4 [packed=true];
     // }
 
-    // Helper to build packed int data (varints)
-    java.io.ByteArrayOutputStream intBuf = new java.io.ByteArrayOutputStream();
-
     // Row 0: id=42, int_values=[1,-1,100] (12 bytes packed), double_values=[1.5,2.5], bool=[true,false]
     // Row 1: id=7, int_values=15x(-1) (150 bytes packed, 2-byte length varint!), double_values=[3.0,4.0], bool=[true]
     // Row 2: id=0, int_values=[] (field omitted), double_values=[5.0], bool=[] (field omitted)
@@ -1589,9 +1604,9 @@ public class ProtobufTest {
     byte[] r0Bools = new byte[]{0x01, 0x00};
     Byte[] row0 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(42)),
-        box(tag(2, WT_LEN)), box(encodeVarint(r0IntVarints.length)), box(r0IntVarints),
-        box(tag(3, WT_LEN)), box(encodeVarint(r0Doubles.length)), box(r0Doubles),
-        box(tag(4, WT_LEN)), box(encodeVarint(r0Bools.length)), box(r0Bools));
+        box(tag(2, WT_LEN)), encodeBytes(r0IntVarints),
+        box(tag(3, WT_LEN)), encodeBytes(r0Doubles),
+        box(tag(4, WT_LEN)), encodeBytes(r0Bools));
 
     // --- Row 1: 15 negative ints => 150 bytes packed (length varint is 2 bytes: 0x96 0x01) ---
     java.io.ByteArrayOutputStream buf1 = new java.io.ByteArrayOutputStream();
@@ -1604,52 +1619,45 @@ public class ProtobufTest {
     byte[] r1Bools = new byte[]{0x01};
     Byte[] row1 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(7)),
-        box(tag(2, WT_LEN)), box(encodeVarint(r1IntVarints.length)), box(r1IntVarints),
-        box(tag(3, WT_LEN)), box(encodeVarint(r1Doubles.length)), box(r1Doubles),
-        box(tag(4, WT_LEN)), box(encodeVarint(r1Bools.length)), box(r1Bools));
+        box(tag(2, WT_LEN)), encodeBytes(r1IntVarints),
+        box(tag(3, WT_LEN)), encodeBytes(r1Doubles),
+        box(tag(4, WT_LEN)), encodeBytes(r1Bools));
 
     // --- Row 2: no int_values, no bool_values ---
     byte[] r2Doubles = encodeDouble(5.0);
     Byte[] row2 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(0)),
-        box(tag(3, WT_LEN)), box(encodeVarint(r2Doubles.length)), box(r2Doubles));
+        box(tag(3, WT_LEN)), encodeBytes(r2Doubles));
 
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1, row2}).build()) {
-      try (ColumnVector result = Protobuf.decodeToStruct(
-          input.getColumn(0),
-          new ProtobufSchemaDescriptorBuilder()
-              .addField(1, DType.INT32)               // id
-              .addField(2, DType.INT32).repeated()    // int_values (packed)
-              .addField(3, DType.FLOAT64).repeated()  // double_values (packed)
-              .addField(4, DType.BOOL8).repeated()    // bool_values (packed)
-              .build(),
-          false)) {
-        assertNotNull(result);
-        assertEquals(DType.STRUCT, result.getType());
-        assertEquals(3, result.getRowCount());
-
-        // Focus of this test is the multi-field packed-double layout (cross-row count
-        // accumulation, child-column construction across mixed packed/unpacked rows); the
-        // exact decoded values are spot-checked only on the double column. Per-element-type
-        // round-trips are covered separately by testUnpackedRepeatedInt32, testRepeatedUint32,
-        // testRepeatedUint64, testRepeatedString, testRepeatedBytes, and
-        // testRepeatedEnumAsString.
-        try (ColumnVector doubleListCol = result.getChildColumnView(2).copyToColumnVector()) {
-          assertEquals(DType.LIST, doubleListCol.getType());
-          try (ColumnVector doubleChildren = doubleListCol.getChildColumnView(0).copyToColumnVector()) {
-            assertEquals(DType.FLOAT64, doubleChildren.getType());
-            assertEquals(5, doubleChildren.getRowCount(),
-                "Total packed doubles across 3 rows should be 5, got " + doubleChildren.getRowCount());
-            try (HostColumnVector hd = doubleChildren.copyToHost()) {
-              assertEquals(1.5, hd.getDouble(0), 1e-10);
-              assertEquals(2.5, hd.getDouble(1), 1e-10);
-              assertEquals(3.0, hd.getDouble(2), 1e-10);
-              assertEquals(4.0, hd.getDouble(3), 1e-10);
-              assertEquals(5.0, hd.getDouble(4), 1e-10);
-            }
-          }
-        }
-      }
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1, row2}).build();
+         ColumnVector expectedIds = ColumnVector.fromBoxedInts(42, 7, 0);
+         ColumnVector expectedInts = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(1, -1, 100),
+             Collections.nCopies(15, -1),
+             Collections.emptyList());
+         ColumnVector expectedDoubles = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.FLOAT64)),
+             Arrays.asList(1.5, 2.5),
+             Arrays.asList(3.0, 4.0),
+             Collections.singletonList(5.0));
+         ColumnVector expectedBools = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.BOOL8)),
+             Arrays.asList(true, false),
+             Collections.singletonList(true),
+             Collections.emptyList());
+         ColumnVector expectedStruct = ColumnVector.makeStruct(
+             expectedIds, expectedInts, expectedDoubles, expectedBools);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32)               // id
+                 .addField(2, DType.INT32).repeated()    // int_values (packed)
+                 .addField(3, DType.FLOAT64).repeated()  // double_values (packed)
+                 .addField(4, DType.BOOL8).repeated()    // bool_values (packed)
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -1690,11 +1698,10 @@ public class ProtobufTest {
   }
 
   @Test
-  void testPermissiveRepeatedWrongWireTypeDoesNotCorruptFollowingRow() {
+  void testPermissiveRepeatedWrongWireTypeNullsMalformedRow() {
     // message Msg { repeated int32 ids = 1; }
     // Row 0 has one valid element, then a malformed fixed32 occurrence for the same field,
-    // then another valid varint that must be ignored once the row is marked malformed.
-    // Row 1 must keep its own slot and not be overwritten by row 0's trailing occurrence.
+    // then another valid varint. Spark CPU nulls the entire malformed row in PERMISSIVE mode.
     Byte[] row0 = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(1)),
         box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
@@ -1703,11 +1710,11 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(100)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT32)),
-             Arrays.asList(1),
-             Arrays.asList(100));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(100)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -1719,6 +1726,55 @@ public class ProtobufTest {
   }
 
   @Test
+  void testTopLevelNestedMessageWrongWireTypeBeforeRepeatedField_Permissive() {
+    // message Msg { Inner inner = 1; repeated int32 ids = 2; }
+    Byte[] malformed = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] valid = concat(box(tag(2, WT_VARINT)), box(encodeVarint(8)));
+    Byte[][] rows = new Byte[][]{malformed, valid};
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).isOutput(false)
+        .addField(2, DType.INT32).repeated()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(8)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testMalformedNestedLengthBeforeRepeatedField_Permissive() {
+    // The oversized nested length makes the trailing repeated-looking bytes unreachable.
+    Byte[] malformed = concat(
+        box(tag(1, WT_LEN)), box(encodeVarint(5)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] valid = concat(box(tag(2, WT_VARINT)), box(encodeVarint(8)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).isOutput(false)
+        .addField(2, DType.INT32).repeated()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed, valid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(8)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void testRepeatedUint32() {
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(1)),
@@ -1726,21 +1782,17 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(3)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.UINT32)),
+             Arrays.asList(1, 2, 3));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.UINT32).repeated()
                  .build(),
              false)) {
-      try (ColumnVector list = result.getChildColumnView(0).copyToColumnVector();
-           ColumnVector vals = list.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostVals = vals.copyToHost()) {
-        assertEquals(DType.UINT32, vals.getType());
-        assertEquals(3, vals.getRowCount());
-        assertEquals(1, Integer.toUnsignedLong(hostVals.getInt(0)));
-        assertEquals(2, Integer.toUnsignedLong(hostVals.getInt(1)));
-        assertEquals(3, Integer.toUnsignedLong(hostVals.getInt(2)));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -1752,21 +1804,17 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(33)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.UINT64)),
+             Arrays.asList(11L, 22L, 33L));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.UINT64).repeated()
                  .build(),
              false)) {
-      try (ColumnVector list = result.getChildColumnView(0).copyToColumnVector();
-           ColumnVector vals = list.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostVals = vals.copyToHost()) {
-        assertEquals(DType.UINT64, vals.getType());
-        assertEquals(3, vals.getRowCount());
-        assertEquals(11L, hostVals.getLong(0));
-        assertEquals(22L, hostVals.getLong(1));
-        assertEquals(33L, hostVals.getLong(2));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -1996,20 +2044,13 @@ public class ProtobufTest {
     // enum Color { RED=0; GREEN=1; BLUE=2; }
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(1)));  // GREEN
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
-            "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-        }
-    };
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
          ColumnVector expectedField = ColumnVector.fromStrings("GREEN");
          ColumnVector expected = ColumnVector.makeStruct(expectedField);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRING).enumMetadata(new int[]{0, 1, 2}, enumNames[0])
+                 .addField(1, DType.STRING).enumMetadata("RED", "GREEN", "BLUE")
                  .build(),
              false)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);
@@ -2021,23 +2062,16 @@ public class ProtobufTest {
     // Unknown enum value should null the entire struct row (PERMISSIVE behavior).
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
-            "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-        }
-    };
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new BasicType(true, DType.STRING)), (StructData) null);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRING).enumMetadata(new int[]{0, 1, 2}, enumNames[0])
+                 .addField(1, DType.STRING).enumMetadata("RED", "GREEN", "BLUE")
                  .build(),
-             false);
-         HostColumnVector hostStruct = actual.copyToHost()) {
-      assertEquals(1, actual.getNullCount(), "Struct row should be null for unknown enum value");
-      assertTrue(hostStruct.isNull(0), "Row 0 should be null");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -2047,25 +2081,17 @@ public class ProtobufTest {
     Byte[] row1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));  // unknown
     Byte[] row2 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(2)));    // BLUE
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
-            "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-        }
-    };
     try (Table input = new Table.TestBuilder().column(row0, row1, row2).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new BasicType(true, DType.STRING)),
+             struct("RED"), null, struct("BLUE"));
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRING).enumMetadata(new int[]{0, 1, 2}, enumNames[0])
+                 .addField(1, DType.STRING).enumMetadata("RED", "GREEN", "BLUE")
                  .build(),
-             false);
-         HostColumnVector hostStruct = actual.copyToHost()) {
-      assertEquals(1, actual.getNullCount(), "Only the unknown enum row should be null");
-      assertTrue(!hostStruct.isNull(0), "Row 0 should be valid");
-      assertTrue(hostStruct.isNull(1), "Row 1 should be null");
-      assertTrue(!hostStruct.isNull(2), "Row 2 should be valid");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -2098,16 +2124,15 @@ public class ProtobufTest {
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(999)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new BasicType(true, DType.INT32)), (StructData) null);
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
                  .build(),
-             false);
-         HostColumnVector hostStruct = actualStruct.copyToHost()) {
-      // The struct itself should be null (not just the field)
-      assertEquals(1, actualStruct.getNullCount(), "Struct row should be null for unknown enum");
-      assertTrue(hostStruct.isNull(0), "Row 0 should be null");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actualStruct);
     }
   }
 
@@ -2121,19 +2146,16 @@ public class ProtobufTest {
     Byte[] row3 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(-1)));   // negative (unknown) -> struct null
 
     try (Table input = new Table.TestBuilder().column(row0, row1, row2, row3).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new BasicType(true, DType.INT32)),
+             struct(0), null, struct(2), null);
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
                  .build(),
-             false);
-         HostColumnVector hostStruct = actualStruct.copyToHost()) {
-      // Check struct-level nulls
-      assertEquals(2, actualStruct.getNullCount(), "Should have 2 null rows (rows 1 and 3)");
-      assertTrue(!hostStruct.isNull(0), "Row 0 should be valid");
-      assertTrue(hostStruct.isNull(1), "Row 1 should be null (unknown enum 999)");
-      assertTrue(!hostStruct.isNull(2), "Row 2 should be valid");
-      assertTrue(hostStruct.isNull(3), "Row 3 should be null (unknown enum -1)");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actualStruct);
     }
   }
 
@@ -2147,17 +2169,20 @@ public class ProtobufTest {
         box(tag(2, WT_VARINT)), box(encodeVarint(42)));  // count = 42
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(
+                 true,
+                 new BasicType(true, DType.INT32),
+                 new BasicType(true, DType.INT32)),
+             (StructData) null);
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).enumValidValues(new int[]{0, 1, 2})
                  .addField(2, DType.INT32)
                  .build(),
-             false);
-         HostColumnVector hostStruct = actualStruct.copyToHost()) {
-      // The entire struct row should be null
-      assertEquals(1, actualStruct.getNullCount(), "Struct row should be null");
-      assertTrue(hostStruct.isNull(0), "Row 0 should be null due to unknown enum");
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actualStruct);
     }
   }
 
@@ -2220,33 +2245,18 @@ public class ProtobufTest {
         box(tag(1, WT_VARINT)), box(encodeVarint(2)),   // BLUE
         box(tag(1, WT_VARINT)), box(encodeVarint(1)));  // GREEN
 
-    byte[][][] enumNames = new byte[][][] {
-        new byte[][] {
-            "RED".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "GREEN".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            "BLUE".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-        }
-    };
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector actual = Protobuf.decodeToStruct(
+         ColumnVector expectedColors = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("RED", "BLUE", "GREEN"));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedColors);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
-                 .addField(1, DType.STRING).repeated().enumMetadata(new int[]{0, 1, 2}, enumNames[0])
+                 .addField(1, DType.STRING).repeated().enumMetadata("RED", "GREEN", "BLUE")
                  .build(),
              false)) {
-      assertNotNull(actual);
-      assertEquals(DType.STRUCT, actual.getType());
-      assertEquals(1, actual.getNumChildren());
-      try (ColumnView listCol = actual.getChildColumnView(0)) {
-        assertEquals(DType.LIST, listCol.getType());
-        try (ColumnView strChild = listCol.getChildColumnView(0);
-             HostColumnVector hostStrs = strChild.copyToHost()) {
-          assertEquals(3, hostStrs.getRowCount());
-          assertEquals("RED", hostStrs.getJavaString(0));
-          assertEquals("BLUE", hostStrs.getJavaString(1));
-          assertEquals("GREEN", hostStrs.getJavaString(2));
-        }
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -2259,8 +2269,7 @@ public class ProtobufTest {
     byte[] packedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
     Byte[] row = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(packedData.length)),
-        box(packedData));
+        encodeBytes(packedData));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
       assertThrows(RuntimeException.class, () -> {
@@ -2280,8 +2289,7 @@ public class ProtobufTest {
     byte[] packedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
     Byte[] row = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(packedData.length)),
-        box(packedData));
+        encodeBytes(packedData));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
       assertThrows(RuntimeException.class, () -> {
@@ -2298,25 +2306,22 @@ public class ProtobufTest {
 
   @Test
   void testPackedFixedMisalignedPermissive() {
-    // PERMISSIVE counterpart of testPackedFixedMisaligned: instead of throwing on the
-    // misaligned packed payload, the malformed row should produce an empty list (the
-    // error fires inside walk_repeated_element before any occurrence is counted) and
-    // a following well-formed row in the same batch must still decode normally.
+    // Spark CPU nulls the malformed row in PERMISSIVE mode; a following well-formed row in the
+    // same batch must still decode normally.
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(badPackedData.length)),
-        box(badPackedData));
+        encodeBytes(badPackedData));
     Byte[] row1 = concat(
         box(tag(1, WT_32BIT)), box(encodeFixed32(42)),
         box(tag(1, WT_32BIT)), box(encodeFixed32(99)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT32)),
-             Arrays.asList(),
-             Arrays.asList(42, 99));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT32))),
+             null,
+             struct(Arrays.asList(42, 99)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2329,22 +2334,21 @@ public class ProtobufTest {
 
   @Test
   void testPackedFixedMisaligned64Permissive() {
-    // PERMISSIVE counterpart of testPackedFixedMisaligned64.
+    // Spark CPU nulls the malformed row in PERMISSIVE mode.
     byte[] badPackedData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
     Byte[] row0 = concat(
         box(tag(1, WT_LEN)),
-        box(encodeVarint(badPackedData.length)),
-        box(badPackedData));
+        encodeBytes(badPackedData));
     Byte[] row1 = concat(
         box(tag(1, WT_64BIT)), box(encodeFixed64(7L)),
         box(tag(1, WT_64BIT)), box(encodeFixed64(11L)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector expectedIds = ColumnVector.fromLists(
-             new ListType(true, new BasicType(true, DType.INT64)),
-             Arrays.asList(),
-             Arrays.asList(7L, 11L));
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new ListType(true, new BasicType(true, DType.INT64))),
+             null,
+             struct(Arrays.asList(7L, 11L)));
          ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -2356,32 +2360,55 @@ public class ProtobufTest {
   }
 
   @Test
+  void testMalformedZeroCountRepeatedFieldBeforeLaterField_Permissive() {
+    Byte[] invalidRow = concat(
+        box(tag(1, WT_LEN)), encodeBytes(new byte[]{(byte) 0x80}),
+        box(tag(2, WT_VARINT)), box(encodeVarint(11)));
+    Byte[] validRow = concat(box(tag(2, WT_VARINT)), box(encodeVarint(22)));
+    StructType expectedType = new StructType(
+        true,
+        new ListType(true, new BasicType(true, DType.INT32)),
+        new ListType(true, new BasicType(true, DType.INT32)));
+
+    try (Table input = new Table.TestBuilder().column(invalidRow, validRow).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             expectedType,
+             null,
+             struct(Collections.emptyList(), Collections.singletonList(22)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.INT32).repeated()
+                 .addField(2, DType.INT32).repeated()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void testLargeRepeatedField() throws Exception {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    Integer[] expectedValues = new Integer[100000];
     for (int i = 0; i < 100000; i++) {
       baos.write(tag(1, WT_VARINT));
       baos.write(encodeVarint(i));
+      expectedValues[i] = i;
     }
     Byte[] row = box(baos.toByteArray());
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(expectedValues));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedIds);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).repeated()
                  .build(),
              false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-      try (ColumnVector list = result.getChildColumnView(0).copyToColumnVector();
-           ColumnVector vals = list.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostVals = vals.copyToHost()) {
-        assertEquals(DType.LIST, list.getType());
-        assertEquals(100000, vals.getRowCount(), "All 100K elements should be decoded");
-        assertEquals(0, hostVals.getInt(0));
-        assertEquals(50000, hostVals.getInt(50000));
-        assertEquals(99999, hostVals.getInt(99999));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -2447,26 +2474,20 @@ public class ProtobufTest {
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(10)),
         box(tag(1, WT_VARINT)), box(encodeVarint(20)),
-        box(tag(1, WT_LEN)), box(encodeVarint(packedContent.length)), box(packedContent));
+        box(tag(1, WT_LEN)), encodeBytes(packedContent));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(10, 20, 30, 40));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).repeated()
                  .build(),
              false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-      try (ColumnVector list = result.getChildColumnView(0).copyToColumnVector();
-           ColumnVector vals = list.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostVals = vals.copyToHost()) {
-        assertEquals(4, vals.getRowCount());
-        assertEquals(10, hostVals.getInt(0));
-        assertEquals(20, hostVals.getInt(1));
-        assertEquals(30, hostVals.getInt(2));
-        assertEquals(40, hostVals.getInt(3));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -2496,18 +2517,15 @@ public class ProtobufTest {
         box(encodeVarint(42)));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValue = ColumnVector.fromBoxedInts(42);
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValue);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(maxFieldNumber, DType.INT32)
                  .build(),
              false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-      try (ColumnVector child = result.getChildColumnView(0).copyToColumnVector();
-           HostColumnVector hostChild = child.copyToHost()) {
-        assertEquals(42, hostChild.getInt(0));
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -2783,6 +2801,234 @@ public class ProtobufTest {
   }
 
   @Test
+  void testPackedRepeatedInsideNestedMessage() {
+    // message Inner { repeated int32 ids = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    byte[] packedIds = concatBytes(encodeVarint(10), encodeVarint(20), encodeVarint(30));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), encodeBytes(packedIds));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(10, 20, 30));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testPackedRepeatedDoubleInsideNestedMessage() {
+    // message Inner { repeated double values = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    Byte[] inner0 = concat(
+        box(tag(1, WT_LEN)), encodeBytes(concatBytes(encodeDouble(1.5), encodeDouble(-2.25))));
+    Byte[] inner1 = concat(
+        box(tag(1, WT_LEN)), encodeBytes(encodeDouble(3.75)));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner0)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner1))
+    };
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.FLOAT64)),
+             Arrays.asList(1.5, -2.25),
+             Arrays.asList(3.75));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedValues);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.FLOAT64).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedEnumAsString() {
+    // message Inner { repeated Priority priority = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
+    byte[] packedPriorities = concatBytes(encodeVarint(0), encodeVarint(2), encodeVarint(1));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), encodeBytes(packedPriorities));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedPriorities = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("UNKNOWN", "BAR", "FOO"));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING).repeated()
+                         .enumMetadata("UNKNOWN", "FOO", "BAR")
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedScalarEmptyAndAbsentParent() {
+    // message Inner { repeated int32 ids = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{})),
+        new Byte[]{}
+    };
+
+    StructType innerType = new StructType(
+        true, new ListType(true, new BasicType(true, DType.INT32)));
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedInner = ColumnVector.fromStructs(
+             innerType, struct(Collections.emptyList()), null);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+      assertListOffsets(actual.getChildColumnView(0).getChildColumnView(0), 0, 0, 0);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedScalarNullWhenImmediateParentAbsent() {
+    // message Inner { repeated int32 ids = 1 [packed=true]; }
+    // message Middle { Inner inner = 1; }
+    // message Outer { Middle middle = 1; }
+    byte[] packedIds = concatBytes(encodeVarint(7), encodeVarint(8));
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), encodeBytes(packedIds));
+    Byte[] middleWithInner = concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+    Byte[] middleWithoutInner = new Byte[]{};
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithInner)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(middleWithoutInner))
+    };
+
+    StructType innerType = new StructType(
+        true, new ListType(true, new BasicType(true, DType.INT32)));
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedInner = ColumnVector.fromStructs(
+             innerType, struct(Arrays.asList(7, 8)), null);
+         ColumnVector expectedMiddle = ColumnVector.makeStruct(expectedInner);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedMiddle);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRUCT).down()
+                         .addField(1, DType.INT32).repeated()
+                     .up()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+      assertListOffsets(
+          actual.getChildColumnView(0).getChildColumnView(0).getChildColumnView(0), 0, 2, 2);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedEnumAsStringInvalidValueKeepsNestedRowVisible() {
+    // message Inner { repeated Priority priority = 1 [packed=true]; }
+    // message Outer { Inner inner = 1; }
+    // enum Priority { UNKNOWN=0; FOO=1; BAR=2; }
+    byte[] validPriorities = concatBytes(encodeVarint(1), encodeVarint(2));
+    byte[] invalidPriorities = concatBytes(encodeVarint(1), encodeVarint(999));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(concat(
+            box(tag(1, WT_LEN)), encodeBytes(validPriorities)))),
+        concat(box(tag(1, WT_LEN)), encodeMessage(concat(
+            box(tag(1, WT_LEN)), encodeBytes(invalidPriorities))))
+    };
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedPriorities = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("FOO", "BAR"),
+             Arrays.asList("FOO", null));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedPriorities);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING).repeated()
+                         .enumMetadata("UNKNOWN", "FOO", "BAR")
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedStringAndBytes() {
+    // message Inner { repeated string name = 1; repeated bytes payload = 2; }
+    // message Outer { Inner inner = 1; }
+    byte[] p0 = new byte[]{0x01, 0x02};
+    byte[] p1 = new byte[]{0x03};
+    Byte[] inner = concat(
+        box(tag(1, WT_LEN)), encodeString("alpha"),
+        box(tag(1, WT_LEN)), encodeString("beta"),
+        box(tag(2, WT_LEN)), encodeBytes(p0),
+        box(tag(2, WT_LEN)), encodeBytes(p1));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(new Byte[]{}))
+    };
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedNames = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("alpha", "beta"),
+             Collections.emptyList());
+         ColumnVector expectedPayloads = ColumnVector.fromLists(
+             new ListType(true, new ListType(true, new BasicType(true, DType.UINT8))),
+             Arrays.asList(
+                 Arrays.asList((byte) 0x01, (byte) 0x02),
+                 Collections.singletonList((byte) 0x03)),
+             Collections.emptyList());
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedNames, expectedPayloads);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.STRING).repeated()
+                     .addField(2, DType.LIST).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
   void testNestedEnumAsStringInvalidKeepsSiblingFieldsVisible() {
     // message Outer { int32 id = 1; Inner inner = 2; string name = 3; }
     // message Inner { enum Status { UNKNOWN=0; OK=1; BAD=2; } Status status = 1;
@@ -2802,9 +3048,6 @@ public class ProtobufTest {
             box(tag(1, WT_VARINT)), box(encodeVarint(2)),
             box(tag(2, WT_LEN)), encodeMessage(innerInvalid),
             box(tag(3, WT_LEN)), encodeString("bad"))};
-    byte[][] enumNames = new byte[][]{
-        "UNKNOWN".getBytes(), "OK".getBytes(), "BAD".getBytes()};
-
     try (Table input = new Table.TestBuilder().column(rows).build();
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
@@ -2812,7 +3055,7 @@ public class ProtobufTest {
                  .addField(1, DType.INT32)
                  .addField(2, DType.STRUCT).down()
                      .addField(1, DType.STRING).encoding(Protobuf.ENC_ENUM_STRING)
-                         .enumMetadata(new int[]{0, 1, 2}, enumNames)
+                         .enumMetadata("UNKNOWN", "OK", "BAD")
                      .addField(2, DType.INT32)
                  .up()
                  .addField(3, DType.STRING)
@@ -3083,11 +3326,38 @@ public class ProtobufTest {
     }
   }
 
+  // Both modes match protobuf-java by treating nested singular wire-type mismatches as unknown
+  // fields; Spark only checks root unknown fields for schema mismatches.
   @Test
-  void testNestedRepeatedWrongWireType_FailsFast() {
-    // message Inner { repeated int32 x = 1; }
-    // message Outer { Inner inner = 1; }
-    Byte[] innerMessage = concat(box(tag(1, WT_32BIT)), box(encodeFixed32(7)));
+  void testNestedSingularWrongWireType_FailfastSkipsMismatchedField() {
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedX = ColumnVector.fromBoxedInts((Integer) null);
+         ColumnVector expectedY = ColumnVector.fromBoxedInts(42);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedX, expectedY);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedSingularWrongWireTypeDoesNotMaskLaterFailfastError() {
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(2, WT_VARINT)), new Byte[]{(byte) 0x80});
     Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
@@ -3096,12 +3366,98 @@ public class ProtobufTest {
             input.getColumn(0),
             new ProtobufSchemaDescriptorBuilder()
                 .addField(1, DType.STRUCT).down()
-                    .addField(1, DType.INT32).repeated()
+                    .addField(1, DType.INT32)
+                    .addField(2, DType.INT32)
                 .up()
                 .build(),
             true)) {
         }
       });
+    }
+  }
+
+  @Test
+  void testNestedSingularWrongWireType_PermissiveSkipsMismatchedField() {
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedX = ColumnVector.fromBoxedInts((Integer) null);
+         ColumnVector expectedY = ColumnVector.fromBoxedInts(42);
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedX, expectedY);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32)
+                     .addField(2, DType.INT32)
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedWrongWireType_FailfastSkipsMismatchedOccurrence() {
+    // message Inner { repeated int32 x = 1; }
+    // message Outer { Inner inner = 1; }
+    Byte[] innerMessage = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(innerMessage));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(1, 2));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated()
+                 .up()
+                 .build(),
+             true)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
+    }
+  }
+
+  @Test
+  void testNestedRepeatedWrongWireType_PermissiveSkipsMismatchedOccurrence() {
+    // message Inner { repeated int32 x = 1; }
+    // message Outer { Inner inner = 1; }
+    Byte[] inner0 = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(1, WT_32BIT)), box(encodeFixed32(77)),
+        box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    Byte[] inner1 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(100)));
+    Byte[][] rows = new Byte[][]{
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner0)),
+        concat(box(tag(1, WT_LEN)), encodeMessage(inner1))};
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expectedIds = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(1, 2),
+             Arrays.asList(100));
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedIds);
+         ColumnVector expectedOuter = ColumnVector.makeStruct(expectedInner);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0),
+             new ProtobufSchemaDescriptorBuilder()
+                 .addField(1, DType.STRUCT).down()
+                     .addField(1, DType.INT32).repeated()
+                 .up()
+                 .build(),
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedOuter, actual);
     }
   }
 
@@ -3124,6 +3480,25 @@ public class ProtobufTest {
       assertEquals(DType.STRUCT, result.getChildColumnView(1).getType());
       assertEquals(1, result.getChildColumnView(1).getNumChildren());
       assertEquals(DType.INT32, result.getChildColumnView(1).getChildColumnView(0).getType());
+    }
+  }
+
+  @Test
+  void testZeroRowNestedRepeatedScalarShape() {
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32).repeated()
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{}).build();
+         ColumnVector result = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      ColumnView nested = result.getChildColumnView(0);
+      ColumnView values = nested.getChildColumnView(0);
+      assertEquals(0, result.getRowCount());
+      assertEquals(DType.STRUCT, nested.getType());
+      assertEquals(DType.LIST, values.getType());
+      assertEquals(DType.INT32, values.getChildColumnView(0).getType());
     }
   }
 
@@ -3184,34 +3559,24 @@ public class ProtobufTest {
   void testRepeatedString() {
     // Exercises the build_repeated_string_column non-enum path (CUB DeviceMemcpy::Batched
     // copy + length-extraction), which the existing testRepeatedEnumAsString does not cover.
-    byte[] s1 = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-    byte[] s2 = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-    byte[] s3 = "foo".getBytes(java.nio.charset.StandardCharsets.UTF_8);
     Byte[] row0 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(s1.length)), box(s1),
-        box(tag(1, WT_LEN)), box(encodeVarint(s2.length)), box(s2));
+        box(tag(1, WT_LEN)), encodeString("hello"),
+        box(tag(1, WT_LEN)), encodeString("world"));
     Byte[] row1 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(s3.length)), box(s3));
+        box(tag(1, WT_LEN)), encodeString("foo"));
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.STRING)),
+             Arrays.asList("hello", "world"),
+             Collections.singletonList("foo"));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.STRING).repeated()
                  .build(),
              false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-      assertEquals(2, result.getRowCount());
-      try (ColumnView listCol = result.getChildColumnView(0)) {
-        assertEquals(DType.LIST, listCol.getType());
-        try (ColumnView strChild = listCol.getChildColumnView(0);
-             HostColumnVector hcv = strChild.copyToHost()) {
-          assertEquals(3, hcv.getRowCount());
-          assertEquals("hello", hcv.getJavaString(0));
-          assertEquals("world", hcv.getJavaString(1));
-          assertEquals("foo", hcv.getJavaString(2));
-        }
-      }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -3223,49 +3588,30 @@ public class ProtobufTest {
     byte[] b2 = new byte[]{0x7f, (byte) 0xff};
     byte[] b3 = new byte[]{0x10};
     Byte[] row0 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(b1.length)), box(b1),
-        box(tag(1, WT_LEN)), box(encodeVarint(b2.length)), box(b2));
+        box(tag(1, WT_LEN)), encodeBytes(b1),
+        box(tag(1, WT_LEN)), encodeBytes(b2));
     Byte[] row1 = concat(
-        box(tag(1, WT_LEN)), box(encodeVarint(b3.length)), box(b3));
+        box(tag(1, WT_LEN)), encodeBytes(b3));
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row0, row1}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new ListType(true, new BasicType(true, DType.UINT8))),
+             Arrays.asList(
+                 Arrays.asList((byte) 0x00, (byte) 0x01, (byte) 0x02),
+                 Arrays.asList((byte) 0x7f, (byte) 0xff)),
+             Collections.singletonList(Collections.singletonList((byte) 0x10)));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.LIST).repeated()  // repeated bytes -> LIST<UINT8> element
                  .build(),
              false)) {
-      assertNotNull(result);
-      assertEquals(DType.STRUCT, result.getType());
-      assertEquals(2, result.getRowCount());
-      // result.child(0) is LIST<LIST<UINT8>>; the outer offsets are [0, 2, 3], the inner
-      // child holds the concatenated bytes [b1, b2, b3].
-      try (ColumnView outerList = result.getChildColumnView(0);
-           ColumnView innerList = outerList.getChildColumnView(0);
-           ColumnView bytesChild = innerList.getChildColumnView(0);
-           HostColumnVector hOuterOff = outerList.getListOffsetsView().copyToColumnVector().copyToHost();
-           HostColumnVector hInnerOff = innerList.getListOffsetsView().copyToColumnVector().copyToHost();
-           HostColumnVector hBytes    = bytesChild.copyToHost()) {
-        assertEquals(DType.LIST, outerList.getType());
-        assertEquals(DType.LIST, innerList.getType());
-        assertEquals(DType.UINT8, bytesChild.getType());
-
-        assertEquals(0, hOuterOff.getInt(0));
-        assertEquals(2, hOuterOff.getInt(1));
-        assertEquals(3, hOuterOff.getInt(2));
-
-        // Three byte-string elements total
-        assertEquals(0, hInnerOff.getInt(0));
-        assertEquals(b1.length, hInnerOff.getInt(1));
-        assertEquals(b1.length + b2.length, hInnerOff.getInt(2));
-        assertEquals(b1.length + b2.length + b3.length, hInnerOff.getInt(3));
-
-        byte[] expected = new byte[b1.length + b2.length + b3.length];
-        System.arraycopy(b1, 0, expected, 0, b1.length);
-        System.arraycopy(b2, 0, expected, b1.length, b2.length);
-        System.arraycopy(b3, 0, expected, b1.length + b2.length, b3.length);
-        for (int i = 0; i < expected.length; i++) {
-          assertEquals(expected[i], hBytes.getByte(i), "byte mismatch at " + i);
-        }
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
+      try (ColumnView outerList = actualStruct.getChildColumnView(0);
+           ColumnView innerList = outerList.getChildColumnView(0)) {
+        assertListOffsets(outerList, 0, 2, 3);
+        assertListOffsets(innerList, 0, b1.length, b1.length + b2.length,
+            b1.length + b2.length + b3.length);
       }
     }
   }
@@ -3273,25 +3619,23 @@ public class ProtobufTest {
   @Test
   void testRepeatedSint32() {
     // sint32 zigzag encoding: zigzag(-1) = 1, zigzag(-2) = 3, zigzag(3) = 6.
-    // Verifies the extract_varint_kernel<T, true, repeated_location_provider> instantiation.
+    // Verifies the zigzag repeated_location_provider scalar extraction instantiation.
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(1L)),
         box(tag(1, WT_VARINT)), box(encodeVarint(3L)),
         box(tag(1, WT_VARINT)), box(encodeVarint(6L)));
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(
+         ColumnVector expectedValues = ColumnVector.fromLists(
+             new ListType(true, new BasicType(true, DType.INT32)),
+             Arrays.asList(-1, -2, 3));
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedValues);
+         ColumnVector actualStruct = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
                  .addField(1, DType.INT32).repeated().encoding(Protobuf.ENC_ZIGZAG)
                  .build(),
-             false);
-         ColumnView listCol = result.getChildColumnView(0);
-         ColumnView vals = listCol.getChildColumnView(0);
-         HostColumnVector hcv = vals.copyToHost()) {
-      assertEquals(3, hcv.getRowCount());
-      assertEquals(-1, hcv.getInt(0));
-      assertEquals(-2, hcv.getInt(1));
-      assertEquals(3, hcv.getInt(2));
+             false)) {
+      AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
   }
 
@@ -3322,7 +3666,7 @@ public class ProtobufTest {
 
   @Test
   void testSchemaWithTooManyRepeatedFields() {
-    // Hits protobuf_error::SCHEMA_TOO_LARGE: the scan_all_repeated_occurrences_kernel stack-array
+    // Hits protobuf_error::SCHEMA_TOO_LARGE: the scan_all_field_occurrences_kernel stack-array
     // guard rejects schemas with more than 32 top-level repeated fields.
     int n = 33;
     ProtobufSchemaDescriptorBuilder builder = new ProtobufSchemaDescriptorBuilder();
@@ -3331,7 +3675,7 @@ public class ProtobufTest {
     }
     ProtobufSchemaDescriptor schema = builder.build();
 
-    // The MAX_STACK_FIELDS guard in scan_all_repeated_occurrences_kernel only fires when
+    // The MAX_REPEATED_FIELDS_PER_KERNEL guard in scan_all_field_occurrences_kernel only fires when
     // every field actually has occurrences (zero-count fields are filtered out before the
     // kernel launch). Encode one occurrence per field so num_scan_fields == n.
     java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
@@ -3398,6 +3742,77 @@ public class ProtobufTest {
            ColumnVector expectedA = ColumnVector.fromBoxedInts(7)) {
         AssertUtils.assertColumnsAreEqual(expectedA, childA);
       }
+    }
+  }
+
+  @Test
+  void testSlicedNullableInputMapsMalformedRootScalarRow_Permissive() {
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] malformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] valid = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .build();
+    StructType outputType = new StructType(true, new BasicType(true, DType.INT32));
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, null, malformed, valid, sentinel})
+             .build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             outputType, (StructData) null, (StructData) null, struct(42));
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(1, 4));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(1), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testSlicedNestedStringInput() {
+    Byte[] sentinel = concat(box(tag(99, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] left = concat(
+        box(tag(1, WT_LEN)),
+        encodeMessage(concat(box(tag(1, WT_LEN)), encodeString("left"))));
+    Byte[] right = concat(
+        box(tag(1, WT_LEN)),
+        encodeMessage(concat(box(tag(1, WT_LEN)), encodeString("right"))));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.STRING)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{sentinel, left, right, sentinel})
+             .build();
+         ColumnVector expectedName = ColumnVector.fromStrings("left", "right");
+         ColumnVector expectedInner = ColumnVector.makeStruct(expectedName);
+         ColumnVector expected = ColumnVector.makeStruct(expectedInner);
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(1, 3));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(1), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testTruncatedSlicedInputWithZeroOffset() {
+    Byte[] first = concat(box(tag(1, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] second = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] trailingMalformed = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .build();
+
+    try (Table input = new Table.TestBuilder()
+             .column(new Byte[][]{first, second, trailingMalformed})
+             .build();
+         ColumnVector expectedValue = ColumnVector.fromBoxedInts(7, 42);
+         ColumnVector expected = ColumnVector.makeStruct(expectedValue);
+         CloseableArray<ColumnView> views =
+             CloseableArray.wrap(input.getColumn(0).splitAsViews(2));
+         ColumnVector actual = Protobuf.decodeToStruct(views.get(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <bit>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -85,7 +86,7 @@ uint8_t* copy_to_host_async(
   void const* src, uint8_t* dest, std::size_t size, uint8_t const* dest_end, cudaStream_t stream)
 {
   if (dest + size > dest_end) { throw std::runtime_error("buffer overflow"); }
-  CUDF_CUDA_TRY(cudaMemcpyAsync(dest, src, size, cudaMemcpyDeviceToHost, stream));
+  CUDF_CUDA_TRY(cudaMemcpyAsync(dest, src, size, cudaMemcpyDefault, stream));
   return dest + size;
 }
 
@@ -108,7 +109,7 @@ uint8_t* build_host_column_view_async(cudf::column_view const& dev_col,
   }
   cudf::bitmask_type const* host_null_mask = nullptr;
   if (dev_col.has_nulls()) {
-    host_null_mask = reinterpret_cast<cudf::bitmask_type const*>(bp);
+    host_null_mask = std::bit_cast<cudf::bitmask_type const*>(bp);
     auto mask_size = cudf::bitmask_allocation_size_bytes(dev_col.size());
     bp             = copy_to_host_async(dev_col.null_mask(), bp, mask_size, bp_end, stream);
   }
@@ -182,8 +183,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_bufferSize(JN
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto t      = reinterpret_cast<cudf::table_view const*>(table_handle);
-    auto stream = reinterpret_cast<cudaStream_t>(jstream);
+    auto t      = std::bit_cast<cudf::table_view const*>(table_handle);
+    auto stream = std::bit_cast<cudaStream_t>(jstream);
     return static_cast<jlong>(host_buffer_size(*t, stream));
   }
   JNI_CATCH(env, 0);
@@ -196,12 +197,12 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_copyFromTable
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto table           = reinterpret_cast<cudf::table_view const*>(table_handle);
-    auto buffer          = reinterpret_cast<uint8_t*>(host_address);
+    auto table           = std::bit_cast<cudf::table_view const*>(table_handle);
+    auto buffer          = std::bit_cast<uint8_t*>(host_address);
     auto buffer_size     = static_cast<std::size_t>(host_size);
-    auto stream          = reinterpret_cast<cudaStream_t>(jstream);
+    auto stream          = std::bit_cast<cudaStream_t>(jstream);
     auto host_table_view = to_host_table_async(*table, buffer, buffer_size, stream);
-    return reinterpret_cast<jlong>(host_table_view.release());
+    return std::bit_cast<jlong>(host_table_view.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -215,7 +216,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_toDevice
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto host_table = reinterpret_cast<spark_rapids_jni::host_table_view const*>(table_handle);
+    auto host_table       = std::bit_cast<spark_rapids_jni::host_table_view const*>(table_handle);
     auto column_view_ptrs = to_device_column_views(*host_table, host_to_dev_offset);
     cudf::jni::native_jlongArray handles(env, static_cast<int>(column_view_ptrs.size()));
     std::transform(
@@ -232,7 +233,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_freeDeviceColu
   JNIEnv* env, jclass, jlong dev_column_view_handle)
 {
   JNI_NULL_CHECK(env, dev_column_view_handle, "view is null", );
-  JNI_TRY { delete reinterpret_cast<cudf::column_view*>(dev_column_view_handle); }
+  JNI_TRY { delete std::bit_cast<cudf::column_view*>(dev_column_view_handle); }
   JNI_CATCH(env, );
 }
 
@@ -241,7 +242,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_freeHostTable(
                                                                                 jlong table_handle)
 {
   JNI_NULL_CHECK(env, table_handle, "table is null", );
-  JNI_TRY { delete reinterpret_cast<host_table_view*>(table_handle); }
+  JNI_TRY { delete std::bit_cast<host_table_view*>(table_handle); }
   JNI_CATCH(env, );
 }
 

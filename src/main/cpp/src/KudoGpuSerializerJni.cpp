@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "shuffle_split.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlongArray JNICALL
@@ -29,8 +31,8 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_splitAndSerializeToDevic
   {
     cudf::jni::auto_set_device(env);
 
-    auto table = reinterpret_cast<cudf::table_view const*>(j_table_view);
-    const cudf::jni::native_jintArray n_splits(env, j_splits);
+    auto table = std::bit_cast<cudf::table_view const*>(j_table_view);
+    cudf::jni::native_jintArray const n_splits(env, j_splits);
     std::vector<cudf::size_type> splits = n_splits.to_vector<int>();
 
     auto [split_result, split_meta] = spark_rapids_jni::shuffle_split(
@@ -46,17 +48,17 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_splitAndSerializeToDevic
     // then either leak it or release the memory held by it, but that is not technically
     // the case.
     cudf::jni::native_jlongArray result(env, 6);
-    result[0] = reinterpret_cast<jlong>(split_result.partitions->data());
+    result[0] = std::bit_cast<jlong>(split_result.partitions->data());
     result[1] = static_cast<jlong>(split_result.partitions->size());
-    result[2] = reinterpret_cast<jlong>(split_result.partitions.release());
+    result[2] = std::bit_cast<jlong>(split_result.partitions.release());
 
     // split_result.offsets is an rmm::device_uvector<size_t> so we have to
     // pull out the rmm::device_buffer * from inside it to return the data in a way that
     // java can handle it.
     auto offsets = std::make_unique<rmm::device_buffer>(std::move(split_result.offsets.release()));
-    result[3]    = reinterpret_cast<jlong>(offsets->data());
+    result[3]    = std::bit_cast<jlong>(offsets->data());
     result[4]    = static_cast<jlong>(offsets->size());
-    result[5]    = reinterpret_cast<jlong>(offsets.release());
+    result[5]    = std::bit_cast<jlong>(offsets.release());
 
     return result.get_jArray();
   }
@@ -85,8 +87,8 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_assembleFromDeviceRawNat
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::device_span<uint8_t const> partitions(reinterpret_cast<uint8_t*>(part_addr), part_len);
-    cudf::device_span<size_t const> offsets(reinterpret_cast<size_t*>(offset_addr),
+    cudf::device_span<uint8_t const> partitions(std::bit_cast<uint8_t*>(part_addr), part_len);
+    cudf::device_span<size_t const> offsets(std::bit_cast<size_t*>(offset_addr),
                                             offset_len / sizeof(size_t));
 
     cudf::jni::native_jintArray nnc(env, flat_num_children);
@@ -112,10 +114,15 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_assembleFromDeviceRawNat
                                             cudf::get_default_stream(),
                                             cudf::get_current_device_resource_ref());
 
-    // Create buffer metadata
-    jlong buffer_size   = static_cast<jlong>(assemble_result.shared_buffer.size());
-    jlong buffer_handle = cudf::jni::release_as_jlong(
-      std::make_unique<rmm::device_buffer>(std::move(assemble_result.shared_buffer)));
+    // Create buffer metadata. The device DATA address must be captured and returned separately
+    // from the rmm::device_buffer* owner handle: Java wraps this allocation via
+    // DeviceMemoryBuffer.fromRmm(address, length, rmmBufferAddress), and any consumer of that
+    // buffer's address (e.g. spill) performs device memory operations on it.
+    auto shared_buffer =
+      std::make_unique<rmm::device_buffer>(std::move(assemble_result.shared_buffer));
+    jlong buffer_size    = static_cast<jlong>(shared_buffer->size());
+    jlong buffer_address = cudf::jni::ptr_as_jlong(shared_buffer->data());
+    jlong buffer_handle  = cudf::jni::release_as_jlong(std::move(shared_buffer));
 
     // Create column handles array
     cudf::jni::native_jlongArray column_handles(env, assemble_result.column_views.size());
@@ -126,10 +133,14 @@ Java_com_nvidia_spark_rapids_jni_kudo_KudoGpuSerializer_assembleFromDeviceRawNat
     // Create and return Java AssembleResult object
     jclass result_class =
       env->FindClass("com/nvidia/spark/rapids/jni/kudo/KudoGpuSerializer$AssembleResult");
-    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(JJ[J)V");
+    jmethodID constructor = env->GetMethodID(result_class, "<init>", "(JJJ[J)V");
 
-    return env->NewObject(
-      result_class, constructor, buffer_handle, buffer_size, column_handles.get_jArray());
+    return env->NewObject(result_class,
+                          constructor,
+                          buffer_address,
+                          buffer_size,
+                          buffer_handle,
+                          column_handles.get_jArray());
   }
   JNI_CATCH(env, NULL);
 }

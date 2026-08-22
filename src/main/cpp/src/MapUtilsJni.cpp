@@ -18,6 +18,8 @@
 #include "jni_utils.hpp"
 #include "map_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jboolean JNICALL Java_com_nvidia_spark_rapids_jni_MapUtils_isValidMap(
@@ -27,7 +29,7 @@ JNIEXPORT jboolean JNICALL Java_com_nvidia_spark_rapids_jni_MapUtils_isValidMap(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const& input = *reinterpret_cast<cudf::column_view const*>(input_handle);
+    auto const& input = *std::bit_cast<cudf::column_view const*>(input_handle);
     return spark_rapids_jni::is_valid_map(input, static_cast<bool>(throw_on_null_key)) ? JNI_TRUE
                                                                                        : JNI_FALSE;
   }
@@ -41,7 +43,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_MapUtils_mapFromEntries
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const& input = *reinterpret_cast<cudf::column_view const*>(input_handle);
+    auto const& input = *std::bit_cast<cudf::column_view const*>(input_handle);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::map_from_entries(input, static_cast<bool>(throw_on_null_key)));
   }

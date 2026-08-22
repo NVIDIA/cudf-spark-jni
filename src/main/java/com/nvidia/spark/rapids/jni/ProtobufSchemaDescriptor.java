@@ -238,7 +238,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
-      validateEnumMetadata(i, encodings[i], enumValidValues[i], enumNames[i]);
+      validateEnumMetadata(
+          i, outputTypeIds[i], encodings[i], enumValidValues[i], enumNames[i]);
     }
   }
 
@@ -336,34 +337,80 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     }
   }
 
-  private static void validateEnumMetadata(int index, int encoding,
+  private static void validateEnumMetadata(int index, int outputTypeId, int encoding,
                                             int[] validValues, byte[][] names) {
-    if (encoding == Protobuf.ENC_ENUM_STRING &&
-        (validValues == null || validValues.length == 0 ||
-         names == null || names.length == 0)) {
+    validateEnumTypeAndEncoding(index, outputTypeId, encoding, validValues);
+    validateEnumAsStringMetadata(index, encoding, validValues, names);
+    validateEnumValuesAndNamesPairing(index, validValues, names);
+  }
+
+  private static void validateEnumTypeAndEncoding(int index, int outputTypeId, int encoding,
+                                                   int[] validValues) {
+    if (validValues == null) {
+      return;
+    }
+    boolean isNumericEnum =
+        outputTypeId == INT32_TYPE_ID && encoding == Protobuf.ENC_DEFAULT;
+    boolean isStringEnum =
+        outputTypeId == STRING_TYPE_ID && encoding == Protobuf.ENC_ENUM_STRING;
+    if (!isNumericEnum && !isStringEnum) {
+      throw new IllegalArgumentException(
+          "Enum metadata at index " + index +
+          " requires INT32/DEFAULT or STRING/ENUM_STRING");
+    }
+  }
+
+  private static void validateEnumAsStringMetadata(int index, int encoding,
+                                                    int[] validValues, byte[][] names) {
+    if (encoding != Protobuf.ENC_ENUM_STRING) {
+      return;
+    }
+    if (isNullOrEmpty(validValues) || isNullOrEmpty(names)) {
       throw new IllegalArgumentException(
           "Enum-as-string field at index " + index +
           " must provide non-empty enumValidValues and enumNames");
     }
-    if (validValues != null) {
-      for (int j = 1; j < validValues.length; j++) {
-        if (validValues[j] <= validValues[j - 1]) {
-          throw new IllegalArgumentException(
-              "enumValidValues[" + index + "] must be strictly sorted in ascending order " +
-              "(binary search requires unique values), but found " + validValues[j - 1] +
-              " followed by " + validValues[j]);
-        }
-      }
-      if (names != null && names.length != validValues.length) {
+  }
+
+  private static void validateEnumValuesAndNamesPairing(int index, int[] validValues,
+                                                         byte[][] names) {
+    if (validValues == null) {
+      if (names != null) {
         throw new IllegalArgumentException(
-            "enumNames[" + index + "].length (" + names.length + ") must equal " +
-            "enumValidValues[" + index + "].length (" + validValues.length + ")");
+            "enumNames[" + index + "] is non-null but enumValidValues[" + index + "] is null; " +
+            "both must be provided together for enum-as-string fields");
       }
-    } else if (names != null) {
-      throw new IllegalArgumentException(
-          "enumNames[" + index + "] is non-null but enumValidValues[" + index + "] is null; " +
-          "both must be provided together for enum-as-string fields");
+      return;
     }
+    validateEnumValuesStrictlySorted(index, validValues);
+    validateEnumNamesLength(index, validValues, names);
+  }
+
+  private static void validateEnumValuesStrictlySorted(int index, int[] validValues) {
+    for (int j = 1; j < validValues.length; j++) {
+      if (validValues[j] <= validValues[j - 1]) {
+        throw new IllegalArgumentException(
+            "enumValidValues[" + index + "] must be strictly sorted in ascending order " +
+            "(binary search requires unique values), but found " + validValues[j - 1] +
+            " followed by " + validValues[j]);
+      }
+    }
+  }
+
+  private static void validateEnumNamesLength(int index, int[] validValues, byte[][] names) {
+    if (names != null && names.length != validValues.length) {
+      throw new IllegalArgumentException(
+          "enumNames[" + index + "].length (" + names.length + ") must equal " +
+          "enumValidValues[" + index + "].length (" + validValues.length + ")");
+    }
+  }
+
+  private static boolean isNullOrEmpty(int[] values) {
+    return values == null || values.length == 0;
+  }
+
+  private static boolean isNullOrEmpty(byte[][] values) {
+    return values == null || values.length == 0;
   }
 
   private static boolean isEncodingCompatible(int wireType, int outputTypeId, int encoding) {

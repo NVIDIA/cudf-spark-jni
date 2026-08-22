@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "hyper_log_log_plus_plus.hpp"
 #include "hyper_log_log_plus_plus_host_udf.hpp"
+
+#include <bit>
 
 extern "C" {
 
@@ -41,7 +43,7 @@ Java_com_nvidia_spark_rapids_jni_HyperLogLogPlusPlusHostUDF_createHLLPPHostUDF(J
     }();
     CUDF_EXPECTS(udf_ptr != nullptr, "Invalid HyperLogLogPlusPlus(HLLPP) UDF instance.");
 
-    return reinterpret_cast<jlong>(udf_ptr);
+    return std::bit_cast<jlong>(udf_ptr);
   }
   JNI_CATCH(env, 0);
 }
@@ -54,7 +56,7 @@ Java_com_nvidia_spark_rapids_jni_HyperLogLogPlusPlusHostUDF_estimateDistinctValu
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const sketch_view = reinterpret_cast<cudf::column_view const*>(sketches);
+    auto const sketch_view = std::bit_cast<cudf::column_view const*>(sketches);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::estimate_from_hll_sketches(*sketch_view, precision).release());
   }
