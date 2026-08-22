@@ -27,6 +27,8 @@ add_library(
   faultinj.cu
 )
 
+spark_rapids_jni_add_strict_warning_flags(cufaultinj)
+
 target_link_libraries(
   cufaultinj PRIVATE spdlog::spdlog_header_only
 )
