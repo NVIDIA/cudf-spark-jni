@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,19 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.Cuda;
+import ai.rapids.cudf.CudfException;
+import ai.rapids.cudf.NativeDepsLoader;
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class StringUtils {
+
+  static {
+    NativeDepsLoader.loadNativeDeps();
+  }
 
   // Stores the sequence ID of calling generate UUIDs.
   private static AtomicLong sequence = new AtomicLong(0);
@@ -88,5 +95,20 @@ public class StringUtils {
     return new ColumnVector(randomUUIDs(rowCount, seed));
   }
 
+  /**
+   * Reverse each string using Spark {@code UTF8String.reverse} semantics.
+   * Character widths follow Spark's {@code numBytesForFirstByte} and are clamped to the
+   * bytes remaining in each row (SPARK-57507), so truncated trailing UTF-8 sequences do
+   * not read past the row boundary.
+   *
+   * @param input strings column
+   * @return new strings column with reversed contents
+   */
+  public static ColumnVector reverseStrings(ColumnView input) {
+    return new ColumnVector(reverseStrings(input.getNativeView()));
+  }
+
   private static native long randomUUIDs(int rowCount, long seed);
+
+  private static native long reverseStrings(long inputHandle) throws CudfException;
 }

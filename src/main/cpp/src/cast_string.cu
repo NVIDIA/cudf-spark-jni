@@ -21,6 +21,7 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_scalar.hpp>
 #include <rmm/exec_policy.hpp>
@@ -165,7 +166,7 @@ process_value(bool first_value, T current_val, T const new_digit, bool adding)
 template <typename T>
 CUDF_KERNEL void string_to_integer_kernel(T* out,
                                           bitmask_type* validity,
-                                          const char* const chars,
+                                          char const* const chars,
                                           size_type const* offsets,
                                           bitmask_type const* incoming_null_mask,
                                           size_type num_rows,
@@ -253,7 +254,7 @@ CUDF_KERNEL void string_to_integer_kernel(T* out,
 
 template <typename T>
 __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_exponent(
-  const char* chars, const int len, bool strip)
+  char const* chars, int const len, bool strip)
 {
   T exponent_val         = 0;
   int i                  = 0;
@@ -276,7 +277,7 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
   };
 
   auto validate_char = [&decimal_location, &exponent_positive, &strip](
-                         processing_state const state, const char chr, int chr_idx) {
+                         processing_state const state, char const chr, int chr_idx) {
     switch (state) {
       case ST_TRAILING_WHITESPACE:
         if (!is_whitespace(chr)) { return ST_INVALID; }
@@ -396,7 +397,7 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
 template <typename T>
 CUDF_KERNEL void string_to_decimal_kernel(T* out,
                                           bitmask_type* validity,
-                                          const char* const chars,
+                                          char const* const chars,
                                           size_type const* offsets,
                                           bitmask_type const* incoming_null_mask,
                                           size_type num_rows,
@@ -422,7 +423,7 @@ CUDF_KERNEL void string_to_decimal_kernel(T* out,
   // If it is the index of a digit, that digit is after the decimal point.
 
   // turn into std::count_if
-  auto count_significant_digits = [](const char* str, int len, int num_digits) {
+  auto count_significant_digits = [](char const* str, int len, int num_digits) {
     int count        = 0;
     int digits_found = 0;
     for (int i = 0; i < len && digits_found < num_digits; ++i) {
@@ -615,16 +616,17 @@ void validate_ansi_column(column_view const& col,
   auto const incoming_nulls = source_col.null_count();
   auto const num_errors     = num_nulls - incoming_nulls;
   if (num_errors > 0) {
-    auto const first_error = thrust::find_if(rmm::exec_policy(stream),
-                                             thrust::make_counting_iterator(0),
-                                             thrust::make_counting_iterator(col.size()),
-                                             row_valid_fn{col.null_mask(), source_col.null_mask()});
+    auto const first_error =
+      thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                      thrust::make_counting_iterator(0),
+                      thrust::make_counting_iterator(col.size()),
+                      row_valid_fn{col.null_mask(), source_col.null_mask()});
 
     size_type string_bounds[2];
     cudaMemcpyAsync(&string_bounds,
                     &source_col.offsets().data<size_type>()[*first_error],
                     sizeof(size_type) * 2,
-                    cudaMemcpyDeviceToHost,
+                    cudaMemcpyDefault,
                     stream.value());
     stream.synchronize();
 
@@ -634,7 +636,7 @@ void validate_ansi_column(column_view const& col,
     cudaMemcpyAsync(dest.data(),
                     &source_col.chars_begin(stream)[string_bounds[0]],
                     string_bounds[1] - string_bounds[0],
-                    cudaMemcpyDeviceToHost,
+                    cudaMemcpyDefault,
                     stream.value());
     stream.synchronize();
 

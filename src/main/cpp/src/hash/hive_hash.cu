@@ -21,11 +21,13 @@
 #include <cudf/detail/row_operator/hashing.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/table/table_device_view.cuh>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/tabulate.h>
@@ -111,32 +113,29 @@ hive_hash_value_t __device__ inline hive_hash_function<int64_t>::operator()(
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<float>::operator()(float const& key) const
 {
-  auto normalized = spark_rapids_jni::normalize_nans(key);
-  auto* p_int     = reinterpret_cast<int32_t const*>(&normalized);
-  return compute_int(*p_int);
+  auto const normalized = spark_rapids_jni::normalize_nans(key);
+  return compute_int(cuda::std::bit_cast<int32_t>(normalized));
 }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<double>::operator()(double const& key) const
 {
-  auto normalized = spark_rapids_jni::normalize_nans(key);
-  auto* p_long    = reinterpret_cast<int64_t const*>(&normalized);
-  return compute_long(*p_long);
+  auto const normalized = spark_rapids_jni::normalize_nans(key);
+  return compute_long(cuda::std::bit_cast<int64_t>(normalized));
 }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<cudf::timestamp_D>::operator()(
   cudf::timestamp_D const& key) const
 {
-  auto* p_int = reinterpret_cast<int32_t const*>(&key);
-  return compute_int(*p_int);
+  return compute_int(key.time_since_epoch().count());
 }
 
 template <>
 hive_hash_value_t __device__ inline hive_hash_function<cudf::timestamp_us>::operator()(
   cudf::timestamp_us const& key) const
 {
-  auto time_as_long            = *reinterpret_cast<int64_t const*>(&key);
+  auto const time_as_long      = key.time_since_epoch().count();
   constexpr int MICRO_PER_SEC  = 1000000;
   constexpr int NANO_PER_MICRO = 1000;
 
@@ -384,7 +383,7 @@ class hive_device_row_hasher {
           if (top.get_idx_to_process() == curr_col.num_child_columns()) {
             if (--stack_size > 0) { col_stack[stack_size - 1].update_cur_hash(top.get_hash()); }
           } else {
-            auto const structcv = cudf::detail::structs_column_device_view(curr_col);
+            auto const structcv = cudf::structs_column_device_view(curr_col);
             while (top.get_idx_to_process() < curr_col.num_child_columns()) {
               auto idx             = top.get_and_inc_idx_to_process();
               auto const child_col = structcv.get_sliced_child(idx);
@@ -403,7 +402,7 @@ class hive_device_row_hasher {
         } else if (curr_col.type().id() == cudf::type_id::LIST) {
           // Get the child column of the list column
           cudf::column_device_view child_col =
-            cudf::detail::lists_column_device_view(curr_col).get_sliced_child();
+            cudf::lists_column_device_view(curr_col).get_sliced_child();
           // If the child column is of primitive type, directly compute the hash value of the list
           if (child_col.type().id() != cudf::type_id::LIST &&
               child_col.type().id() != cudf::type_id::STRUCT) {
@@ -486,12 +485,13 @@ std::unique_ptr<cudf::column> hive_hash(cudf::table_view const& input,
 
   check_nested_depth(input);
 
-  bool const nullable   = has_nested_nulls(input);
-  auto const input_view = cudf::table_device_view::create(input, stream);
-  auto output_view      = output->mutable_view();
+  bool const nullable = has_nested_nulls(input);
+  auto const input_view =
+    cudf::table_device_view::create(input, stream, cudf::get_current_device_resource_ref());
+  auto output_view = output->mutable_view();
 
   // Compute the hash value for each row
-  thrust::tabulate(rmm::exec_policy(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output_view.begin<hive_hash_value_t>(),
                    output_view.end<hive_hash_value_t>(),
                    hive_device_row_hasher<hive_hash_function, bool>(nullable, *input_view));

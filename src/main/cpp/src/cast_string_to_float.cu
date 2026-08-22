@@ -295,7 +295,7 @@ class string_to_float {
                              bitmask_type* validity,
                              int32_t* ansi_except,
                              size_type* valid_count,
-                             const char* const chars,
+                             char const* const chars,
                              size_type const* offsets,
                              uint64_t const* const ipow,
                              bitmask_type const* incoming_null_mask,
@@ -583,7 +583,7 @@ class string_to_float {
           return {0, 0};
         }
         auto const dpos = __ffs(decimal_mask) - 1;  // 0th bit is reported as 1 by __ffs
-        decimal_pos     = (dpos + real_digits);
+        decimal_pos     = dpos + real_digits + truncated_digits;
         decimal         = true;
 
         // strip the decimal char out
@@ -604,7 +604,7 @@ class string_to_float {
 
       num_chars = min(num_chars, first_non_digit > 0 ? first_non_digit - 1 : num_chars);
 
-      if (decimal_pos > 0 && decimal_pos > num_chars + real_digits) {
+      if (decimal_pos > 0 && decimal_pos > num_chars + real_digits + truncated_digits) {
         _valid  = false;
         _except = true;
         return {0, 0};
@@ -805,7 +805,7 @@ class string_to_float {
   bitmask_type* _validity;
   int32_t* _ansi_except;
   size_type* _valid_count;
-  const char* const _chars;
+  char const* const _chars;
   size_type const _warp_id;
   size_type const _row;
   size_type const _warp_lane;
@@ -829,7 +829,7 @@ CUDF_KERNEL void string_to_float_kernel(T* out,
                                         bitmask_type* validity,
                                         int32_t* ansi_except,
                                         size_type* valid_count,
-                                        const char* const chars,
+                                        char const* const chars,
                                         size_type const* offsets,
                                         bitmask_type const* incoming_null_mask,
                                         size_type const num_rows)
@@ -940,7 +940,7 @@ std::unique_ptr<column> string_to_float(data_type dtype,
       cudaMemcpyAsync(&string_bounds,
                       &string_col.offsets().data<size_type>()[error_row],
                       sizeof(size_type) * 2,
-                      cudaMemcpyDeviceToHost,
+                      cudaMemcpyDefault,
                       stream.value());
       stream.synchronize();
 
@@ -950,7 +950,7 @@ std::unique_ptr<column> string_to_float(data_type dtype,
       cudaMemcpyAsync(dest.data(),
                       &string_col.chars_begin(stream)[string_bounds[0]],
                       string_bounds[1] - string_bounds[0],
-                      cudaMemcpyDeviceToHost,
+                      cudaMemcpyDefault,
                       stream.value());
       stream.synchronize();
 

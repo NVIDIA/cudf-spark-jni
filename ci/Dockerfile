@@ -42,7 +42,7 @@ ARG CMAKE_ARCH=x86_64
 
 ### Install basic requirements
 # pin urllib3<2.0 for https://github.com/psf/requests/issues/6432
-RUN dnf --enablerepo=powertools install -y scl-utils gcc-toolset-13 gcc-toolset-${TOOLSET_VERSION} python39 \
+RUN dnf --enablerepo=powertools install -y scl-utils gcc-toolset-14 gcc-toolset-${TOOLSET_VERSION} python39 \
     zlib-devel maven tar wget patch ninja-build git zip && \
   alternatives --set python /usr/bin/python3 && \
   python -m pip install requests 'urllib3<2.0'

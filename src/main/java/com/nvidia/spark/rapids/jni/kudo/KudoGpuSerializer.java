@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,16 +28,22 @@ public class KudoGpuSerializer {
    * Result class for assembleFromDeviceRaw operation containing buffer metadata and column handles
    */
   public static class AssembleResult {
-    private final long bufferHandle;
+    private final long bufferAddress;
     private final long bufferSize;
+    private final long bufferHandle;
     private final long[] columnHandles;
 
-    public AssembleResult(long bufferHandle, long bufferSize, long[] columnHandles) {
-      this.bufferHandle = bufferHandle;
+    public AssembleResult(long bufferAddress, long bufferSize, long bufferHandle,
+                          long[] columnHandles) {
+      this.bufferAddress = bufferAddress;
       this.bufferSize = bufferSize;
+      this.bufferHandle = bufferHandle;
       this.columnHandles = columnHandles;
     }
 
+    /** Device address of the shared buffer's data (what device memory operations must use). */
+    public long getBufferAddress() { return bufferAddress; }
+    /** Native {@code rmm::device_buffer*} owner handle (what frees the allocation). */
     public long getBufferHandle() { return bufferHandle; }
     public long getBufferSize() { return bufferSize; }
     public long[] getColumnHandles() { return columnHandles; }
@@ -79,7 +85,7 @@ public class KudoGpuSerializer {
         schema.getFlattenedTypeScales());
 
     DeviceMemoryBuffer singleBuffer = DeviceMemoryBuffer.fromRmm(
-        result.getBufferHandle(), result.getBufferSize(), result.getBufferHandle());
+        result.getBufferAddress(), result.getBufferSize(), result.getBufferHandle());
 
     // Create ColumnVector array using fromViewWithContiguousAllocation
     ColumnVector[] columnVectors = new ColumnVector[result.getNumColumns()];

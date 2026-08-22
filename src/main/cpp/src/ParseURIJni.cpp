@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include "exception_with_row_index.hpp"
 #include "parse_uri.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseProtocol(JNIEnv* env,
@@ -31,7 +33,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseProtocol(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_protocol(*input, static_cast<bool>(ansi_mode)).release());
   }
@@ -48,7 +50,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseHost(JNIE
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_host(*input, static_cast<bool>(ansi_mode)).release());
   }
@@ -65,7 +67,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseQuery(JNI
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_query(*input, static_cast<bool>(ansi_mode)).release());
   }
@@ -81,7 +83,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseQueryWith
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
     cudf::jni::native_jstring native_query(env, query);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_query(
@@ -100,8 +102,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parseQueryWith
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
-    auto const query = reinterpret_cast<cudf::column_view const*>(query_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
+    auto const query = std::bit_cast<cudf::column_view const*>(query_column);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_query(*input, *query, static_cast<bool>(ansi_mode)).release());
   }
@@ -118,7 +120,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ParseURI_parsePath(JNIE
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_column);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::parse_uri_to_path(*input, static_cast<bool>(ansi_mode)).release());
   }

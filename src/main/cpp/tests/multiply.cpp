@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ TEST_F(MultiplyTests, int8)
   try {
     spark_rapids_jni::multiply(input, input2, /*ansi*/ true, /*try*/ false);
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 }
@@ -57,7 +57,7 @@ TEST_F(MultiplyTests, int16)
   try {
     spark_rapids_jni::multiply(input, input2, /*ansi*/ true, /*try*/ false);
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 2);
   }
 }
@@ -81,7 +81,7 @@ TEST_F(MultiplyTests, int32)
   try {
     spark_rapids_jni::multiply(input, input2, /*ansi*/ true, /*try*/ false);
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 3);
   }
 }
@@ -107,7 +107,7 @@ TEST_F(MultiplyTests, int64)
   std::vector<int64_t> right_longs;
   std::vector<int64_t> expected_longs;
   std::vector<bool> is_valid;
-  for (const auto& [left, right, is_valid_result, expected] : cases) {
+  for (auto const& [left, right, is_valid_result, expected] : cases) {
     left_longs.push_back(left);
     right_longs.push_back(right);
     expected_longs.push_back(expected);
@@ -124,7 +124,7 @@ TEST_F(MultiplyTests, int64)
   try {
     spark_rapids_jni::multiply(input1, input2, /*ansi*/ true, /*try*/ false);
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 2);
   }
 }

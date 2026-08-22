@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -557,7 +557,7 @@ std::string memcpy_to_string(spark_rapids_jni::profiler::MemcpyActivity const* m
   return oss.str();
 }
 
-const char* memcpy_to_color(spark_rapids_jni::profiler::MemcpyActivity const* m)
+char const* memcpy_to_color(spark_rapids_jni::profiler::MemcpyActivity const* m)
 {
   switch (m->copy_kind()) {
     case spark_rapids_jni::profiler::MemcpyKind_HtoD:
@@ -686,8 +686,12 @@ void convert_to_nvtxt(std::ifstream& in, std::ostream& out, program_options cons
               color    = it->second->color();
               category = it->second->category();
             }
-            marker_start ms{
-              m->timestamp(), process_id, thread_id, color, category, m->name()->str()};
+            marker_start ms{m->timestamp(),
+                            process_id,
+                            thread_id,
+                            color,
+                            category,
+                            m->name() ? m->name()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;
@@ -970,8 +974,8 @@ int convert_to_nvtxw(std::ifstream& in,
                             thread_id,
                             color,
                             category,
-                            m->name()->str(),
-                            m->domain()->str()};
+                            m->name() ? m->name()->str() : "",
+                            m->domain() ? m->domain()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;
