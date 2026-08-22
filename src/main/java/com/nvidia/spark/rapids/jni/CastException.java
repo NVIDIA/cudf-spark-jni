@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,19 @@
  */
 package com.nvidia.spark.rapids.jni;
 
+import java.nio.charset.StandardCharsets;
+
 /**
  * CastException is an exception thrown by the JNI in the even of a casting error.
  */
 public class CastException extends RuntimeException {
   private final int rowWithError;
   private final String stringWithError;
-  
+
+  CastException(byte[] utf8StringWithError, int rowWithError) {
+    this(new String(utf8StringWithError, StandardCharsets.UTF_8), rowWithError);
+  }
+
   CastException(String stringWithError, int rowWithError) {
     super("Error casting data on row " + String.valueOf(rowWithError) + ": " + stringWithError);
 

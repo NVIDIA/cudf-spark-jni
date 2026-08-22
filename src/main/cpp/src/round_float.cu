@@ -116,8 +116,11 @@ std::unique_ptr<cudf::column> round_with(cudf::column_view const& input,
   auto out_view = result->mutable_view();
   T const n     = std::pow(10, std::abs(decimal_places));
 
-  thrust::transform(
-    rmm::exec_policy(stream), input.begin<T>(), input.end<T>(), out_view.begin<T>(), Functor{n});
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                    input.begin<T>(),
+                    input.end<T>(),
+                    out_view.begin<T>(),
+                    Functor{n});
 
   result->set_null_count(input.null_count());
 
@@ -267,8 +270,9 @@ cudf::size_type find_first_overflow_for_integral_type(cudf::column_view const& i
   // Compute safe range and check values against it
   auto [min_safe, max_safe] = compute_non_overflow_range<T>(decimal_places, method);
 
-  auto const input_cdv = cudf::column_device_view::create(input, stream);
-  auto overflow_iter   = thrust::make_transform_iterator(
+  auto const input_cdv =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
+  auto overflow_iter = thrust::make_transform_iterator(
     thrust::make_counting_iterator<cudf::size_type>(0),
     [input_view = *input_cdv, min_safe, max_safe] __device__(cudf::size_type idx) -> bool {
       if (input_view.is_null(idx)) { return false; }
@@ -276,8 +280,10 @@ cudf::size_type find_first_overflow_for_integral_type(cudf::column_view const& i
       return val > max_safe || val < min_safe;
     });
 
-  auto it = thrust::find(
-    rmm::exec_policy_nosync(stream), overflow_iter, overflow_iter + input.size(), true);
+  auto it = thrust::find(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                         overflow_iter,
+                         overflow_iter + input.size(),
+                         true);
   return (it != overflow_iter + input.size()) ? cuda::std::distance(overflow_iter, it) : -1;
 }
 

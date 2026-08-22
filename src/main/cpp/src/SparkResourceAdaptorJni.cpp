@@ -31,7 +31,9 @@
 #include <task_priority.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <iostream>
@@ -106,7 +108,7 @@ enum class thread_state {
 /**
  * Convert a state to a string representation for logging.
  */
-const char* as_str(thread_state state)
+char const* as_str(thread_state state)
 {
   switch (state) {
     case thread_state::THREAD_RUNNING: return "THREAD_RUNNING";
@@ -365,7 +367,7 @@ class thread_priority {
 
   long get_thread_id() const { return thread_id; }
 
-  bool operator<(const thread_priority& other) const
+  bool operator<(thread_priority const& other) const
   {
     long task_priority       = this->task_priority;
     long other_task_priority = other.task_priority;
@@ -377,7 +379,7 @@ class thread_priority {
     return false;
   }
 
-  bool operator>(const thread_priority& other) const
+  bool operator>(thread_priority const& other) const
   {
     long task_priority       = this->task_priority;
     long other_task_priority = other.task_priority;
@@ -1417,7 +1419,7 @@ class spark_resource_adaptor_impl {
    * and if there are no blocked threads, then we wake up all BUFN threads.
    * Hopefully the frees have already woken up all the blocked threads anyways.
    */
-  void wake_up_threads_after_task_finishes(const std::unique_lock<std::mutex>& lock)
+  void wake_up_threads_after_task_finishes(std::unique_lock<std::mutex> const& lock)
   {
     bool are_any_tasks_just_blocked = false;
     for (auto& [thread_id, t_state] : threads) {
@@ -1456,7 +1458,7 @@ class spark_resource_adaptor_impl {
    */
   bool remove_thread_association(long thread_id,
                                  long remove_task_id,
-                                 const std::unique_lock<std::mutex>& lock)
+                                 std::unique_lock<std::mutex> const& lock)
   {
     bool thread_should_be_removed = false;
     bool ret                      = false;
@@ -1479,7 +1481,7 @@ class spark_resource_adaptor_impl {
 
       if (thread_should_be_removed) {
         JNIEnv* env = nullptr;
-        if (jvm->GetEnv(reinterpret_cast<void**>(&env), cudf::jni::MINIMUM_JNI_VERSION) == JNI_OK) {
+        if (jvm->GetEnv(std::bit_cast<void**>(&env), cudf::jni::MINIMUM_JNI_VERSION) == JNI_OK) {
           cache_thread_reg_jni(env);
           env->CallStaticVoidMethod(ThreadStateRegistry_jclass, removeThread_method, thread_id);
         }
@@ -1910,7 +1912,7 @@ class spark_resource_adaptor_impl {
    * This split in invocation is done to make the critical sections faster, and leave
    * deadlock busting to the deadlock thread.
    */
-  void check_and_update_for_bufn_state_machine_only(const std::unique_lock<std::mutex>& lock)
+  void check_and_update_for_bufn_state_machine_only(std::unique_lock<std::mutex> const& lock)
   {
     // we pass nullopt because we are calling this method from a place in the code that has
     // no java knowledge of blocked threads.
@@ -1926,7 +1928,7 @@ class spark_resource_adaptor_impl {
    * along a set of java native thread ids that are blocked in the java state (Thread.getState).
    */
   void check_and_update_for_bufn(
-    const std::unique_lock<std::mutex>& lock,
+    std::unique_lock<std::mutex> const& lock,
     std::optional<std::unordered_set<long>> const& java_blocked_thread_ids)
   {
     std::map<long, long> pool_bufn_task_thread_count;
@@ -2777,7 +2779,7 @@ Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_postCpuAllocSuccess(JNIEnv
   JNI_TRY
   {
     auto mr = get_spark_adaptor(ptr);
-    mr->cpu_postalloc_success(reinterpret_cast<void*>(addr), amount, blocking, was_recursive);
+    mr->cpu_postalloc_success(std::bit_cast<void*>(addr), amount, blocking, was_recursive);
   }
   JNI_CATCH(env, );
 }
@@ -2801,7 +2803,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_cpu
   JNI_TRY
   {
     auto mr = get_spark_adaptor(ptr);
-    mr->cpu_dealloc(reinterpret_cast<void*>(addr), amount);
+    mr->cpu_dealloc(std::bit_cast<void*>(addr), amount);
   }
   JNI_CATCH(env, );
 }
@@ -2896,7 +2898,8 @@ Java_com_nvidia_spark_rapids_jni_RmmSparkDeallocationFailureTest_00024Child_trig
 
     auto const tid = static_cast<long>(pthread_self());
     adaptor->start_dedicated_task_thread(tid, 1);
-    adaptor->deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, reinterpret_cast<void*>(0x1), 1);
+    adaptor->deallocate(
+      cuda::stream_ref{cudaStream_t{nullptr}}, std::bit_cast<void*>(std::uintptr_t{1}), 1);
   }
   JNI_CATCH(env, );
 }

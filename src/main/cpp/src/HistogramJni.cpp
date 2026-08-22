@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "histogram.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_createHistogramIfValid(
@@ -29,8 +31,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_createHistogr
   {
     cudf::jni::auto_set_device(env);
 
-    auto const values      = reinterpret_cast<cudf::column_view const*>(values_handle);
-    auto const frequencies = reinterpret_cast<cudf::column_view const*>(frequencies_handle);
+    auto const values      = std::bit_cast<cudf::column_view const*>(values_handle);
+    auto const frequencies = std::bit_cast<cudf::column_view const*>(frequencies_handle);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::create_histogram_if_valid(*values, *frequencies, output_as_lists)
         .release());
@@ -48,7 +50,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_percentileFro
   {
     cudf::jni::auto_set_device(env);
 
-    auto const input       = reinterpret_cast<cudf::column_view const*>(input_handle);
+    auto const input       = std::bit_cast<cudf::column_view const*>(input_handle);
     auto const percentages = [&] {
       auto const native_percentages = cudf::jni::native_jdoubleArray(env, jpercentages);
       return std::vector<double>(native_percentages.begin(), native_percentages.end());

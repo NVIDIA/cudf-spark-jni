@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2022, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ def main():
                 'base': pr.base,
                 'body': "submodule-sync to create a PR keeping thirdparty/cudf up-to-date.\n"
                         f"HEAD commit SHA: {args.sha}, "
-                        f"cudf commit SHA: https://github.com/rapidsai/cudf/commit/{args.cudf_sha}\n\n"
+                        f"cudf commit SHA: https://github.com/NVIDIA/cudf/commit/{args.cudf_sha}\n\n"
                         "This PR will be auto-merged if test passed. "
                         "If failed, it will remain open until test pass or manually fix.",
                 'maintainer_can_modify': True
@@ -65,7 +65,7 @@ def main():
                 sys.exit(0)
 
         pr.comment(number, content=f"HEAD commit SHA: {args.sha}, "
-                                   f"CUDF commit SHA: https://github.com/rapidsai/cudf/commit/{args.cudf_sha}\n"
+                                   f"CUDF commit SHA: https://github.com/NVIDIA/cudf/commit/{args.cudf_sha}\n"
                                    f"Test passed: **{args.passed}**")
 
         if args.passed:

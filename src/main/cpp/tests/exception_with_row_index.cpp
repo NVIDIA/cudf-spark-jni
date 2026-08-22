@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ TEST_F(ErrorAtRowTests, unary)
   try {
     spark_rapids_jni::throw_row_error_if_any(input, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 
@@ -49,7 +49,7 @@ TEST_F(ErrorAtRowTests, binary)
   try {
     spark_rapids_jni::throw_row_error_if_any(input1, input2, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 
@@ -68,7 +68,7 @@ TEST_F(ErrorAtRowTests, ternary)
     spark_rapids_jni::throw_row_error_if_any(
       input1, input2, input3, result, cudf::get_default_stream());
     FAIL() << "Expected error_at_row exception to be thrown";
-  } catch (const spark_rapids_jni::exception_with_row_index& e) {
+  } catch (spark_rapids_jni::exception_with_row_index const& e) {
     EXPECT_EQ(e.get_row_index(), 1);
   }
 

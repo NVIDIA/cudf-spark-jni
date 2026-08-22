@@ -525,8 +525,8 @@ struct daylight_saving_time_utils {
 template <typename timestamp_type>
 __device__ static timestamp_type convert_timestamp(
   timestamp_type const& timestamp,
-  cudf::detail::lists_column_device_view const& fixed_transitions,
-  cudf::detail::lists_column_device_view const& dst_rules,
+  cudf::lists_column_device_view const& fixed_transitions,
+  cudf::lists_column_device_view const& dst_rules,
   cudf::size_type tz_index,
   bool to_utc)
 {

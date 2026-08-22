@@ -20,6 +20,7 @@
 
 #include <cudf/strings/strings_column_view.hpp>
 
+#include <bit>
 #include <vector>
 
 using path_instruction_type = spark_rapids_jni::path_instruction_type;
@@ -52,7 +53,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const n_column_view      = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const n_column_view      = std::bit_cast<cudf::column_view const*>(input_column);
     auto const n_strings_col_view = cudf::strings_column_view{*n_column_view};
 
     std::vector<std::tuple<path_instruction_type, std::string, int32_t>> instructions;
@@ -69,7 +70,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
 
     for (int i = 0; i < size; i++) {
       path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[i]);
-      const char* name_str                   = names[i].get();
+      char const* name_str                   = names[i].get();
       jlong index                            = indexes[i];
       instructions.emplace_back(instruction_type, name_str, index);
     }
@@ -125,7 +126,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
       path.reserve(path_size);
       for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
         path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[j]);
-        const char* name_str                   = names[j].get();
+        char const* name_str                   = names[j].get();
         jlong index                            = indexes[j];
         path.emplace_back(instruction_type, name_str, index);
       }
@@ -133,7 +134,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
       paths[i] = std::move(path);
     }
 
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
     auto output         = spark_rapids_jni::get_json_object_multiple_paths(
       cudf::strings_column_view{*input_cv}, paths, memory_budget_bytes, parallel_override);
 
@@ -160,13 +161,43 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMap
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
     return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::from_json_to_raw_map(cudf::strings_column_view{*input_cv},
-                                             normalize_single_quotes,
-                                             allow_leading_zeros,
-                                             allow_nonnumeric_numbers,
-                                             allow_unquoted_control)
+      spark_rapids_jni::from_json_to_raw_map(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
+        .release());
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_extractRawMapArrayFromJsonString(
+  JNIEnv* env,
+  jclass,
+  jlong j_input,
+  jboolean normalize_single_quotes,
+  jboolean allow_leading_zeros,
+  jboolean allow_nonnumeric_numbers,
+  jboolean allow_unquoted_control)
+{
+  JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
+
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
+    return cudf::jni::ptr_as_jlong(
+      spark_rapids_jni::from_json_to_raw_map_array_values(
+        cudf::strings_column_view{*input_cv},
+        spark_rapids_jni::json_parse_options{
+          .normalize_single_quotes  = static_cast<bool>(normalize_single_quotes),
+          .allow_leading_zeros      = static_cast<bool>(allow_leading_zeros),
+          .allow_nonnumeric_numbers = static_cast<bool>(allow_nonnumeric_numbers),
+          .allow_unquoted_control   = static_cast<bool>(allow_unquoted_control)})
         .release());
   }
   JNI_CATCH(env, 0);
@@ -198,7 +229,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
   {
     cudf::jni::auto_set_device(env);
 
-    auto const input_cv     = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input_cv     = std::bit_cast<cudf::column_view const*>(j_input);
     auto const col_names    = cudf::jni::native_jstringArray(env, j_col_names).as_cpp_vector();
     auto const num_children = cudf::jni::native_jintArray(env, j_num_children).to_vector();
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
@@ -249,7 +280,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
   {
     cudf::jni::auto_set_device(env);
 
-    auto const input_cv     = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input_cv     = std::bit_cast<cudf::column_view const*>(j_input);
     auto const num_children = cudf::jni::native_jintArray(env, j_num_children).to_vector();
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
     auto const scales       = cudf::jni::native_jintArray(env, j_scales).to_vector();
@@ -281,7 +312,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_removeQuotes(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::remove_quotes(cudf::strings_column_view{*input_cv}, nullify_if_not_quoted)
         .release());

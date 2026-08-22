@@ -33,6 +33,7 @@
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -43,6 +44,7 @@
 #include <cooperative_groups.h>
 #include <cuda/barrier>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
@@ -221,7 +223,11 @@ build_string_row_offsets(table_view const& tbl,
 {
   auto const num_rows = tbl.num_rows();
   rmm::device_uvector<size_type> d_row_sizes(num_rows, stream);
-  thrust::uninitialized_fill(rmm::exec_policy(stream), d_row_sizes.begin(), d_row_sizes.end(), 0);
+  thrust::uninitialized_fill(
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_row_sizes.begin(),
+    d_row_sizes.end(),
+    0);
 
   auto d_offsets_iterators = [&]() {
     std::vector<cudf::detail::input_offsetalator> offsets_iterators;
@@ -244,7 +250,7 @@ build_string_row_offsets(table_view const& tbl,
 
   auto const num_columns = static_cast<size_type>(d_offsets_iterators.size());
 
-  thrust::for_each(rmm::exec_policy(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    cuda::make_counting_iterator(0),
                    cuda::make_counting_iterator(num_columns * num_rows),
                    [d_offsets_iterators = d_offsets_iterators.data(),
@@ -259,7 +265,7 @@ build_string_row_offsets(table_view const& tbl,
                    });
 
   // transform the row sizes to include fixed width size and alignment
-  thrust::transform(rmm::exec_policy(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     d_row_sizes.begin(),
                     d_row_sizes.end(),
                     d_row_sizes.begin(),
@@ -319,14 +325,14 @@ struct fixed_width_row_offset_functor {
  * @param output_nm array of pointers to the output null masks
  * @param input_data pointing to the incoming row data
  */
-CUDF_KERNEL void copy_from_rows_fixed_width_optimized(const size_type num_rows,
-                                                      const size_type num_columns,
-                                                      const size_type row_size,
-                                                      const size_type* input_offset_in_row,
-                                                      const size_type* num_bytes,
+CUDF_KERNEL void copy_from_rows_fixed_width_optimized(size_type const num_rows,
+                                                      size_type const num_columns,
+                                                      size_type const row_size,
+                                                      size_type const* input_offset_in_row,
+                                                      size_type const* num_bytes,
                                                       int8_t** output_data,
                                                       bitmask_type** output_nm,
-                                                      const int8_t* input_data)
+                                                      int8_t const* input_data)
 {
   // We are going to copy the data in two passes.
   // The first pass copies a chunk of data into shared memory.
@@ -402,17 +408,17 @@ CUDF_KERNEL void copy_from_rows_fixed_width_optimized(const size_type num_rows,
           }
           case 2: {
             int16_t* short_col_output   = reinterpret_cast<int16_t*>(col_output);
-            short_col_output[row_index] = *reinterpret_cast<const int16_t*>(col_tmp);
+            short_col_output[row_index] = *reinterpret_cast<int16_t const*>(col_tmp);
             break;
           }
           case 4: {
             int32_t* int_col_output   = reinterpret_cast<int32_t*>(col_output);
-            int_col_output[row_index] = *reinterpret_cast<const int32_t*>(col_tmp);
+            int_col_output[row_index] = *reinterpret_cast<int32_t const*>(col_tmp);
             break;
           }
           case 8: {
             int64_t* long_col_output   = reinterpret_cast<int64_t*>(col_output);
-            long_col_output[row_index] = *reinterpret_cast<const int64_t*>(col_tmp);
+            long_col_output[row_index] = *reinterpret_cast<int64_t const*>(col_tmp);
             break;
           }
           default: {
@@ -438,14 +444,14 @@ CUDF_KERNEL void copy_from_rows_fixed_width_optimized(const size_type num_rows,
   }
 }
 
-CUDF_KERNEL void copy_to_rows_fixed_width_optimized(const size_type start_row,
-                                                    const size_type num_rows,
-                                                    const size_type num_columns,
-                                                    const size_type row_size,
-                                                    const size_type* output_offset_in_row,
-                                                    const size_type* num_bytes,
-                                                    const int8_t** input_data,
-                                                    const bitmask_type** input_nm,
+CUDF_KERNEL void copy_to_rows_fixed_width_optimized(size_type const start_row,
+                                                    size_type const num_rows,
+                                                    size_type const num_columns,
+                                                    size_type const row_size,
+                                                    size_type const* output_offset_in_row,
+                                                    size_type const* num_bytes,
+                                                    int8_t const** input_data,
+                                                    bitmask_type const** input_nm,
                                                     int8_t* output_data)
 {
   // We are going to copy the data in two passes.
@@ -492,24 +498,24 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(const size_type start_row,
            col_index += col_index_stride) {
         size_type col_size      = num_bytes[col_index];
         int8_t* col_tmp         = &(row_tmp[output_offset_in_row[col_index]]);
-        const int8_t* col_input = input_data[col_index];
+        int8_t const* col_input = input_data[col_index];
         switch (col_size) {
           case 1: {
             *col_tmp = col_input[row_index];
             break;
           }
           case 2: {
-            const int16_t* short_col_input       = reinterpret_cast<const int16_t*>(col_input);
+            int16_t const* short_col_input       = reinterpret_cast<int16_t const*>(col_input);
             *reinterpret_cast<int16_t*>(col_tmp) = short_col_input[row_index];
             break;
           }
           case 4: {
-            const int32_t* int_col_input         = reinterpret_cast<const int32_t*>(col_input);
+            int32_t const* int_col_input         = reinterpret_cast<int32_t const*>(col_input);
             *reinterpret_cast<int32_t*>(col_tmp) = int_col_input[row_index];
             break;
           }
           case 8: {
-            const int64_t* long_col_input        = reinterpret_cast<const int64_t*>(col_input);
+            int64_t const* long_col_input        = reinterpret_cast<int64_t const*>(col_input);
             *reinterpret_cast<int64_t*>(col_tmp) = long_col_input[row_index];
             break;
           }
@@ -526,7 +532,7 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(const size_type start_row,
         // so we have to rewrite the addresses to make sure that it is 4 byte aligned
         int8_t* valid_byte        = &row_vld_tmp[col_index / 8];
         size_type byte_bit_offset = col_index % 8;
-        uint64_t fixup_bytes      = reinterpret_cast<uint64_t>(valid_byte) % 4;
+        uint64_t fixup_bytes      = cuda::std::bit_cast<uint64_t>(valid_byte) % 4;
         int32_t* valid_int        = reinterpret_cast<int32_t*>(valid_byte - fixup_bytes);
         size_type int_bit_offset  = byte_bit_offset + (fixup_bytes * 8);
         // Now copy validity for the column
@@ -588,13 +594,13 @@ CUDF_KERNEL void copy_to_rows_fixed_width_optimized(const size_type start_row,
  *
  */
 template <int block_size, typename RowOffsetFunctor>
-__launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(const size_type num_rows,
-                                                            const size_type num_columns,
-                                                            const size_type shmem_used_per_tile,
-                                                            device_span<const tile_info> tile_infos,
-                                                            const int8_t** input_data,
-                                                            const size_type* col_sizes,
-                                                            const size_type* col_offsets,
+__launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(size_type const num_rows,
+                                                            size_type const num_columns,
+                                                            size_type const shmem_used_per_tile,
+                                                            device_span<tile_info const> tile_infos,
+                                                            int8_t const** input_data,
+                                                            size_type const* col_sizes,
+                                                            size_type const* col_offsets,
                                                             RowOffsetFunctor row_offsets,
                                                             size_type const* batch_row_boundaries,
                                                             int8_t** output_data)
@@ -659,17 +665,17 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(const size_type num_
       // copy the element from global memory
       switch (col_size) {
         case 2: {
-          const int16_t* short_col_input = reinterpret_cast<const int16_t*>(input_src);
+          int16_t const* short_col_input = reinterpret_cast<int16_t const*>(input_src);
           *reinterpret_cast<int16_t*>(&shared_data[shared_offset]) = *short_col_input;
           break;
         }
         case 4: {
-          const int32_t* int_col_input = reinterpret_cast<const int32_t*>(input_src);
+          int32_t const* int_col_input = reinterpret_cast<int32_t const*>(input_src);
           *reinterpret_cast<int32_t*>(&shared_data[shared_offset]) = *int_col_input;
           break;
         }
         case 8: {
-          const int64_t* long_col_input = reinterpret_cast<const int64_t*>(input_src);
+          int64_t const* long_col_input = reinterpret_cast<int64_t const*>(input_src);
           *reinterpret_cast<int64_t*>(&shared_data[shared_offset]) = *long_col_input;
           break;
         }
@@ -724,15 +730,15 @@ __launch_bounds__(block_size) CUDF_KERNEL void copy_to_rows(const size_type num_
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_validity_to_rows(const size_type num_rows,
-                             const size_type num_columns,
-                             const size_type shmem_used_per_tile,
+  void copy_validity_to_rows(size_type const num_rows,
+                             size_type const num_columns,
+                             size_type const shmem_used_per_tile,
                              RowOffsetFunctor row_offsets,
                              size_type const* batch_row_boundaries,
                              int8_t** output_data,
-                             const size_type validity_offset,
-                             device_span<const tile_info> tile_infos,
-                             const bitmask_type** input_nm)
+                             size_type const validity_offset,
+                             device_span<tile_info const> tile_infos,
+                             bitmask_type const** input_nm)
 {
   extern __shared__ int8_t shared_data[];
 
@@ -909,16 +915,16 @@ __launch_bounds__(block_size) CUDF_KERNEL
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_from_rows(const size_type num_rows,
-                      const size_type num_columns,
-                      const size_type shmem_used_per_tile,
+  void copy_from_rows(size_type const num_rows,
+                      size_type const num_columns,
+                      size_type const shmem_used_per_tile,
                       RowOffsetFunctor row_offsets,
                       size_type const* batch_row_boundaries,
                       int8_t** output_data,
-                      const size_type* col_sizes,
-                      const size_type* col_offsets,
-                      device_span<const tile_info> tile_infos,
-                      const int8_t* input_data)
+                      size_type const* col_sizes,
+                      size_type const* col_offsets,
+                      device_span<tile_info const> tile_infos,
+                      int8_t const* input_data)
 {
   // We are going to copy the data in two passes.
   // The first pass copies a chunk of data into shared memory.
@@ -1019,15 +1025,15 @@ __launch_bounds__(block_size) CUDF_KERNEL
  */
 template <int block_size, typename RowOffsetFunctor>
 __launch_bounds__(block_size) CUDF_KERNEL
-  void copy_validity_from_rows(const size_type num_rows,
-                               const size_type num_columns,
-                               const size_type shmem_used_per_tile,
+  void copy_validity_from_rows(size_type const num_rows,
+                               size_type const num_columns,
+                               size_type const shmem_used_per_tile,
                                RowOffsetFunctor row_offsets,
                                size_type const* batch_row_boundaries,
                                bitmask_type** output_nm,
-                               const size_type validity_offset,
-                               device_span<const tile_info> tile_infos,
-                               const int8_t* input_data)
+                               size_type const validity_offset,
+                               device_span<tile_info const> tile_infos,
+                               int8_t const* input_data)
 {
   extern __shared__ int8_t shared[];
 
@@ -1199,9 +1205,9 @@ __launch_bounds__(block_size) CUDF_KERNEL
  * @param [out] threads the size of the threads for the kernel
  * @return the size in bytes of shared memory needed for each block.
  */
-static int calc_fixed_width_kernel_dims(const size_type num_columns,
-                                        const size_type num_rows,
-                                        const size_type size_per_row,
+static int calc_fixed_width_kernel_dims(size_type const num_columns,
+                                        size_type const num_rows,
+                                        size_type const size_per_row,
                                         dim3& blocks,
                                         dim3& threads)
 {
@@ -1253,16 +1259,16 @@ static int calc_fixed_width_kernel_dims(const size_type num_columns,
  * into this function are common between runs and should be calculated once.
  */
 static std::unique_ptr<column> fixed_width_convert_to_rows(
-  const size_type start_row,
-  const size_type num_rows,
-  const size_type num_columns,
-  const size_type size_per_row,
+  size_type const start_row,
+  size_type const num_rows,
+  size_type const num_columns,
+  size_type const size_per_row,
   rmm::device_uvector<size_type>& column_start,
   rmm::device_uvector<size_type>& column_size,
-  rmm::device_uvector<const int8_t*>& input_data,
-  rmm::device_uvector<const bitmask_type*>& input_nm,
-  const scalar& zero,
-  const scalar& scalar_size_per_row,
+  rmm::device_uvector<int8_t const*>& input_data,
+  rmm::device_uvector<bitmask_type const*>& input_nm,
+  scalar const& zero,
+  scalar const& scalar_size_per_row,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -1504,7 +1510,10 @@ batch_data build_batches(size_type num_rows,
                          rmm::cuda_stream_view stream,
                          rmm::device_async_resource_ref mr)
 {
-  auto const total_size = thrust::reduce(rmm::exec_policy(stream), row_sizes, row_sizes + num_rows);
+  auto const total_size =
+    thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   row_sizes,
+                   row_sizes + num_rows);
   auto const num_batches = static_cast<int32_t>(
     cudf::util::div_rounding_up_safe(total_size, static_cast<uint64_t>(MAX_BATCH_SIZE)));
   auto const num_offsets = num_batches + 1;
@@ -1518,8 +1527,10 @@ batch_data build_batches(size_type num_rows,
   size_type last_row_end = 0;
   device_uvector<uint64_t> cumulative_row_sizes(num_rows, stream);
 
-  thrust::inclusive_scan(
-    rmm::exec_policy(stream), row_sizes, row_sizes + num_rows, cumulative_row_sizes.begin());
+  thrust::inclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                         row_sizes,
+                         row_sizes + num_rows,
+                         cumulative_row_sizes.begin());
 
   // This needs to be split this into 2 gig batches. Care must be taken to avoid a batch larger than
   // 2 gigs. Imagine a table with 900 meg rows. The batches should occur every 2 rows, but if a
@@ -1546,7 +1557,10 @@ batch_data build_batches(size_type num_rows,
 
     // find the first row that would exceed MAX_BATCH_SIZE
     auto const ub =
-      thrust::upper_bound(rmm::exec_policy(stream), search_start, search_end, MAX_BATCH_SIZE);
+      thrust::upper_bound(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                          search_start,
+                          search_end,
+                          MAX_BATCH_SIZE);
     size_type const batch_size = ub - search_start;
 
     // If fewer than 32 rows fit before exceeding MAX_BATCH_SIZE, round_down_safe(batch_size, 32)
@@ -1572,7 +1586,7 @@ batch_data build_batches(size_type num_rows,
     auto row_size_iter_bounded = spark_rapids_jni::util::make_counting_transform_iterator(
       0, row_size_functor(row_end, row_sizes, last_row_end));
 
-    thrust::exclusive_scan(rmm::exec_policy(stream),
+    thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                            row_size_iter_bounded,
                            row_size_iter_bounded + num_entries,
                            output_batch_row_offsets.begin());
@@ -1586,7 +1600,7 @@ batch_data build_batches(size_type num_rows,
       CUDF_CUDA_TRY(cudaMemcpyAsync(batch_row_offsets.data() + last_row_end,
                                     output_batch_row_offsets.data(),
                                     num_rows_in_batch * sizeof(size_type),
-                                    cudaMemcpyDeviceToDevice,
+                                    cudaMemcpyDefault,
                                     stream.value()));
     }
 
@@ -1619,7 +1633,7 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
   device_uvector<size_type> num_tiles(num_batches, stream);
   auto iter = cuda::make_counting_iterator(0);
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + num_batches,
     num_tiles.begin(),
@@ -1630,7 +1644,9 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
           batch_row_boundaries[batch_index + 1] - batch_row_boundaries[batch_index],
           desired_tile_height);
       }));
-  return thrust::reduce(rmm::exec_policy(stream), num_tiles.begin(), num_tiles.end());
+  return thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                        num_tiles.begin(),
+                        num_tiles.end());
 }
 
 /**
@@ -1658,7 +1674,7 @@ size_type build_tiles(
   device_uvector<size_type> num_tiles(num_batches, stream);
   auto iter = cuda::make_counting_iterator(0);
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + num_batches,
     num_tiles.begin(),
@@ -1671,7 +1687,9 @@ size_type build_tiles(
       }));
 
   size_type const total_tiles =
-    thrust::reduce(rmm::exec_policy(stream), num_tiles.begin(), num_tiles.end());
+    thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   num_tiles.begin(),
+                   num_tiles.end());
 
   device_uvector<size_type> tile_starts(num_batches + 1, stream);
   auto tile_iter = spark_rapids_jni::util::make_counting_transform_iterator(
@@ -1680,13 +1698,13 @@ size_type build_tiles(
       [num_tiles = num_tiles.data(), num_batches] __device__(auto i) {
         return (i < num_batches) ? num_tiles[i] : 0;
       }));
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          tile_iter,
                          tile_iter + num_batches + 1,
                          tile_starts.begin());  // in tiles
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     iter,
     iter + total_tiles,
     tiles.begin(),
@@ -1998,6 +2016,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
           batch_row_offset,
           reinterpret_cast<int8_t*>(output_data[i]));
     }
+
+    // Drain the async H2D uploads above before variable_width_input_data goes out of scope:
+    // CUDA 13+ may read the host source only when the stream executes the copy.
+    stream.synchronize();
   }
 
   // split up the output buffer into multiple buffers based on row batch sizes and create list of
@@ -2028,6 +2050,11 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
                                             0,
                                             rmm::device_buffer{0, cudf::get_default_stream(), mr});
                  });
+
+  // Drain the async H2D uploads above before input_data, input_nm, output_data and
+  // validity_tile_infos go out of scope: CUDA 13+ may read the host source only when the stream
+  // executes the copy.
+  stream.synchronize();
 
   return ret;
 }
@@ -2187,7 +2214,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
   auto const num_rows = tbl.num_rows();
 
   // Get the pointers to the input columnar data ready
-  std::vector<const int8_t*> input_data;
+  std::vector<int8_t const*> input_data;
   std::vector<bitmask_type const*> input_nm;
   for (size_type column_number = 0; column_number < num_columns; column_number++) {
     column_view cv = tbl.column(column_number);
@@ -2223,6 +2250,10 @@ std::vector<std::unique_ptr<column>> convert_to_rows_fixed_width_optimized(
                                                          stream,
                                                          mr));
   }
+
+  // Drain the async H2D uploads above before column_start, column_size, input_data and input_nm
+  // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
+  stream.synchronize();
 
   return ret;
 }
@@ -2371,7 +2402,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   constexpr auto num_batches = 2;
   device_uvector<size_type> gpu_batch_row_boundaries(num_batches, stream);
 
-  thrust::transform(rmm::exec_policy(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     cuda::make_counting_iterator(0),
                     cuda::make_counting_iterator(num_batches),
                     gpu_batch_row_boundaries.begin(),
@@ -2489,10 +2520,11 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
           return i < num_rows ? col_string_lengths[i] : 0;
         });
       auto bounded_iter = spark_rapids_jni::util::make_counting_transform_iterator(0, tmp);
-      thrust::exclusive_scan(rmm::exec_policy(stream),
-                             bounded_iter,
-                             bounded_iter + num_rows + 1,
-                             output_string_offsets.begin());
+      thrust::exclusive_scan(
+        rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+        bounded_iter,
+        bounded_iter + num_rows + 1,
+        output_string_offsets.begin());
 
       // allocate destination string column
       rmm::device_uvector<char> string_data(
@@ -2540,12 +2572,21 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         string_idx++;
       }
     }
+
+    // Drain the async H2D uploads above before string_col_offset_ptrs and string_data_col_ptrs
+    // go out of scope: CUDA 13+ may read the host source only when the stream executes the copy.
+    stream.synchronize();
   }
 
   // Set null counts, because output_columns are modified via mutable-view,
   // in the kernel above.
   // TODO(future): Consider setting null count in the kernel itself.
   fixup_null_counts(output_columns, stream);
+
+  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
+  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
+  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
+  stream.synchronize();
 
   return std::make_unique<table>(std::move(output_columns));
 }
@@ -2619,6 +2660,11 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   // in the kernel above.
   // TODO(future): Consider setting null count in the kernel itself.
   fixup_null_counts(output_columns, stream);
+
+  // Explicitly drain async H2D uploads before the host staging vectors go out of scope
+  // (CUDA 13+ may read the host source only at stream-execution time). Not left to the
+  // incidental sync in fixup_null_counts, which vanishes if null counts move into the kernel.
+  stream.synchronize();
 
   return std::make_unique<table>(std::move(output_columns));
 }

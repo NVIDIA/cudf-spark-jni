@@ -21,6 +21,7 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/null_mask.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -85,7 +86,8 @@ struct dispatch_format_float_fn {
     auto const strings_count = floats.size();
     if (strings_count == 0) { return cudf::make_empty_column(cudf::type_id::STRING); }
 
-    auto const input_ptr = cudf::column_device_view::create(floats, stream);
+    auto const input_ptr =
+      cudf::column_device_view::create(floats, stream, cudf::get_current_device_resource_ref());
 
     auto [offsets, chars] = cudf::strings::detail::make_strings_children(
       format_float_fn<FloatType>{*input_ptr, digits}, strings_count, stream, mr);

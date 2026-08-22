@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,14 @@ set -e
 
 BASE_DIR=$( git rev-parse --show-toplevel )
 
-PATCH_DIR=${PATCH_DIR:-$(realpath "$BASE_DIR/patches/")}
+PATCH_DIR=${PATCH_DIR:-"$BASE_DIR/patches/"}
+
+if [ ! -d "$PATCH_DIR" ] ; then
+  echo "No patches to apply"
+  exit 0
+fi
+
+PATCH_DIR=$(realpath "$PATCH_DIR")
 
 CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
 

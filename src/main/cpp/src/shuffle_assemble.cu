@@ -40,6 +40,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <thrust/binary_search.h>
@@ -184,7 +185,9 @@ rmm::device_uvector<offset_column_info> compute_offset_column_info(
   while (col_index < static_cast<int>(metadata.col_info.size())) {
     col_index = compute_offset_column_info_traverse(metadata.col_info, col_index, -1, offset_info);
   }
-  return cudf::detail::make_device_uvector_async(offset_info, stream, mr);
+  // Sync variant required: offset_info dies at return, but an async upload may read the host
+  // source only when the stream executes the copy (CUDA 13+ deferred source read).
+  return cudf::detail::make_device_uvector(offset_info, stream, mr);
 }
 
 /**
@@ -660,7 +663,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
       return i >= value_count ? 0 : first[i];
     }));
   rmm::device_uvector<size_t> group_offsets(value_count + 1, stream, temp_mr);
-  thrust::exclusive_scan(rmm::exec_policy(stream, temp_mr),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                          size_wrapper,
                          size_wrapper + group_offsets.size(),
                          group_offsets.begin());
@@ -669,7 +672,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
   using OutputType = std::invoke_result_t<GroupFunction>;
   rmm::device_uvector<OutputType> result(total_size, stream, mr);
   auto iter = thrust::make_counting_iterator(0);
-  thrust::transform(rmm::exec_policy(stream, temp_mr),
+  thrust::transform(rmm::exec_policy_nosync(stream, temp_mr),
                     iter,
                     iter + total_size,
                     result.begin(),
@@ -920,8 +923,17 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   // for better memory management and reduced allocation overhead.
   std::vector<buffer_slice> buffer_slices(num_dst_buffers);
 
-  // Collect validity buffers that need zero-initialization
-  std::vector<cudf::device_span<cudf::bitmask_type>> validity_spans_to_zero;
+  // Collect buffers that need zero-initialization. Two cases:
+  //  - validity buffers (partially rewritten by copy_validity via atomicOr, so must start zeroed)
+  //  - offset buffers of zero-row list/string columns: with num_rows == 0 the output still
+  //    reserves a single terminating offset (get_output_offsets_size uses num_rows + 1), but there
+  //    are no source bytes to copy (assemble_src_buffer_size_functor returns 0 for empty offsets)
+  //    and copy_offsets skips zero-size batches. Without this the lone terminal offset is left
+  //    uninitialized, which surfaces as garbage list/string offsets after shuffle reassembly.
+  // Both are zeroed with a single word-granularity batched_memset. This is valid because
+  // split_align (64) guarantees every slice size is a multiple of sizeof(bitmask_type) and every
+  // slice base is 4-byte aligned; an offset value is itself a 4-byte word, so no sub-word writes.
+  std::vector<cudf::device_span<cudf::bitmask_type>> spans_to_zero;
 
   for (size_t i = 0; i < num_dst_buffers; i++) {
     size_t col_idx  = i / 3;
@@ -932,19 +944,21 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
 
     buffer_slices[i] = buffer_slice(base_ptr + buffer_offsets[i], size, buffer_offsets[i]);
 
-    // Collect validity buffers that need zero-initialization
-    if (buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity) {
+    bool const zero_validity = buf_type == 0 && size > 0 && h_column_info[col_idx].has_validity;
+    bool const zero_empty_offsets =
+      buf_type == 1 && size > 0 && h_column_info[col_idx].num_rows == 0;
+    if (zero_validity || zero_empty_offsets) {
       // Convert byte size to element count for bitmask_type (uint32_t) span
       size_t num_elements = size / sizeof(cudf::bitmask_type);
-      validity_spans_to_zero.emplace_back(
-        reinterpret_cast<cudf::bitmask_type*>(buffer_slices[i].data), num_elements);
+      spans_to_zero.emplace_back(reinterpret_cast<cudf::bitmask_type*>(buffer_slices[i].data),
+                                 num_elements);
     }
   }
 
-  // Batch memset all validity buffers at once for better performance with many columns
-  if (!validity_spans_to_zero.empty()) {
-    cudf::host_span<cudf::device_span<cudf::bitmask_type> const> host_spans(
-      validity_spans_to_zero.data(), validity_spans_to_zero.size());
+  // Batch memset all collected buffers at once for better performance with many columns
+  if (!spans_to_zero.empty()) {
+    cudf::host_span<cudf::device_span<cudf::bitmask_type> const> host_spans(spans_to_zero.data(),
+                                                                            spans_to_zero.size());
     cudf::detail::batched_memset<cudf::bitmask_type>(host_spans, cudf::bitmask_type{0}, stream);
   }
 
@@ -953,7 +967,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   std::transform(buffer_slices.begin(),
                  buffer_slices.end(),
                  h_dst_buffers.begin(),
-                 [](const buffer_slice& slice) { return slice.data; });
+                 [](buffer_slice const& slice) { return slice.data; });
   auto dst_buffers = cudf::detail::make_device_uvector_async(h_dst_buffers, stream, temp_mr);
 
   // compute:
@@ -1016,7 +1030,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     auto const num_column_instances = column_instance_info.size();
     auto iter                       = thrust::make_counting_iterator(0);
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [buffers_per_partition,
@@ -1052,7 +1066,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
       0, cuda::proclaim_return_type<size_t>([num_columns] __device__(size_t i) {
         return (i / num_columns);
       }));
-    thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+    thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                   section_keys,
                                   section_keys + num_src_buffers,
                                   src_sizes_unpadded.begin(),
@@ -1062,7 +1076,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // - add metadata offset
     // - add partition offset
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [num_columns,
@@ -1119,7 +1133,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
           return src_sizes_unpadded[src_buf_index] -
                  ((is_offsets_buffer && src_sizes_unpadded[src_buf_index] > 0) ? 4 : 0);
         }));
-      thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+      thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                     dst_buf_key,
                                     dst_buf_key + num_src_buffers,
                                     size_iter,
@@ -1131,7 +1145,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // this implies we will potentially be writing our leading bits into the same word as another
     // copy is writing it's trailing bits, so atomics will be necessary.
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [column_info          = column_info.begin(),
@@ -1331,6 +1345,11 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     stream,
     mr);
 
+  // Drain the async H2D uploads above before h_dst_buffers and the batched_memset span vector
+  // (spans_to_zero) go out of scope: CUDA 13+ may read the host source only when the stream
+  // executes the copy.
+  stream.synchronize();
+
   // Return shuffle assemble result with slices and copy batches (column_views will be populated
   // later)
   shuffle_assemble_result result_buffers(std::move(shared_buffer), std::move(buffer_slices));
@@ -1362,7 +1381,7 @@ __global__ void copy_validity(cudf::device_span<assemble_batch> batches)
 
   // how many leading bytes we have. that is, how many bytes will be read by the initial read, which
   // accounts for misaligned source buffers.
-  int const leading_bytes = (4 - (reinterpret_cast<uint64_t>(batch.src) % 4));
+  int const leading_bytes = (4 - (cuda::std::bit_cast<uint64_t>(batch.src) % 4));
   int remaining_rows      = batch.validity_row_count;
 
   // - if the address is misaligned, load byte-by-byte and only store up to that many bits/rows off
@@ -1629,7 +1648,7 @@ void assemble_copy(cudf::device_span<assemble_batch> batches,
   cudaMemcpyAsync(h_column_info.data(),
                   column_info.data(),
                   column_info.size() * sizeof(assemble_column_info),
-                  cudaMemcpyDeviceToHost,
+                  cudaMemcpyDefault,
                   stream);
   stream.synchronize();
 }
@@ -1946,7 +1965,7 @@ shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
           reinterpret_cast<partition_header const*>(partitions.data() + _partition_offsets[pindex]);
         return cudf::hashing::detail::swap_endian(pheader->num_rows) > 0 ? pindex + 1 : 0;
       }));
-  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy(stream, temp_mr),
+  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy_nosync(stream, temp_mr),
                                                    iter,
                                                    iter + (_partition_offsets.size() - 1),
                                                    size_t{0},
