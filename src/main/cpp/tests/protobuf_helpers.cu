@@ -79,3 +79,23 @@ TEST_F(ProtobufHelpersTest, NullMaskFromPaddedValidIgnoresTail)
   EXPECT_TRUE(cudf::bit_is_set(h_mask.data(), 0));
   EXPECT_FALSE(cudf::bit_is_set(h_mask.data(), 1));
 }
+
+TEST_F(ProtobufHelpersTest, NullMaskFromAllValidRowsIsEmpty)
+{
+  auto stream = cudf::get_default_stream();
+
+  std::array<bool, 2> h_valid{true, true};
+  rmm::device_uvector<bool> valid(h_valid.size(), stream);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(valid.data(),
+                                h_valid.data(),
+                                h_valid.size() * sizeof(h_valid[0]),
+                                cudaMemcpyDefault,
+                                stream.value()));
+
+  auto [mask, null_count] = spark_rapids_jni::protobuf::detail::make_null_mask_from_valid(
+    valid, h_valid.size(), stream, cudf::get_current_device_resource_ref());
+
+  EXPECT_EQ(0u, mask.size());
+  EXPECT_EQ(nullptr, mask.data());
+  EXPECT_EQ(0, null_count);
+}
