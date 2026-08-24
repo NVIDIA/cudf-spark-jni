@@ -73,6 +73,11 @@ export WORKDIR=~/gits/rapidsai/cudf
 ~/gits/NVIDIA/spark-rapids-jni/build/run-in-docker head README.md
 ```
 
+`run-in-docker` defaults `CCACHE_BASEDIR` to `WORKDIR`, allowing equivalent Release builds
+to share cache entries across checkouts. Debug builds also require compiler-specific
+[debug path normalization](https://ccache.dev/manual/4.11.2.html#_compiling_in_different_directories);
+disabling ccache's `hash_dir` instead can embed an incorrect working directory in debug information.
+
 ### cudf Submodule and Build
 
 [RAPIDS cuDF](https://github.com/rapidsai/cudf) is being used as a submodule in this project.
