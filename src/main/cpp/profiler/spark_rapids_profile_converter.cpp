@@ -365,9 +365,7 @@ void verify_profile_header(std::ifstream& in)
   auto fb_ptr = read_flatbuffer(in);
   auto header = validate_fb<spark_rapids_jni::profiler::ProfileHeader>(*fb_ptr, "profile header");
   auto magic  = header->magic();
-  if (magic == nullptr) {
-    throw std::runtime_error("does not appear to be a cuDF plugin profile");
-  }
+  if (magic == nullptr) { throw std::runtime_error("does not appear to be a cuDF plugin profile"); }
   if (magic->str() != "spark-rapids profile") {
     std::ostringstream oss;
     oss << "bad profile magic, expected 'spark-rapids profile' found '" << magic->str() << "'";
