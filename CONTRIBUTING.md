@@ -64,7 +64,7 @@ so it should be invoked as one would invoke Maven, e.g.: `build/build-in-docker 
 #### Using the cudf-spark-jni Docker Container with other Repos
 
 The cuDF plugin project spans multiple repos. Some issues are discovered in
-cudf-spark-jni but they need to be made easily reproducible in the cudf repo. 
+cudf-spark-jni but they need to be made easily reproducible in the cudf repo.
 To this end export WORKDIR with the path pointing to a different repo
 
 ```

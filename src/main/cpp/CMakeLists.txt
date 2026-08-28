@@ -50,7 +50,7 @@ project(
 
 # We use no C++20 modules; disable module scanning so CMake emits no ninja dyndep phase. Otherwise
 # its dyndep refresh trips ninja's RefreshDyndepDependents assertion on incremental rebuilds after
-# a structural source change. Mirrors libcudf (rapidsai/cudf#19192).
+# a structural source change. Mirrors libcudf (nvidia/cudf#19192).
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # ##################################################################################################

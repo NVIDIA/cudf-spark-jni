@@ -185,7 +185,7 @@ std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_s
 
   // Append the delimiter to the end of the concatenated buffer.
   // This is to fix a bug when the last string is invalid
-  // (https://github.com/rapidsai/cudf/issues/16999).
+  // (https://github.com/nvidia/cudf/issues/16999).
   // The bug was fixed in libcudf's JSON reader by the same way like this.
   auto unified_buff = rmm::device_buffer(concatenated_buff->size() + 1, stream, default_mr);
   CUDF_CUDA_TRY(cudaMemcpyAsync(unified_buff.data(),

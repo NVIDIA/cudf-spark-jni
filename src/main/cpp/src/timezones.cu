@@ -534,7 +534,7 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
  * borrow decision in the same frame as Apache. It can therefore both add a missing borrow and undo
  * one that cuDF applied before the sign changed.
  *
- * For example, the Asia/Shanghai reproducer from rapidsai/cudf#21993 has:
+ * For example, the Asia/Shanghai reproducer from nvidia/cudf#21993 has:
  *
  * @code{.pseudo}
  *   decoded_us     =  21'087'883'873  // cuDF used the UTC 2015 epoch; no borrow
