@@ -20,11 +20,10 @@
 
 #include <cudf/utilities/error.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
-
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <cuda/std/type_traits>
+#include <cuda/stream_ref>
 
 #include <concepts>
 #include <type_traits>
@@ -80,7 +79,7 @@ __device__ __forceinline__ void write_varint_value(T* dst, uint64_t val)
 
 void set_error_once_async(protobuf_error* error_flag,
                           protobuf_error error,
-                          rmm::cuda_stream_view stream);
+                          cuda::stream_ref stream);
 
 __device__ inline int get_wire_type_size(proto_wire_type wt, uint8_t const* cur, uint8_t const* end)
 {

@@ -34,11 +34,11 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/stream_ref>
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -274,7 +274,7 @@ void setup_source_buf_info(InputIter begin,
                            src_buf_info*& data_cur,
                            int& offset_stack_pos,
                            int& col_index,
-                           rmm::cuda_stream_view stream,
+                           cuda::stream_ref stream,
                            int parent_offset_index = -1,
                            int offset_depth        = 0);
 
@@ -296,7 +296,7 @@ struct buf_info_functor {
                   int& offset_stack_pos,
                   int parent_offset_index,
                   int offset_depth,
-                  rmm::cuda_stream_view)
+                  cuda::stream_ref)
   {
     if (include_nulls_for_column(col)) {
       add_null_buffer(
@@ -354,7 +354,7 @@ void buf_info_functor::operator()<cudf::string_view>(column_view const& col,
                                                      int& offset_stack_pos,
                                                      int parent_offset_index,
                                                      int offset_depth,
-                                                     rmm::cuda_stream_view)
+                                                     cuda::stream_ref)
 {
   if (include_nulls_for_column(col)) {
     add_null_buffer(
@@ -414,7 +414,7 @@ void buf_info_functor::operator()<cudf::list_view>(column_view const& col,
                                                    int& offset_stack_pos,
                                                    int parent_offset_index,
                                                    int offset_depth,
-                                                   rmm::cuda_stream_view stream)
+                                                   cuda::stream_ref stream)
 {
   lists_column_view lcv(col);
 
@@ -479,7 +479,7 @@ void buf_info_functor::operator()<cudf::struct_view>(column_view const& col,
                                                      int& offset_stack_pos,
                                                      int parent_offset_index,
                                                      int offset_depth,
-                                                     rmm::cuda_stream_view stream)
+                                                     cuda::stream_ref stream)
 {
   if (include_nulls_for_column(col)) {
     add_null_buffer(
@@ -530,7 +530,7 @@ void setup_source_buf_info(InputIter begin,
                            src_buf_info*& data_cur,
                            int& offset_stack_pos,
                            int& col_index,
-                           rmm::cuda_stream_view stream,
+                           cuda::stream_ref stream,
                            int parent_offset_index,
                            int offset_depth)
 {
@@ -708,7 +708,7 @@ void split_copy(src_buf_info const* src_bufs,
                 uint8_t* dst_buf,
                 size_t num_bufs,
                 dst_buf_info const* d_dst_buf_info,
-                rmm::cuda_stream_view stream)
+                cuda::stream_ref stream)
 {
   auto input_iter = spark_rapids_jni::util::make_counting_transform_iterator(
     0, cuda::proclaim_return_type<void*>([src_bufs, d_dst_buf_info] __device__(size_t i) {
@@ -797,7 +797,7 @@ shuffle_split_metadata compute_metadata(cudf::table_view const& input,
  */
 shuffle_split_output shuffle_split(cudf::table_view const& input,
                                    std::vector<size_type> const& splits,
-                                   rmm::cuda_stream_view stream,
+                                   cuda::stream_ref stream,
                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -890,7 +890,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
 
   // HtoD indices and source buf info to device
   CUDF_CUDA_TRY(cudaMemcpyAsync(
-    d_indices, h_indices, indices_size + src_buf_info_size, cudaMemcpyDefault, stream.value()));
+    d_indices, h_indices, indices_size + src_buf_info_size, cudaMemcpyDefault, stream.get()));
 
   // packed block of memory 2. partition buffer sizes, dst_buf_info structs and per-partition
   // has-validity buffer
@@ -1136,7 +1136,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
     });
 
   // allocate output buffer
-  stream.synchronize();  // for dst_buf_total_size from above
+  stream.sync();  // for dst_buf_total_size from above
   rmm::device_buffer dst_buf(dst_buf_total_size, stream, mr);
 
   // pack per-partition data. one thread per (flattened) column.
@@ -1147,13 +1147,13 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   pack_per_partition_metadata_kernel<<<grid.num_blocks,
                                        grid.num_threads_per_block,
                                        0,
-                                       stream.value()>>>(static_cast<uint8_t*>(dst_buf.data()),
-                                                         d_partition_offsets.data(),
-                                                         num_partitions,
-                                                         total_flattened_columns,
-                                                         d_indices,
-                                                         d_flattened_col_inst_has_validity,
-                                                         d_partition_sizes);
+                                       stream.get()>>>(static_cast<uint8_t*>(dst_buf.data()),
+                                                       d_partition_offsets.data(),
+                                                       num_partitions,
+                                                       total_flattened_columns,
+                                                       d_indices,
+                                                       d_flattened_col_inst_has_validity,
+                                                       d_partition_sizes);
 
   // perform the copy.
   split_copy(
@@ -1163,7 +1163,7 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   // function only uses the cpu).
   auto metadata = compute_metadata(input, total_flattened_columns);
 
-  stream.synchronize();
+  stream.sync();
   return {shuffle_split_result{std::make_unique<rmm::device_buffer>(std::move(dst_buf)),
                                std::move(d_partition_offsets)},
           std::move(metadata)};

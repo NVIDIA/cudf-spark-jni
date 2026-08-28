@@ -41,7 +41,7 @@ namespace detail {
 std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const& schema,
                                                            int schema_idx,
                                                            cudf::size_type num_rows,
-                                                           rmm::cuda_stream_view stream,
+                                                           cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr)
 {
   auto const& field = schema[schema_idx];
@@ -293,7 +293,7 @@ bool protobuf_schema::is_output(int schema_idx) const
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   protobuf_schema schema_context{context};
@@ -374,7 +374,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     track_permissive_null_rows ? num_rows : 0, stream, scratch_mr);
   if (track_permissive_null_rows) {
     CUDF_CUDA_TRY(
-      cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.value()));
+      cudaMemsetAsync(d_row_force_null.data(), 0, num_rows * sizeof(bool), stream.get()));
   }
   auto const decode_ctx        = protobuf_decode_runtime_context{&d_row_force_null, &d_error};
   auto const recursive_context = recursive_decode_context{schema_context, decode_ctx};
@@ -519,8 +519,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           auto const batch_input = batched_scalar_input_view<T>{
             input, d_locations.data(), num_scalar, d_descs.data(), nf, d_error.data()};
           extract_scalar_batched_kernel<T, DecodeFn>
-            <<<grid, threads, 0, stream.value()>>>(batch_input);
-          CUDF_CHECK_CUDA(stream.value());
+            <<<grid, threads, 0, stream.get()>>>(batch_input);
+          CUDF_CHECK_CUDA(stream.get());
         }
 
         for (int j = 0; j < nf; j++) {
@@ -721,11 +721,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   {
     using enum protobuf_error;
-    CUDF_CHECK_CUDA(stream.value());
+    CUDF_CHECK_CUDA(stream.get());
     protobuf_error h_error = NONE;
     CUDF_CUDA_TRY(
       cudf::detail::memcpy_async(&h_error, d_error.data(), sizeof(protobuf_error), stream));
-    stream.synchronize();
+    stream.sync();
     if (h_error == SCHEMA_TOO_LARGE || h_error == REPEATED_COUNT_MISMATCH) {
       throw cudf::logic_error(error_message(h_error));
     }
@@ -766,7 +766,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

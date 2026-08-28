@@ -70,7 +70,7 @@ std::unique_ptr<cudf::column> list_slice(
   cudf::size_type const start,
   cudf::size_type const length,
   bool check_start_length           = true,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -123,7 +123,7 @@ std::unique_ptr<cudf::column> list_slice(
   cudf::size_type const start,
   cudf::column_view const& length,
   bool check_start_length           = true,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -176,7 +176,7 @@ std::unique_ptr<cudf::column> list_slice(
   cudf::column_view const& start,
   cudf::size_type const length,
   bool check_start_length           = true,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -239,7 +239,7 @@ std::unique_ptr<cudf::column> list_slice(
   cudf::column_view const& start,
   cudf::column_view const& length,
   bool check_start_length           = true,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

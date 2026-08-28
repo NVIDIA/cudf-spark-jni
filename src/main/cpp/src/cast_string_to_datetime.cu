@@ -27,10 +27,10 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/functional>
+#include <cuda/stream_ref>
 #include <thrust/binary_search.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
@@ -875,7 +875,7 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
                                                cudf::table_view const& tz_info_table,
                                                bool is_spark_320,
                                                bool is_spark_400_or_later_or_db_14_3_or_later,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   auto const num_rows = input.size();
@@ -1078,7 +1078,7 @@ struct parse_string_to_date_fn {
  * Parse strings to dates.
  */
 std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& input,
-                                            rmm::cuda_stream_view stream,
+                                            cuda::stream_ref stream,
                                             rmm::device_async_resource_ref mr)
 {
   auto const num_rows = input.size();
@@ -1120,7 +1120,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
   cudf::column_view const& tz_name_to_index_map,
   cudf::table_view const& tz_info_table,
   spark_rapids_jni::spark_system const& spark_system,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   bool is_spark_320 = spark_system.is_vanilla_320();
@@ -1139,7 +1139,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
 }
 
 std::unique_ptr<cudf::column> parse_strings_to_date(cudf::strings_column_view const& input,
-                                                    rmm::cuda_stream_view stream,
+                                                    cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
   return parse_to_date(input, stream, mr);

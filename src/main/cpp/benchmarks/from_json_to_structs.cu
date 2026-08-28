@@ -80,7 +80,7 @@ void BM_from_json_to_structs(nvbench::state& state)
   auto const scales       = nested_schema_scales();
   auto const precisions   = nested_schema_precisions();
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output =
       spark_rapids_jni::from_json_to_structs(cudf::strings_column_view{input->view()},

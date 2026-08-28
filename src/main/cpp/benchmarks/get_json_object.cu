@@ -44,7 +44,7 @@ struct strings_to_host_fn {
   void operator()(std::vector<std::string>& host_data,
                   char const* chars,
                   cudf::column_view const& offsets,
-                  rmm::cuda_stream_view stream)
+                  cuda::stream_ref stream)
   {
     auto const h_offsets = cudf::detail::make_std_vector_sync(
       cudf::device_span<OffsetType const>(offsets.data<OffsetType>(), offsets.size()), stream);
@@ -62,7 +62,7 @@ struct strings_to_host_fn {
   void operator()(std::vector<std::string>&,
                   char const*,
                   cudf::column_view const&,
-                  rmm::cuda_stream_view)
+                  cuda::stream_ref)
   {
     CUDF_FAIL("invalid offsets type");
   }
@@ -147,7 +147,7 @@ void BM_get_json_object(nvbench::state& state)
     instructions.emplace_back(path_instruction_type::NAMED, "0", -1);
   }
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
     // Can also verify at https://jsonpath.com/.
     [[maybe_unused]] auto const output = spark_rapids_jni::get_json_object(

@@ -35,7 +35,7 @@ namespace spark_rapids_jni::protobuf::detail {
 
 field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_indices,
                                                protobuf_schema const& schema,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr,
                                                std::span<int const> output_indices)
 {
@@ -58,7 +58,7 @@ namespace {
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent_locations(
   field_location const* parent_locs,
   int num_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(num_rows >= 0, std::string{__func__} + ": row count must be non-negative");
@@ -106,7 +106,7 @@ inline std::unique_ptr<cudf::column> make_list_column_with_parent_nulls(
   std::unique_ptr<cudf::column> offsets_col,
   std::unique_ptr<cudf::column> child_col,
   field_location const* parent_locs,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto [list_mask, list_null_count] =
@@ -122,7 +122,7 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
   std::unique_ptr<cudf::column> offsets_col,
   std::unique_ptr<cudf::column> child_col,
   cudf::column_view const& binary_input,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const input_null_count = binary_input.null_count();
@@ -139,7 +139,7 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
 
 std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
                                                cudf::size_type num_rows,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   if (num_rows == 0) { return cudf::make_empty_column(dtype); }
@@ -181,7 +181,7 @@ std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
 }
 
 std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   switch (dtype.id()) {
@@ -193,7 +193,7 @@ std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
                                        rmm::device_buffer{},
                                        0);
       CUDF_CUDA_TRY(cudaMemsetAsync(
-        offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.value()));
+        offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
       auto child_col = std::make_unique<cudf::column>(
         cudf::data_type{cudf::type_id::UINT8}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
       return cudf::make_lists_column(
@@ -211,7 +211,7 @@ std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
 std::unique_ptr<cudf::column> make_null_list_column_with_child(
   std::unique_ptr<cudf::column> child_col,
   cudf::size_type num_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
@@ -223,7 +223,7 @@ std::unique_ptr<cudf::column> make_null_list_column_with_child(
 }
 
 std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::column> element_col,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
@@ -231,8 +231,8 @@ std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::colum
                                                     rmm::device_buffer(sizeof(int32_t), stream, mr),
                                                     rmm::device_buffer{},
                                                     0);
-  CUDF_CUDA_TRY(cudaMemsetAsync(
-    offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.value()));
+  CUDF_CUDA_TRY(
+    cudaMemsetAsync(offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
   return cudf::make_lists_column(
     0, std::move(offsets_col), std::move(element_col), 0, rmm::device_buffer{});
 }
@@ -257,7 +257,7 @@ struct enum_string_lookup_tables {
 enum_string_lookup_tables make_enum_string_lookup_tables(
   cudf::detail::host_vector<int32_t> const& valid_enums,
   std::vector<cudf::detail::host_vector<uint8_t>> const& enum_name_bytes,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto d_valid_enums    = cudf::detail::make_device_uvector_async(valid_enums, stream, scratch_mr);
@@ -300,7 +300,7 @@ std::unique_ptr<cudf::column> build_enum_string_values_column(
   rmm::device_uvector<bool>& valid,
   enum_string_lookup_tables const& lookup,
   int num_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const scratch_mr = cudf::get_current_device_resource_ref();
@@ -325,7 +325,7 @@ std::unique_ptr<cudf::column> build_enum_string_values_column(
 std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
                                                        rmm::device_uvector<bool>& valid,
                                                        protobuf_field_decode_request request,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   auto const field = request.context.schema.field(request.schema_idx);
@@ -342,7 +342,7 @@ std::unique_ptr<cudf::column> build_repeated_enum_string_column(
   protobuf_input_view input,
   recursive_decode_context context,
   repeated_field_work work,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   validate_nonempty_repeated_field_work(work, input.num_rows);
@@ -383,7 +383,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view con
                                                            protobuf_input_view input,
                                                            repeated_field_work work,
                                                            bool is_bytes,
-                                                           rmm::cuda_stream_view stream,
+                                                           cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr)
 {
   validate_nonempty_repeated_field_work(work, input.num_rows);
@@ -397,8 +397,8 @@ std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view con
   repeated_location_provider loc_provider{
     input.row_offsets, input.base_offset, work.occurrences->data()};
   extract_lengths_kernel<repeated_location_provider>
-    <<<blocks, threads, 0, stream.value()>>>(loc_provider, total_count, str_lengths.data());
-  CUDF_CHECK_CUDA(stream.value());
+    <<<blocks, threads, 0, stream.get()>>>(loc_provider, total_count, str_lengths.data());
+  CUDF_CHECK_CUDA(stream.get());
 
   auto [str_offsets_col, total_chars] = cudf::strings::detail::make_offsets_child_column(
     str_lengths.begin(), str_lengths.end(), stream, mr);
@@ -434,7 +434,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view con
 
     size_t temp_storage_bytes = 0;
     CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
-      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, total_count, stream.value()));
+      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, total_count, stream.get()));
     rmm::device_buffer temp_storage(temp_storage_bytes, stream, scratch_mr);
     CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(temp_storage.data(),
                                              temp_storage_bytes,
@@ -442,7 +442,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(cudf::column_view con
                                              dst_iter,
                                              size_iter,
                                              total_count,
-                                             stream.value()));
+                                             stream.get()));
   }
 
   std::unique_ptr<cudf::column> child_col;
@@ -481,7 +481,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   std::vector<int> const& child_field_indices,
   recursive_decode_context context,
   int depth,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const& schema = context.schema;
@@ -621,7 +621,7 @@ std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_vi
                                                                nested_parent_view parent,
                                                                recursive_decode_context context,
                                                                repeated_field_work work,
-                                                               rmm::cuda_stream_view stream,
+                                                               cuda::stream_ref stream,
                                                                rmm::device_async_resource_ref mr)
 {
   auto const& schema = context.schema;

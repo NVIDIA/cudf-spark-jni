@@ -37,7 +37,7 @@ namespace spark_rapids_jni {
  */
 std::unique_ptr<cudf::column> years_from_epoch(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -52,7 +52,7 @@ std::unique_ptr<cudf::column> years_from_epoch(
  */
 std::unique_ptr<cudf::column> months_from_epoch(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -67,7 +67,7 @@ std::unique_ptr<cudf::column> months_from_epoch(
  */
 std::unique_ptr<cudf::column> days_from_epoch(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -82,7 +82,7 @@ std::unique_ptr<cudf::column> days_from_epoch(
  */
 std::unique_ptr<cudf::column> hours_from_epoch(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

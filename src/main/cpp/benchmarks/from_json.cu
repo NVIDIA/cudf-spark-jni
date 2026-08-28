@@ -361,7 +361,7 @@ void BM_from_json_to_raw_map(nvbench::state& state)
 
   auto const json_strings = generate_input(size_bytes, make_all_string_column_types(num_keys));
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -379,7 +379,7 @@ void BM_from_json_to_raw_map_value_width(nvbench::state& state)
   auto const json_strings = generate_input(
     size_bytes, make_all_string_column_types(num_keys), {.value_width = value_width});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -397,7 +397,7 @@ void BM_from_json_to_raw_map_null_density(nvbench::state& state)
   auto const json_strings =
     generate_input(size_bytes, make_all_string_column_types(num_keys), {.null_pct = null_pct});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -413,7 +413,7 @@ void BM_from_json_to_raw_map_micro_size(nvbench::state& state)
 
   auto const json_strings = generate_input(size_bytes, make_all_string_column_types(num_keys));
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -438,7 +438,7 @@ void BM_from_json_to_raw_map_row_shape(nvbench::state& state)
   auto const json_strings =
     generate_input(/*size_bytes=*/0, make_all_string_column_types(num_keys), options);
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -456,7 +456,7 @@ void BM_from_json_to_raw_map_key_name_len(nvbench::state& state)
   auto const json_strings = generate_input(
     size_bytes, make_all_string_column_types(num_keys), {.key_name_len = key_name_len});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map(
@@ -476,7 +476,7 @@ void BM_from_json_to_raw_map_array_values(nvbench::state& state)
 
   auto const json_strings = generate_map_of_array_input(num_rows, keys_per_row, array_len);
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map_array_values(
@@ -500,7 +500,7 @@ void BM_from_json_to_raw_map_array_values_null_density(nvbench::state& state)
     {.element_null_pct = static_cast<double>(state.get_int64("element_null_pct")) / 100.0,
      .value_null_pct   = static_cast<double>(state.get_int64("value_null_pct")) / 100.0});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map_array_values(
@@ -517,7 +517,7 @@ void BM_from_json_to_raw_map_array_values_keys_per_row(nvbench::state& state)
 
   auto const json_strings = generate_map_of_array_input(num_rows, keys_per_row, array_len);
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map_array_values(
@@ -538,7 +538,7 @@ void BM_from_json_to_raw_map_array_values_key_name_len(nvbench::state& state)
     array_len,
     {.key_name_len = static_cast<int>(state.get_int64("key_name_len"))});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map_array_values(
@@ -562,7 +562,7 @@ void BM_from_json_to_raw_map_array_values_type_mismatch(nvbench::state& state)
     array_len,
     {.mismatch_pct = static_cast<double>(state.get_int64("mismatch_pct")) / 100.0});
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_char_bytes(json_strings->view()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::from_json_to_raw_map_array_values(

@@ -610,7 +610,7 @@ struct row_valid_fn {
  */
 void validate_ansi_column(column_view const& col,
                           strings_column_view const& source_col,
-                          rmm::cuda_stream_view stream)
+                          cuda::stream_ref stream)
 {
   auto const num_nulls      = col.null_count();
   auto const incoming_nulls = source_col.null_count();
@@ -627,8 +627,8 @@ void validate_ansi_column(column_view const& col,
                     &source_col.offsets().data<size_type>()[*first_error],
                     sizeof(size_type) * 2,
                     cudaMemcpyDefault,
-                    stream.value());
-    stream.synchronize();
+                    stream.get());
+    stream.sync();
 
     std::string dest;
     dest.resize(string_bounds[1] - string_bounds[0]);
@@ -637,8 +637,8 @@ void validate_ansi_column(column_view const& col,
                     &source_col.chars_begin(stream)[string_bounds[0]],
                     string_bounds[1] - string_bounds[0],
                     cudaMemcpyDefault,
-                    stream.value());
-    stream.synchronize();
+                    stream.get());
+    stream.sync();
 
     throw cast_error(*first_error, dest);
   }
@@ -659,7 +659,7 @@ struct string_to_integer_impl {
   std::unique_ptr<column> operator()(strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
-                                     rmm::cuda_stream_view stream,
+                                     cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
     if (string_col.size() == 0) {
@@ -674,7 +674,7 @@ struct string_to_integer_impl {
     dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
-    detail::string_to_integer_kernel<<<blocks, threads, 0, stream.value()>>>(
+    detail::string_to_integer_kernel<<<blocks, threads, 0, stream.get()>>>(
       data.data(),
       null_mask.data(),
       string_col.chars_begin(stream),
@@ -704,7 +704,7 @@ struct string_to_integer_impl {
   std::unique_ptr<column> operator()(strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
-                                     rmm::cuda_stream_view stream,
+                                     cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
     CUDF_FAIL("Invalid integer column type");
@@ -731,7 +731,7 @@ struct string_to_decimal_impl {
                                      strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
-                                     rmm::cuda_stream_view stream,
+                                     cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
     using Type = device_storage_type_t<T>;
@@ -743,7 +743,7 @@ struct string_to_decimal_impl {
     dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
-    detail::string_to_decimal_kernel<<<blocks, threads, 0, stream.value()>>>(
+    detail::string_to_decimal_kernel<<<blocks, threads, 0, stream.get()>>>(
       data.data(),
       null_mask.data(),
       string_col.chars_begin(stream),
@@ -773,7 +773,7 @@ struct string_to_decimal_impl {
                                      strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
-                                     rmm::cuda_stream_view stream,
+                                     cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
     CUDF_FAIL("Invalid decimal column type");
@@ -798,7 +798,7 @@ std::unique_ptr<column> string_to_integer(data_type dtype,
                                           strings_column_view const& string_col,
                                           bool ansi_mode,
                                           bool strip,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   return type_dispatcher(
@@ -823,7 +823,7 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
                                           strings_column_view const& string_col,
                                           bool ansi_mode,
                                           bool strip,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   data_type dtype = [precision, scale]() {

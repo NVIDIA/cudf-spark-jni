@@ -390,38 +390,38 @@ void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   field_scan_view fields,
                                   protobuf_error* error_flag,
                                   bool* row_has_invalid_data,
-                                  rmm::cuda_stream_view stream);
+                                  cuda::stream_ref stream);
 
 void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
                                        field_occurrence_scan_view fields,
                                        protobuf_error* error_flag,
-                                       rmm::cuda_stream_view stream);
+                                       cuda::stream_ref stream);
 
 void launch_extract_strided_locations(field_location const* nested_locations,
                                       int field_idx,
                                       int num_fields,
                                       field_location* parent_locs,
                                       int num_rows,
-                                      rmm::cuda_stream_view stream);
+                                      cuda::stream_ref stream);
 
 void launch_scan_nested_message_fields(protobuf_input_view input,
                                        nested_parent_view parent,
                                        field_scan_view fields,
                                        protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
-                                       rmm::cuda_stream_view stream);
+                                       cuda::stream_ref stream);
 
 void launch_scan_all_field_occurrences_in_nested(protobuf_input_view input,
                                                  nested_parent_view parent,
                                                  field_occurrence_scan_view fields,
                                                  protobuf_error* error_flag,
-                                                 rmm::cuda_stream_view stream);
+                                                 cuda::stream_ref stream);
 
 void launch_compute_grandchild_parent_locations(nested_location_provider loc_provider,
                                                 field_location* gc_parent_locs,
                                                 int num_rows,
                                                 protobuf_error* error_flag,
-                                                rmm::cuda_stream_view stream);
+                                                cuda::stream_ref stream);
 
 // ============================================================================
 // Host-side template helpers that launch CUDA kernels
@@ -432,7 +432,7 @@ template <typename T>
 inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   rmm::device_uvector<T> const& valid,
   cudf::size_type num_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(num_rows >= 0, "num_rows must be non-negative");
@@ -456,14 +456,14 @@ inline void extract_scalar_into_buffers(uint8_t const* message_data,
                                         proto_encoding encoding,
                                         scalar_decode_options<T> options,
                                         scalar_value_output<T> output,
-                                        rmm::cuda_stream_view stream)
+                                        cuda::stream_ref stream)
 {
   auto constexpr threads = THREADS_PER_BLOCK;
   auto const blocks      = static_cast<int>((num_rows + threads - 1u) / threads);
   dispatch_scalar_decoder<T>(get_scalar_decode_kind<T>(encoding), [&]<auto DecodeFn>() {
-    extract_scalar_kernel<T, DecodeFn><<<blocks, threads, 0, stream.value()>>>(
-      message_data, loc_provider, num_rows, output, options);
-    CUDF_CHECK_CUDA(stream.value());
+    extract_scalar_kernel<T, DecodeFn>
+      <<<blocks, threads, 0, stream.get()>>>(message_data, loc_provider, num_rows, output, options);
+    CUDF_CHECK_CUDA(stream.get());
   });
 }
 
@@ -488,7 +488,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
   LocationProvider const& loc_provider,
   int num_rows,
   protobuf_decode_runtime_context decode_ctx,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   if (num_rows == 0) { return cudf::make_empty_column(field.output_type); }
@@ -517,7 +517,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   ValidityFn validity_fn,
   bool has_default,
   cudf::detail::host_vector<uint8_t> const& default_bytes,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   int32_t def_len       = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
@@ -530,9 +530,9 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   rmm::device_uvector<int32_t> lengths(num_rows, stream, scratch_mr);
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
-  extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.value()>>>(
+  extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.get()>>>(
     loc_provider, num_rows, lengths.data(), has_default, def_len);
-  CUDF_CHECK_CUDA(stream.value());
+  CUDF_CHECK_CUDA(stream.get());
 
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
@@ -573,7 +573,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
 
     size_t temp_storage_bytes = 0;
     CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
-      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.value()));
+      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.get()));
     rmm::device_buffer temp_storage(temp_storage_bytes, stream, scratch_mr);
     CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(temp_storage.data(),
                                              temp_storage_bytes,
@@ -581,7 +581,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
                                              dst_iter,
                                              size_iter,
                                              num_rows,
-                                             stream.value()));
+                                             stream.get()));
   }
 
   if (num_rows == 0) {
@@ -616,7 +616,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
 template <typename LocationProvider>
 inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_request request,
                                                           LocationProvider const& loc_provider,
-                                                          rmm::cuda_stream_view stream,
+                                                          cuda::stream_ref stream,
                                                           rmm::device_async_resource_ref mr)
 {
   auto const field           = request.context.schema.field(request.schema_idx);
@@ -676,7 +676,7 @@ inline std::unique_ptr<cudf::column> build_protobuf_field_values_column(
   LocationProvider const& loc_provider,
   ValidityFn validity_fn,
   TopRowIndexProvider get_top_row_indices,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const message_data = request.message_data;
@@ -755,7 +755,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   protobuf_field_meta_view field,
   repeated_field_work work,
   rmm::device_uvector<protobuf_error>& d_error,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   validate_nonempty_repeated_field_work(work, input.num_rows);
@@ -788,22 +788,22 @@ void launch_scan_all_fields(cudf::column_device_view const& d_in,
                             field_scan_view fields,
                             protobuf_error* error_flag,
                             bool* row_has_invalid_data,
-                            rmm::cuda_stream_view stream);
+                            cuda::stream_ref stream);
 
 void launch_validate_enum_values(enum_value_device_view input,
                                  bool* row_has_invalid_enum,
                                  enum_domain_device_view domain,
-                                 rmm::cuda_stream_view stream);
+                                 cuda::stream_ref stream);
 
 void launch_compute_enum_string_lengths(enum_value_device_view input,
                                         enum_string_lookup_device_view lookup,
                                         int32_t* lengths,
-                                        rmm::cuda_stream_view stream);
+                                        cuda::stream_ref stream);
 
 void launch_copy_enum_string_chars(enum_value_device_view input,
                                    enum_string_lookup_device_view lookup,
                                    int32_t const* output_offsets,
                                    char* out_chars,
-                                   rmm::cuda_stream_view stream);
+                                   cuda::stream_ref stream);
 
 }  // namespace spark_rapids_jni::protobuf::detail

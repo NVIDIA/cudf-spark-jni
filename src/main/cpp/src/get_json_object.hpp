@@ -44,7 +44,7 @@ enum class path_instruction_type : int8_t { WILDCARD, INDEX, NAMED };
 std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
   std::vector<std::tuple<path_instruction_type, std::string, int32_t>> const& instructions,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -66,7 +66,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
     json_paths,
   int64_t memory_budget_bytes,
   int32_t parallel_override,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

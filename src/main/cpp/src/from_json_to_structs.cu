@@ -35,7 +35,6 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -46,6 +45,7 @@
 #include <cuda/std/functional>
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
+#include <cuda/stream_ref>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
@@ -160,7 +160,7 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> generate_stru
 
 std::unique_ptr<cudf::column> make_empty_column_from_schema(
   schema_element_with_precision const& schema,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   if (schema.type.id() == cudf::type_id::LIST) {
@@ -191,7 +191,7 @@ std::unique_ptr<cudf::column> make_empty_column_from_schema(
 
 void nullify_rows(cudf::column& input,
                   std::span<cudf::size_type const> row_indices,
-                  rmm::cuda_stream_view stream,
+                  cuda::stream_ref stream,
                   rmm::device_async_resource_ref mr)
 {
   if (row_indices.empty()) { return; }
@@ -266,7 +266,7 @@ void nullify_rows(cudf::column& input,
   cudf::size_type null_count,
   rmm::device_buffer&& null_mask,
   bool did_nullify_schema_mismatch_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   std::vector<std::unique_ptr<cudf::column>> children;
@@ -292,7 +292,7 @@ void nullify_rows(cudf::column& input,
   cudf::size_type null_count,
   rmm::device_buffer&& null_mask,
   bool did_nullify_schema_mismatch_rows,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   if (did_nullify_schema_mismatch_rows && null_count > 0) {
@@ -312,7 +312,7 @@ void nullify_rows(cudf::column& input,
 using string_index_pair = cuda::std::pair<char const*, cudf::size_type>;
 
 std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& input,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -367,7 +367,7 @@ std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& 
 
 std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& input,
                                                        cudf::data_type output_type,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -435,7 +435,7 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
 }
 
 std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
-  cudf::column_view const& input, rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr)
+  cudf::column_view const& input, cuda::stream_ref stream, rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
 
@@ -521,7 +521,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
 std::unique_ptr<cudf::column> cast_strings_to_floats(cudf::column_view const& input,
                                                      cudf::data_type output_type,
                                                      bool allow_nonnumeric_numbers,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -548,7 +548,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                                        cudf::data_type output_type,
                                                        int precision,
                                                        bool is_us_locale,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -597,7 +597,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                        in_offsets + 1,
                                        plus_op,
                                        count_type{0, 0},
-                                       stream.value());
+                                       stream.get());
     auto d_temp_storage = rmm::device_buffer{temp_storage_bytes, stream};
     cub::DeviceSegmentedReduce::Reduce(d_temp_storage.data(),
                                        temp_storage_bytes,
@@ -608,7 +608,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                        in_offsets + 1,
                                        plus_op,
                                        count_type{0, 0},
-                                       stream.value());
+                                       stream.get());
   }
 
   auto const out_size_it = spark_rapids_jni::util::make_counting_transform_iterator(
@@ -691,7 +691,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
   cudf::strings_column_view const& input,
   bool nullify_if_not_quoted,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -776,7 +776,7 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
                                                 bool allow_nonnumeric_numbers,
                                                 bool is_us_locale,
                                                 bool did_nullify_schema_mismatch_rows,
-                                                rmm::cuda_stream_view stream,
+                                                cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -993,7 +993,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                                    bool allow_nonnumeric_numbers,
                                                    bool allow_unquoted_control,
                                                    bool is_us_locale,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   auto const [concat_input, delimiter, should_be_nullified] =
@@ -1093,7 +1093,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                                    bool allow_nonnumeric_numbers,
                                                    bool allow_unquoted_control,
                                                    bool is_us_locale,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1120,7 +1120,7 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
                                                    std::vector<int> const& precisions,
                                                    bool allow_nonnumeric_numbers,
                                                    bool is_us_locale,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1146,7 +1146,7 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
 
 std::unique_ptr<cudf::column> remove_quotes(cudf::strings_column_view const& input,
                                             bool nullify_if_not_quoted,
-                                            rmm::cuda_stream_view stream,
+                                            cuda::stream_ref stream,
                                             rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

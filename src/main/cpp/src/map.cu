@@ -28,7 +28,7 @@ namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> sort_map_column(cudf::column_view const& input,
                                               cudf::order sort_order,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,

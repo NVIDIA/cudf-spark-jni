@@ -50,7 +50,7 @@ namespace {
 std::unique_ptr<column> generate_labels(
   lists_column_view const& input,
   size_type n_elements,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref())
 {
   auto labels = make_numeric_column(
@@ -112,8 +112,7 @@ std::unique_ptr<column> generate_labels(
 std::unique_ptr<column> indices_of(
   lists_column_view const& search_keys,    // Column containing lists of keys to search for
   lists_column_view const& search_values,  // Column containing lists of values to search through
-  rmm::cuda_stream_view stream =
-    cudf::get_default_stream(),  // CUDA stream for asynchronous execution
+  cuda::stream_ref stream = cudf::get_default_stream(),  // CUDA stream for asynchronous execution
   rmm::device_async_resource_ref mr =
     cudf::get_current_device_resource_ref())  // Memory resource for allocations
 {
@@ -310,7 +309,7 @@ std::unique_ptr<column> indices_of(
 std::unique_ptr<cudf::column> map_zip(
   cudf::lists_column_view const& col1,  // First map column containing key-value pairs
   cudf::lists_column_view const& col2,  // Second map column containing key-value pairs
-  rmm::cuda_stream_view stream,         // CUDA stream for asynchronous execution
+  cuda::stream_ref stream,              // CUDA stream for asynchronous execution
   rmm::device_async_resource_ref mr)    // Memory resource for allocations
 {
   CUDF_EXPECTS(col1.child().type().id() == cudf::type_id::STRUCT,

@@ -19,7 +19,6 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
 
 #include <cuda/stream_ref>
@@ -42,7 +41,7 @@ constexpr int MAX_STACK_DEPTH           = 8;
 std::unique_ptr<cudf::column> murmur_hash3_32(
   cudf::table_view const& input,
   uint32_t seed                     = 0,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -58,7 +57,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32(
 std::unique_ptr<cudf::column> xxhash64(
   cudf::table_view const& input,
   int64_t seed                      = DEFAULT_XXHASH64_SEED,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -72,7 +71,7 @@ std::unique_ptr<cudf::column> xxhash64(
  */
 std::unique_ptr<cudf::column> hive_hash(
   cudf::table_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**

@@ -60,7 +60,7 @@ namespace spark_rapids_jni {
 [[maybe_unused]] std::unique_ptr<cudf::column> map_zip(
   cudf::lists_column_view const& col1,
   cudf::lists_column_view const& col2,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni
