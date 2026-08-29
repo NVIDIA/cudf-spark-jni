@@ -16,11 +16,14 @@
 
 package com.nvidia.spark.rapids.jni;
 
+import ai.rapids.cudf.BinaryOp;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.CudfException;
+import ai.rapids.cudf.DType;
 import ai.rapids.cudf.NativeDepsLoader;
+import ai.rapids.cudf.Scalar;
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
@@ -108,7 +111,38 @@ public class StringUtils {
     return new ColumnVector(reverseStrings(input.getNativeView()));
   }
 
+  /**
+   * Match each input string against the LIKE pattern at the corresponding row.
+   *
+   * <p>The escape character applies to every pattern. A null input or pattern produces a null
+   * result. Invalid escape sequences in non-null patterns throw {@link ExceptionWithRowIndex} for
+   * the first row where both the input and pattern are non-null.</p>
+   *
+   * @param input strings to match
+   * @param patterns row-aligned LIKE patterns
+   * @param escapeChar scalar string containing the escape character
+   * @return a BOOL8 column containing the row-aligned match results
+   */
+  public static ColumnVector like(ColumnView input, ColumnView patterns, Scalar escapeChar) {
+    assert input.getType().equals(DType.STRING) : "input column must be a String";
+    assert patterns.getType().equals(DType.STRING) : "patterns column must be a String";
+    assert input.getRowCount() == patterns.getRowCount()
+        : "input and patterns must have the same number of rows";
+    assert escapeChar != null : "escapeChar must not be null";
+    assert escapeChar.getType().equals(DType.STRING) : "escapeChar must be a string scalar";
+
+    try (Scalar empty = Scalar.fromString("");
+         ColumnVector normalizedPatterns = patterns.replaceNulls(empty);
+         ColumnVector result = new ColumnVector(like(
+             input.getNativeView(), normalizedPatterns.getNativeView(), escapeChar.getScalarHandle()))) {
+      return result.mergeAndSetValidity(BinaryOp.BITWISE_AND, input, patterns);
+    }
+  }
+
   private static native long randomUUIDs(int rowCount, long seed);
 
   private static native long reverseStrings(long inputHandle) throws CudfException;
+
+  private static native long like(long inputHandle, long patternsHandle, long escapeCharHandle)
+      throws CudfException, ExceptionWithRowIndex;
 }
