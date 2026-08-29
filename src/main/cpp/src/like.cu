@@ -41,10 +41,10 @@ struct invalid_like_pattern_fn {
   {
     if (input.is_null(row)) { return false; }
 
-    auto const pattern = patterns.element<cudf::string_view>(row);
+    auto const pattern           = patterns.element<cudf::string_view>(row);
     auto const escape_code_point = *escape.begin();
-    auto it = pattern.begin();
-    auto const end = pattern.end();
+    auto it                      = pattern.begin();
+    auto const end               = pattern.end();
     while (it != end) {
       if (*it == escape_code_point) {
         ++it;
@@ -65,8 +65,7 @@ void validate_patterns(cudf::strings_column_view const& input,
 {
   if (input.is_empty()) { return; }
 
-  CUDF_EXPECTS(input.size() == patterns.size(),
-               "Number of patterns must match the input size");
+  CUDF_EXPECTS(input.size() == patterns.size(), "Number of patterns must match the input size");
   CUDF_EXPECTS(!patterns.has_nulls(), "Parameter patterns must not contain nulls");
   CUDF_EXPECTS(escape_character.is_valid(stream), "Escape character must be valid");
   auto const escape = escape_character.value(stream);
@@ -77,12 +76,12 @@ void validate_patterns(cudf::strings_column_view const& input,
   auto const d_patterns = cudf::column_device_view::create(
     patterns.parent(), stream, cudf::get_current_device_resource_ref());
   auto const begin = thrust::make_counting_iterator<cudf::size_type>(0);
-  auto const end = begin + input.size();
-  auto const invalid = thrust::find_if(
-    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-    begin,
-    end,
-    invalid_like_pattern_fn{*d_input, *d_patterns, escape});
+  auto const end   = begin + input.size();
+  auto const invalid =
+    thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                    begin,
+                    end,
+                    invalid_like_pattern_fn{*d_input, *d_patterns, escape});
   if (invalid != end) { throw spark_rapids_jni::exception_with_row_index(*invalid); }
 }
 

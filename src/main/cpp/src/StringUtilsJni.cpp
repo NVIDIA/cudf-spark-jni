@@ -60,8 +60,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_StringUtils_like(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = std::bit_cast<cudf::column_view const*>(input_handle);
-    auto const patterns = std::bit_cast<cudf::column_view const*>(patterns_handle);
+    auto const input       = std::bit_cast<cudf::column_view const*>(input_handle);
+    auto const patterns    = std::bit_cast<cudf::column_view const*>(patterns_handle);
     auto const escape_char = std::bit_cast<cudf::string_scalar const*>(escape_char_handle);
     return cudf::jni::release_as_jlong(spark_rapids_jni::like(
       cudf::strings_column_view{*input}, cudf::strings_column_view{*patterns}, *escape_char));
