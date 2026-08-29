@@ -23,7 +23,7 @@
   <artifactId>spark-rapids-jni</artifactId>
   <version>26.10.0-SNAPSHOT</version>
   <packaging>jar</packaging>
-  <name>cuDF plugin JNI for Apache Spark</name>
+  <name>NVIDIA cuDF plugin JNI for Apache Spark</name>
   <description>
     Native code and CUDA kernels specific to the NVIDIA cuDF plugin for Apache Spark
   </description>

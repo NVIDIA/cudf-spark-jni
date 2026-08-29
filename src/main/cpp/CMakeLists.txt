@@ -155,10 +155,10 @@ else()
 endif()
 
 # cuCollections
-# As of rapidsai/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
+# As of nvidia/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
 # wraps its `cuco::cuco` link with `$<BUILD_LOCAL_INTERFACE:...>`, so the cuco headers are no
 # longer transitively exposed to downstream consumers via `find_package(cudf)`. Several
-# spark-rapids-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
+# cudf-spark-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
 # `<cuco/hash_functions.cuh>`, so we need to fetch cuco ourselves.
 include(${rapids-cmake-dir}/cpm/cuco.cmake)
 rapids_cpm_cuco()

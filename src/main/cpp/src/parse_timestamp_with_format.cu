@@ -161,7 +161,7 @@ struct format_token {
 //   - "Packed" runs (a digit field abutting another digit field without a literal between them,
 //     e.g. yyyyMMdd) get exact width — otherwise the boundary is ambiguous.
 //   - Otherwise CORRECTED uses exact width and LEGACY uses [1, 2].
-//   - CORRECTED `yyyy/MM/dd` keeps the existing spark-rapids compatibility contract and accepts
+//   - CORRECTED `yyyy/MM/dd` keeps the existing cudf-spark compatibility contract and accepts
 //     1-2 digit month/day fields. This intentionally DEVIATES from Spark CPU, whose STRICT
 //     DateTimeFormatter rejects single-digit fields ("2024/5/6" is null on CPU); the GPU
 //     over-accepts. Pinned by parseTimestampWithFormat_correctedSlashDateDeviation.
