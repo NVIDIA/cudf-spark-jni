@@ -32,7 +32,7 @@ repos:
           cudf_ver=$(grep -A1 "repo: $clang_format_pattern" "thirdparty/cudf/.pre-commit-config.yaml" | grep "rev:" | tail -1 | sed "s/.*rev: *//");
           if [ -z "$our_ver" ] || [ -z "$cudf_ver" ] || [ "$our_ver" != "$cudf_ver" ]; then
             echo "ERROR: clang-format version mismatch or failed to extract version!";
-            echo "  cudf-spark-jni: ${our_ver:-(empty)}";
+            echo "  spark-rapids-jni: ${our_ver:-(empty)}";
             echo "  cudf:             ${cudf_ver:-(empty)}";
             echo "Please update .pre-commit-config.yaml to use the same rev as cudf";
             exit 1;
