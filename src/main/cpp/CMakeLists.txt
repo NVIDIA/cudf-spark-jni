@@ -277,6 +277,7 @@ add_library(
   src/json_utils.cu
   src/join_primitives.cu
   src/list_slice.cu
+  src/like.cu
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
