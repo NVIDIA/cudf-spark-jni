@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,9 @@
 #include <cudf/strings/strings_column_view.hpp>
 
 //
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+
+#include <cuda/stream>
 
 //
 #include <sstream>
@@ -61,7 +62,7 @@ template <typename T, typename U = int>
 void print_debug(rmm::device_uvector<T> const& input,
                  std::string const& name,
                  std::string const& separator,
-                 rmm::cuda_stream_view stream)
+                 cuda::stream_ref stream)
 {
   auto const h_input = cudf::detail::make_host_vector_sync(
     cudf::device_span<T const>{input.data(), input.size()}, stream);
@@ -78,7 +79,7 @@ void print_debug(rmm::device_uvector<T> const& input,
 template <typename T, typename U = int>
 void print_map_debug(rmm::device_uvector<T> const& input,
                      std::string const& name,
-                     rmm::cuda_stream_view stream)
+                     cuda::stream_ref stream)
 {
   auto const h_input = cudf::detail::make_host_vector_sync(
     cudf::device_span<T const>{input.data(), input.size()}, stream);
@@ -94,7 +95,7 @@ void print_map_debug(rmm::device_uvector<T> const& input,
 template <typename T, typename U = int>
 void print_pair_debug(rmm::device_uvector<T> const& input,
                       std::string const& name,
-                      rmm::cuda_stream_view stream)
+                      cuda::stream_ref stream)
 {
   auto const h_input = cudf::detail::make_host_vector_sync(
     cudf::device_span<T const>{input.data(), input.size()}, stream);
@@ -111,7 +112,7 @@ void print_pair_debug(rmm::device_uvector<T> const& input,
 void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
                             std::unique_ptr<cudf::column> const& extracted_keys,
                             std::unique_ptr<cudf::column> const& extracted_values,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   if (extracted_keys->size() == 0) {
     std::cerr << "Extract keys-values are all empty.\n" << std::endl;

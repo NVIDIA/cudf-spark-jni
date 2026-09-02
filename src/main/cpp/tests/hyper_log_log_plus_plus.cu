@@ -27,8 +27,9 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+
+#include <cuda/stream>
 
 #include <hyper_log_log_plus_plus.hpp>
 #include <hyper_log_log_plus_plus_host_udf.hpp>
@@ -86,7 +87,7 @@ std::vector<int64_t const*> get_column_ptrs_from_struct_scalars(
 std::unique_ptr<cudf::column> make_struct_column_from_scalars(
   std::vector<std::unique_ptr<cudf::scalar>>& scalars,
   int num_longs_in_scalar,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   // asserts
@@ -123,7 +124,7 @@ std::unique_ptr<cudf::column> make_struct_column_from_scalars(
   auto d_output = cudf::detail::make_device_uvector(host_results_pointers, stream, mr);
 
   // concatenate struct scalars into a struct column
-  concat_struct_scalars_to_struct_column_kernel<<<1, 1, 0, stream.value()>>>(
+  concat_struct_scalars_to_struct_column_kernel<<<1, 1, 0, stream.get()>>>(
     d_col_ptrs, scalars.size(), num_longs_in_scalar, d_output);
 
   // create struct column
@@ -139,7 +140,7 @@ std::unique_ptr<cudf::column> make_struct_column_from_scalars(
  */
 std::unique_ptr<cudf::column> make_struct_column_from_scalar(std::unique_ptr<cudf::scalar>& scalar,
                                                              int num_longs_in_scalar,
-                                                             rmm::cuda_stream_view stream,
+                                                             cuda::stream_ref stream,
                                                              rmm::device_async_resource_ref mr)
 {
   std::vector<std::unique_ptr<cudf::scalar>> scalars;

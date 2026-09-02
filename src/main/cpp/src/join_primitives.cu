@@ -29,11 +29,12 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <cuda_runtime_api.h>
 #include <thrust/copy.h>
 #include <thrust/count.h>
@@ -95,7 +96,7 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
                            cudf::table_device_view const& right_table,
                            cudf::ast::detail::expression_device_view device_expression_data,
                            cudf::size_type num_intermediates,
-                           rmm::cuda_stream_view stream,
+                           cuda::stream_ref stream,
                            rmm::device_async_resource_ref mr)
 {
   auto const num_pairs = left_indices.size();
@@ -134,20 +135,23 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
   auto const shmem_size = static_cast<size_t>(block_size) * static_cast<size_t>(per_thread_bytes);
 
   filter_join_indices_kernel<has_nulls>
-    <<<grid_size, block_size, shmem_size, stream.value()>>>(left_indices.data(),
-                                                            right_indices.data(),
-                                                            num_pairs,
-                                                            left_table,
-                                                            right_table,
-                                                            device_expression_data,
-                                                            keep_mask.data());
+    <<<grid_size, block_size, shmem_size, stream.get()>>>(left_indices.data(),
+                                                          right_indices.data(),
+                                                          num_pairs,
+                                                          left_table,
+                                                          right_table,
+                                                          device_expression_data,
+                                                          keep_mask.data());
 
   // Surface any kernel launch errors immediately
   CUDF_CUDA_TRY(cudaPeekAtLastError());
 
   // Count the number of true values in the mask
   auto const num_matches =
-    thrust::count(rmm::exec_policy(stream), keep_mask.begin(), keep_mask.end(), true);
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                  keep_mask.begin(),
+                  keep_mask.end(),
+                  true);
 
   // Allocate output vectors
   auto out_left_indices  = rmm::device_uvector<cudf::size_type>(num_matches, stream, mr);
@@ -157,7 +161,7 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
   auto input_iter  = thrust::make_zip_iterator(left_indices.begin(), right_indices.begin());
   auto output_iter = thrust::make_zip_iterator(out_left_indices.begin(), out_right_indices.begin());
 
-  thrust::copy_if(rmm::exec_policy_nosync(stream),
+  thrust::copy_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                   input_iter,
                   input_iter + num_pairs,
                   keep_mask.begin(),
@@ -179,7 +183,7 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::sorted is_left_sorted,
                       cudf::sorted is_right_sorted,
                       cudf::null_equality compare_nulls,
-                      rmm::cuda_stream_view stream,
+                      cuda::stream_ref stream,
                       rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -204,7 +208,7 @@ std::pair<rmm::device_uvector<cudf::size_type>, rmm::device_uvector<cudf::size_t
 hash_inner_join(cudf::table_view const& left_keys,
                 cudf::table_view const& right_keys,
                 cudf::null_equality compare_nulls,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -236,7 +240,7 @@ filter_gather_maps_by_ast(cudf::device_span<cudf::size_type const> left_indices,
                           cudf::table_view const& left_table,
                           cudf::table_view const& right_table,
                           cudf::ast::expression const& binary_predicate,
-                          rmm::cuda_stream_view stream,
+                          cuda::stream_ref stream,
                           rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -263,8 +267,10 @@ filter_gather_maps_by_ast(cudf::device_span<cudf::size_type const> left_indices,
                "The expression must produce a boolean output.");
 
   // Create device views of tables
-  auto left_table_view  = cudf::table_device_view::create(left_table, stream);
-  auto right_table_view = cudf::table_device_view::create(right_table, stream);
+  auto left_table_view =
+    cudf::table_device_view::create(left_table, stream, cudf::get_current_device_resource_ref());
+  auto right_table_view =
+    cudf::table_device_view::create(right_table, stream, cudf::get_current_device_resource_ref());
 
   // Filter by conditional expression
   if (has_nulls) {
@@ -302,16 +308,16 @@ namespace {
 std::pair<rmm::device_uvector<bool>, cudf::size_type> compute_side_match_info(
   cudf::device_span<cudf::size_type const> indices,
   cudf::size_type table_size,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   // Create a boolean mask to track which rows have matches
   // Note: Temporary buffers use current device resource for allocation
   auto has_match =
     rmm::device_uvector<bool>(table_size, stream, cudf::get_current_device_resource_ref());
-  CUDF_CUDA_TRY(cudaMemsetAsync(has_match.data(), 0, has_match.size(), stream.value()));
+  CUDF_CUDA_TRY(cudaMemsetAsync(has_match.data(), 0, has_match.size(), stream.get()));
 
   // Mark rows that have matches
-  thrust::for_each(rmm::exec_policy_nosync(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    indices.begin(),
                    indices.end(),
                    [has_match = has_match.data(), table_size] __device__(cudf::size_type idx) {
@@ -321,7 +327,10 @@ std::pair<rmm::device_uvector<bool>, cudf::size_type> compute_side_match_info(
 
   // Count unmatched rows
   auto const num_unmatched =
-    thrust::count(rmm::exec_policy_nosync(stream), has_match.begin(), has_match.end(), false);
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                  has_match.begin(),
+                  has_match.end(),
+                  false);
 
   return {std::move(has_match), num_unmatched};
 }
@@ -334,11 +343,11 @@ void populate_outer_result(cudf::size_type table_size,
                            cudf::size_type unmatched_offset,
                            rmm::device_uvector<cudf::size_type>& out_indices,
                            rmm::device_uvector<cudf::size_type>& out_other_indices,
-                           rmm::cuda_stream_view stream)
+                           cuda::stream_ref stream)
 {
   // Copy unmatched rows
   auto unmatched_iter = out_indices.begin() + unmatched_offset;
-  thrust::copy_if(rmm::exec_policy_nosync(stream),
+  thrust::copy_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                   thrust::counting_iterator<cudf::size_type>(0),
                   thrust::counting_iterator<cudf::size_type>(table_size),
                   has_match.begin(),
@@ -347,7 +356,7 @@ void populate_outer_result(cudf::size_type table_size,
 
   // Fill corresponding other indices with sentinel values (null markers)
   // Use INT32_MIN as the sentinel value for unmatched rows
-  thrust::fill(rmm::exec_policy_nosync(stream),
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                out_other_indices.begin() + unmatched_offset,
                out_other_indices.begin() + unmatched_offset + num_unmatched,
                std::numeric_limits<cudf::size_type>::min());
@@ -360,7 +369,7 @@ make_left_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -379,11 +388,11 @@ make_left_outer(cudf::device_span<cudf::size_type const> left_indices,
   auto out_right_indices = rmm::device_uvector<cudf::size_type>(total_size, stream, mr);
 
   // Copy matched pairs
-  thrust::copy(rmm::exec_policy_nosync(stream),
+  thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                left_indices.begin(),
                left_indices.end(),
                out_left_indices.begin());
-  thrust::copy(rmm::exec_policy_nosync(stream),
+  thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                right_indices.begin(),
                right_indices.end(),
                out_right_indices.begin());
@@ -405,7 +414,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream,
+                cuda::stream_ref stream,
                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -426,11 +435,11 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
   auto out_right_indices = rmm::device_uvector<cudf::size_type>(total_size, stream, mr);
 
   // Copy matched pairs
-  thrust::copy(rmm::exec_policy_nosync(stream),
+  thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                left_indices.begin(),
                left_indices.end(),
                out_left_indices.begin());
-  thrust::copy(rmm::exec_policy_nosync(stream),
+  thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                right_indices.begin(),
                right_indices.end(),
                out_right_indices.begin());
@@ -467,7 +476,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
 rmm::device_uvector<cudf::size_type> make_semi(
   cudf::device_span<cudf::size_type const> left_indices,
   cudf::size_type left_table_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -475,12 +484,14 @@ rmm::device_uvector<cudf::size_type> make_semi(
   // Create a boolean mask for all left rows (default-initialized to false)
   auto left_has_match =
     rmm::device_uvector<bool>(left_table_size, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(
-    rmm::exec_policy_nosync(stream), left_has_match.begin(), left_has_match.end(), false);
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+               left_has_match.begin(),
+               left_has_match.end(),
+               false);
 
   // Mark left rows that have matches
   thrust::for_each(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     left_indices.begin(),
     left_indices.end(),
     [left_has_match = left_has_match.data(), left_table_size] __device__(cudf::size_type idx) {
@@ -489,11 +500,14 @@ rmm::device_uvector<cudf::size_type> make_semi(
     });
 
   // Count and collect matched rows
-  auto const num_matched = thrust::count(
-    rmm::exec_policy_nosync(stream), left_has_match.begin(), left_has_match.end(), true);
+  auto const num_matched =
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                  left_has_match.begin(),
+                  left_has_match.end(),
+                  true);
 
   auto result = rmm::device_uvector<cudf::size_type>(num_matched, stream, mr);
-  thrust::copy_if(rmm::exec_policy_nosync(stream),
+  thrust::copy_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                   thrust::counting_iterator<cudf::size_type>(0),
                   thrust::counting_iterator<cudf::size_type>(left_table_size),
                   left_has_match.begin(),
@@ -506,7 +520,7 @@ rmm::device_uvector<cudf::size_type> make_semi(
 rmm::device_uvector<cudf::size_type> make_anti(
   cudf::device_span<cudf::size_type const> left_indices,
   cudf::size_type left_table_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -514,12 +528,14 @@ rmm::device_uvector<cudf::size_type> make_anti(
   // Create a boolean mask for all left rows (default-initialized to false)
   auto left_has_match =
     rmm::device_uvector<bool>(left_table_size, stream, cudf::get_current_device_resource_ref());
-  thrust::fill(
-    rmm::exec_policy_nosync(stream), left_has_match.begin(), left_has_match.end(), false);
+  thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+               left_has_match.begin(),
+               left_has_match.end(),
+               false);
 
   // Mark left rows that have matches
   thrust::for_each(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     left_indices.begin(),
     left_indices.end(),
     [left_has_match = left_has_match.data(), left_table_size] __device__(cudf::size_type idx) {
@@ -528,11 +544,14 @@ rmm::device_uvector<cudf::size_type> make_anti(
     });
 
   // Count and collect unmatched rows
-  auto const num_unmatched = thrust::count(
-    rmm::exec_policy_nosync(stream), left_has_match.begin(), left_has_match.end(), false);
+  auto const num_unmatched =
+    thrust::count(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                  left_has_match.begin(),
+                  left_has_match.end(),
+                  false);
 
   auto result = rmm::device_uvector<cudf::size_type>(num_unmatched, stream, mr);
-  thrust::copy_if(rmm::exec_policy_nosync(stream),
+  thrust::copy_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                   thrust::counting_iterator<cudf::size_type>(0),
                   thrust::counting_iterator<cudf::size_type>(left_table_size),
                   left_has_match.begin(),
@@ -548,7 +567,7 @@ rmm::device_uvector<cudf::size_type> make_anti(
 
 std::unique_ptr<cudf::column> get_matched_rows(cudf::device_span<cudf::size_type const> gather_map,
                                                cudf::size_type table_size,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -561,10 +580,10 @@ std::unique_ptr<cudf::column> get_matched_rows(cudf::device_span<cudf::size_type
   auto result_data = result_view.data<bool>();
 
   // Initialize all to false
-  CUDF_CUDA_TRY(cudaMemsetAsync(result_data, 0, table_size, stream.value()));
+  CUDF_CUDA_TRY(cudaMemsetAsync(result_data, 0, table_size, stream.get()));
 
   // Mark rows that appear in the gather map as true
-  thrust::for_each(rmm::exec_policy_nosync(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    gather_map.begin(),
                    gather_map.end(),
                    [result_data, table_size] __device__(cudf::size_type idx) {

@@ -22,16 +22,17 @@
 #include <cudf/column/column_view.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/functional>
 #include <cuda/std/optional>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/transform.h>
@@ -265,7 +266,7 @@ template <typename Timestamp, typename FormatT>
 std::unique_ptr<cudf::column> truncate_datetime(cudf::column_view const& datetime,
                                                 FormatT const& format,
                                                 cudf::size_type output_size,
-                                                rmm::cuda_stream_view stream,
+                                                cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
   auto output = cudf::make_fixed_width_column(
@@ -276,7 +277,7 @@ std::unique_ptr<cudf::column> truncate_datetime(cudf::column_view const& datetim
   auto const output_it =
     thrust::make_zip_iterator(output->mutable_view().template begin<Timestamp>(), validity.begin());
   auto const do_transform = [&](auto trunc_fn) {
-    thrust::transform(rmm::exec_policy_nosync(stream),
+    thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       input_it,
                       input_it + output_size,
                       output_it,
@@ -290,9 +291,11 @@ std::unique_ptr<cudf::column> truncate_datetime(cudf::column_view const& datetim
                                            truncate_date_fn<FormatDeviceT>,
                                            truncate_timestamp_fn<FormatDeviceT>>;
 
-  auto const d_datetime_ptr = cudf::column_device_view::create(datetime, stream);
+  auto const d_datetime_ptr =
+    cudf::column_device_view::create(datetime, stream, cudf::get_current_device_resource_ref());
   if constexpr (std::is_same_v<FormatT, cudf::column_view>) {
-    auto const d_format_ptr = cudf::column_device_view::create(format, stream);
+    auto const d_format_ptr =
+      cudf::column_device_view::create(format, stream, cudf::get_current_device_resource_ref());
     do_transform(TransformFunc{*d_datetime_ptr, *d_format_ptr});
   } else {
     auto const fmt = parse_format(format.data(), static_cast<cudf::size_type>(format.size()));
@@ -315,7 +318,7 @@ template <typename FormatT>
 std::unique_ptr<cudf::column> truncate_dispatcher(cudf::column_view const& datetime,
                                                   FormatT const& format,
                                                   cudf::size_type output_size,
-                                                  rmm::cuda_stream_view stream,
+                                                  cuda::stream_ref stream,
                                                   rmm::device_async_resource_ref mr)
 {
   if (datetime.type().id() == cudf::type_id::TIMESTAMP_DAYS) {
@@ -342,7 +345,7 @@ void check_types(cudf::column_view const& datetime, cudf::column_view const& for
 
 std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
                                        cudf::column_view const& format,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   check_types(datetime, format);
@@ -361,7 +364,7 @@ std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
 
 std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
                                        std::string const& format,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   check_type(datetime);
@@ -379,7 +382,7 @@ std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
 
 std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
                                        cudf::column_view const& format,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -388,7 +391,7 @@ std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
 
 std::unique_ptr<cudf::column> truncate(cudf::column_view const& datetime,
                                        std::string const& format,
-                                       rmm::cuda_stream_view stream,
+                                       cuda::stream_ref stream,
                                        rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

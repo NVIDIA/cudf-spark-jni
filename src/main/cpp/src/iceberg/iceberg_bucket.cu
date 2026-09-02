@@ -26,12 +26,16 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/exec_policy.hpp>
 
 #include <cuco/detail/hash_functions/murmurhash3.cuh>
+#include <cuda/std/array>
+#include <cuda/std/bit>
 #include <cuda/std/limits>
+#include <cuda/stream>
 #include <thrust/tabulate.h>
 
 #include <cstdint>
@@ -75,7 +79,8 @@ class iceberg_murmur_hash3_32 {
   __device__ static inline int32_t hash_long(int64_t input)
   {
     // Hash the 8 bytes of the long value in little-endian order
-    return hash_bytes(reinterpret_cast<uint8_t const*>(&input), 8);
+    auto const bytes = cuda::std::bit_cast<cuda::std::array<uint8_t, sizeof(input)>>(input);
+    return hash_bytes(bytes.data(), static_cast<int32_t>(bytes.size()));
   }
 
   /**
@@ -379,15 +384,17 @@ struct bucket_decimal128_fn {
 template <typename GeneratorFunc>
 void generate_buckets(GeneratorFunc generator,
                       cudf::mutable_column_view output,
-                      rmm::cuda_stream_view stream)
+                      cuda::stream_ref stream)
 {
-  thrust::tabulate(
-    rmm::exec_policy_nosync(stream), output.begin<int32_t>(), output.end<int32_t>(), generator);
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   output.begin<int32_t>(),
+                   output.end<int32_t>(),
+                   generator);
 }
 
 std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input,
                                                   int32_t num_buckets,
-                                                  rmm::cuda_stream_view stream,
+                                                  cuda::stream_ref stream,
                                                   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(num_buckets > 0, "num_buckets must be positive");
@@ -403,7 +410,8 @@ std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input
                                               stream,
                                               mr);
 
-  auto d_input     = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto output_view = output->mutable_view();
 
   auto type_id = input.type().id();
@@ -460,7 +468,7 @@ std::unique_ptr<cudf::column> compute_bucket_impl(cudf::column_view const& input
 
 std::unique_ptr<cudf::column> compute_bucket(cudf::column_view const& input,
                                              int32_t num_buckets,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

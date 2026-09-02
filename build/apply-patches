@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,12 +20,19 @@ set -e
 
 BASE_DIR=$( git rev-parse --show-toplevel )
 
-PATCH_DIR=${PATCH_DIR:-$(realpath "$BASE_DIR/patches/")}
+PATCH_DIR=${PATCH_DIR:-"$BASE_DIR/patches/"}
+
+if [ ! -d "$PATCH_DIR" ] ; then
+  echo "No patches to apply"
+  exit 0
+fi
+
+PATCH_DIR=$(realpath "$PATCH_DIR")
 
 CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
 
 # Apply pattches to CUDF is problematic in a number of ways. But ultimately it comes down to
-# making sure that a user can do development work in spark-rapids-jni without the patches
+# making sure that a user can do development work in cudf-spark-jni without the patches
 # getting in the way
 # The operations I really want to support no matter what state CUDF is in are
 # 1) Build the repo from scratch

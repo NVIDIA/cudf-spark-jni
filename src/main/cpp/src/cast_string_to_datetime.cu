@@ -24,12 +24,13 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/functional>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
@@ -554,7 +555,7 @@ __device__ result_type parse_timestamp_string(bool is_spark_320,
   }
 
   // Spark400+ and DB14.3+: do not support pattern: spaces + Thh:mm:ss
-  // Refer to https://github.com/NVIDIA/spark-rapids-jni/issues/3401
+  // Refer to https://github.com/NVIDIA/cudf-spark-jni/issues/3401
   // Refer to https://issues.apache.org/jira/browse/SPARK-52351
   // Check if Spark is Spark400+ or DB14.3+ and has left spaces
   bool match_issue_52351 = is_spark_400_or_later_or_db_14_3_or_later && pos > 0;
@@ -874,12 +875,14 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
                                                cudf::table_view const& tz_info_table,
                                                bool is_spark_320,
                                                bool is_spark_400_or_later_or_db_14_3_or_later,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
-  auto const num_rows            = input.size();
-  auto const d_input             = cudf::column_device_view::create(input.parent(), stream);
-  auto const d_name_to_index_map = cudf::column_device_view::create(tz_name_to_index_map, stream);
+  auto const num_rows = input.size();
+  auto const d_input  = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
+  auto const d_name_to_index_map = cudf::column_device_view::create(
+    tz_name_to_index_map, stream, cudf::get_current_device_resource_ref());
 
   // the follow saves parsed result
   auto parsed_result_type_col = cudf::make_fixed_width_column(
@@ -904,15 +907,17 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
     std::chrono::duration_cast<std::chrono::seconds>(duration).count();
 
   // get the fixed transitions
-  auto const ft_cdv_ptr        = cudf::column_device_view::create(tz_info_table.column(0), stream);
+  auto const ft_cdv_ptr = cudf::column_device_view::create(
+    tz_info_table.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = cudf::lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(tz_info_table.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    tz_info_table.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     num_rows,
     parse_timestamp_string_fn{is_spark_320,
@@ -1073,7 +1078,7 @@ struct parse_string_to_date_fn {
  * Parse strings to dates.
  */
 std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& input,
-                                            rmm::cuda_stream_view stream,
+                                            cuda::stream_ref stream,
                                             rmm::device_async_resource_ref mr)
 {
   auto const num_rows = input.size();
@@ -1081,7 +1086,8 @@ std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& inp
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()});
   }
 
-  auto const d_input = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()},
                                             input.size(),
                                             rmm::device_buffer{},
@@ -1092,7 +1098,7 @@ std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& inp
     rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     num_rows,
     parse_string_to_date_fn{
@@ -1114,7 +1120,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
   cudf::column_view const& tz_name_to_index_map,
   cudf::table_view const& tz_info_table,
   spark_rapids_jni::spark_system const& spark_system,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   bool is_spark_320 = spark_system.is_vanilla_320();
@@ -1133,7 +1139,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings(
 }
 
 std::unique_ptr<cudf::column> parse_strings_to_date(cudf::strings_column_view const& input,
-                                                    rmm::cuda_stream_view stream,
+                                                    cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
   return parse_to_date(input, stream, mr);

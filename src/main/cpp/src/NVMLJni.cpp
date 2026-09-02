@@ -21,7 +21,8 @@
 #include <bit>
 #include <cstdint>
 
-// NVML JNI implementation with comprehensive GPU metrics for Spark Rapids
+// NVML JNI implementation with comprehensive GPU metrics for the NVIDIA cuDF plugin for Apache
+// Spark
 
 #define NVML_CLASS_PATH "com/nvidia/spark/rapids/jni/nvml/"
 

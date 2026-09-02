@@ -16,35 +16,26 @@
 #pragma once
 
 #include <cudf/column/column.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
-
-#include <cuda/stream>
 
 #include <memory>
 
 namespace spark_rapids_jni {
 
 /**
- * @brief Reverse strings using Spark `UTF8String.reverse` character-width semantics.
+ * @brief Match each input string against the corresponding LIKE pattern.
  *
- * Unlike libcudf `cudf::strings::reverse`, character widths follow Spark's
- * `UTF8String.numBytesForFirstByte` and are clamped to the bytes remaining in each
- * row (`min(declared_width, remaining)`). This matches SPARK-57507 and avoids
- * reading past a truncated trailing multi-byte UTF-8 sequence into the next row.
- *
- * Well-formed UTF-8 results match libcudf reverse. Null rows remain null. Output
- * offsets match the input offsets (byte length is preserved per row).
- *
- * @param input Strings column
- * @param stream CUDA stream used for device memory operations
- * @param mr Device memory resource used to allocate the returned column
- * @return New strings column with Spark-compatible reversed contents
+ * Patterns must not contain nulls. Invalid escape sequences on rows with a non-null input throw
+ * exception_with_row_index for the first invalid row.
  */
-std::unique_ptr<cudf::column> reverse_strings(
+std::unique_ptr<cudf::column> like(
   cudf::strings_column_view const& input,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
+  cudf::strings_column_view const& patterns,
+  cudf::string_scalar const& escape_character,
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

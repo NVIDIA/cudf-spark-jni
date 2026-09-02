@@ -21,8 +21,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream>
 
 #include <cstddef>
 #include <cstdint>
@@ -49,7 +50,7 @@ std::unique_ptr<cudf::column> convert_timestamp_to_utc(
   cudf::column_view const& input,
   cudf::table_view const& timezone_info,
   cudf::size_type const tz_index,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -71,7 +72,7 @@ std::unique_ptr<cudf::column> convert_utc_timestamp_to_timezone(
   cudf::column_view const& input,
   cudf::table_view const& timezone_info,
   cudf::size_type const tz_index,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -102,7 +103,7 @@ std::unique_ptr<cudf::column> convert_timestamp_to_utc(
   cudf::column_view const& tz_offset,
   cudf::table_view const& timezone_info,
   cudf::column_view const tz_indices,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -169,7 +170,7 @@ struct orc_tz_side {
   int64_t writer_2015_year_base_offset_us,
   orc_tz_side writer,
   orc_tz_side reader,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
   bool writer_reader_rules_differ   = true);
 
@@ -186,7 +187,7 @@ struct orc_tz_side {
 [[nodiscard]] std::unique_ptr<cudf::column> convert_orc_from_utc(
   cudf::column_view const& input,
   orc_tz_side reader,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -217,7 +218,7 @@ struct orc_tz_side {
   int64_t writer_2015_year_base_offset_us,
   cudf::table_view const* reader_tz_info_table,
   int32_t reader_raw_offset,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

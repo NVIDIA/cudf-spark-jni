@@ -19,10 +19,12 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
@@ -74,7 +76,7 @@ namespace spark_rapids_jni {
 std::unique_ptr<cudf::column> extract_chunk32_from_64bit(cudf::column_view const& in_col,
                                                          cudf::data_type type,
                                                          int chunk_idx,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(
@@ -91,7 +93,7 @@ std::unique_ptr<cudf::column> extract_chunk32_from_64bit(cudf::column_view const
   auto out_view = out_col->mutable_view();
 
   if (chunk_idx == 0) {  // Extract lower 32 bits
-    thrust::transform(rmm::exec_policy_nosync(stream),
+    thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       in_col.begin<uint64_t>(),
                       in_col.end<uint64_t>(),
                       out_view.data<uint32_t>(),
@@ -99,7 +101,7 @@ std::unique_ptr<cudf::column> extract_chunk32_from_64bit(cudf::column_view const
   } else {  // Extract upper 32 bits
     // Cast to int32_t for the upper chunk to correctly handle signedness during potential future
     // aggregation.
-    thrust::transform(rmm::exec_policy_nosync(stream),
+    thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       in_col.begin<uint64_t>(),
                       in_col.end<uint64_t>(),
                       out_view.data<int32_t>(),
@@ -111,7 +113,7 @@ std::unique_ptr<cudf::column> extract_chunk32_from_64bit(cudf::column_view const
 // Reassemble a column of 64-bit values from two 64-bit integer columns with overflow detection.
 std::unique_ptr<cudf::table> assemble64_from_sum(cudf::table_view const& chunks_table,
                                                  cudf::data_type output_type,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(
@@ -142,7 +144,7 @@ std::unique_ptr<cudf::table> assemble64_from_sum(cudf::table_view const& chunks_
   auto overflows_view = columns[0]->mutable_view();
   auto assembled_view = columns[1]->mutable_view();
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator<cudf::size_type>(0),
     thrust::make_counting_iterator<cudf::size_type>(num_rows),
     assembled_view.begin<int64_t>(),

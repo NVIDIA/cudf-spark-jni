@@ -20,11 +20,13 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 #include <rmm/resource_ref.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
 
@@ -52,7 +54,7 @@ __device__ __inline__ auto days_from_julian(cuda::std::chrono::year_month_day co
 // days since the epoch from that Julian local date.
 // This is to match with Apache Spark's `localRebaseGregorianToJulianDays` function.
 std::unique_ptr<cudf::column> gregorian_to_julian_days(cudf::column_view const& input,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_DAYS,
@@ -67,7 +69,7 @@ std::unique_ptr<cudf::column> gregorian_to_julian_days(cudf::column_view const& 
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_D>(),
@@ -123,7 +125,7 @@ __device__ __inline__ cuda::std::chrono::year_month_day julian_from_days(int32_t
 // of days since the epoch from that Gregorian local date. This is to match with Apache Spark's
 // `localRebaseJulianToGregorianDays` function.
 std::unique_ptr<cudf::column> julian_to_gregorian_days(cudf::column_view const& input,
-                                                       rmm::cuda_stream_view stream,
+                                                       cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_DAYS,
@@ -137,7 +139,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_days(cudf::column_view const& 
                                             stream,
                                             mr);
 
-  thrust::transform(rmm::exec_policy(stream),
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator(0),
                     thrust::make_counting_iterator(input.size()),
                     output->mutable_view().begin<cudf::timestamp_D>(),
@@ -223,7 +225,7 @@ __device__ __inline__ time_components get_time_components(int64_t micros)
 // This is to match with Apache Spark's `rebaseGregorianToJulianMicros` function with timezone
 // fixed to UTC.
 std::unique_ptr<cudf::column> gregorian_to_julian_micros(cudf::column_view const& input,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
@@ -238,7 +240,7 @@ std::unique_ptr<cudf::column> gregorian_to_julian_micros(cudf::column_view const
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_us>(),
@@ -286,7 +288,7 @@ std::unique_ptr<cudf::column> gregorian_to_julian_micros(cudf::column_view const
 // This is to match with Apache Spark's `rebaseJulianToGregorianMicros` function with timezone
 // fixed to UTC.
 std::unique_ptr<cudf::column> julian_to_gregorian_micros(cudf::column_view const& input,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::TIMESTAMP_MICROSECONDS,
@@ -301,7 +303,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_micros(cudf::column_view const
                                             mr);
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     output->mutable_view().begin<cudf::timestamp_us>(),
@@ -340,7 +342,7 @@ std::unique_ptr<cudf::column> julian_to_gregorian_micros(cudf::column_view const
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> rebase_gregorian_to_julian(cudf::column_view const& input,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -356,7 +358,7 @@ std::unique_ptr<cudf::column> rebase_gregorian_to_julian(cudf::column_view const
 }
 
 std::unique_ptr<cudf::column> rebase_julian_to_gregorian(cudf::column_view const& input,
-                                                         rmm::cuda_stream_view stream,
+                                                         cuda::stream_ref stream,
                                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

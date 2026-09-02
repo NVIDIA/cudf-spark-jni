@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,11 @@
 
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/utilities/bit.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <thrust/find.h>
 #include <thrust/iterator/counting_iterator.h>
 
@@ -90,7 +92,7 @@ struct row_invalid_ternary_fn {
 
 void throw_row_error_if_any(cudf::column_view const& input,
                             cudf::column_view const& result,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS(input.size() == result.size(),
                "The row counts of the input and result columns must match.");
@@ -102,7 +104,7 @@ void throw_row_error_if_any(cudf::column_view const& input,
     auto const itr_begin = thrust::make_counting_iterator(0);
     auto const itr_end   = thrust::make_counting_iterator(result.size());
     auto const first_row_idx_with_error =
-      thrust::find_if(rmm::exec_policy(stream),
+      thrust::find_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                       itr_begin,
                       itr_end,
                       row_invalid_unary_fn{input.null_mask(), result.null_mask()});
@@ -114,7 +116,7 @@ void throw_row_error_if_any(cudf::column_view const& input,
 void throw_row_error_if_any(cudf::column_view const& input1,
                             cudf::column_view const& input2,
                             cudf::column_view const& result,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS((input1.size() == input2.size() && input2.size() == result.size()),
                "The row counts of the input and result columns must match.");
@@ -125,7 +127,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
   auto const itr_begin                = thrust::make_counting_iterator(0);
   auto const itr_end                  = thrust::make_counting_iterator(result.size());
   auto const first_row_idx_with_error = thrust::find_if(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     itr_begin,
     itr_end,
     row_invalid_binary_fn{input1.null_mask(), input2.null_mask(), result.null_mask()});
@@ -137,7 +139,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
                             cudf::column_view const& input2,
                             cudf::column_view const& input3,
                             cudf::column_view const& result,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS((input1.size() == input2.size() && input2.size() == input3.size() &&
                 input3.size() == result.size()),
@@ -149,7 +151,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
   auto const itr_begin                = thrust::make_counting_iterator(0);
   auto const itr_end                  = thrust::make_counting_iterator(result.size());
   auto const first_row_idx_with_error = thrust::find_if(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     itr_begin,
     itr_end,
     row_invalid_ternary_fn{
@@ -161,7 +163,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
 void throw_row_error_if_any(cudf::column_view const& input1,
                             cudf::scalar const& input2,
                             cudf::column_view const& result,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   CUDF_EXPECTS(input1.size() == result.size(),
                "The row counts of the input and result columns must match.");
@@ -179,7 +181,7 @@ void throw_row_error_if_any(cudf::column_view const& input1,
 void throw_row_error_if_any(cudf::scalar const& input1,
                             cudf::column_view const& input2,
                             cudf::column_view const& result,
-                            rmm::cuda_stream_view stream)
+                            cuda::stream_ref stream)
 {
   throw_row_error_if_any(input2, input1, result, stream);
 }

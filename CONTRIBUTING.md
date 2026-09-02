@@ -1,15 +1,15 @@
-# Contributing to RAPIDS Accelerator JNI for Apache Spark
+# Contributing to the NVIDIA cuDF plugin JNI for Apache Spark
 
-Contributions to RAPIDS Accelerator JNI for Apache Spark fall into the following three categories.
+Contributions to the NVIDIA cuDF plugin JNI for Apache Spark fall into the following three categories.
 
 1. To report a bug, request a new feature, or report a problem with
-    documentation, please file an [issue](https://github.com/NVIDIA/spark-rapids-jni/issues/new/choose)
+    documentation, please file an [issue](https://github.com/NVIDIA/cudf-spark-jni/issues/new/choose)
     describing in detail the problem or new feature. The project team evaluates
     and triages issues, and schedules them for a release. If you believe the
     issue needs priority attention, please comment on the issue to notify the
     team.
 2. To propose and implement a new Feature, please file a new feature request
-    [issue](https://github.com/NVIDIA/spark-rapids-jni/issues/new/choose). Describe the
+    [issue](https://github.com/NVIDIA/cudf-spark-jni/issues/new/choose). Describe the
     intended feature and discuss the design and implementation with the team and
     community. Once the team agrees that the plan looks good, go ahead and
     implement it using the [code contributions](#code-contributions) guide below.
@@ -42,17 +42,17 @@ git submodule update --init --recursive
 ## Building From Source
 
 [Maven](https://maven.apache.org) is used for most aspects of the build. For example, the
-Maven `package` goal can be used to build the RAPIDS Accelerator JNI jar. After a successful
-build the RAPIDS Accelerator JNI jar will be in the `spark-rapids-jni/target/` directory.
+Maven `package` goal can be used to build the cuDF plugin JNI jar. After a successful
+build the cuDF plugin JNI jar will be in the `cudf-spark-jni/target/` directory.
 Be sure to select the jar with the CUDA classifier.
 
-When building spark-rapids-jni, the pom.xml in the submodule thirdparty/cudf is completely
+When building cudf-spark-jni, the pom.xml in the submodule thirdparty/cudf is completely
 bypassed. For a detailed explanation please read
-[this](https://github.com/NVIDIA/spark-rapids-jni/issues/1084#issuecomment-1513471739).
+[this](https://github.com/NVIDIA/cudf-spark-jni/issues/1084#issuecomment-1513471739).
 
 ### Building in the Docker Container
 
-The `build/build-in-docker` script will build the spark-rapids-jni artifact within a Docker
+The `build/build-in-docker` script will build the cudf-spark-jni artifact within a Docker
 container using devtoolset to produce native code that can run on all supported Linux
 distributions. The repo directory is bind-mounted into the container and the container runs
 as the current user, so the artifacts are produced as if they were built or installed outside
@@ -61,21 +61,25 @@ the Docker container.
 The script passes all of its arguments onto the Maven command run inside the Docker container,
 so it should be invoked as one would invoke Maven, e.g.: `build/build-in-docker clean package`
 
-#### Using spark-rapids-jni Docker Container with other Repos
+#### Using the cudf-spark-jni Docker Container with other Repos
 
-Spark RAPIDS project spans multiple repos. Some issues are discovered in
-spark-rapids-jni but they need to be made easily reproducible in the cudf repo
-
+The cuDF plugin project spans multiple repos. Some issues are discovered in
+cudf-spark-jni but they need to be made easily reproducible in the cudf repo.
 To this end export WORKDIR with the path pointing to a different repo
 
 ```
-export WORKDIR=~/gits/rapidsai/cudf
-~/gits/NVIDIA/spark-rapids-jni/build/run-in-docker head README.md
+export WORKDIR=~/gits/nvidia/cudf
+~/gits/NVIDIA/cudf-spark-jni/build/run-in-docker head README.md
 ```
+
+`run-in-docker` defaults `CCACHE_BASEDIR` to `WORKDIR`, allowing equivalent Release builds
+to share cache entries across checkouts. Debug builds also require compiler-specific
+[debug path normalization](https://ccache.dev/manual/4.11.2.html#_compiling_in_different_directories);
+disabling ccache's `hash_dir` instead can embed an incorrect working directory in debug information.
 
 ### cudf Submodule and Build
 
-[RAPIDS cuDF](https://github.com/rapidsai/cudf) is being used as a submodule in this project.
+[NVIDIA cuDF](https://github.com/nvidia/cudf) is being used as a submodule in this project.
 
 Currently libcudf is only configured once and the build relies on cmake to re-configure as needed.
 This is because libcudf currently is rebuilding almost entirely when it is configured with the same
@@ -102,33 +106,33 @@ to control aspects of the build:
 | `submodule.check.skip`               | Whether to skip checking git submodules | false   |
 
 
-### Local testing of cross-repo contributions cudf, spark-rapids-jni, and spark-rapids
+### Local testing of cross-repo contributions cudf, cudf-spark-jni, and cudf-spark
 
 When we work on a feature or a bug fix across repositories, it is beneficial to be able to
 run manual and integration tests end to end on the full stack from Apache Spark
-with spark-rapids plugin upfront before merging the PRs.
+with cuDF plugin upfront before merging the PRs.
 
 So we are dealing with a subset of the following:
 
 Local PR branches for
-- rapidsai/cuDF, branch pr1
-- NVIDIA/spark-rapids-jni, branch pr2
-- NVIDIA/spark-rapids, branch pr3
+- NVIDIA/cuDF, branch pr1
+- NVIDIA/cudf-spark-jni, branch pr2
+- NVIDIA/cudf-spark, branch pr3
 
 Our end goal is to build the rapids-4-spark dist jar in the pr3 branch under local repo path
-~/repos/NVIDIA/spark-rapids that includes changes from the pr2 branch in
-~/repos/NVIDIA/spark-rapids-jni and the pr1 branch in rapidsai/cuDF that we will test
+~/repos/NVIDIA/cudf-spark that includes changes from the pr2 branch in
+~/repos/NVIDIA/cudf-spark-jni and the pr1 branch in NVIDIA/cudf that we will test
 with Spark. There are two options for working on pr1.
 
-#### Option 1: Working on cuDF PR inside the the submodule in spark-rapids-jni
+#### Option 1: Working on cuDF PR inside the the submodule in cudf-spark-jni
 To avoid retargeting the submodule to the local cuDF repo as below, we might find it easier
-to make changes locally under ~/repos/NVIDIA/spark-rapids-jni/thirdparty/cudf directly.
+to make changes locally under ~/repos/NVIDIA/cudf-spark-jni/thirdparty/cudf directly.
 
 In order to push pr1 to create a pull request, we need to add a remote to the submodule for the cuDF
 fork in our account
 
 ```bash
-$ cd ~/repos/NVIDIA/spark-rapids-jni/thirdparty/cudf
+$ cd ~/repos/NVIDIA/cudf-spark-jni/thirdparty/cudf
 $ git remote add <user> git@github.com:<user>/cudf.git
 # make and commit changes
 $ git push <user>
@@ -136,27 +140,27 @@ $ git push <user>
 
 #### Option 2: Working on cuDF PR in a conventional local cuDF fork
 Once we are done with our changes to the pr1 branch in
-~/repos/rapidsai/cuDF, we git commit changes locally.
+~/repos/nvidia/cudf, we git commit changes locally.
 
-Then we cd to ~/repos/NVIDIA/spark-rapids-jni and point the cudf submodule temporarily to the pr1
+Then we cd to ~/repos/NVIDIA/cudf-spark-jni and point the cudf submodule temporarily to the pr1
 branch
 
 ```bash
-$ git submodule set-url thirdparty/cudf ~/repos/rapidsai/cudf
+$ git submodule set-url thirdparty/cudf ~/repos/nvidia/cudf
 $ git submodule set-branch --branch pr1 thirdparty/cudf
 ```
 
-Sync pr1 into our pr2 branch in ~/repos/NVIDIA/spark-rapids-jni
+Sync pr1 into our pr2 branch in ~/repos/NVIDIA/cudf-spark-jni
 ```bash
 $ git submodule sync --recursive
 $ git submodule update --init --recursive --remote
 ```
 
-#### Building final spark-rapids artifact with pr1, pr2, and pr3 changes
+#### Building final cuDF plugin artifact with pr1, pr2, and pr3 changes
 Regardless what option we have used to make cuDF changes, we proceed with building
-spark-rapids-jni. The spark-rapids repo will consume spark-rapids-jni with pr1 and pr2 changes
+cudf-spark-jni. The cudf-spark repo will consume cudf-spark-jni with pr1 and pr2 changes
 from the local Maven cache after we run `mvn install` via `build/build-in-docker`
-in ~/repos/NVIDIA/spark-rapids-jni.
+in ~/repos/NVIDIA/cudf-spark-jni.
 
 Make sure to stage thirdparty/cudf with `git add` to satifsfy build's submodule check.
 ```bash
@@ -164,8 +168,8 @@ $ git add thirdparty/cudf
 $ ./build/build-in-docker install ...
 ```
 
-Now cd to ~/repos/NVIDIA/spark-rapids and build with one of the options from
-[spark-rapids instructions](https://github.com/NVIDIA/spark-rapids/blob/main/CONTRIBUTING.md#building-from-source).
+Now cd to ~/repos/NVIDIA/cudf-spark and build with one of the options from
+[cuDF plugin instructions](https://github.com/NVIDIA/cudf-spark/blob/main/CONTRIBUTING.md#building-from-source).
 
 ```bash
 $ ./build/buildall
@@ -176,7 +180,7 @@ the final rapids-4-spark artifact includes the locally built dependencies as opp
 CI-built snapshot dependencies from the remote Maven repo. This may happen even if Maven
 is invoked with `--offline` or `--no-snapshot-updates` option due to IDE-Maven
 interactions in the background. To confirm that the artifact is correct we can either enable
-[INFO logging in Spark](https://github.com/NVIDIA/spark-rapids/blob/4c77f0db58d229b2e6cb75c196934fcc0ae3a485/sql-plugin/src/main/scala/com/nvidia/spark/rapids/Plugin.scala#L73-L83)
+[INFO logging in Spark](https://github.com/NVIDIA/cudf-spark/blob/4c77f0db58d229b2e6cb75c196934fcc0ae3a485/sql-plugin/src/main/scala/com/nvidia/spark/rapids/Plugin.scala#L73-L83)
 or directly inspect the resulting jar for build info:
 ```bash
 $ unzip -c dist/target/rapids-4-spark_2.12-22.08.0-SNAPSHOT-cuda12.jar *version-info.properties
@@ -187,7 +191,7 @@ user=
 revision=62657ad6a296ea3547417504652e3b8836b020fb
 branch=testCUDF_pr1
 date=2022-07-19T21:48:15Z
-url=https://github.com/rapidsai/cudf.git
+url=https://github.com/nvidia/cudf.git
 
   inflating: spark-rapids-jni-version-info.properties
 version=22.08.0-SNAPSHOT
@@ -195,7 +199,7 @@ user=
 revision=70adcc86a513ad6665968021c669fbca7515a188
 branch=pr/user1/381
 date=2022-07-19T21:48:15Z
-url=git@github.com:NVIDIA/spark-rapids-jni.git
+url=git@github.com:NVIDIA/cudf-spark-jni.git
 
   inflating: rapids4spark-version-info.properties
 version=22.08.0-SNAPSHOT
@@ -204,15 +208,15 @@ user=user1
 revision=6453047ef479b5ec79384c5150c50af2f50f563e
 branch=aqeFinalPlanOnGPUDoc
 date=2022-07-19T21:51:52Z
-url=https://github.com/NVIDIA/spark-rapids
+url=https://github.com/NVIDIA/cudf-spark
 ```
 and verify that the branch names and the revisions in the console output
 correspond the local repos.
 
-When we are ready to move on, prior to switching to another spark-rapids-jni branch
-or submiting a PR to NVIDIA/spark-rapids-jni, we should undo the cudf submodule modifications.
+When we are ready to move on, prior to switching to another cudf-spark-jni branch
+or submiting a PR to NVIDIA/cudf-spark-jni, we should undo the cudf submodule modifications.
 ```
-$ cd ~/repos/NVIDIA/spark-rapids-jni
+$ cd ~/repos/NVIDIA/cudf-spark-jni
 $ git restore .gitmodules
 $ git restore --staged thirdparty/cudf
 ```
@@ -226,7 +230,7 @@ Ubuntu distro WSL2 instance to be able to run `build/build-in-docker` above.
 > .\build\win\create-wsl2.ps1
 ```
 
-Clone spark-rapids-jni inside or outside (convenient but slower filesystem) the distro,
+Clone cudf-spark-jni inside or outside (convenient but slower filesystem) the distro,
 and build inside WSL2, e.g.
 ```PowerShell
 > wsl -d Ubuntu ./build/build-in-docker clean install -DGPU_ACRCHS=NATIVE -Dtest="*,!CuFileTest"
@@ -244,7 +248,7 @@ arguments to get into an interactive shell inside the container.
 
 #### Testing with Compute Sanitizer
 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) is a
-functional correctness checking suite included in the CUDA toolkit. The RAPIDS Accelerator JNI
+functional correctness checking suite included in the CUDA toolkit. The cuDF plugin JNI
 supports leveraging the Compute Sanitizer in memcheck mode in the unit tests to help catch any kernels
 that may be doing something incorrectly. To run the unit tests with the Compute Sanitizer, append the
 `-DUSE_SANITIZER=ON` to the build command. e.g.
@@ -276,7 +280,7 @@ class NormalCaseTest {
 ```
 
 ### Debugging
-You can add debug symbols selectively to C++ files in spark-rapids-jni by modifying the appropriate
+You can add debug symbols selectively to C++ files in cudf-spark-jni by modifying the appropriate
 `CMakeLists.txt` files. You will need to add a specific flag depending on what kind of code you are
 debugging. For CUDA code, you need to add the `-G` flag to add device debug symbols:
 
@@ -305,8 +309,8 @@ bash-4.2$ cuda-gdb target/jni/cmake-build/gtests/ROW_CONVERSION
 You can also use the [NVIDIA Nsight VSCode Code Integration](https://docs.nvidia.com/nsight-visual-studio-code-edition/latest/cuda-debugger/index.html)
 as well to debug within Visual Studio Code.
 
-To debug libcudf code, please see [Debugging cuDF](https://github.com/rapidsai/cudf/blob/main/CONTRIBUTING.md#debugging-cudf)
-in the cuDF [CONTRIBUTING](https://github.com/rapidsai/cudf/blob/main/CONTRIBUTING.md) guide.
+To debug libcudf code, please see [Debugging cuDF](https://github.com/nvidia/cudf/blob/main/CONTRIBUTING.md#debugging-cudf)
+in the cuDF [CONTRIBUTING](https://github.com/nvidia/cudf/blob/main/CONTRIBUTING.md) guide.
 
 ### Benchmarks
 Benchmarks exist for c++ benchmarks using NVBench and are in the `src/main/cpp/benchmarks` directory.
@@ -321,15 +325,15 @@ script can be run without any arguments to get into an interactive shell inside 
 
 ### Your first issue
 
-1. Read the [Developer Overview](https://github.com/NVIDIA/spark-rapids/blob/main/docs/dev/README.md)
-    to understand how the RAPIDS Accelerator plugin works.
+1. Read the [Developer Overview](https://github.com/NVIDIA/cudf-spark/blob/main/docs/dev/README.md)
+    to understand how the cuDF plugin works.
 2. Find an issue to work on. The best way is to look for the
-    [good first issue](https://github.com/NVIDIA/spark-rapids-jni/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
-    or [help wanted](https://github.com/NVIDIA/spark-rapids-jni/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+    [good first issue](https://github.com/NVIDIA/cudf-spark-jni/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+    or [help wanted](https://github.com/NVIDIA/cudf-spark-jni/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
     labels.
 3. Comment on the issue stating that you are going to work on it.
 4. Code! Make sure to add or update unit tests if needed!
-5. When done, [create your pull request](https://github.com/NVIDIA/spark-rapids-jni/compare).
+5. When done, [create your pull request](https://github.com/NVIDIA/cudf-spark-jni/compare).
 6. Verify that CI passes all [status checks](https://help.github.com/articles/about-status-checks/).
     Fix if needed.
 7. Wait for other developers to review your code and update code as needed.
@@ -349,7 +353,7 @@ This Java code in this project (`src/main/java`) follows the
 #### C++
 
 The C++ code in this project (`src/main/cpp`) follows the
-[coding style from `rapidsai/cudf` repository](https://github.com/rapidsai/cudf/blob/main/cpp/doxygen/developer_guide/DEVELOPER_GUIDE.md#code-and-documentation-style-and-formatting).
+[coding style from `nvidia/cudf` repository](https://github.com/nvidia/cudf/blob/main/cpp/doxygen/developer_guide/DEVELOPER_GUIDE.md#code-and-documentation-style-and-formatting).
 
 We also provide a precommit-hook to format code using cudf's C++ `clang-format` style.
 To use precommit-hook, install it on your system such as using `conda` or `pip`:
@@ -434,4 +438,4 @@ By making a contribution to this project, I certify that:
 ```
 
 ## Attribution
-Portions adopted from https://github.com/rapidsai/cudf/blob/main/CONTRIBUTING.md, https://github.com/NVIDIA/nvidia-docker/blob/main/CONTRIBUTING.md, and https://github.com/NVIDIA/DALI/blob/main/CONTRIBUTING.md
+Portions adopted from https://github.com/nvidia/cudf/blob/main/CONTRIBUTING.md, https://github.com/NVIDIA/nvidia-docker/blob/main/CONTRIBUTING.md, and https://github.com/NVIDIA/DALI/blob/main/CONTRIBUTING.md

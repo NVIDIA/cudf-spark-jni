@@ -29,13 +29,13 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/algorithm>
 #include <cuda/std/climits>
 #include <cuda/std/limits>
 #include <cuda/std/type_traits>
+#include <cuda/stream>
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
 #include <thrust/generate.h>
@@ -180,7 +180,7 @@ struct decimal_to_non_ansi_string_fn {
 struct dispatch_decimal_to_non_ansi_string_fn {
   template <typename T, std::enable_if_t<cudf::is_fixed_point<T>()>* = nullptr>
   std::unique_ptr<column> operator()(column_view const& input,
-                                     rmm::cuda_stream_view stream,
+                                     cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr) const
   {
     using DecimalType = device_storage_type_t<T>;  // underlying value type
@@ -199,7 +199,7 @@ struct dispatch_decimal_to_non_ansi_string_fn {
 
   template <typename T, std::enable_if_t<not cudf::is_fixed_point<T>()>* = nullptr>
   std::unique_ptr<column> operator()(column_view const&,
-                                     rmm::cuda_stream_view,
+                                     cuda::stream_ref,
                                      rmm::device_async_resource_ref) const
   {
     CUDF_FAIL("Values for decimal_to_non_ansi_string function must be a decimal type.");
@@ -209,7 +209,7 @@ struct dispatch_decimal_to_non_ansi_string_fn {
 }  // namespace
 
 std::unique_ptr<column> decimal_to_non_ansi_string(column_view const& input,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) return make_empty_column(type_id::STRING);
@@ -221,7 +221,7 @@ std::unique_ptr<column> decimal_to_non_ansi_string(column_view const& input,
 // external API
 
 std::unique_ptr<column> decimal_to_non_ansi_string(column_view const& input,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

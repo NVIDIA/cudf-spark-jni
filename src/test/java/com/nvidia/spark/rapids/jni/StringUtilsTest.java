@@ -134,4 +134,51 @@ public class StringUtilsTest {
       assertColumnsAreEqual(expected, result);
     }
   }
+
+  @Test
+  void testLikeWithColumnPatterns() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+            "azaa", "ababaabba", "aaxa", "abc_def", "abc1def", "", "éclair", null, "x");
+         ColumnVector patterns = ColumnVector.fromStrings(
+            "%a", "a%b%", "a__a", "abc\\_d%", "abc\\_d%", "", "é%", "%", null);
+         Scalar escape = Scalar.fromString("\\");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans(
+            true, true, true, true, false, true, true, null, null);
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testLikeWithCustomEscape() {
+    try (ColumnVector input = ColumnVector.fromStrings("abc_def", "abc1def", "20%", "20x");
+         ColumnVector patterns = ColumnVector.fromStrings("abc#_d%", "abc#_d%", "20#%", "20#%");
+         Scalar escape = Scalar.fromString("#");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans(true, false, true, false);
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testLikeInvalidPatternReportsFirstActiveRow() {
+    try (ColumnVector input = ColumnVector.fromStrings(null, "abc", "def");
+         ColumnVector patterns = ColumnVector.fromStrings("bad\\x", "bad\\x", "trailing\\");
+         Scalar escape = Scalar.fromString("\\")) {
+      ExceptionWithRowIndex error = assertThrows(
+          ExceptionWithRowIndex.class, () -> StringUtils.like(input, patterns, escape).close());
+      assertEquals(1, error.getRowIndex());
+    }
+  }
+
+  @Test
+  void testLikeEmptyColumns() {
+    try (ColumnVector input = ColumnVector.fromStrings();
+         ColumnVector patterns = ColumnVector.fromStrings();
+         Scalar escape = Scalar.fromString("\\");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans();
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
 }

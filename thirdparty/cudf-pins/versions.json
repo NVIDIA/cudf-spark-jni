@@ -25,8 +25,8 @@
     "cuco" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cuCollections/archive/0883368d39296f3bef3a058033141bcc642c5c54.tar.gz",
-      "url_hash" : "SHA256=4ec8320a0372839b991f0b431c7f8bf0e770006cb3c8631c6e373c434471fd45",
+      "url" : "https://github.com/NVIDIA/cuCollections/archive/4b26118c99866221f99f35f4e3bc74afdbe063bc.tar.gz",
+      "url_hash" : "SHA256=cfff0dfe8552ca2a8e3c53d04c26ab4d95364d14c159aaf8a37b3971b78b609d",
       "version" : "0.0.1"
     },
     "dlpack" : 
@@ -45,19 +45,11 @@
       "git_url" : "https://github.com/google/flatbuffers.git",
       "version" : "24.3.25"
     },
-    "fmt" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "0c9fce2ffefecfdce794e1859584e25877b7b592",
-      "git_url" : "https://github.com/fmtlib/fmt.git",
-      "version" : "11.0.2"
-    },
     "kvikio" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "2b022b2cea8fdf66077668c5648cfced3030dfec",
+      "git_tag" : "afbbc28eddd3d52a4c525f4d8b491dd0795a274d",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.10"
@@ -81,15 +73,15 @@
     "rapids_logger" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/rapidsai/rapids-logger/archive/4c72b598f99c8aa06af49468b3fc82f3931c6bf6.tar.gz",
-      "url_hash" : "SHA256=4e7cbbde62ba8517dabd1a327b45955d50db2dfa1240d0124662071ce8f1afc9",
-      "version" : "0.2.3"
+      "url" : "https://github.com/rapidsai/rapids-logger/archive/1124de618517654cce3636d69d022ee76e9df4b0.tar.gz",
+      "url_hash" : "SHA256=96a2f4ef04ad06d55546dbeee355cfe6e4fc94a33dee156d40f4f55dddc31686",
+      "version" : "0.3.0"
     },
     "rmm" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "06b5776789766876dcd395e084885dec59846823",
+      "git_tag" : "9c8ee7592d4d75c2d10bb8b9fe0b45a08c67abae",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.10"
@@ -98,7 +90,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "efad266c1fd9de6d8486c6ba71bfa74df063eb1f",
+      "git_tag" : "a9f63f8cdd4b0b41a2d88a9f705576a61b4222ec",
       "git_url" : "https://github.com/rapidsai/librtcx.git",
       "version" : "0.1"
     },

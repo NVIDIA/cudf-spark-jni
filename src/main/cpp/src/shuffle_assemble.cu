@@ -35,13 +35,14 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -175,7 +176,7 @@ int compute_offset_column_info_traverse(cudf::host_span<shuffle_split_col_data c
  */
 rmm::device_uvector<offset_column_info> compute_offset_column_info(
   shuffle_split_metadata const& metadata,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   std::vector<offset_column_info> offset_info;
@@ -294,7 +295,7 @@ std::tuple<rmm::device_uvector<assemble_column_info>,
 assemble_build_column_info(shuffle_split_metadata const& h_global_metadata,
                            cudf::device_span<uint8_t const> partitions,
                            cudf::device_span<size_t const> partition_offsets,
-                           rmm::cuda_stream_view stream,
+                           cuda::stream_ref stream,
                            rmm::device_async_resource_ref mr)
 {
   auto temp_mr = cudf::get_current_device_resource_ref();
@@ -421,7 +422,7 @@ assemble_build_column_info(shuffle_split_metadata const& h_global_metadata,
     // each partition linearly. to fix this, we'd have to change the kudo format in a way that would
     // increase it's size. I'm doing this as a kernel instead of through thrust so that I can
     // guarantee each partition is being marched by a seperate block to avoid thread divergence.
-    compute_offset_child_row_counts<<<num_partitions, 32, 0, stream.value()>>>(
+    compute_offset_child_row_counts<<<num_partitions, 32, 0, stream.get()>>>(
       offset_column_info,
       global_metadata,
       column_instance_info,
@@ -651,7 +652,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
   SizeIterator first,
   SizeIterator last,
   GroupFunction op,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto temp_mr = cudf::get_current_device_resource_ref();
@@ -662,7 +663,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
       return i >= value_count ? 0 : first[i];
     }));
   rmm::device_uvector<size_t> group_offsets(value_count + 1, stream, temp_mr);
-  thrust::exclusive_scan(rmm::exec_policy(stream, temp_mr),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                          size_wrapper,
                          size_wrapper + group_offsets.size(),
                          group_offsets.begin());
@@ -671,7 +672,7 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
   using OutputType = std::invoke_result_t<GroupFunction>;
   rmm::device_uvector<OutputType> result(total_size, stream, mr);
   auto iter = thrust::make_counting_iterator(0);
-  thrust::transform(rmm::exec_policy(stream, temp_mr),
+  thrust::transform(rmm::exec_policy_nosync(stream, temp_mr),
                     iter,
                     iter + total_size,
                     result.begin(),
@@ -869,7 +870,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   cudf::device_span<uint8_t const> partitions,
   cudf::device_span<size_t const> partition_offsets,
   size_t per_partition_metadata_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto temp_mr                    = cudf::get_current_device_resource_ref();
@@ -1029,7 +1030,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     auto const num_column_instances = column_instance_info.size();
     auto iter                       = thrust::make_counting_iterator(0);
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [buffers_per_partition,
@@ -1065,7 +1066,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
       0, cuda::proclaim_return_type<size_t>([num_columns] __device__(size_t i) {
         return (i / num_columns);
       }));
-    thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+    thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                   section_keys,
                                   section_keys + num_src_buffers,
                                   src_sizes_unpadded.begin(),
@@ -1075,7 +1076,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // - add metadata offset
     // - add partition offset
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [num_columns,
@@ -1132,7 +1133,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
           return src_sizes_unpadded[src_buf_index] -
                  ((is_offsets_buffer && src_sizes_unpadded[src_buf_index] > 0) ? 4 : 0);
         }));
-      thrust::exclusive_scan_by_key(rmm::exec_policy(stream, temp_mr),
+      thrust::exclusive_scan_by_key(rmm::exec_policy_nosync(stream, temp_mr),
                                     dst_buf_key,
                                     dst_buf_key + num_src_buffers,
                                     size_iter,
@@ -1144,7 +1145,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
     // this implies we will potentially be writing our leading bits into the same word as another
     // copy is writing it's trailing bits, so atomics will be necessary.
     thrust::for_each(
-      rmm::exec_policy(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, temp_mr),
       iter,
       iter + num_column_instances,
       [column_info          = column_info.begin(),
@@ -1347,7 +1348,7 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
   // Drain the async H2D uploads above before h_dst_buffers and the batched_memset span vector
   // (spans_to_zero) go out of scope: CUDA 13+ may read the host source only when the stream
   // executes the copy.
-  stream.synchronize();
+  stream.sync();
 
   // Return shuffle assemble result with slices and copy batches (column_views will be populated
   // later)
@@ -1380,7 +1381,7 @@ __global__ void copy_validity(cudf::device_span<assemble_batch> batches)
 
   // how many leading bytes we have. that is, how many bytes will be read by the initial read, which
   // accounts for misaligned source buffers.
-  int const leading_bytes = (4 - (reinterpret_cast<uint64_t>(batch.src) % 4));
+  int const leading_bytes = (4 - (cuda::std::bit_cast<uint64_t>(batch.src) % 4));
   int remaining_rows      = batch.validity_row_count;
 
   // - if the address is misaligned, load byte-by-byte and only store up to that many bits/rows off
@@ -1587,7 +1588,7 @@ __global__ void copy_offsets(cudf::device_span<assemble_batch> batches)
 void assemble_copy(cudf::device_span<assemble_batch> batches,
                    cudf::device_span<assemble_column_info const> column_info,
                    cudf::host_span<assemble_column_info> h_column_info,
-                   rmm::cuda_stream_view stream)
+                   cuda::stream_ref stream)
 {
   // TODO: it might make sense to launch these three copies on separate streams. It is likely that
   // the validity and offset copies will be much smaller than the data copies and could
@@ -1619,8 +1620,13 @@ void assemble_copy(cudf::device_span<assemble_batch> batches,
         }));
 
     size_t temp_storage_bytes{0};
-    cub::DeviceMemcpy::Batched(
-      nullptr, temp_storage_bytes, input_iter, output_iter, size_iter, batches.size(), stream);
+    cub::DeviceMemcpy::Batched(nullptr,
+                               temp_storage_bytes,
+                               input_iter,
+                               output_iter,
+                               size_iter,
+                               batches.size(),
+                               stream.get());
     rmm::device_buffer temp_storage(
       temp_storage_bytes, stream, cudf::get_current_device_resource_ref());
     cub::DeviceMemcpy::Batched(temp_storage.data(),
@@ -1629,27 +1635,27 @@ void assemble_copy(cudf::device_span<assemble_batch> batches,
                                output_iter,
                                size_iter,
                                batches.size(),
-                               stream);
+                               stream.get());
   }
 
   // copy validity
   constexpr int copy_validity_block_size = 128;
   copy_validity<copy_validity_block_size>
-    <<<batches.size(), copy_validity_block_size, 0, stream.value()>>>(batches);
+    <<<batches.size(), copy_validity_block_size, 0, stream.get()>>>(batches);
 
   // copy offsets
   constexpr int copy_offsets_block_size = 128;
   copy_offsets<copy_offsets_block_size>
-    <<<batches.size(), copy_offsets_block_size, 0, stream.value()>>>(batches);
+    <<<batches.size(), copy_offsets_block_size, 0, stream.get()>>>(batches);
 
   // we have to sync because the build_table step will need the cpu-side valid_count in
   // h_column_info when constructing the columns.
   cudaMemcpyAsync(h_column_info.data(),
                   column_info.data(),
                   column_info.size() * sizeof(assemble_column_info),
-                  cudaMemcpyDeviceToHost,
-                  stream);
-  stream.synchronize();
+                  cudaMemcpyDefault,
+                  stream.get());
+  stream.sync();
 }
 
 }  // namespace
@@ -1705,13 +1711,13 @@ calculate_empty_buffer_sizes(cudf::host_span<shuffle_split_col_data const> col_i
 }
 
 // initialize buffers for empty columns
-void initialize_empty_buffers(uint8_t* buffer_base, size_t total_size, rmm::cuda_stream_view stream)
+void initialize_empty_buffers(uint8_t* buffer_base, size_t total_size, cuda::stream_ref stream)
 {
   // Initialize all buffers to 0, which is correct for:
   // - Validity: all bits 0 (but since num_rows=0, no bits matter)
   // - Offsets: 0 (correct for empty offsets)
   // - Data: 0 (empty data)
-  cudaMemsetAsync(buffer_base, 0, total_size, stream);
+  cudaMemsetAsync(buffer_base, 0, total_size, stream.get());
 }
 
 // create buffer slices for empty columns
@@ -1751,7 +1757,7 @@ struct assemble_column_view_functor {
   cudf::host_span<shuffle_split_col_data const> column_meta;
   cudf::host_span<assemble_column_info const> assemble_data;
   shuffle_assemble_result const& assemble_result;
-  rmm::cuda_stream_view stream;
+  cuda::stream_ref stream;
   rmm::device_async_resource_ref mr;
 
   template <typename T, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>
@@ -1917,7 +1923,7 @@ struct assemble_column_view_functor {
 void build_table(cudf::host_span<shuffle_split_col_data const> column_meta,
                  cudf::host_span<assemble_column_info const> assemble_data,
                  shuffle_assemble_result& assemble_result,
-                 rmm::cuda_stream_view stream,
+                 cuda::stream_ref stream,
                  rmm::device_async_resource_ref mr)
 {
   // create native cudf::column_view objects pointing to slices in the shared buffer
@@ -1946,7 +1952,7 @@ void build_table(cudf::host_span<shuffle_split_col_data const> column_meta,
 shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
                                          cudf::device_span<uint8_t const> partitions,
                                          cudf::device_span<size_t const> _partition_offsets,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1964,7 +1970,7 @@ shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
           reinterpret_cast<partition_header const*>(partitions.data() + _partition_offsets[pindex]);
         return cudf::hashing::detail::swap_endian(pheader->num_rows) > 0 ? pindex + 1 : 0;
       }));
-  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy(stream, temp_mr),
+  size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy_nosync(stream, temp_mr),
                                                    iter,
                                                    iter + (_partition_offsets.size() - 1),
                                                    size_t{0},

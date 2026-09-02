@@ -50,7 +50,7 @@ project(
 
 # We use no C++20 modules; disable module scanning so CMake emits no ninja dyndep phase. Otherwise
 # its dyndep refresh trips ninja's RefreshDyndepDependents assertion on incremental rebuilds after
-# a structural source change. Mirrors libcudf (rapidsai/cudf#19192).
+# a structural source change. Mirrors libcudf (nvidia/cudf#19192).
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # ##################################################################################################
@@ -155,10 +155,10 @@ else()
 endif()
 
 # cuCollections
-# As of rapidsai/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
+# As of nvidia/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
 # wraps its `cuco::cuco` link with `$<BUILD_LOCAL_INTERFACE:...>`, so the cuco headers are no
 # longer transitively exposed to downstream consumers via `find_package(cudf)`. Several
-# spark-rapids-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
+# cudf-spark-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
 # `<cuco/hash_functions.cuh>`, so we need to fetch cuco ourselves.
 include(${rapids-cmake-dir}/cpm/cuco.cmake)
 rapids_cpm_cuco()
@@ -277,6 +277,7 @@ add_library(
   src/json_utils.cu
   src/join_primitives.cu
   src/list_slice.cu
+  src/like.cu
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu

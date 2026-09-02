@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,9 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -40,7 +41,7 @@ constexpr int MAX_STACK_DEPTH           = 8;
 std::unique_ptr<cudf::column> murmur_hash3_32(
   cudf::table_view const& input,
   uint32_t seed                     = 0,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -56,7 +57,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32(
 std::unique_ptr<cudf::column> xxhash64(
   cudf::table_view const& input,
   int64_t seed                      = DEFAULT_XXHASH64_SEED,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -70,7 +71,7 @@ std::unique_ptr<cudf::column> xxhash64(
  */
 std::unique_ptr<cudf::column> hive_hash(
   cudf::table_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -85,7 +86,7 @@ std::unique_ptr<cudf::column> hive_hash(
  */
 std::unique_ptr<cudf::column> sha224_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -100,7 +101,7 @@ std::unique_ptr<cudf::column> sha224_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha256_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -115,7 +116,7 @@ std::unique_ptr<cudf::column> sha256_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha384_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -130,7 +131,7 @@ std::unique_ptr<cudf::column> sha384_nulls_preserved(
  */
 std::unique_ptr<cudf::column> sha512_nulls_preserved(
   cudf::column_view const& input,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

@@ -25,8 +25,11 @@
 #include <cudf_test/table_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
+#include <cudf/utilities/memory_resource.hpp>
+
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/stream>
 
 struct ShuffleSplitTests : public cudf::test::BaseFixture {};
 
@@ -47,7 +50,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
   cudf::device_span<uint8_t const> partitions,
   cudf::device_span<size_t const> partition_offsets,
   std::vector<int> const& remaps,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(remaps.size() == partition_offsets.size() - 1, "Invaid remaps vector size");
@@ -65,7 +68,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
       auto const ri = remaps[i];
       return i >= num_partitions ? 0 : partition_offsets[ri + 1] - partition_offsets[ri];
     }));
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          remapped_size_iter,
                          remapped_size_iter + num_partitions + 1,
                          remapped_offsets.begin());
@@ -98,7 +101,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
 
   size_t temp_storage_bytes = 0;
   cub::DeviceMemcpy::Batched(
-    nullptr, temp_storage_bytes, input_iter, output_iter, size_iter, num_partitions, stream);
+    nullptr, temp_storage_bytes, input_iter, output_iter, size_iter, num_partitions, stream.get());
   rmm::device_buffer temp_storage(
     temp_storage_bytes, stream, cudf::get_current_device_resource_ref());
   cub::DeviceMemcpy::Batched(temp_storage.data(),
@@ -107,7 +110,7 @@ spark_rapids_jni::shuffle_split_result reshape_partitions(
                              output_iter,
                              size_iter,
                              num_partitions,
-                             stream);
+                             stream.get());
 
   return {std::make_unique<rmm::device_buffer>(std::move(remapped_partitions)),
           std::move(remapped_offsets)};
@@ -882,7 +885,7 @@ TEST_F(ShuffleSplitTests, MixedValidity)
         cudaMemcpy(static_cast<uint8_t*>(full.data()) + pos,
                    shuf[idx].result.partitions->data(),
                    shuf[idx].result.partitions->size(),
-                   cudaMemcpyDeviceToDevice);
+                   cudaMemcpyDefault);
         h_full_offsets[idx] = pos;
         pos += shuf[idx].result.partitions->size();
       }
@@ -890,7 +893,7 @@ TEST_F(ShuffleSplitTests, MixedValidity)
       cudaMemcpy(full_offsets.data(),
                  h_full_offsets.data(),
                  sizeof(size_t) * h_full_offsets.size(),
-                 cudaMemcpyHostToDevice);
+                 cudaMemcpyDefault);
 
       spark_rapids_jni::shuffle_split_metadata md;
       md.col_info.push_back({cudf::type_id::INT32, 0});

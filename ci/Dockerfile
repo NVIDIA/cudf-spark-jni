@@ -15,7 +15,7 @@
 #
 
 ###
-# Build the image for spark-rapids-jni CICD environment.
+# Build the image for cudf-spark-jni CICD environment.
 #
 # Arguments: CUDA_VERSION=[12.X.Y], OS_RELEASE=[8, 9], TARGETPLATFORM=[linux/amd64, linux/arm64]
 #

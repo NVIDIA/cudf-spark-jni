@@ -32,13 +32,15 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/launch>
+#include <cuda/std/bit>
 #include <cuda/std/chrono>
 #include <cuda/std/functional>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 
 using column                   = cudf::column;
@@ -92,16 +94,18 @@ auto convert_timestamp_tz(column_view const& input,
                           table_view const& transitions,
                           size_type tz_index,
                           bool to_utc,
-                          rmm::cuda_stream_view stream,
+                          cuda::stream_ref stream,
                           rmm::device_async_resource_ref mr)
 {
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get the DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto results = cudf::make_timestamp_column(input.type(),
                                              input.size(),
@@ -111,7 +115,7 @@ auto convert_timestamp_tz(column_view const& input,
                                              mr);
 
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     input.begin<timestamp_type>(),
     input.end<timestamp_type>(),
     results->mutable_view().begin<timestamp_type>(),
@@ -201,7 +205,7 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
   column_view const& tz_offset,
   table_view const& transitions,
   column_view const tz_indices,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input_seconds.type().id() == cudf::type_id::INT64,
@@ -210,12 +214,14 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                "microseconds column must be of type INT32");
 
   // get the fixed transitions
-  auto const ft_cdv_ptr        = column_device_view::create(transitions.column(0), stream);
+  auto const ft_cdv_ptr = column_device_view::create(
+    transitions.column(0), stream, cudf::get_current_device_resource_ref());
   auto const fixed_transitions = lists_column_device_view{*ft_cdv_ptr};
 
   // get DST rules
-  auto const dst_cdv_ptr = cudf::column_device_view::create(transitions.column(1), stream);
-  auto const dst_rules   = cudf::lists_column_device_view{*dst_cdv_ptr};
+  auto const dst_cdv_ptr = cudf::column_device_view::create(
+    transitions.column(1), stream, cudf::get_current_device_resource_ref());
+  auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
   auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
                                             input_seconds.size(),
@@ -227,9 +233,9 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
                                                  input_seconds.size(),
                                                  cudf::mask_state::UNALLOCATED,
                                                  stream,
-                                                 mr);
+                                                 cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator<size_type>(0),
                      input_seconds.size(),
                      convert_with_timezones_fn{input_seconds.begin<int64_t>(),
@@ -528,7 +534,7 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
  * borrow decision in the same frame as Apache. It can therefore both add a missing borrow and undo
  * one that cuDF applied before the sign changed.
  *
- * For example, the Asia/Shanghai reproducer from rapidsai/cudf#21993 has:
+ * For example, the Asia/Shanghai reproducer from nvidia/cudf#21993 has:
  *
  * @code{.pseudo}
  *   decoded_us     =  21'087'883'873  // cuDF used the UTC 2015 epoch; no borrow
@@ -643,7 +649,8 @@ __device__ static void stage_side_transitions(int64_t const* __restrict__ g_tran
   int32_t* s_offsets = nullptr;
 
   if (fits && trans_count > 0) {
-    ptr     = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(ptr), alignof(int64_t)));
+    ptr =
+      cuda::std::bit_cast<char*>(align_up(cuda::std::bit_cast<uintptr_t>(ptr), alignof(int64_t)));
     s_trans = reinterpret_cast<int64_t*>(ptr);
     ptr += trans_count * sizeof(int64_t);
     s_offsets = reinterpret_cast<int32_t*>(ptr);
@@ -720,7 +727,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           int64_t writer_2015_year_base_offset_us,
                                           spark_rapids_jni::orc_tz_side writer,
                                           spark_rapids_jni::orc_tz_side reader,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr,
                                           bool writer_reader_rules_differ)
 {
@@ -787,7 +794,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
                                                cuda::dynamic_shared_memory<char[]>(smem_bytes));
-  cuda::launch(stream.value(),
+  cuda::launch(stream.get(),
                launch_config,
                convert_timezones_kernel,
                input.begin<cudf::timestamp_us>(),
@@ -799,7 +806,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                writer_args,
                reader_args,
                writer_reader_rules_differ);
-  CUDF_CHECK_CUDA(stream.value());
+  CUDF_CHECK_CUDA(stream.get());
 
   return results;
 }
@@ -869,7 +876,7 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
 template <typename T>
 std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& input,
                                                    spark_rapids_jni::orc_tz_side reader,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   auto results = cudf::make_fixed_width_column(input.type(),
@@ -902,7 +909,7 @@ std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& inpu
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
                                                cuda::dynamic_shared_memory<char[]>(smem_bytes));
-  cuda::launch(stream.value(),
+  cuda::launch(stream.get(),
                launch_config,
                convert_orc_from_utc_kernel<T>,
                input.begin<T>(),
@@ -911,7 +918,7 @@ std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& inpu
                input.size(),
                input.offset(),
                reader_args);
-  CUDF_CHECK_CUDA(stream.value());
+  CUDF_CHECK_CUDA(stream.get());
   return results;
 }
 
@@ -925,7 +932,7 @@ std::unique_ptr<column> convert_timestamp(column_view const& input,
                                           table_view const& transitions,
                                           size_type tz_index,
                                           bool to_utc,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   auto const type = input.type().id();
@@ -953,7 +960,7 @@ std::unique_ptr<column> convert_timestamp(column_view const& input,
 std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input,
                                                  table_view const& transitions,
                                                  size_type tz_index,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   return convert_timestamp(input, transitions, tz_index, true, stream, mr);
@@ -962,7 +969,7 @@ std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input,
 std::unique_ptr<column> convert_utc_timestamp_to_timezone(column_view const& input,
                                                           table_view const& transitions,
                                                           size_type tz_index,
-                                                          rmm::cuda_stream_view stream,
+                                                          cuda::stream_ref stream,
                                                           rmm::device_async_resource_ref mr)
 {
   return convert_timestamp(input, transitions, tz_index, false, stream, mr);
@@ -975,7 +982,7 @@ std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input_second
                                                  column_view const& tz_offset,
                                                  table_view const& transitions,
                                                  column_view const tz_indices,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   return convert_to_utc_with_multiple_timezones(input_seconds,
@@ -994,7 +1001,7 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   int64_t writer_2015_year_base_offset_us,
   orc_tz_side writer,
   orc_tz_side reader,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
   bool writer_reader_rules_differ)
 {
@@ -1004,7 +1011,7 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
 
 std::unique_ptr<cudf::column> convert_orc_from_utc(cudf::column_view const& input,
                                                    orc_tz_side reader,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   validate_timezone_table(reader.tz_info_table);
@@ -1020,7 +1027,7 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   int64_t writer_2015_year_base_offset_us,
   cudf::table_view const* reader_tz_info_table,
   int32_t reader_raw_offset,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   // Java passes the exact ORC 2015 writer base offset, so this path does not infer it from

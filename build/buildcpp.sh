@@ -16,7 +16,7 @@
 #
 
 #
-# Script to build native code in cudf and spark-rapids-jni
+# Script to build native code in cudf and cudf-spark-jni
 #
 
 set -e
@@ -163,7 +163,7 @@ cmake --build "$LIBCUDFJNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"
 #
 mkdir -p "$SPARK_JNI_BUILD_PATH"
 cd "$SPARK_JNI_BUILD_PATH"
-echo "Configuring spark-rapids-jni native libs"
+echo "Configuring cudf-spark-jni native libs"
 CUDF_ROOT="$CUDF_PATH" \
   CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" \
   CUDFJNI_BUILD_DIR="$LIBCUDFJNI_BUILD_PATH" \
@@ -183,5 +183,5 @@ CUDF_ROOT="$CUDF_PATH" \
 
 create_compile_commands_symlink "$SPARK_JNI_BUILD_PATH" "$PROJECT_BASE_DIR/src/main/cpp"
 
-echo "Building spark-rapids-jni native libs"
+echo "Building cudf-spark-jni native libs"
 cmake --build "$SPARK_JNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"

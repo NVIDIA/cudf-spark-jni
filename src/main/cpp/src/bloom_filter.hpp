@@ -21,8 +21,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -90,7 +91,7 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(
   int num_hashes,
   int bloom_filter_longs,
   int seed                          = 0,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -105,7 +106,7 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(
  */
 void bloom_filter_put(cudf::list_scalar& bloom_filter,
                       cudf::column_view const& input,
-                      rmm::cuda_stream_view stream = cudf::get_default_stream());
+                      cuda::stream_ref stream = cudf::get_default_stream());
 
 /**
  * @brief Probe a bloom filter with an input column of int64_t values.
@@ -121,7 +122,7 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
 std::unique_ptr<cudf::column> bloom_filter_probe(
   cudf::column_view const& input,
   cudf::device_span<uint8_t const> bloom_filter,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -138,7 +139,7 @@ std::unique_ptr<cudf::column> bloom_filter_probe(
 std::unique_ptr<cudf::column> bloom_filter_probe(
   cudf::column_view const& input,
   cudf::list_scalar& bloom_filter,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -156,7 +157,7 @@ std::unique_ptr<cudf::column> bloom_filter_probe(
  */
 std::unique_ptr<cudf::list_scalar> bloom_filter_merge(
   cudf::column_view const& bloom_filters,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

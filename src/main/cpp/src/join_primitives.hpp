@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,9 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+
+#include <cuda/stream>
 
 #include <memory>
 #include <utility>
@@ -67,7 +68,7 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::sorted is_left_sorted       = cudf::sorted::NO,
                       cudf::sorted is_right_sorted      = cudf::sorted::NO,
                       cudf::null_equality compare_nulls = cudf::null_equality::EQUAL,
-                      rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+                      cuda::stream_ref stream           = cudf::get_default_stream(),
                       rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -88,7 +89,7 @@ std::pair<rmm::device_uvector<cudf::size_type>, rmm::device_uvector<cudf::size_t
 hash_inner_join(cudf::table_view const& left_keys,
                 cudf::table_view const& right_keys,
                 cudf::null_equality compare_nulls = cudf::null_equality::EQUAL,
-                rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+                cuda::stream_ref stream           = cudf::get_default_stream(),
                 rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 // =============================================================================
@@ -119,7 +120,7 @@ filter_gather_maps_by_ast(
   cudf::table_view const& left_table,
   cudf::table_view const& right_table,
   cudf::ast::expression const& binary_predicate,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 // =============================================================================
@@ -146,7 +147,7 @@ make_left_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+                cuda::stream_ref stream           = cudf::get_default_stream(),
                 rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -170,7 +171,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
                 cudf::device_span<cudf::size_type const> right_indices,
                 cudf::size_type left_table_size,
                 cudf::size_type right_table_size,
-                rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+                cuda::stream_ref stream           = cudf::get_default_stream(),
                 rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 // =============================================================================
@@ -194,7 +195,7 @@ make_full_outer(cudf::device_span<cudf::size_type const> left_indices,
 rmm::device_uvector<cudf::size_type> make_semi(
   cudf::device_span<cudf::size_type const> indices,
   cudf::size_type table_size,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -213,7 +214,7 @@ rmm::device_uvector<cudf::size_type> make_semi(
 rmm::device_uvector<cudf::size_type> make_anti(
   cudf::device_span<cudf::size_type const> indices,
   cudf::size_type table_size,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 // =============================================================================
@@ -237,7 +238,7 @@ rmm::device_uvector<cudf::size_type> make_anti(
 std::unique_ptr<cudf::column> get_matched_rows(
   cudf::device_span<cudf::size_type const> gather_map,
   cudf::size_type table_size,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

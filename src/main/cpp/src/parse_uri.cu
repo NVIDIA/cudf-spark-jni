@@ -30,13 +30,14 @@
 #include <cudf/strings/detail/utilities.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
 #include <cuda/std/optional>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/tabulate.h>
 
 #include <memory>
@@ -886,7 +887,7 @@ CUDF_KERNEL void parse_uri(column_device_view const in_strings,
 std::unique_ptr<column> parse_uri(strings_column_view const& input,
                                   URI_chunks chunk,
                                   std::optional<strings_column_view const> query_match,
-                                  rmm::cuda_stream_view stream,
+                                  cuda::stream_ref stream,
                                   rmm::device_async_resource_ref mr)
 {
   size_type strings_count = input.size();
@@ -919,17 +920,17 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   // count number of bytes in each string after parsing and store it in offsets_column
   auto offsets_view         = offsets_column->view();
   auto offsets_mutable_view = offsets_column->mutable_view();
-  parse_uri_char_counter<<<num_threadblocks, threadblock_size, 0, stream.value()>>>(
+  parse_uri_char_counter<<<num_threadblocks, threadblock_size, 0, stream.get()>>>(
     *d_strings,
     chunk,
     input.chars_begin(stream),
     offsets_mutable_view.begin<size_type>(),
-    reinterpret_cast<size_type*>(src_offsets.data()),
-    reinterpret_cast<bitmask_type*>(null_mask.data()),
+    src_offsets.data(),
+    static_cast<bitmask_type*>(null_mask.data()),
     d_matches ? cuda::std::optional<column_device_view const>{*d_matches} : cuda::std::nullopt);
 
   // use scan to transform number of bytes into offsets
-  thrust::exclusive_scan(rmm::exec_policy(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          offsets_view.begin<size_type>(),
                          offsets_view.end<size_type>(),
                          offsets_mutable_view.begin<size_type>());
@@ -945,15 +946,15 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   auto d_out_chars = rmm::device_buffer(out_chars_bytes, stream, mr);
 
   // copy the characters from the input column to the output column
-  parse_uri<<<num_threadblocks, threadblock_size, 0, stream.value()>>>(
+  parse_uri<<<num_threadblocks, threadblock_size, 0, stream.get()>>>(
     *d_strings,
     input.chars_begin(stream),
-    reinterpret_cast<size_type*>(src_offsets.data()),
+    src_offsets.data(),
     offsets_column->view().begin<size_type>(),
     static_cast<char*>(d_out_chars.data()));
 
   auto null_count =
-    cudf::null_count(reinterpret_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
+    cudf::null_count(static_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
@@ -962,7 +963,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
                              std::move(null_mask));
 }
 
-void validate_input_uris(strings_column_view const& input, rmm::cuda_stream_view stream)
+void validate_input_uris(strings_column_view const& input, cuda::stream_ref stream)
 {
   if (input.size() == 0) { return; }
 
@@ -973,7 +974,7 @@ void validate_input_uris(strings_column_view const& input, rmm::cuda_stream_view
   auto validity_flags = rmm::device_uvector<bool>(input.size(), stream);
 
   thrust::tabulate(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     validity_flags.begin(),
     validity_flags.end(),
     cuda::proclaim_return_type<bool>([input = *d_strings] __device__(cudf::size_type row_idx) {
@@ -1006,7 +1007,7 @@ void validate_input_uris(strings_column_view const& input, rmm::cuda_stream_view
 
 std::unique_ptr<column> parse_uri_to_protocol(strings_column_view const& input,
                                               bool ansi_mode,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1016,7 +1017,7 @@ std::unique_ptr<column> parse_uri_to_protocol(strings_column_view const& input,
 
 std::unique_ptr<column> parse_uri_to_host(strings_column_view const& input,
                                           bool ansi_mode,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1026,7 +1027,7 @@ std::unique_ptr<column> parse_uri_to_host(strings_column_view const& input,
 
 std::unique_ptr<column> parse_uri_to_query(strings_column_view const& input,
                                            bool ansi_mode,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1037,7 +1038,7 @@ std::unique_ptr<column> parse_uri_to_query(strings_column_view const& input,
 std::unique_ptr<cudf::column> parse_uri_to_query(cudf::strings_column_view const& input,
                                                  std::string const& query_match,
                                                  bool ansi_mode,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1053,7 +1054,7 @@ std::unique_ptr<cudf::column> parse_uri_to_query(cudf::strings_column_view const
 std::unique_ptr<cudf::column> parse_uri_to_query(cudf::strings_column_view const& input,
                                                  cudf::strings_column_view const& query_match,
                                                  bool ansi_mode,
-                                                 rmm::cuda_stream_view stream,
+                                                 cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1065,7 +1066,7 @@ std::unique_ptr<cudf::column> parse_uri_to_query(cudf::strings_column_view const
 
 std::unique_ptr<column> parse_uri_to_path(strings_column_view const& input,
                                           bool ansi_mode,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
