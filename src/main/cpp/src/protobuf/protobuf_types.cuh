@@ -18,6 +18,7 @@
 
 #include "protobuf/protobuf.hpp"
 
+#include <cstddef>
 #include <string>
 #include <type_traits>
 
@@ -26,8 +27,22 @@ namespace spark_rapids_jni::protobuf::detail {
 // Protobuf varint encoding uses at most 10 bytes to represent a 64-bit value.
 constexpr int MAX_VARINT_BYTES = 10;
 
+// Match protobuf-java's shared embedded-message/group recursion limit.
+constexpr int PROTOBUF_JAVA_RECURSION_LIMIT = 100;
+
 // CUDA kernel launch configuration.
 constexpr int THREADS_PER_BLOCK = 256;
+
+// Threshold for using a direct-mapped lookup table for field_number -> field_index.
+// Field numbers above this threshold fall back to linear search.
+constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
+
+// Maximum number of repeated fields in one message the combined occurrence-scan kernel can process
+// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
+// array on the stack; raising the limit pushes the array into local memory, which would otherwise
+// cost 4x the per-thread footprint and pressure occupancy. Host launchers chunk larger schemas,
+// so this is a native launch detail rather than a Java/schema limit.
+constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
 
 enum class protobuf_error : int {
   NONE = 0,
@@ -39,21 +54,11 @@ enum class protobuf_error : int {
   FIELD_SIZE,
   SKIP,
   FIXED_LEN,
+  INVALID_ENUM,
   REQUIRED,
   SCHEMA_TOO_LARGE,
   REPEATED_COUNT_MISMATCH,
 };
-
-// Threshold for using a direct-mapped lookup table for field_number -> field_index.
-// Field numbers above this threshold fall back to linear search.
-constexpr int FIELD_LOOKUP_TABLE_MAX = 4096;
-
-// Maximum number of top-level repeated fields the combined occurrence-scan kernel can process
-// in a single launch. The kernel keeps a per-thread `int write_idx[MAX_REPEATED_FIELDS_PER_KERNEL]`
-// array on the stack; raising the limit pushes the array into local memory, which would otherwise
-// cost 4x the per-thread footprint and pressure occupancy. Validated at the host level so the
-// error surface depends on the schema, not on which fields happen to have data in a given batch.
-constexpr int MAX_REPEATED_FIELDS_PER_KERNEL = 32;
 
 inline std::string error_message(protobuf_error error)
 {
@@ -68,10 +73,10 @@ inline std::string error_message(protobuf_error error)
     case FIELD_SIZE: return "Protobuf decode error: invalid field size";
     case SKIP: return "Protobuf decode error: unable to skip unknown field";
     case FIXED_LEN: return "Protobuf decode error: invalid fixed-width or packed field length";
+    case INVALID_ENUM: return "Protobuf decode error: unknown enum value";
     case REQUIRED: return "Protobuf decode error: missing required field";
     case SCHEMA_TOO_LARGE:
-      return "Protobuf decode error: schema exceeds maximum supported repeated fields per "
-             "kernel (" +
+      return "Protobuf decode internal error: occurrence scan exceeds fields per kernel (" +
              std::to_string(MAX_REPEATED_FIELDS_PER_KERNEL) + ")";
     case REPEATED_COUNT_MISMATCH:
       return "Protobuf decode error: repeated-field count/scan mismatch";
@@ -94,7 +99,10 @@ struct field_location {
 struct field_descriptor {
   int field_number;                    // Protobuf field number
   proto_wire_type expected_wire_type;  // Expected wire type for this field
-  bool is_repeated;                    // Repeated children are scanned via count/scan kernels
+  bool is_repeated;                    // Repeated children use count/scan kernels
+  bool is_message;                     // Singular messages may need occurrence merging
+  int32_t const* valid_enum_values;    // Sorted closed-enum values, or nullptr
+  int num_valid_enum_values;           // Size of valid_enum_values
   int output_index = -1;               // Matching output column, or -1 when unused
 };
 
@@ -151,6 +159,11 @@ struct protobuf_input_view {
 struct nested_parent_view {
   field_location const* locations;
   std::size_t location_count;
+  int32_t const* top_row_indices;
+};
+
+struct message_fragment_source_view {
+  field_location const* parent_locations;
   int32_t const* top_row_indices;
 };
 
@@ -226,6 +239,13 @@ struct field_scan_view {
   int location_stride;
   field_occurrence_count* repeated_info;
   int repeated_stride;
+  field_occurrence_count* singular_message_info;
+  int singular_message_stride;
+  int* multiple_message_fields;
+  lookup_view<field_descriptor> lookup;
+};
+
+struct message_validation_view {
   lookup_view<field_descriptor> lookup;
 };
 
@@ -238,6 +258,7 @@ static_assert(device_layout_compatible<field_occurrence_scan_desc>);
 static_assert(device_layout_compatible<field_occurrence_scan_view>);
 static_assert(device_layout_compatible<lookup_view<field_descriptor>>);
 static_assert(device_layout_compatible<nested_parent_view>);
+static_assert(device_layout_compatible<message_fragment_source_view>);
 static_assert(device_layout_compatible<protobuf_value_domain_view>);
 static_assert(device_layout_compatible<required_field_input_view>);
 static_assert(device_layout_compatible<scalar_value_input>);
@@ -251,5 +272,6 @@ static_assert(device_layout_compatible<batched_scalar_input_view<double>>);
 static_assert(device_layout_compatible<enum_domain_device_view>);
 static_assert(device_layout_compatible<enum_string_lookup_device_view>);
 static_assert(device_layout_compatible<field_scan_view>);
+static_assert(device_layout_compatible<message_validation_view>);
 
 }  // namespace spark_rapids_jni::protobuf::detail

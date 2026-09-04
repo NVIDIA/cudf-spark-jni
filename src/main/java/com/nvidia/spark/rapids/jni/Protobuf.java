@@ -45,11 +45,9 @@ import ai.rapids.cudf.NativeDepsLoader;
  *   <li>Nested messages and repeated fields</li>
  * </ul>
  *
- * <p>In permissive mode ({@code failOnErrors=false}), if decoding encounters a row-local parse
- * error from which it cannot safely recover its cursor position (for example, an unexpected wire
- * type or malformed varint), scanning for that row stops at the error position. Fields that appear
- * later in the same message are therefore treated as "not found" and follow the normal
- * missing-field semantics (nulls or defaults, depending on the schema metadata).
+ * <p>In permissive mode ({@code failOnErrors=false}), a malformed top-level message produces a null
+ * STRUCT row. Valid protobuf fields that are absent still follow the normal missing-field semantics
+ * (nulls or defaults, depending on the schema metadata).
  */
 public class Protobuf {
   static {
@@ -73,9 +71,7 @@ public class Protobuf {
    * @param binaryInput column of type LIST&lt;INT8/UINT8&gt; where each row is one protobuf message.
    * @param schema descriptor containing flattened schema arrays (field numbers, types, defaults, etc.)
    * @param failOnErrors if true, throw an exception on malformed protobuf messages. If false,
-   *                     malformed rows are handled permissively; when a row-local parse error
-   *                     prevents safe resynchronization, later fields in that same row are treated
-   *                     as absent rather than continuing from an uncertain cursor position.
+   *                     malformed top-level messages produce null STRUCT rows.
    * @return a cudf STRUCT column with nested structure.
    */
   public static ColumnVector decodeToStruct(ColumnView binaryInput,

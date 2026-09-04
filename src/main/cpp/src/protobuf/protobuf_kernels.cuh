@@ -148,6 +148,27 @@ struct nested_repeated_location_provider {
   }
 };
 
+struct message_fragment_location_provider {
+  protobuf_input_view input;
+  message_fragment_source_view source;
+  field_occurrence const* fragments;
+
+  __device__ inline field_location get(int thread_idx, int32_t& data_offset) const
+  {
+    auto const fragment      = fragments[thread_idx];
+    auto const parent_offset = source.parent_locations == nullptr
+                                 ? int32_t{0}
+                                 : source.parent_locations[fragment.row_idx].offset;
+    if (parent_offset < 0) {
+      data_offset = 0;
+      return {-1, 0};
+    }
+    data_offset =
+      input.row_offsets[fragment.row_idx] - input.base_offset + parent_offset + fragment.offset;
+    return {fragment.offset, fragment.length};
+  }
+};
+
 __device__ inline scalar_value_input resolve_scalar_value(uint8_t const* message_data,
                                                           field_location location,
                                                           int32_t data_offset)
@@ -177,14 +198,22 @@ __device__ inline void decode_varint_value(scalar_value_input input,
   uint8_t const* cur     = input.data;
   uint8_t const* cur_end = cur + input.length;
 
-  uint64_t v;
+  using varint_type = cuda::std::conditional_t<sizeof(OutputType) == 4, uint32_t, uint64_t>;
+  varint_type v;
   int n;
-  if (!read_varint(cur, cur_end, v, n)) {
+  bool decoded;
+  if constexpr (sizeof(OutputType) == 4) {
+    decoded = read_varint32(cur, cur_end, v, n);
+  } else {
+    decoded = read_varint64(cur, cur_end, v, n);
+  }
+  if (!decoded) {
     set_error_once(output.error, protobuf_error::VARINT);
     if (output.valid) output.valid[index] = false;
     return;
   }
 
+  // protobuf-java applies ZigZag after width-specific raw-varint decoding.
   if constexpr (ZigZag) { v = (v >> 1) ^ (-(v & 1)); }
   write_varint_value(&output.values[index], v);
   if (output.valid) output.valid[index] = true;
@@ -383,6 +412,55 @@ CUDF_KERNEL void extract_lengths_kernel(LocationProvider loc_provider,
   }
 }
 
+template <typename LocationProvider>
+CUDF_KERNEL void extract_utf8_lengths_kernel(uint8_t const* message_data,
+                                             LocationProvider loc_provider,
+                                             int total_items,
+                                             int32_t* out_lengths,
+                                             protobuf_error* error,
+                                             uint8_t const* default_data = nullptr,
+                                             int32_t default_length      = 0)
+{
+  auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (idx >= total_items) return;
+
+  int32_t data_offset = 0;
+  auto const loc      = loc_provider.get(idx, data_offset);
+  auto const* data    = loc.offset >= 0 ? message_data + data_offset : default_data;
+  auto const size     = loc.offset >= 0 ? loc.length : default_length;
+  if (data == nullptr || size == 0) {
+    out_lengths[idx] = 0;
+    return;
+  }
+
+  auto const repaired_length = repaired_utf8_length(data, size);
+  if (repaired_length > cuda::std::numeric_limits<int32_t>::max()) {
+    out_lengths[idx] = 0;
+    if (error != nullptr) { set_error_once(error, protobuf_error::OVERFLOW); }
+    return;
+  }
+  out_lengths[idx] = static_cast<int32_t>(repaired_length);
+}
+
+template <typename LocationProvider>
+CUDF_KERNEL void copy_repaired_utf8_kernel(uint8_t const* message_data,
+                                           LocationProvider loc_provider,
+                                           int total_items,
+                                           int32_t const* output_offsets,
+                                           char* output,
+                                           uint8_t const* default_data = nullptr,
+                                           int32_t default_length      = 0)
+{
+  auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (idx >= total_items) return;
+
+  int32_t data_offset = 0;
+  auto const loc      = loc_provider.get(idx, data_offset);
+  auto const* data    = loc.offset >= 0 ? message_data + data_offset : default_data;
+  auto const size     = loc.offset >= 0 ? loc.length : default_length;
+  if (data != nullptr && size > 0) { copy_repaired_utf8(data, size, output + output_offsets[idx]); }
+}
+
 // ============================================================================
 // Host wrapper declarations for kernel launches (repeated + nested)
 // ============================================================================
@@ -390,6 +468,7 @@ CUDF_KERNEL void extract_lengths_kernel(LocationProvider loc_provider,
 void launch_count_repeated_fields(cudf::column_device_view const& d_in,
                                   field_scan_view fields,
                                   protobuf_error* error_flag,
+                                  protobuf_error* deferred_enum_error,
                                   bool* row_has_invalid_data,
                                   cuda::stream_ref stream);
 
@@ -397,6 +476,11 @@ void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
                                        field_occurrence_scan_view fields,
                                        protobuf_error* error_flag,
                                        cuda::stream_ref stream);
+
+void launch_scan_singular_message_occurrences(cudf::column_device_view const& d_in,
+                                              field_occurrence_scan_view fields,
+                                              protobuf_error* error_flag,
+                                              cuda::stream_ref stream);
 
 void launch_extract_strided_locations(field_location const* nested_locations,
                                       int field_idx,
@@ -410,19 +494,45 @@ void launch_scan_nested_message_fields(protobuf_input_view input,
                                        field_scan_view fields,
                                        protobuf_error* error_flag,
                                        bool* row_has_invalid_data,
+                                       int recursion_depth,
                                        cuda::stream_ref stream);
 
 void launch_scan_all_field_occurrences_in_nested(protobuf_input_view input,
                                                  nested_parent_view parent,
                                                  field_occurrence_scan_view fields,
                                                  protobuf_error* error_flag,
+                                                 int recursion_depth,
                                                  cuda::stream_ref stream);
+
+void launch_validate_message_fragments(message_fragment_location_provider locations,
+                                       message_validation_view fields,
+                                       int num_fragments,
+                                       bool* invalid_rows,
+                                       bool* row_has_invalid_data,
+                                       protobuf_error* error_flag,
+                                       int recursion_depth,
+                                       cuda::stream_ref stream);
 
 void launch_compute_grandchild_parent_locations(nested_location_provider loc_provider,
                                                 field_location* gc_parent_locs,
                                                 int num_rows,
                                                 protobuf_error* error_flag,
                                                 cuda::stream_ref stream);
+
+void launch_compute_virtual_parents_for_nested_repeated(protobuf_input_view input,
+                                                        nested_parent_view parent,
+                                                        repeated_field_work const& work,
+                                                        cudf::size_type* virtual_row_offsets,
+                                                        field_location* virtual_parent_locs,
+                                                        protobuf_decode_runtime_context decode_ctx,
+                                                        cuda::stream_ref stream);
+
+void launch_compute_msg_locations_from_occurrences(protobuf_input_view input,
+                                                   repeated_field_work const& work,
+                                                   field_location* msg_locs,
+                                                   cudf::size_type* msg_row_offsets,
+                                                   protobuf_decode_runtime_context decode_ctx,
+                                                   cuda::stream_ref stream);
 
 // ============================================================================
 // Host-side template helpers that launch CUDA kernels
@@ -487,13 +597,15 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
   protobuf_field_meta_view field,
   uint8_t const* message_data,
   LocationProvider const& loc_provider,
-  int num_rows,
+  int num_values,
   protobuf_decode_runtime_context decode_ctx,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
+  auto const num_rows = num_values;
   if (num_rows == 0) { return cudf::make_empty_column(field.output_type); }
   rmm::device_uvector<T> out(num_rows, stream, mr);
+  // Validity is temporary extraction state; only output data and its null mask use the caller MR.
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
   extract_scalar_into_buffers<T, LocationProvider>(
@@ -504,6 +616,11 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
     make_scalar_decode_options<T>(field),
     {out.data(), valid.data(), decode_ctx.error->data()},
     stream);
+  if constexpr (std::is_same_v<T, int32_t>) {
+    if (!field.enum_valid_values.empty()) {
+      validate_enum_values(out, valid, field.enum_valid_values, stream);
+    }
+  }
   auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
   return std::make_unique<cudf::column>(
     field.output_type, num_rows, out.release(), std::move(mask), null_count);
@@ -511,18 +628,19 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
 
 template <typename LocationProvider, typename ValidityFn>
 inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
-  bool as_bytes,
+  protobuf_field_meta_view field,
   uint8_t const* message_data,
   int num_rows,
   LocationProvider const& loc_provider,
   ValidityFn validity_fn,
-  bool has_default,
-  cudf::detail::host_vector<uint8_t> const& default_bytes,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
-  int32_t def_len       = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
-  auto const scratch_mr = cudf::get_current_device_resource_ref();
+  auto const as_bytes       = field.output_type.id() == cudf::type_id::LIST;
+  auto const has_default    = field.schema.has_default_value;
+  auto const& default_bytes = field.default_string;
+  int32_t def_len           = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
+  auto const scratch_mr     = cudf::get_current_device_resource_ref();
   rmm::device_uvector<uint8_t> d_default(0, stream, scratch_mr);
   if (has_default && def_len > 0) {
     d_default = cudf::detail::make_device_uvector_async(default_bytes, stream, scratch_mr);
@@ -531,9 +649,22 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   rmm::device_uvector<int32_t> lengths(num_rows, stream, scratch_mr);
   auto const threads = THREADS_PER_BLOCK;
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
-  extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.get()>>>(
-    loc_provider, num_rows, lengths.data(), has_default, def_len);
-  CUDF_CHECK_CUDA(stream.get());
+  if (num_rows > 0) {
+    if (as_bytes) {
+      extract_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.get()>>>(
+        loc_provider, num_rows, lengths.data(), has_default, def_len);
+    } else {
+      extract_utf8_lengths_kernel<LocationProvider>
+        <<<blocks, threads, 0, stream.get()>>>(message_data,
+                                               loc_provider,
+                                               num_rows,
+                                               lengths.data(),
+                                               nullptr,
+                                               has_default ? d_default.data() : nullptr,
+                                               def_len);
+    }
+    CUDF_CHECK_CUDA(stream.get());
+  }
 
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
@@ -544,45 +675,58 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto* chars_ptr          = chars.data();
     auto const* default_ptr  = d_default.data();
 
-    auto src_iter = cudf::detail::make_counting_transform_iterator(
-      0,
-      cuda::proclaim_return_type<void const*>(
-        [message_data, loc_provider, has_default, default_ptr, def_len] __device__(
-          int idx) -> void const* {
-          int32_t data_offset = 0;
-          auto loc            = loc_provider.get(idx, data_offset);
-          if (loc.offset < 0) {
-            return (has_default && def_len > 0) ? static_cast<void const*>(default_ptr) : nullptr;
-          }
-          return static_cast<void const*>(message_data + data_offset);
+    if (!as_bytes) {
+      copy_repaired_utf8_kernel<LocationProvider>
+        <<<blocks, threads, 0, stream.get()>>>(message_data,
+                                               loc_provider,
+                                               num_rows,
+                                               offsets_data,
+                                               chars_ptr,
+                                               has_default ? default_ptr : nullptr,
+                                               def_len);
+      CUDF_CHECK_CUDA(stream.get());
+    } else {
+      auto src_iter = cudf::detail::make_counting_transform_iterator(
+        0,
+        cuda::proclaim_return_type<void const*>(
+          [message_data, loc_provider, has_default, default_ptr, def_len] __device__(
+            int idx) -> void const* {
+            int32_t data_offset = 0;
+            auto loc            = loc_provider.get(idx, data_offset);
+            if (loc.offset < 0) {
+              return (has_default && def_len > 0) ? static_cast<void const*>(default_ptr) : nullptr;
+            }
+            return static_cast<void const*>(message_data + data_offset);
+          }));
+      auto dst_iter = cudf::detail::make_counting_transform_iterator(
+        0,
+        cuda::proclaim_return_type<void*>([chars_ptr, offsets_data] __device__(int idx) -> void* {
+          return static_cast<void*>(chars_ptr + offsets_data[idx]);
         }));
-    auto dst_iter = cudf::detail::make_counting_transform_iterator(
-      0, cuda::proclaim_return_type<void*>([chars_ptr, offsets_data] __device__(int idx) -> void* {
-        return static_cast<void*>(chars_ptr + offsets_data[idx]);
-      }));
-    auto size_iter = cudf::detail::make_counting_transform_iterator(
-      0,
-      cuda::proclaim_return_type<size_t>(
-        [loc_provider, has_default, def_len] __device__(int idx) -> size_t {
-          int32_t data_offset = 0;
-          auto loc            = loc_provider.get(idx, data_offset);
-          if (loc.offset < 0) {
-            return (has_default && def_len > 0) ? static_cast<size_t>(def_len) : 0;
-          }
-          return static_cast<size_t>(loc.length);
-        }));
+      auto size_iter = cudf::detail::make_counting_transform_iterator(
+        0,
+        cuda::proclaim_return_type<size_t>(
+          [loc_provider, has_default, def_len] __device__(int idx) -> size_t {
+            int32_t data_offset = 0;
+            auto loc            = loc_provider.get(idx, data_offset);
+            if (loc.offset < 0) {
+              return (has_default && def_len > 0) ? static_cast<size_t>(def_len) : 0;
+            }
+            return static_cast<size_t>(loc.length);
+          }));
 
-    size_t temp_storage_bytes = 0;
-    CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
-      nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.get()));
-    rmm::device_buffer temp_storage(temp_storage_bytes, stream, scratch_mr);
-    CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(temp_storage.data(),
-                                             temp_storage_bytes,
-                                             src_iter,
-                                             dst_iter,
-                                             size_iter,
-                                             num_rows,
-                                             stream.get()));
+      size_t temp_storage_bytes = 0;
+      CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
+        nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_rows, stream.get()));
+      rmm::device_buffer temp_storage(temp_storage_bytes, stream, scratch_mr);
+      CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(temp_storage.data(),
+                                               temp_storage_bytes,
+                                               src_iter,
+                                               dst_iter,
+                                               size_iter,
+                                               num_rows,
+                                               stream.get()));
+    }
   }
 
   if (num_rows == 0) {
@@ -620,70 +764,52 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
                                                           cuda::stream_ref stream,
                                                           rmm::device_async_resource_ref mr)
 {
-  auto const field           = request.context.schema.field(request.schema_idx);
-  auto const message_data    = request.message_data;
-  auto const num_items       = request.values.size;
-  auto const decode_ctx      = request.context.runtime;
-  auto const top_row_indices = request.values.top_row_indices;
-  auto const dt              = field.output_type;
+  auto const field        = request.context.schema.field(request.schema_idx);
+  auto const message_data = request.message_data;
+  auto const decode_ctx   = request.context.runtime;
+  auto const num_items    = request.num_values;
+  auto const dt           = field.output_type;
 
   switch (dt.id()) {
     case cudf::type_id::BOOL8:
       return extract_and_build_scalar_field_column<uint8_t>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
-    case cudf::type_id::INT32: {
-      if (num_items == 0) { return cudf::make_empty_column(dt); }
-      rmm::device_uvector<int32_t> out(num_items, stream, mr);
-      auto const scratch_mr = cudf::get_current_device_resource_ref();
-      rmm::device_uvector<bool> valid(num_items, stream, scratch_mr);
-      extract_scalar_into_buffers<int32_t, LocationProvider>(
-        message_data,
-        loc_provider,
-        num_items,
-        field.schema.encoding,
-        make_scalar_decode_options<int32_t>(field),
-        {out.data(), valid.data(), decode_ctx.error->data()},
-        stream);
-      if (!field.enum_valid_values.empty()) {
-        validate_enum_and_propagate_rows(
-          out, valid, field.enum_valid_values, decode_ctx, {num_items, top_row_indices}, stream);
-      }
-      auto [mask, null_count] = make_null_mask_from_valid(valid, num_items, stream, mr);
-      return std::make_unique<cudf::column>(
-        dt, num_items, out.release(), std::move(mask), null_count);
-    }
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
+    case cudf::type_id::INT32:
+      return extract_and_build_scalar_field_column<int32_t>(
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
     case cudf::type_id::UINT32:
       return extract_and_build_scalar_field_column<uint32_t>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
     case cudf::type_id::INT64:
       return extract_and_build_scalar_field_column<int64_t>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
     case cudf::type_id::UINT64:
       return extract_and_build_scalar_field_column<uint64_t>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
     case cudf::type_id::FLOAT32:
       return extract_and_build_scalar_field_column<float>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
     case cudf::type_id::FLOAT64:
       return extract_and_build_scalar_field_column<double>(
-        field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
-    default: return make_null_column(dt, num_items, stream, mr);
+        field, message_data, loc_provider, request.num_values, decode_ctx, stream, mr);
+    default:
+      // Preserve protobuf-java-compatible null output when invalid input reaches this fallback.
+      return make_null_column(dt, num_items, stream, mr);
   }
 }
 
-template <typename LocationProvider, typename ValidityFn, typename TopRowIndexProvider>
-inline std::unique_ptr<cudf::column> build_protobuf_field_values_column(
+template <typename LocationProvider, typename ValidityFn>
+inline std::unique_ptr<cudf::column> build_protobuf_field_values_column_shared(
   protobuf_field_decode_request request,
   LocationProvider const& loc_provider,
   ValidityFn validity_fn,
-  TopRowIndexProvider get_top_row_indices,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const message_data = request.message_data;
   auto const field        = request.context.schema.field(request.schema_idx);
   auto const decode_ctx   = request.context.runtime;
-  auto const num_values   = request.values.size;
+  auto const num_values   = request.num_values;
   CUDF_EXPECTS(num_values > 0, std::string{__func__} + ": value count must be positive");
   auto const value_type  = field.output_type;
   auto const has_default = field.schema.has_default_value;
@@ -696,16 +822,7 @@ inline std::unique_ptr<cudf::column> build_protobuf_field_values_column(
     case cudf::type_id::UINT64:
     case cudf::type_id::FLOAT32:
     case cudf::type_id::FLOAT64: {
-      bool const is_numeric_enum =
-        value_type.id() == cudf::type_id::INT32 && !field.enum_valid_values.empty();
-      auto values = request.values;
-      values.top_row_indices =
-        is_numeric_enum && decode_ctx.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr;
-      return extract_typed_column(
-        {request.context, request.message_data, request.schema_idx, values},
-        loc_provider,
-        stream,
-        mr);
+      return extract_typed_column(request, loc_provider, stream, mr);
     }
     case cudf::type_id::STRING:
     case cudf::type_id::LIST: {
@@ -723,25 +840,10 @@ inline std::unique_ptr<cudf::column> build_protobuf_field_values_column(
           {has_default, static_cast<int32_t>(field.default_int)},
           {values.data(), valid.data(), decode_ctx.error->data()},
           stream);
-        auto enum_values = request.values;
-        enum_values.top_row_indices =
-          decode_ctx.propagate_invalid_enum_rows ? get_top_row_indices() : nullptr;
-        return build_enum_string_column(
-          values,
-          valid,
-          {request.context, request.message_data, request.schema_idx, enum_values},
-          stream,
-          mr);
+        return build_enum_string_column(values, valid, request, stream, mr);
       }
-      return extract_and_build_string_or_bytes_column(value_type.id() == cudf::type_id::LIST,
-                                                      message_data,
-                                                      num_values,
-                                                      loc_provider,
-                                                      validity_fn,
-                                                      has_default,
-                                                      field.default_string,
-                                                      stream,
-                                                      mr);
+      return extract_and_build_string_or_bytes_column(
+        field, message_data, num_values, loc_provider, validity_fn, stream, mr);
     }
     default:
       CUDF_FAIL("Protobuf decode: unsupported child output type id=" +
@@ -753,32 +855,52 @@ template <typename T>
 inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   cudf::column_view const& binary_input,
   protobuf_input_view input,
-  protobuf_field_meta_view field,
+  protobuf_schema const& schema,
+  protobuf_decode_runtime_context decode_ctx,
   repeated_field_work work,
-  rmm::device_uvector<protobuf_error>& d_error,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   validate_nonempty_repeated_field_work(work, input.num_rows);
 
-  rmm::device_uvector<T> values(work.total_count, stream, mr);
-  repeated_location_provider loc_provider{
-    input.row_offsets, input.base_offset, work.occurrences->data()};
-  extract_scalar_into_buffers<T, repeated_location_provider>(
-    input.message_data,
-    loc_provider,
-    work.total_count,
-    field.schema.encoding,
-    {false, T{}},
-    {values.data(), nullptr, d_error.data()},
-    stream);
+  auto const field       = schema.field(work.schema_idx);
+  auto const total_count = work.total_count;
+  auto& occurrences      = *work.occurrences;
+  repeated_location_provider loc_provider{input.row_offsets, input.base_offset, occurrences.data()};
+
+  std::unique_ptr<cudf::column> child_col;
+  if constexpr (std::is_same_v<T, int32_t>) {
+    if (!field.enum_valid_values.empty()) {
+      auto const context = recursive_decode_context{schema, decode_ctx};
+      auto const request =
+        protobuf_field_decode_request{context, input.message_data, work.schema_idx, total_count};
+      child_col = extract_typed_column(request, loc_provider, stream, mr);
+    }
+  }
+
+  if (child_col == nullptr) {
+    rmm::device_uvector<T> values(total_count, stream, mr);
+    extract_scalar_into_buffers<T, repeated_location_provider>(
+      input.message_data,
+      loc_provider,
+      total_count,
+      field.schema.encoding,
+      {false, T{}},
+      {values.data(), nullptr, decode_ctx.error->data()},
+      stream);
+    child_col = std::make_unique<cudf::column>(
+      field.output_type, total_count, values.release(), rmm::device_buffer{}, 0);
+  }
 
   auto offsets_col = make_offsets_column(input.num_rows, std::move(work.offsets));
-  auto child_col   = std::make_unique<cudf::column>(
-    field.output_type, work.total_count, values.release(), rmm::device_buffer{}, 0);
-
-  return make_list_column_with_input_nulls(
+  auto result      = make_list_column_with_input_nulls(
     input.num_rows, std::move(offsets_col), std::move(child_col), binary_input, stream, mr);
+  if constexpr (std::is_same_v<T, int32_t>) {
+    if (!field.enum_valid_values.empty()) {
+      return drop_unknown_repeated_enum_values(std::move(result), stream, mr);
+    }
+  }
+  return result;
 }
 
 // ============================================================================
@@ -788,11 +910,11 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
 void launch_scan_all_fields(cudf::column_device_view const& d_in,
                             field_scan_view fields,
                             protobuf_error* error_flag,
+                            protobuf_error* deferred_enum_error,
                             bool* row_has_invalid_data,
                             cuda::stream_ref stream);
 
 void launch_validate_enum_values(enum_value_device_view input,
-                                 bool* row_has_invalid_enum,
                                  enum_domain_device_view domain,
                                  cuda::stream_ref stream);
 
