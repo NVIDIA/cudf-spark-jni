@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -134,7 +134,9 @@ struct MurmurHash3_32 {
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<bool>::operator()(bool const& key) const
 {
-  return compute<uint32_t>(key);
+  // BOOL8 stores false as zero and true as any non-zero byte. Canonicalize
+  // before hashing so noncanonical true values hash exactly like Spark true.
+  return compute<uint32_t>(key ? 1u : 0u);
 }
 
 template <>
