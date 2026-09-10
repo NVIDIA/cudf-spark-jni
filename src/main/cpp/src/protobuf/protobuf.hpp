@@ -25,6 +25,7 @@
 
 #include <cuda/stream>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -40,7 +41,7 @@ enum class proto_encoding : int {
 
 constexpr int MAX_FIELD_NUMBER = (1 << 29) - 1;
 
-enum class proto_wire_type : int {
+enum class proto_wire_type : uint32_t {
   VARINT = 0,
   I64BIT = 1,
   LEN    = 2,
@@ -64,6 +65,26 @@ struct nested_field_descriptor {
 };
 
 struct protobuf_decode_context {
+  protobuf_decode_context(std::vector<nested_field_descriptor> schema,
+                          std::vector<int64_t> default_ints,
+                          std::vector<double> default_floats,
+                          std::vector<bool> default_bools,
+                          std::vector<cudf::detail::host_vector<uint8_t>> default_strings,
+                          std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values,
+                          std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names,
+                          bool fail_on_errors,
+                          std::vector<bool> output_fields = {});
+
+  protobuf_decode_context(std::vector<nested_field_descriptor> schema,
+                          bool fail_on_errors,
+                          cuda::stream_ref stream,
+                          std::vector<bool> output_fields = {});
+
+  protobuf_decode_context(protobuf_decode_context const&)            = delete;
+  protobuf_decode_context& operator=(protobuf_decode_context const&) = delete;
+  protobuf_decode_context(protobuf_decode_context&&)                 = default;
+  protobuf_decode_context& operator=(protobuf_decode_context&&)      = default;
+
   std::vector<nested_field_descriptor> schema;
   std::vector<int64_t> default_ints;
   std::vector<double> default_floats;
@@ -72,10 +93,16 @@ struct protobuf_decode_context {
   std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names;
   bool fail_on_errors;
-  // Per-field flag (parallel to `schema`) controlling whether a field appears in the
-  // returned struct. Hidden fields are still decoded so required/enum/wire validation
-  // runs, but they are dropped from the final output. An empty vector means "all output".
+  // Hidden fields are still decoded so required/enum/wire validation runs. An empty vector means
+  // all fields are included in the returned struct.
   std::vector<bool> output_fields;
+
+ private:
+  protobuf_decode_context(std::size_t num_fields,
+                          std::vector<nested_field_descriptor> schema,
+                          bool fail_on_errors,
+                          cuda::stream_ref stream,
+                          std::vector<bool> output_fields);
 };
 
 struct protobuf_field_meta_view {

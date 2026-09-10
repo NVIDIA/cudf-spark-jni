@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "protobuf/protobuf.hpp"
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf_test/base_fixture.hpp>
@@ -30,9 +31,52 @@
 #include <cuda_runtime_api.h>
 
 #include <array>
+#include <cstdint>
+#include <numeric>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 class ProtobufHelpersTest : public cudf::test::BaseFixture {};
+
+namespace {
+
+namespace protobuf = spark_rapids_jni::protobuf;
+
+protobuf::protobuf_decode_context make_numeric_enum_context(int64_t default_value)
+{
+  auto const stream = cudf::get_default_stream();
+
+  std::vector<cudf::detail::host_vector<uint8_t>> default_strings;
+  default_strings.emplace_back(cudf::detail::make_pinned_vector_async<uint8_t>(0, stream));
+
+  std::vector enum_valid_values{cudf::detail::make_pinned_vector_async<int32_t>(3, stream)};
+  auto& values = enum_valid_values.back();
+  std::iota(values.begin(), values.end(), 0);
+
+  std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names(1);
+  return {{{.field_number      = 1,
+            .parent_idx        = -1,
+            .wire_type         = protobuf::proto_wire_type::VARINT,
+            .output_type       = cudf::type_id::INT32,
+            .encoding          = protobuf::proto_encoding::DEFAULT,
+            .has_default_value = true}},
+          {default_value},
+          {0.0},
+          {false},
+          std::move(default_strings),
+          std::move(enum_valid_values),
+          std::move(enum_names),
+          true};
+}
+
+}  // namespace
+
+TEST_F(ProtobufHelpersTest, NumericEnumDefaultMustFitInt32)
+{
+  EXPECT_NO_THROW(make_numeric_enum_context(2));
+  EXPECT_THROW(make_numeric_enum_context(int64_t{1} << 42), std::invalid_argument);
+}
 
 TEST_F(ProtobufHelpersTest, NullMaskFromPaddedValidUsesZeroLogicalRows)
 {

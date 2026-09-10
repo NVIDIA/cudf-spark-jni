@@ -25,7 +25,7 @@ import java.util.Set;
  * that describe field structure, types, defaults, and enum metadata.
  *
  * <p>Use this class instead of passing 15+ individual arrays through the JNI boundary.
- * Validation is performed once in the constructor (and again on deserialization).
+ * Validation is performed during construction and deserialization.
  *
  * <p>All arrays provided to the constructor are defensively copied to guarantee immutability.
  * During deserialization, {@code defaultReadObject()} reconstructs a fresh object graph and
@@ -238,8 +238,8 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       validateUniqueFieldKey(i, parentIndices[i], fieldNumbers[i], seenFieldNumbers);
       validateWireTypeAndEncoding(i, wireTypes[i], outputTypeIds[i], encodings[i]);
       validateFieldFlags(i, isRepeated[i], isRequired[i], hasDefaultValue[i], outputTypeIds[i]);
-      validateEnumMetadata(
-          i, outputTypeIds[i], encodings[i], enumValidValues[i], enumNames[i]);
+      validateEnumMetadata(i, encodings[i], outputTypeIds[i], enumValidValues[i], enumNames[i],
+          hasDefaultValue[i], defaultInts[i]);
     }
   }
 
@@ -337,43 +337,16 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
     }
   }
 
-  private static void validateEnumMetadata(int index, int outputTypeId, int encoding,
-                                            int[] validValues, byte[][] names) {
-    validateEnumTypeAndEncoding(index, outputTypeId, encoding, validValues);
-    validateEnumAsStringMetadata(index, encoding, validValues, names);
-    validateEnumValuesAndNamesPairing(index, validValues, names);
-  }
-
-  private static void validateEnumTypeAndEncoding(int index, int outputTypeId, int encoding,
-                                                   int[] validValues) {
-    if (validValues == null) {
-      return;
-    }
-    boolean isNumericEnum =
-        outputTypeId == INT32_TYPE_ID && encoding == Protobuf.ENC_DEFAULT;
-    boolean isStringEnum =
-        outputTypeId == STRING_TYPE_ID && encoding == Protobuf.ENC_ENUM_STRING;
-    if (!isNumericEnum && !isStringEnum) {
-      throw new IllegalArgumentException(
-          "Enum metadata at index " + index +
-          " requires INT32/DEFAULT or STRING/ENUM_STRING");
-    }
-  }
-
-  private static void validateEnumAsStringMetadata(int index, int encoding,
-                                                    int[] validValues, byte[][] names) {
-    if (encoding != Protobuf.ENC_ENUM_STRING) {
-      return;
-    }
-    if (isNullOrEmpty(validValues) || isNullOrEmpty(names)) {
+  private static void validateEnumMetadata(int index, int encoding, int outputTypeId,
+                                            int[] validValues, byte[][] names,
+                                            boolean hasDefault, long defaultValue) {
+    boolean isStringEnum = encoding == Protobuf.ENC_ENUM_STRING;
+    if (isStringEnum &&
+        (isNullOrEmpty(validValues) || isNullOrEmpty(names))) {
       throw new IllegalArgumentException(
           "Enum-as-string field at index " + index +
           " must provide non-empty enumValidValues and enumNames");
     }
-  }
-
-  private static void validateEnumValuesAndNamesPairing(int index, int[] validValues,
-                                                         byte[][] names) {
     if (validValues == null) {
       if (names != null) {
         throw new IllegalArgumentException(
@@ -382,8 +355,16 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       }
       return;
     }
+    boolean isNumericEnum = outputTypeId == INT32_TYPE_ID &&
+        encoding == Protobuf.ENC_DEFAULT;
+    if (!isNumericEnum && !(isStringEnum && outputTypeId == STRING_TYPE_ID)) {
+      throw new IllegalArgumentException(
+          "Enum metadata at index " + index +
+          " requires INT32/DEFAULT or STRING/ENUM_STRING");
+    }
     validateEnumValuesStrictlySorted(index, validValues);
     validateEnumNamesLength(index, validValues, names);
+    validateEnumDefault(index, validValues, hasDefault, defaultValue);
   }
 
   private static void validateEnumValuesStrictlySorted(int index, int[] validValues) {
@@ -402,6 +383,18 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
       throw new IllegalArgumentException(
           "enumNames[" + index + "].length (" + names.length + ") must equal " +
           "enumValidValues[" + index + "].length (" + validValues.length + ")");
+    }
+  }
+
+  private static void validateEnumDefault(int index, int[] validValues,
+                                          boolean hasDefault, long defaultValue) {
+    if (!hasDefault || isNullOrEmpty(validValues)) {
+      return;
+    }
+    int defaultInt = (int) defaultValue;
+    if (defaultInt != defaultValue || Arrays.binarySearch(validValues, defaultInt) < 0) {
+      throw new IllegalArgumentException(
+          "Enum default at index " + index + " must be present in enumValidValues");
     }
   }
 
