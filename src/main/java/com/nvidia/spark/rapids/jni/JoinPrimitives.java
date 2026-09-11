@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,7 +72,8 @@ public class JoinPrimitives {
    *
    * @param leftKeys The left table for equality comparison
    * @param rightKeys The right table for equality comparison
-   * @param isLeftSorted Whether the left table is pre-sorted
+   * @param isLeftSorted Ignored. Retained for source compatibility; the underlying
+   *                     cudf API no longer uses it.
    * @param isRightSorted Whether the right table is pre-sorted
    * @param compareNullsEqual Whether nulls in equality keys should be considered equal
    * @return An array of two GatherMaps: [left_map, right_map]
@@ -85,7 +86,6 @@ public class JoinPrimitives {
     long[] result = nativeSortMergeInnerJoin(
       leftKeys.getNativeView(),
       rightKeys.getNativeView(),
-      isLeftSorted,
       isRightSorted,
       compareNullsEqual);
     
@@ -314,7 +314,6 @@ public class JoinPrimitives {
   private static native long[] nativeSortMergeInnerJoin(
     long leftKeys,
     long rightKeys,
-    boolean isLeftSorted,
     boolean isRightSorted,
     boolean compareNullsEqual);
 
