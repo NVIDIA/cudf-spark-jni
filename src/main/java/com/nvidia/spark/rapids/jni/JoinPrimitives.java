@@ -90,29 +90,6 @@ public class JoinPrimitives {
   }
 
   /**
-   * Perform an inner join using sort-merge algorithm.
-   * <p>
-   * Use {@link #sortMergeInnerJoin(Table, Table, boolean, boolean)} instead. This
-   * overload remains only so existing callers keep compiling, and will be removed
-   * once they have moved over.
-   * </p>
-   *
-   * @param leftKeys The left table for equality comparison
-   * @param rightKeys The right table for equality comparison
-   * @param isLeftSorted Ignored. The underlying cudf API no longer uses it.
-   * @param isRightSorted Whether the right table is pre-sorted
-   * @param compareNullsEqual Whether nulls in equality keys should be considered equal
-   * @return An array of two GatherMaps: [left_map, right_map]
-   */
-  public static GatherMap[] sortMergeInnerJoin(Table leftKeys,
-                                               Table rightKeys,
-                                               boolean isLeftSorted,
-                                               boolean isRightSorted,
-                                               boolean compareNullsEqual) {
-    return sortMergeInnerJoin(leftKeys, rightKeys, isRightSorted, compareNullsEqual);
-  }
-
-  /**
    * Perform an inner join using hash join algorithm.
    * <p>
    * Returns gather maps for matching rows. Does not optimize by swapping tables

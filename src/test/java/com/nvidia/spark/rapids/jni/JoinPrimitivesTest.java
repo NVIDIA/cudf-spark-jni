@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -229,7 +229,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] gatherMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         Set<Map.Entry<Integer, Integer>> expected = pairSet(pair(1, 0), pair(2, 1));
@@ -286,7 +286,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] gatherMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, false);
+          leftTable, rightTable, false, false);
 
       try {
         Set<Map.Entry<Integer, Integer>> expected = pairSet(pair(1, 1));
@@ -339,7 +339,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] gatherMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         Set<Map.Entry<Integer, Integer>> expected = pairSet(); // Empty set
@@ -385,7 +385,7 @@ public class JoinPrimitivesTest {
 
       // First get gather maps from equality join
       GatherMap[] equalityMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftKeyTable, rightKeyTable, false, false, true);
+          leftKeyTable, rightKeyTable, false, true);
 
       try {
         // Then filter by AST
@@ -429,7 +429,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Make it left outer
@@ -472,7 +472,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Make it right outer by swapping: makeLeftOuter(right, left, rightSize, leftSize)
@@ -514,7 +514,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Make it full outer
@@ -559,7 +559,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result (will have duplicates)
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Make it semi (only needs left gather map)
@@ -590,7 +590,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Make it semi first (only needs left gather map)
@@ -628,7 +628,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result (will have duplicates)
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Get matched rows boolean column for left side
@@ -667,7 +667,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         GatherMap[] outerMaps = JoinPrimitives.makeLeftOuter(
@@ -723,7 +723,7 @@ public class JoinPrimitivesTest {
 
       // Step 1: Equality join
       GatherMap[] equalityMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftKeyTable, rightKeyTable, false, false, true);
+          leftKeyTable, rightKeyTable, false, true);
 
       try {
         // Step 2: Filter by AST
@@ -771,7 +771,7 @@ public class JoinPrimitivesTest {
 
       // Step 1: Equality join
       GatherMap[] equalityMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftKeyTable, rightKeyTable, false, false, true);
+          leftKeyTable, rightKeyTable, false, true);
 
       try {
         // Step 2: Filter by AST
@@ -825,7 +825,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] gatherMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         Set<Map.Entry<Integer, Integer>> expected = pairSet(); // Empty set
@@ -1087,7 +1087,7 @@ public class JoinPrimitivesTest {
 
       // Get inner join result (will have duplicates for key 1)
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         // Get matched rows boolean column for left side
@@ -1125,7 +1125,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         GatherMap[] outerMaps = JoinPrimitives.makeLeftOuter(
@@ -1170,7 +1170,7 @@ public class JoinPrimitivesTest {
       int rightSize = (int) rightTable.getRowCount();
 
       GatherMap[] innerMaps = JoinPrimitives.sortMergeInnerJoin(
-          leftTable, rightTable, false, false, true);
+          leftTable, rightTable, false, true);
 
       try {
         GatherMap[] outerMaps = JoinPrimitives.makeLeftOuter(
