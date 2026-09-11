@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -149,7 +149,7 @@ struct percentile_dispatcher {
   //  2. Null mask to apply for the final output column containing percentile values, and
   //  3. Null count corresponding to that null mask.
   using output_type =
-    std::tuple<std::unique_ptr<cudf::column>, rmm::device_buffer, cudf::size_type>;
+    std::tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<std::byte>, cudf::size_type>;
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
@@ -221,7 +221,7 @@ struct percentile_dispatcher {
       return {std::move(percentiles), std::move(*null_mask.release()), null_count};
     }
 
-    return {std::move(percentiles), rmm::device_buffer{}, 0};
+    return {std::move(percentiles), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0};
   }
 };
 
@@ -252,7 +252,7 @@ void check_input(cudf::column_view const& input, std::vector<double> const& perc
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
-                                           rmm::device_buffer&& null_mask,
+                                           cuda::device_buffer<std::byte>&& null_mask,
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
@@ -294,7 +294,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                                      cudf::make_empty_column(cudf::type_to_id<cudf::size_type>()),
                                      cudf::reduction::detail::make_empty_histogram_like(values),
                                      0,
-                                     {});
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     } else {
       return cudf::reduction::detail::make_empty_histogram_like(values);
     }
@@ -327,7 +327,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                "The input frequencies must not contain negative values.",
                std::invalid_argument);
 
-  auto const make_structs_histogram = [&](rmm::device_buffer&& null_mask,
+  auto const make_structs_histogram = [&](cuda::device_buffer<std::byte>&& null_mask,
                                           cudf::size_type null_count) {
     // Copy values and frequencies into a new structs column.
     std::vector<std::unique_ptr<cudf::column>> values_and_frequencies;
@@ -345,7 +345,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
           std::vector<cudf::bitmask_type const*>{
             // Don't use values.null_mask(), to make sure no slicing.
             values_and_frequencies.front()->view().null_mask(),
-            static_cast<cudf::bitmask_type const*>(null_mask.data())},
+            reinterpret_cast<cudf::bitmask_type const*>(null_mask.data())},
           std::vector<cudf::size_type>{0, 0},
           values.size(),
           stream,
@@ -369,8 +369,12 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
         });
     }
 
-    return cudf::make_structs_column(
-      values.size(), std::move(values_and_frequencies), 0, rmm::device_buffer{}, stream, mr);
+    return cudf::make_structs_column(values.size(),
+                                     std::move(values_and_frequencies),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     stream,
+                                     mr);
   };
 
   auto const make_lists_histograms = [&](cudf::size_type num_elements,
@@ -379,12 +383,16 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
     auto const sizes_itr = cuda::make_constant_iterator(1);
     auto offsets         = std::get<0>(
       cudf::detail::make_offsets_child_column(sizes_itr, sizes_itr + num_elements, stream, mr));
-    return cudf::make_lists_column(
-      num_elements, std::move(offsets), std::move(structs_histogram), 0, rmm::device_buffer{});
+    return cudf::make_lists_column(num_elements,
+                                   std::move(offsets),
+                                   std::move(structs_histogram),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   };
 
   if (output_as_lists) {
-    auto child            = make_structs_histogram(rmm::device_buffer{}, 0);
+    auto child =
+      make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     auto lists_histograms = make_lists_histograms(values.size(), std::move(child));
 
     if (!h_checks.back()) {  // all frequencies are positive
@@ -400,11 +408,11 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
       cudf::bools_to_mask(cudf::device_span<bool const>(check_valid), stream, default_mr);
     lists_histograms->set_null_mask(std::move(*null_mask.release()), null_count);
     lists_histograms = cudf::purge_nonempty_nulls(lists_histograms->view(), stream, mr);
-    lists_histograms->set_null_mask(rmm::device_buffer{}, 0);
+    lists_histograms->set_null_mask(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     return lists_histograms;
   } else {                   // output_as_lists==false
     if (!h_checks.back()) {  // all frequencies are positive
-      return make_structs_histogram(rmm::device_buffer{}, 0);
+      return make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     }
 
     // We nullify the values corresponding to zero frequencies.

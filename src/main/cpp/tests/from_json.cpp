@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -100,7 +100,9 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
                                  std::move(offsets_col),
                                  std::move(structs_child),
                                  null_count,
-                                 null_count > 0 ? std::move(*null_mask) : rmm::device_buffer{});
+                                 null_count > 0
+                                   ? std::move(*null_mask)
+                                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Convenience: every row valid.
@@ -685,18 +687,22 @@ std::unique_ptr<cudf::column> make_expected_raw_map_array(std::vector<std::vecto
   auto [inner_mask, inner_null_count] = cudf::bools_to_mask(
     cudf::test::fixed_width_column_wrapper<bool>(inner_valid.begin(), inner_valid.end()));
 
-  auto inner_list =
-    cudf::make_lists_column(num_pairs,
-                            std::move(inner_offsets_col),
-                            elements_child.release(),
-                            inner_null_count,
-                            inner_null_count > 0 ? std::move(*inner_mask) : rmm::device_buffer{});
+  auto inner_list = cudf::make_lists_column(
+    num_pairs,
+    std::move(inner_offsets_col),
+    elements_child.release(),
+    inner_null_count,
+    inner_null_count > 0 ? std::move(*inner_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
   struct_children.emplace_back(keys_child.release());
   struct_children.emplace_back(std::move(inner_list));
   auto structs_child =
-    cudf::make_structs_column(num_pairs, std::move(struct_children), 0, rmm::device_buffer{});
+    cudf::make_structs_column(num_pairs,
+                              std::move(struct_children),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   auto outer_offsets_col = cudf::test::fixed_width_column_wrapper<cudf::size_type>(
                              outer_offsets.begin(), outer_offsets.end())
@@ -705,12 +711,13 @@ std::unique_ptr<cudf::column> make_expected_raw_map_array(std::vector<std::vecto
   auto [outer_mask, outer_null_count] = cudf::bools_to_mask(
     cudf::test::fixed_width_column_wrapper<bool>(row_valid.begin(), row_valid.end()));
 
-  return cudf::make_lists_column(
-    static_cast<cudf::size_type>(num_rows),
-    std::move(outer_offsets_col),
-    std::move(structs_child),
-    outer_null_count,
-    outer_null_count > 0 ? std::move(*outer_mask) : rmm::device_buffer{});
+  return cudf::make_lists_column(static_cast<cudf::size_type>(num_rows),
+                                 std::move(outer_offsets_col),
+                                 std::move(structs_child),
+                                 outer_null_count,
+                                 outer_null_count > 0
+                                   ? std::move(*outer_mask)
+                                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Convenience builders for `array_value` literals.

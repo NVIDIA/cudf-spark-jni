@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -298,12 +298,20 @@ TEST_F(ShuffleSplitTests, Lists)
     cudf::test::strings_column_wrapper strings0{{"*", "*", "****", "", "*", ""},
                                                 {1, 1, 1, 1, 1, 0}};
     cudf::test::fixed_width_column_wrapper<int> offsets0{0, 1, 2, 3, 6};
-    auto col0 = cudf::make_lists_column(4, offsets0.release(), strings0.release(), 0, {});
+    auto col0 = cudf::make_lists_column(4,
+                                        offsets0.release(),
+                                        strings0.release(),
+                                        0,
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     cudf::test::strings_column_wrapper strings1{{"", "", "", "", "", "", ""},
                                                 {0, 0, 0, 0, 0, 0, 0}};
     cudf::test::fixed_width_column_wrapper<int> offsets1{0, 4, 4, 7, 7};
-    auto col1 = cudf::make_lists_column(4, offsets1.release(), strings1.release(), 0, {});
+    auto col1 = cudf::make_lists_column(4,
+                                        offsets1.release(),
+                                        strings1.release(),
+                                        0,
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     cudf::table_view tbl{{*col0, *col1}};
     run_split(tbl, {});
@@ -423,9 +431,11 @@ TEST_F(ShuffleSplitTests, PurgeNulls)
   // non-nullable outputs at assemble side.
 
   // manually construct a column with a non-null validity buffer to force it to appear nullable
-  auto validity_buffer =
-    rmm::device_buffer{1, cudf::get_default_stream(), rmm::mr::get_current_device_resource_ref()};
-  auto col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_to_id<float>()},
+  auto validity_buffer = cudf::create_null_mask(1,
+                                                cudf::mask_state::UNINITIALIZED,
+                                                cudf::get_default_stream(),
+                                                rmm::mr::get_current_device_resource_ref());
+  auto col             = std::make_unique<cudf::column>(cudf::data_type{cudf::type_to_id<float>()},
                                             0,
                                             rmm::device_buffer{},
                                             std::move(validity_buffer),
@@ -448,14 +458,22 @@ TEST_F(ShuffleSplitTests, EmptyOffsets)
   // list<string> with empty strings
   cudf::test::strings_column_wrapper strings0{};
   cudf::test::fixed_width_column_wrapper<int> offsets0{0, 0, 0};
-  auto col0 = cudf::make_lists_column(2, offsets0.release(), strings0.release(), 0, {});
+  auto col0 = cudf::make_lists_column(2,
+                                      offsets0.release(),
+                                      strings0.release(),
+                                      0,
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   cudf::lists_column_view lcv(*col0);
   CUDF_EXPECTS(lcv.child().num_children() == 0, "String column is expected to have no offsets");
 
   // list<list<int>> with empty inner list
   cudf::test::lists_column_wrapper<int> list0{};
   cudf::test::fixed_width_column_wrapper<int> offsets1{0, 0, 0};
-  auto col1 = cudf::make_lists_column(2, offsets1.release(), list0.release(), 0, {});
+  auto col1 = cudf::make_lists_column(2,
+                                      offsets1.release(),
+                                      list0.release(),
+                                      0,
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   // list<struct<int, int>>
   cudf::test::fixed_width_column_wrapper<int> ints0{-210, 311};
@@ -465,7 +483,11 @@ TEST_F(ShuffleSplitTests, EmptyOffsets)
   inner_children.push_back(ints1.release());
   cudf::test::structs_column_wrapper inner_struct(std::move(inner_children));
   cudf::test::fixed_width_column_wrapper<int> offsets2{0, 1, 2};
-  auto col2 = cudf::make_lists_column(2, offsets2.release(), inner_struct.release(), 0, {});
+  auto col2 = cudf::make_lists_column(2,
+                                      offsets2.release(),
+                                      inner_struct.release(),
+                                      0,
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   cudf::table_view tbl{{*col0, *col1, *col2, *col1}};
   auto result = run_split(tbl, {});
@@ -591,7 +613,12 @@ TEST_F(ShuffleSplitTests, NestedTypes)
 
     // list<struct<list, list>>
     cudf::test::fixed_width_column_wrapper<int> offsets{0, 2, 4, 6, 7, 9, 9, 12, 16};
-    auto list_col = cudf::make_lists_column(8, offsets.release(), struct_col.release(), 0, {});
+    auto list_col =
+      cudf::make_lists_column(8,
+                              offsets.release(),
+                              struct_col.release(),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     cudf::table_view tbl{{*list_col}};
     run_split(tbl, {});
@@ -701,7 +728,12 @@ TEST_F(ShuffleSplitTests, Reshaping)
 
     // list<struct<list, list>>
     cudf::test::fixed_width_column_wrapper<int> offsets{0, 2, 4, 6, 7, 9, 9, 12, 16};
-    auto list_col = cudf::make_lists_column(8, offsets.release(), struct_col.release(), 0, {});
+    auto list_col =
+      cudf::make_lists_column(8,
+                              offsets.release(),
+                              struct_col.release(),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     cudf::table_view tbl{{*list_col}};
     run_split(tbl, {2, 4}, {2, 0, 1});
@@ -788,7 +820,12 @@ TEST_F(ShuffleSplitTests, NestedTerminatingEmptyPartition)
     cudf::test::structs_column_wrapper str(std::move(children));
 
     cudf::test::fixed_width_column_wrapper<int> inner_offsets{0, 1, 2, 3, 4, 5, 6, 7, 8};
-    auto inner_list = cudf::make_lists_column(8, inner_offsets.release(), str.release(), 0, {});
+    auto inner_list =
+      cudf::make_lists_column(8,
+                              inner_offsets.release(),
+                              str.release(),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     cudf::test::fixed_width_column_wrapper<int> outer_offsets{
       0, 1, 2, 2, 2, 2, 3, 4, 4, 4, 4, 4, 5, 6, 7, 7, 8, 8, 8};
@@ -808,7 +845,11 @@ TEST_F(ShuffleSplitTests, NestedTerminatingEmptyPartition)
   {
     cudf::test::strings_column_wrapper str{};
     cudf::test::fixed_width_column_wrapper<int> offsets{0, 0, 0, 0, 0, 0, 0, 0, 0};
-    auto list = cudf::make_lists_column(8, offsets.release(), str.release(), 0, {});
+    auto list = cudf::make_lists_column(8,
+                                        offsets.release(),
+                                        str.release(),
+                                        0,
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     cudf::table_view tbl{{*list}};
     run_split(tbl, {2, 4, 6});
   }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -176,10 +176,11 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
 
   return cudf::make_strings_column(
     row_count,
-    std::make_unique<cudf::column>(std::move(offsets), rmm::device_buffer{}, 0),
+    std::make_unique<cudf::column>(
+      std::move(offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0),
     chars.release(),
-    0,                    // null count
-    rmm::device_buffer{}  // all UUIDs are non-null
+    0,                                                        // null count
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)  // all UUIDs are non-null
   );
 }
 

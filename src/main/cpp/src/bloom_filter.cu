@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -324,8 +324,11 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(int version,
     static_cast<uint8_t*>(buf.data()) + hdr_size, 0, bloom_filter_size, stream.get()));
 
   return std::make_unique<cudf::list_scalar>(
-    cudf::column(
-      cudf::data_type{cudf::type_id::UINT8}, buf_size, std::move(buf), rmm::device_buffer{}, 0),
+    cudf::column(cudf::data_type{cudf::type_id::UINT8},
+                 buf_size,
+                 std::move(buf),
+                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                 0),
     true,
     stream,
     mr);
@@ -441,8 +444,11 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_merge(cudf::column_view const& b
 
   // create the 1-row list column and move it into a scalar.
   return std::make_unique<cudf::list_scalar>(
-    cudf::column(
-      cudf::data_type{cudf::type_id::UINT8}, buf_size, std::move(buf), rmm::device_buffer{}, 0),
+    cudf::column(cudf::data_type{cudf::type_id::UINT8},
+                 buf_size,
+                 std::move(buf),
+                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                 0),
     true,
     stream,
     mr);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -172,7 +172,7 @@ std::unique_ptr<cudf::column> make_empty_column_from_schema(
       cudf::make_empty_column(cudf::data_type{cudf::type_id::INT32}),
       make_empty_column_from_schema(schema.child_types.front().second, stream, mr),
       0,
-      {});
+      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }
 
   if (schema.type.id() == cudf::type_id::STRUCT) {
@@ -183,7 +183,12 @@ std::unique_ptr<cudf::column> make_empty_column_from_schema(
       schema.child_types.end(),
       std::back_inserter(children),
       [&](auto const& child) { return make_empty_column_from_schema(child.second, stream, mr); });
-    return cudf::make_structs_column(0, std::move(children), 0, {}, stream, mr);
+    return cudf::make_structs_column(0,
+                                     std::move(children),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     stream,
+                                     mr);
   }
 
   return cudf::make_empty_column(schema.type);
@@ -199,10 +204,11 @@ void nullify_rows(cudf::column& input,
   auto const input_view = input.view();
   auto null_mask =
     input_view.nullable()
-      ? rmm::device_buffer{}
+      ? cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)
       : cudf::create_null_mask(input_view.size(), cudf::mask_state::ALL_VALID, stream, mr);
-  auto const mask_ptr = input_view.nullable() ? input.mutable_view().null_mask()
-                                              : static_cast<cudf::bitmask_type*>(null_mask.data());
+  auto const mask_ptr = input_view.nullable()
+                          ? input.mutable_view().null_mask()
+                          : reinterpret_cast<cudf::bitmask_type*>(null_mask.data());
 
   // Diagnostic row indices are sorted and unique, so updates to one mask word are adjacent.
   std::vector<mask_word_update> word_updates;
@@ -264,7 +270,7 @@ void nullify_rows(cudf::column& input,
   std::unique_ptr<cudf::column> offsets_column,
   std::unique_ptr<cudf::column> child_column,
   cudf::size_type null_count,
-  rmm::device_buffer&& null_mask,
+  cuda::device_buffer<std::byte>&& null_mask,
   bool did_nullify_schema_mismatch_rows,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -290,7 +296,7 @@ void nullify_rows(cudf::column& input,
   cudf::size_type num_rows,
   std::vector<std::unique_ptr<cudf::column>>&& children,
   cudf::size_type null_count,
-  rmm::device_buffer&& null_mask,
+  cuda::device_buffer<std::byte>&& null_mask,
   bool did_nullify_schema_mismatch_rows,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -359,7 +365,9 @@ std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& 
 
   auto [null_mask, null_count] =
     cudf::detail::valid_if(validity.begin(), validity.end(), cuda::std::identity{}, stream, mr);
-  output->set_null_mask(null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr},
+  output->set_null_mask(null_count > 0
+                          ? std::move(null_mask)
+                          : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
                         null_count);
 
   return output;
@@ -420,7 +428,7 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
       : cudf::column_view{cudf::data_type{cudf::type_id::STRING},
                           input_sv.size(),
                           input_sv.chars_begin(stream),
-                          static_cast<cudf::bitmask_type const*>(null_mask.data()),
+                          reinterpret_cast<cudf::bitmask_type const*>(null_mask.data()),
                           null_count,
                           input_sv.offset(),
                           std::vector<cudf::column_view>{input_sv.offsets()}};
@@ -677,7 +685,11 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 
   // Don't care about the null mask, as nulls imply empty strings, which will also result in nulls.
   auto const unquoted_strings =
-    cudf::make_strings_column(string_count, std::move(offsets_column), chars_data.release(), 0, {});
+    cudf::make_strings_column(string_count,
+                              std::move(offsets_column),
+                              chars_data.release(),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   return spark_rapids_jni::string_to_decimal(precision,
                                              output_type.scale(),
@@ -745,11 +757,12 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
     offsets_column->view(), bytes, string_pairs.begin(), string_count, stream, mr);
 
   if (nullify_if_not_quoted) {
-    auto output = cudf::make_strings_column(string_count,
-                                            std::move(offsets_column),
-                                            chars_data.release(),
-                                            0,
-                                            rmm::device_buffer{0, stream, mr});
+    auto output = cudf::make_strings_column(
+      string_count,
+      std::move(offsets_column),
+      chars_data.release(),
+      0,
+      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr));
 
     auto [null_mask, null_count] = cudf::detail::valid_if(
       string_pairs.begin(),
@@ -1072,7 +1085,8 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
     input.size(),
     std::move(converted_cols),
     null_count,
-    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr},
+    null_count > 0 ? std::move(null_mask)
+                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
     /*did_nullify_schema_mismatch_rows=*/false,
     stream,
     mr);

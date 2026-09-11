@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,12 +43,15 @@ TEST_F(UtilitiesTest, BitwiseOr)
     std::vector<cudf::bitmask_type> expect{
       0x11111001, 0xffffffff, 0xffff0000, 0xf101010f, 0xab0100ab};
     auto d_result = spark_rapids_jni::bitmask_bitwise_or({{da}, {db}}, stream);
-    CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
+    CUDF_EXPECTS(d_result->size() >= expect.size() * sizeof(cudf::bitmask_type),
                  "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
-    cudaMemcpy(result.data(), d_result->data(), d_result->size(), cudaMemcpyDefault);
+    cudaMemcpy(result.data(),
+               d_result->data(),
+               result.size() * sizeof(cudf::bitmask_type),
+               cudaMemcpyDefault);
     CUDF_EXPECTS(std::equal(result.begin(), result.end(), expect.begin()),
-                 "Unexpected output size");
+                 "Results do not match expected");
   }
 
   // 4 buffers
@@ -72,10 +75,13 @@ TEST_F(UtilitiesTest, BitwiseOr)
     std::vector<cudf::bitmask_type> expect{
       0x10011001, 0x0000ffff, 0xffff0000, 0x01010101, 0xab0000ab};
     auto d_result = spark_rapids_jni::bitmask_bitwise_or({{da}, {db}, {dc}, {dd}}, stream);
-    CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
+    CUDF_EXPECTS(d_result->size() >= expect.size() * sizeof(cudf::bitmask_type),
                  "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
-    cudaMemcpy(result.data(), d_result->data(), d_result->size(), cudaMemcpyDefault);
+    cudaMemcpy(result.data(),
+               d_result->data(),
+               result.size() * sizeof(cudf::bitmask_type),
+               cudaMemcpyDefault);
     CUDF_EXPECTS(std::equal(result.begin(), result.end(), expect.begin()),
                  "Results do not match expected");
   }

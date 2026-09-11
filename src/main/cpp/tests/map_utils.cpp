@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,8 +44,11 @@ TEST_F(MapUtilsTests, ListOfNonStructThrows)
   // LIST<INT32> — child is not STRUCT.
   auto offsets  = size_col{0, 2, 3}.release();
   auto children = int_col{1, 2, 3}.release();
-  auto list =
-    cudf::make_lists_column(2, std::move(offsets), std::move(children), 0, rmm::device_buffer{});
+  auto list     = cudf::make_lists_column(2,
+                                      std::move(offsets),
+                                      std::move(children),
+                                      0,
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list->view(), true)),
                cudf::logic_error);
 }
@@ -56,8 +59,11 @@ TEST_F(MapUtilsTests, StructWithWrongArityThrows)
   auto keys    = int_col{1, 2, 3};
   auto structs = cudf::test::structs_column_wrapper({keys}).release();
   auto offsets = size_col{0, 2, 3}.release();
-  auto list =
-    cudf::make_lists_column(2, std::move(offsets), std::move(structs), 0, rmm::device_buffer{});
+  auto list    = cudf::make_lists_column(2,
+                                      std::move(offsets),
+                                      std::move(structs),
+                                      0,
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list->view(), true)),
                cudf::logic_error);
 }
@@ -82,12 +88,15 @@ TEST_F(MapUtilsTests, EmptyNonListInputStillThrows)
 TEST_F(MapUtilsTests, StringKeyNullThrows)
 {
   // row 0: {"a", 10}, {null_key, 20}  →  must throw (null key in valid struct).
-  auto keys    = cudf::test::strings_column_wrapper({"a", "x"}, {1, 0});
-  auto values  = int_col{10, 20};
-  auto structs = cudf::test::structs_column_wrapper({keys, values}).release();
-  auto offsets = size_col{0, 2}.release();
-  auto list_col =
-    cudf::make_lists_column(1, std::move(offsets), std::move(structs), 0, rmm::device_buffer{});
+  auto keys     = cudf::test::strings_column_wrapper({"a", "x"}, {1, 0});
+  auto values   = int_col{10, 20};
+  auto structs  = cudf::test::structs_column_wrapper({keys, values}).release();
+  auto offsets  = size_col{0, 2}.release();
+  auto list_col = cudf::make_lists_column(1,
+                                          std::move(offsets),
+                                          std::move(structs),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list_col->view(), true)),
                cudf::logic_error);
 }
@@ -96,12 +105,15 @@ TEST_F(MapUtilsTests, StringKeyNonNullIsValidMap)
 {
   // All-valid string keys: input is already a valid map.  is_valid_map returns true;
   // map_from_entries returns a non-null deep copy of input.
-  auto keys    = cudf::test::strings_column_wrapper({"a", "b", "c"});
-  auto values  = int_col{10, 20, 30};
-  auto structs = cudf::test::structs_column_wrapper({keys, values}).release();
-  auto offsets = size_col{0, 2, 3}.release();
-  auto list_col =
-    cudf::make_lists_column(2, std::move(offsets), std::move(structs), 0, rmm::device_buffer{});
+  auto keys     = cudf::test::strings_column_wrapper({"a", "b", "c"});
+  auto values   = int_col{10, 20, 30};
+  auto structs  = cudf::test::structs_column_wrapper({keys, values}).release();
+  auto offsets  = size_col{0, 2, 3}.release();
+  auto list_col = cudf::make_lists_column(2,
+                                          std::move(offsets),
+                                          std::move(structs),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_TRUE(spark_rapids_jni::is_valid_map(list_col->view(), true));
 
   std::unique_ptr<cudf::column> result;
@@ -120,8 +132,11 @@ TEST_F(MapUtilsTests, EmptyListOfNonStructStillThrows)
 {
   auto offsets  = size_col{0}.release();
   auto children = int_col{}.release();
-  auto list_col =
-    cudf::make_lists_column(0, std::move(offsets), std::move(children), 0, rmm::device_buffer{});
+  auto list_col = cudf::make_lists_column(0,
+                                          std::move(offsets),
+                                          std::move(children),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list_col->view(), true)),
                cudf::logic_error);
 }
@@ -137,12 +152,15 @@ TEST_F(MapUtilsTests, NullStructEntryMasksRowSlowPath)
   //   index 0: null_struct (struct validity = false)
   //   index 1: {2, 20}     (struct validity = true)
   //   index 2: {3, 30}     (struct validity = true)
-  auto keys    = int_col{-1, 2, 3};  // index-0 key is don't-care because the struct is null
-  auto values  = int_col{-1, 20, 30};
-  auto structs = cudf::test::structs_column_wrapper({keys, values}, {0, 1, 1}).release();
-  auto offsets = size_col{0, 2, 3}.release();
-  auto list_col =
-    cudf::make_lists_column(2, std::move(offsets), std::move(structs), 0, rmm::device_buffer{});
+  auto keys     = int_col{-1, 2, 3};  // index-0 key is don't-care because the struct is null
+  auto values   = int_col{-1, 20, 30};
+  auto structs  = cudf::test::structs_column_wrapper({keys, values}, {0, 1, 1}).release();
+  auto offsets  = size_col{0, 2, 3}.release();
+  auto list_col = cudf::make_lists_column(2,
+                                          std::move(offsets),
+                                          std::move(structs),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   // is_valid_map sees the null struct entry and returns false.
   EXPECT_FALSE(spark_rapids_jni::is_valid_map(list_col->view(), true));
@@ -165,12 +183,15 @@ TEST_F(MapUtilsTests, IsValidMapNonListInputThrows)
 // and returns true under throw_on_null_key=false.
 TEST_F(MapUtilsTests, IsValidMapNullKeyPolicyVariants)
 {
-  auto keys    = cudf::test::strings_column_wrapper({"a", "x"}, {1, 0});
-  auto values  = int_col{10, 20};
-  auto structs = cudf::test::structs_column_wrapper({keys, values}).release();
-  auto offsets = size_col{0, 2}.release();
-  auto list_col =
-    cudf::make_lists_column(1, std::move(offsets), std::move(structs), 0, rmm::device_buffer{});
+  auto keys     = cudf::test::strings_column_wrapper({"a", "x"}, {1, 0});
+  auto values   = int_col{10, 20};
+  auto structs  = cudf::test::structs_column_wrapper({keys, values}).release();
+  auto offsets  = size_col{0, 2}.release();
+  auto list_col = cudf::make_lists_column(1,
+                                          std::move(offsets),
+                                          std::move(structs),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::is_valid_map(list_col->view(), true)),
                cudf::logic_error);

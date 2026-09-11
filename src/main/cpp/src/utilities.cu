@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
@@ -27,6 +28,8 @@
 #include <cuda/functional>
 #include <cuda/stream>
 
+#include <climits>
+
 namespace spark_rapids_jni {
 
 bool is_basic_spark_numeric(cudf::data_type type)
@@ -36,7 +39,7 @@ bool is_basic_spark_numeric(cudf::data_type type)
          type.id() == cudf::type_id::FLOAT32 || type.id() == cudf::type_id::FLOAT64;
 }
 
-std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
+std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -48,7 +51,8 @@ std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
       input.begin(), input.end(), [mask_size](auto mask) { return mask.size() == mask_size; }),
     "Encountered size mismatch in inputs");
   if (mask_size == 0) {
-    return std::make_unique<rmm::device_buffer>(rmm::device_buffer{0, stream, mr});
+    return std::make_unique<cuda::device_buffer<std::byte>>(
+      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr));
   }
 
   // move the pointers to the gpu
@@ -58,12 +62,16 @@ std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
   auto d_input = cudf::detail::make_device_uvector_async(
     h_input, stream, rmm::mr::get_current_device_resource_ref());
 
-  std::unique_ptr<rmm::device_buffer> out =
-    std::make_unique<rmm::device_buffer>(mask_size * sizeof(cudf::bitmask_type), stream, mr);
+  std::unique_ptr<cuda::device_buffer<std::byte>> out =
+    std::make_unique<cuda::device_buffer<std::byte>>(
+      cudf::create_null_mask(mask_size * sizeof(cudf::bitmask_type) * CHAR_BIT,
+                             cudf::mask_state::UNINITIALIZED,
+                             stream,
+                             mr));
   thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator(0),
                     thrust::make_counting_iterator(0) + mask_size,
-                    static_cast<cudf::bitmask_type*>(out->data()),
+                    reinterpret_cast<cudf::bitmask_type*>(out->data()),
                     cuda::proclaim_return_type<cudf::bitmask_type>(
                       [buffers     = d_input.data(),
                        num_buffers = input.size()] __device__(cudf::size_type word_index) {

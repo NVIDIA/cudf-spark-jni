@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -980,11 +980,12 @@ std::unique_ptr<cudf::table> multiply_decimal128(cudf::column_view const& a,
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(
     cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::DECIMAL128, product_scale},
                                   num_rows,
@@ -1015,11 +1016,12 @@ std::unique_ptr<cudf::table> divide_decimal128(cudf::column_view const& a,
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(
     cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::DECIMAL128, quotient_scale},
                                   num_rows,
@@ -1049,11 +1051,12 @@ std::unique_ptr<cudf::table> integer_divide_decimal128(cudf::column_view const& 
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::INT64},
                                                   num_rows,
                                                   std::move(result_null_mask),
@@ -1082,11 +1085,12 @@ std::unique_ptr<cudf::table> remainder_decimal128(cudf::column_view const& a,
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(
     cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::DECIMAL128, remainder_scale},
                                   num_rows,
@@ -1115,11 +1119,12 @@ std::unique_ptr<cudf::table> add_decimal128(cudf::column_view const& a,
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(
     cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::DECIMAL128, target_scale},
                                   num_rows,
@@ -1148,11 +1153,12 @@ std::unique_ptr<cudf::table> sub_decimal128(cudf::column_view const& a,
     cudf::bitmask_and(cudf::table_view{{a, b}}, stream, rmm::mr::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> columns;
   // copy the null mask here, as it will be used again later
-  columns.push_back(cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
-                                                  num_rows,
-                                                  rmm::device_buffer(result_null_mask, stream),
-                                                  result_null_count,
-                                                  stream));
+  columns.push_back(cudf::make_fixed_width_column(
+    cudf::data_type{cudf::type_id::BOOL8},
+    num_rows,
+    cuda::device_buffer<std::byte>{stream, result_null_mask.memory_resource(), result_null_mask},
+    result_null_count,
+    stream));
   columns.push_back(
     cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::DECIMAL128, target_scale},
                                   num_rows,

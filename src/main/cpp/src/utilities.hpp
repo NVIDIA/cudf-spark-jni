@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/buffer>
 #include <cuda/stream>
 
 namespace spark_rapids_jni {
@@ -46,7 +47,7 @@ bool is_basic_spark_numeric(cudf::data_type type);
  * @param mr Device memory resource used to allocate the returned bloom filter's memory.
  *
  */
-std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
+std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
