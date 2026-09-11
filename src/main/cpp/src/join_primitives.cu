@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -180,7 +180,6 @@ filter_by_conditional_impl(cudf::device_span<cudf::size_type const> left_indices
 std::pair<rmm::device_uvector<cudf::size_type>, rmm::device_uvector<cudf::size_type>>
 sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::table_view const& right_keys,
-                      cudf::sorted is_left_sorted,
                       cudf::sorted is_right_sorted,
                       cudf::null_equality compare_nulls,
                       cuda::stream_ref stream,
@@ -200,7 +199,7 @@ sort_merge_inner_join(cudf::table_view const& left_keys,
 
   // Perform sort-merge inner join
   cudf::sort_merge_join join_obj(right_keys, is_right_sorted, compare_nulls, stream);
-  auto [left_result, right_result] = join_obj.inner_join(left_keys, is_left_sorted, stream, mr);
+  auto [left_result, right_result] = join_obj.inner_join(left_keys, stream, mr);
   return {std::move(*left_result), std::move(*right_result)};
 }
 

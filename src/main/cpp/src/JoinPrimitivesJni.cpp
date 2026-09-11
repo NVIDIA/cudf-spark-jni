@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,7 +98,6 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeSortMergeInnerJoin(JNIEnv*
                                                                          jclass,
                                                                          jlong j_left_keys,
                                                                          jlong j_right_keys,
-                                                                         jboolean j_is_left_sorted,
                                                                          jboolean j_is_right_sorted,
                                                                          jboolean j_nulls_equal)
 {
@@ -112,13 +111,12 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeSortMergeInnerJoin(JNIEnv*
     auto const left_keys  = std::bit_cast<cudf::table_view const*>(j_left_keys);
     auto const right_keys = std::bit_cast<cudf::table_view const*>(j_right_keys);
 
-    auto const is_left_sorted  = j_is_left_sorted ? cudf::sorted::YES : cudf::sorted::NO;
     auto const is_right_sorted = j_is_right_sorted ? cudf::sorted::YES : cudf::sorted::NO;
     auto const nulls_equal =
       j_nulls_equal ? cudf::null_equality::EQUAL : cudf::null_equality::UNEQUAL;
 
     auto result = spark_rapids_jni::sort_merge_inner_join(
-      *left_keys, *right_keys, is_left_sorted, is_right_sorted, nulls_equal);
+      *left_keys, *right_keys, is_right_sorted, nulls_equal);
 
     return gather_maps_to_java(env, std::move(result));
   }
