@@ -232,7 +232,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         sh 'bash ci/fuzz-test.sh'
                                     } catch (e) {
                                         common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids-jni', 'cuda12')
+                                        common.uploadDebugBundle(this, 'cudf-spark-jni', 'cuda12')
                                         throw e
                                     }
                                 }
@@ -270,7 +270,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         sh 'bash ci/fuzz-test.sh'
                                     } catch (e) {
                                         common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids-jni', 'cuda13')
+                                        common.uploadDebugBundle(this, 'cudf-spark-jni', 'cuda13')
                                         throw e
                                     }
                                 }

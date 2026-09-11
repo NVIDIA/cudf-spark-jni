@@ -45,7 +45,7 @@ CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
 # is to save some state files about what happened. But a user could mess with CUDF directly
 # so we want to have ways to double check that they are indeed correct.
 
-FULLY_PATCHED_FILE="$CUDF_DIR/spark-rapids-jni.patch"
+FULLY_PATCHED_FILE="$CUDF_DIR/cudf-spark-jni.patch"
 
 pushd "$CUDF_DIR"
 

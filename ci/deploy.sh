@@ -16,7 +16,7 @@
 #
 
 ###
-# Script to deploy spark-rapids-jni jar files along with other classifiers,
+# Script to deploy cudf-spark-jni jar files along with other classifiers,
 # such as cudaXXX, sources, javadoc.
 #
 # Argument(s):
@@ -92,7 +92,7 @@ fi
 DEPLOY_CMD="$DEPLOY_CMD -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID -DpomFile=$POM_FILE"
 echo "Deploy CMD: $DEPLOY_CMD"
 
-###### Deploy spark-rapids-jni jar with all its additions ######
+###### Deploy cudf-spark-jni jar with all its additions ######
 $DEPLOY_CMD -Dfile=$FPATH.jar \
             -DpomFile=$POM_FILE \
             -Dsources=$FPATH-sources.jar \

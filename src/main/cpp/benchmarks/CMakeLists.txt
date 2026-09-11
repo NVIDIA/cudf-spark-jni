@@ -60,7 +60,7 @@ function(ConfigureBench CMAKE_BENCH_NAME)
     install(
         TARGETS ${CMAKE_BENCH_NAME}
         COMPONENT testing
-        DESTINATION bin/benchmarks/spark-rapids-jni
+        DESTINATION bin/benchmarks/cudf-spark-jni
         EXCLUDE_FROM_ALL
     )
 endfunction(ConfigureBench)

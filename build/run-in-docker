@@ -54,7 +54,7 @@ LOCAL_LIBCUDF_KERNEL_CACHE_DIR=${LOCAL_LIBCUDF_KERNEL_CACHE_DIR:-${LIBCUDF_KERNE
 mkdir -p "$LOCAL_CCACHE_DIR" "$LOCAL_MAVEN_REPO" "$LOCAL_LIBCUDF_KERNEL_CACHE_DIR"
 
 echo "Building docker image for CICD environment..."
-JNI_DOCKER_CICD_IMAGE="spark-rapids-jni-build:${CUDA_VERSION}-rockylinux${OS_RELEASE}"
+JNI_DOCKER_CICD_IMAGE="cudf-spark-jni-build:${CUDA_VERSION}-rockylinux${OS_RELEASE}"
 $DOCKER_CMD build $DOCKER_BUILD_EXTRA_ARGS -f $REPODIR/ci/Dockerfile \
   --build-arg CUDA_VERSION=$CUDA_VERSION \
   --build-arg OS_RELEASE=$OS_RELEASE \

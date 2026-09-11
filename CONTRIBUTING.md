@@ -193,7 +193,7 @@ branch=testCUDF_pr1
 date=2022-07-19T21:48:15Z
 url=https://github.com/nvidia/cudf.git
 
-  inflating: spark-rapids-jni-version-info.properties
+  inflating: cudf-spark-jni-version-info.properties
 version=22.08.0-SNAPSHOT
 user=
 revision=70adcc86a513ad6665968021c669fbca7515a188
