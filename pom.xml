@@ -258,6 +258,10 @@
                 <configuration>
                   <groups>!noSanitizer</groups>
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                  <environmentVariables>
+                    <SANITIZER_LOG_DIR>${project.build.directory}/surefire-reports</SANITIZER_LOG_DIR>
+                  </environmentVariables>
+                  <testFailureIgnore>true</testFailureIgnore>
                   <excludes>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
                     <exclude>**/PackagedJarOriginCheck.java</exclude>
@@ -272,6 +276,7 @@
                 </goals>
                 <configuration>
                   <groups>noSanitizer</groups>
+                  <testFailureIgnore>true</testFailureIgnore>
                 </configuration>
               </execution>
               <execution>
@@ -281,6 +286,51 @@
                 </goals>
                 <configuration>
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                  <environmentVariables>
+                    <SANITIZER_LOG_DIR>${project.build.directory}/surefire-reports</SANITIZER_LOG_DIR>
+                  </environmentVariables>
+                  <testFailureIgnore>true</testFailureIgnore>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>${antrun.version}</version>
+            <executions>
+              <execution>
+                <id>clean-sanitizer-logs</id>
+                <phase>process-test-classes</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <delete>
+                      <fileset dir="${project.build.directory}/surefire-reports"
+                               erroronmissingdir="false">
+                        <include name="sanitizer_for_pid_*.log"/>
+                        <include name="TEST-*.xml"/>
+                      </fileset>
+                    </delete>
+                  </target>
+                </configuration>
+              </execution>
+              <execution>
+                <id>print-sanitizer-logs</id>
+                <phase>test</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <echo message="Checking for compute-sanitizer logs..."/>
+                    <exec executable="bash" failonerror="true">
+                      <arg value="-c"/>
+                      <arg value="failed=0; report_dir=&quot;${project.build.directory}/surefire-reports&quot;; for f in &quot;$report_dir&quot;/sanitizer_for_pid_*.log; do [ -f &quot;$f&quot; ] || continue; printf '===== %s =====\n' &quot;$f&quot;; head -n 80 &quot;$f&quot;; grep -q 'ERROR SUMMARY: 0 errors' &quot;$f&quot; || failed=1; done; for f in &quot;$report_dir&quot;/TEST-*.xml; do [ -f &quot;$f&quot; ] || continue; if grep -Eq '&lt;(failure|error)([[:space:]]|&gt;)' &quot;$f&quot;; then printf 'Surefire failures recorded in %s\n' &quot;$f&quot;; failed=1; fi; done; exit $failed"/>
+                    </exec>
+                  </target>
                 </configuration>
               </execution>
             </executions>
