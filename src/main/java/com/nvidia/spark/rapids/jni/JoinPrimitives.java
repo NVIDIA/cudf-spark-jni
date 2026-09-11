@@ -72,8 +72,34 @@ public class JoinPrimitives {
    *
    * @param leftKeys The left table for equality comparison
    * @param rightKeys The right table for equality comparison
-   * @param isLeftSorted Ignored. Retained for source compatibility; the underlying
-   *                     cudf API no longer uses it.
+   * @param isRightSorted Whether the right table is pre-sorted
+   * @param compareNullsEqual Whether nulls in equality keys should be considered equal
+   * @return An array of two GatherMaps: [left_map, right_map]
+   */
+  public static GatherMap[] sortMergeInnerJoin(Table leftKeys,
+                                               Table rightKeys,
+                                               boolean isRightSorted,
+                                               boolean compareNullsEqual) {
+    long[] result = nativeSortMergeInnerJoin(
+      leftKeys.getNativeView(),
+      rightKeys.getNativeView(),
+      isRightSorted,
+      compareNullsEqual);
+
+    return gatherMapsFromJNI(result);
+  }
+
+  /**
+   * Perform an inner join using sort-merge algorithm.
+   * <p>
+   * Use {@link #sortMergeInnerJoin(Table, Table, boolean, boolean)} instead. This
+   * overload remains only so existing callers keep compiling, and will be removed
+   * once they have moved over.
+   * </p>
+   *
+   * @param leftKeys The left table for equality comparison
+   * @param rightKeys The right table for equality comparison
+   * @param isLeftSorted Ignored. The underlying cudf API no longer uses it.
    * @param isRightSorted Whether the right table is pre-sorted
    * @param compareNullsEqual Whether nulls in equality keys should be considered equal
    * @return An array of two GatherMaps: [left_map, right_map]
@@ -83,13 +109,7 @@ public class JoinPrimitives {
                                                boolean isLeftSorted,
                                                boolean isRightSorted,
                                                boolean compareNullsEqual) {
-    long[] result = nativeSortMergeInnerJoin(
-      leftKeys.getNativeView(),
-      rightKeys.getNativeView(),
-      isRightSorted,
-      compareNullsEqual);
-    
-    return gatherMapsFromJNI(result);
+    return sortMergeInnerJoin(leftKeys, rightKeys, isRightSorted, compareNullsEqual);
   }
 
   /**
