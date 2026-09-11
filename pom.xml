@@ -21,7 +21,7 @@
 
   <groupId>com.nvidia</groupId>
   <artifactId>cudf-spark-jni</artifactId>
-  <version>jnibug</version>
+  <version>26.10.0-SNAPSHOT</version>
   <packaging>jar</packaging>
   <name>NVIDIA cuDF plugin JNI for Apache Spark</name>
   <description>
