@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,7 +54,6 @@ namespace spark_rapids_jni {
  *
  * @param left_keys The left table for equality comparison
  * @param right_keys The right table for equality comparison
- * @param is_left_sorted Whether the left table is pre-sorted
  * @param is_right_sorted Whether the right table is pre-sorted
  * @param compare_nulls Whether null values in equality keys join to each other
  * @param stream CUDA stream for device operations
@@ -65,7 +64,6 @@ namespace spark_rapids_jni {
 std::pair<rmm::device_uvector<cudf::size_type>, rmm::device_uvector<cudf::size_type>>
 sort_merge_inner_join(cudf::table_view const& left_keys,
                       cudf::table_view const& right_keys,
-                      cudf::sorted is_left_sorted       = cudf::sorted::NO,
                       cudf::sorted is_right_sorted      = cudf::sorted::NO,
                       cudf::null_equality compare_nulls = cudf::null_equality::EQUAL,
                       cuda::stream_ref stream           = cudf::get_default_stream(),
