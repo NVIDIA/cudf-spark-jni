@@ -33,6 +33,7 @@ struct test_state {
   bool subscribed       = false;
   std::atomic_int attaches{0};
   std::atomic_int detaches{0};
+  std::atomic_int serializer_constructions{0};
   std::string exception;
   JNINativeInterface_ jni_functions{};
   JNIInvokeInterface_ vm_functions{};
@@ -124,8 +125,9 @@ TEST_P(ProfilerInitTest, RollsBackAndAllowsRetry)
   EXPECT_EQ(state.exception, std::string(error) + ": injected failure");
   EXPECT_EQ(state.setup_calls, fail_step + 1);
   EXPECT_EQ(state.global_refs, 0);
-  EXPECT_EQ(state.attaches.load(), 1);
-  EXPECT_EQ(state.detaches.load(), 1);
+  EXPECT_EQ(state.attaches.load(), 0);
+  EXPECT_EQ(state.detaches.load(), 0);
+  EXPECT_EQ(state.serializer_constructions.load(), 0);
   EXPECT_FALSE(state.subscribed);
   EXPECT_EQ(state.unsubscribe_calls, fail_step == 0 ? 0 : 1);
   ASSERT_EQ(State, nullptr);
@@ -144,8 +146,9 @@ TEST_P(ProfilerInitTest, RollsBackAndAllowsRetry)
   EXPECT_TRUE(state.exception.empty()) << state.exception;
   EXPECT_FALSE(state.subscribed);
   EXPECT_EQ(state.global_refs, 0);
-  EXPECT_EQ(state.attaches.load(), 2);
-  EXPECT_EQ(state.detaches.load(), 2);
+  EXPECT_EQ(state.attaches.load(), 1);
+  EXPECT_EQ(state.detaches.load(), 1);
+  EXPECT_EQ(state.serializer_constructions.load(), 1);
   EXPECT_EQ(state.unsubscribe_calls, fail_step == 0 ? 1 : 2);
 }
 
@@ -170,7 +173,11 @@ INSTANTIATE_TEST_SUITE_P(CuptiSetupFailures,
 namespace spark_rapids_jni::profiler {
 
 // Keep the real writer thread and queue; serialization is outside this test's scope.
-profiler_serializer::profiler_serializer(JNIEnv*, jobject, size_t, size_t, bool) {}
+profiler_serializer::profiler_serializer(JNIEnv*, jobject writer, size_t, size_t, bool)
+{
+  EXPECT_EQ(writer, &Test_state->writer);
+  ++Test_state->serializer_constructions;
+}
 void profiler_serializer::process_cupti_buffer(uint8_t*, size_t) {}
 void profiler_serializer::flush() {}
 

@@ -445,16 +445,9 @@ Java_com_nvidia_spark_rapids_jni_Profiler_nativeInit(JNIEnv* env,
     std::unique_ptr<subscriber_state> state;
     bool subscribed = false;
     try {
-      state                = std::make_unique<subscriber_state>(writer, write_buffer_size);
-      state->writer_thread = std::thread(writer_thread_process,
-                                         state.get(),
-                                         get_jvm(env),
-                                         writer,
-                                         write_buffer_size,
-                                         write_buffer_size,
-                                         async_alloc_capture);
-      auto rc              = cuptiSubscribe(&state->subscriber_handle, callback_handler, nullptr);
-      subscribed           = rc == CUPTI_SUCCESS;
+      state      = std::make_unique<subscriber_state>(writer, write_buffer_size);
+      auto rc    = cuptiSubscribe(&state->subscriber_handle, callback_handler, nullptr);
+      subscribed = rc == CUPTI_SUCCESS;
       check_cupti(rc, "Error initializing CUPTI");
       rc = cuptiEnableCallback(1,
                                state->subscriber_handle,
@@ -489,7 +482,15 @@ Java_com_nvidia_spark_rapids_jni_Profiler_nativeInit(JNIEnv* env,
       check_cupti(rc, "Error registering activity buffer callbacks");
       // Callbacks must not observe a session that can still fail initialization.
       std::lock_guard lock(State_mutex);
-      State = state.release();
+      // The serializer writes a header immediately, so no fallible setup may follow thread startup.
+      state->writer_thread = std::thread(writer_thread_process,
+                                         state.get(),
+                                         get_jvm(env),
+                                         writer,
+                                         write_buffer_size,
+                                         write_buffer_size,
+                                         async_alloc_capture);
+      State                = state.release();
     } catch (...) {
       if (subscribed) {
         auto rc = cuptiUnsubscribe(state->subscriber_handle);
@@ -497,10 +498,6 @@ Java_com_nvidia_spark_rapids_jni_Profiler_nativeInit(JNIEnv* env,
           std::cerr << "PROFILER: Error rolling back CUPTI subscription: " << get_cupti_error(rc)
                     << std::endl;
         }
-      }
-      if (state && state->writer_thread.joinable()) {
-        state->completed_buffers.shutdown();
-        state->writer_thread.join();
       }
       env->DeleteGlobalRef(writer);
       throw;
