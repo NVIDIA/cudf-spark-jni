@@ -4,8 +4,8 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/399863ef1c45d810dfa24b3ab72e07d435d56de9.tar.gz",
-      "url_hash" : "SHA256=7296bcec675a567786f3bf2ec888e07be8c3d6f252f97f87a3686088e10adccd",
+      "url" : "https://github.com/NVIDIA/cccl/archive/b98d4bd6ff0715be42b7cfc78dfa9c4e212c5c5a.tar.gz",
+      "url_hash" : "SHA256=b773791cf6bdafb4cb3d68c80b7cc2707471f3dd8e9a1e40c8b47fce5dcf466a",
       "version" : "3.5.0"
     },
     "GTest" : 
@@ -81,7 +81,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "904372c180bf107e21d2cdc823eb5d20362ef954",
+      "git_tag" : "80d281c51e20fa6af2b964562a1c85e3084c8676",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.12"
