@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,12 +73,16 @@ fi
 echo "Configure libcudf only to update pinned versions..."
 MVN_SETTINGS=${MVN_SETTINGS:-"ci/settings.xml"}
 MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -B -s $MVN_SETTINGS"
+# This job only validates a temporary JAR, so compile for the worker's GPU. Premerge and nightly
+# artifact builds use ci/premerge-build.sh and ci/nightly-build.sh without this override, retaining
+# the POM's RAPIDS default and full supported-architecture compilation coverage.
 set +e
 # phase 1:
 # Just try to update CUDF and pinned versions with no patches on top of it.
 # calling the antrun directly skips applying patches
 ${MVN} antrun:run@buildcpp ${MVN_MIRROR} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
+  -DCMAKE_CUDA_ARCHITECTURES=native \
   -Dlibcudf.build.configure=true \
   -Dlibcudf.dependency.mode=latest \
   -DUSE_GDS=ON \
@@ -115,6 +119,7 @@ set +e
 # now build and test everything with the patches in place
 ${MVN} clean verify ${MVN_MIRROR} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
+  -DCMAKE_CUDA_ARCHITECTURES=native \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest,!PackagedJarOriginCheck \
   -DBUILD_TESTS=ON \

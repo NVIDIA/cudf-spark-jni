@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,12 @@
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/hashing.hpp>
 
+#include <rmm/device_buffer.hpp>
+
 #include <hash/hash.hpp>
+
+#include <memory>
+#include <vector>
 
 constexpr cudf::test::debug_output_level verbosity{cudf::test::debug_output_level::ALL_ERRORS};
 
@@ -197,6 +202,27 @@ TYPED_TEST(HashTestFloatTyped, TestExtremes)
 }
 
 class SparkMurmurHash3Test : public cudf::test::BaseFixture {};
+
+TEST_F(SparkMurmurHash3Test, NonCanonicalBool)
+{
+  // BOOL8 treats every non-zero byte as true. fixed_width_column_wrapper<bool>
+  // canonicalizes its inputs, so construct this column from raw bytes instead.
+  auto const stream = cudf::get_default_stream();
+  std::vector<uint8_t> const raw{0, 1, 2, 255};
+  auto data      = rmm::device_buffer{raw.data(), raw.size(), stream};
+  auto const col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::BOOL8},
+                                                  static_cast<cudf::size_type>(raw.size()),
+                                                  std::move(data),
+                                                  rmm::device_buffer{},
+                                                  0);
+
+  auto const output = spark_rapids_jni::murmur_hash3_32(cudf::table_view({col->view()}), 42);
+
+  cudf::test::fixed_width_column_wrapper<bool> const canonical({false, true, true, true});
+  auto const expected = spark_rapids_jni::murmur_hash3_32(cudf::table_view({canonical}), 42);
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(output->view(), expected->view());
+}
 
 TEST_F(SparkMurmurHash3Test, MultiValueWithSeeds)
 {
