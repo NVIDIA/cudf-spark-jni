@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,14 @@ import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.jni.Arms;
 import java.util.Arrays;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.io.File;
@@ -44,6 +48,7 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.junit.jupiter.api.Assertions.*;
 
+@Isolated("Read failure tests temporarily replace the default host memory allocator")
 public class KudoSerializerTest extends CudfTestBase {
   private static final Logger log = LoggerFactory.getLogger(KudoSerializerTest.class);
 
@@ -67,6 +72,54 @@ public class KudoSerializerTest extends CudfTestBase {
       }
     } catch (Exception e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  @Test
+  public void testReadIOExceptionClosesBuffer() throws IOException {
+    checkReadFailureClosesBuffer(new IOException("read"));
+  }
+
+  @Test
+  public void testReadOutOfMemoryErrorClosesBuffer() throws IOException {
+    checkReadFailureClosesBuffer(new OutOfMemoryError("read"));
+  }
+
+  private void checkReadFailureClosesBuffer(Throwable failure) throws IOException {
+    KudoTableHeader header = new KudoTableHeader(0, 1, 0, 0, 4, 1, new byte[]{0});
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    header.writeTo(new DataOutputStreamWriter(new DataOutputStream(bytes)));
+    FilterInputStream input = new FilterInputStream(new ByteArrayInputStream(bytes.toByteArray())) {
+      @Override
+      public int read(byte[] bytes, int offset, int length) throws IOException {
+        if (in.available() == 0) {
+          if (failure instanceof Error) {
+            throw (Error) failure;
+          }
+          throw (IOException) failure;
+        }
+        return super.read(bytes, offset, length);
+      }
+    };
+
+    HostMemoryAllocator originalAllocator = DefaultHostMemoryAllocator.get();
+    HostMemoryBuffer[] allocated = new HostMemoryBuffer[1];
+    DefaultHostMemoryAllocator.set(new DefaultHostMemoryAllocator() {
+      @Override
+      public HostMemoryBuffer allocate(long size, boolean preferPinned) {
+        allocated[0] = originalAllocator.allocate(size, preferPinned);
+        return allocated[0];
+      }
+    });
+    try {
+      assertSame(failure, assertThrows(failure.getClass(), () -> KudoTable.from(input)));
+      assertNotNull(allocated[0]);
+      assertEquals(0, allocated[0].getRefCount());
+    } finally {
+      DefaultHostMemoryAllocator.set(originalAllocator);
+      if (allocated[0] != null && allocated[0].getRefCount() > 0) {
+        allocated[0].close();
+      }
     }
   }
 
