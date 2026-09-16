@@ -18,6 +18,7 @@
     "bs_thread_pool" : 
     {
       "always_download" : true,
+      "source_subdir" : ".rapids-cmake-download-only/bs_thread_pool",
       "url" : "https://github.com/bshoshany/thread-pool/archive/097aa718f25d44315cadb80b407144ad455ee4f9.tar.gz",
       "url_hash" : "SHA256=8e54280b4d9af3e4d2fd3dfa3f8d1198fc1c3a572d6f22c5eaf1abe38f2db0a8",
       "version" : "4.1.0"
@@ -35,6 +36,7 @@
       "git_shallow" : false,
       "git_tag" : "365b823cedb281cd0240ca601aba9b78771f91a3",
       "git_url" : "https://github.com/dmlc/dlpack.git",
+      "source_subdir" : ".rapids-cmake-download-only/dlpack",
       "version" : "0.8"
     },
     "flatbuffers" : 
@@ -108,6 +110,7 @@
       "git_shallow" : false,
       "git_tag" : "e626a72bc2321cd320e953a0ccf1584cad60f363",
       "git_url" : "https://github.com/Cyan4973/xxHash.git",
+      "source_subdir" : ".rapids-cmake-download-only/xxhash",
       "version" : "0.8.3"
     },
     "zstd" : 
