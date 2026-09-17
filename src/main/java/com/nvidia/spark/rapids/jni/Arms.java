@@ -134,24 +134,18 @@ public class Arms {
      */
     public static <R extends AutoCloseable, C extends Collection<R>, V> V withResource(
         C resource, Function<C, V> function) {
-        Throwable primary = null;
+        V result;
         try {
-            return function.apply(resource);
-        } catch (Throwable e) {
-            primary = e;
-            throw e;
-        } finally {
+            result = function.apply(resource);
+        } catch (Throwable primary) {
             try {
-                Throwable failure = closeAll(resource.iterator(), primary);
-                if (primary == null) {
-                    rethrowUnchecked(failure);
-                }
+                closeAll(resource.iterator(), primary);
             } catch (Throwable e) {
-                if (primary == null) {
-                    throw e;
-                }
                 collectFailure(primary, e);
             }
+            throw primary;
         }
+        closeAll(resource);
+        return result;
     }
 }
