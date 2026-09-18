@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -169,8 +169,12 @@ TEST_F(BloomFilterTest, ProbeMergedV1)
     thrust::make_counting_iterator(0) + 4,
     premerge_offsets->mutable_view().begin<cudf::size_type>(),
     bloom_filter_stride_transform{bloom_filter_a->view().size()});
-  auto premerged = cudf::make_lists_column(
-    3, std::move(premerge_offsets), std::move(premerge_children), 0, rmm::device_buffer{});
+  auto premerged =
+    cudf::make_lists_column(3,
+                            std::move(premerge_offsets),
+                            std::move(premerge_children),
+                            0,
+                            cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   // merged bloom filter
   auto bloom_filter_merged = spark_rapids_jni::bloom_filter_merge(*premerged);
@@ -325,8 +329,12 @@ TEST_F(BloomFilterTest, ProbeMergedV2)
     thrust::make_counting_iterator(0) + 4,
     premerge_offsets->mutable_view().begin<cudf::size_type>(),
     bloom_filter_stride_transform{bloom_filter_a->view().size()});
-  auto premerged = cudf::make_lists_column(
-    3, std::move(premerge_offsets), std::move(premerge_children), 0, rmm::device_buffer{});
+  auto premerged =
+    cudf::make_lists_column(3,
+                            std::move(premerge_offsets),
+                            std::move(premerge_children),
+                            0,
+                            cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   auto bloom_filter_merged = spark_rapids_jni::bloom_filter_merge(*premerged);
 

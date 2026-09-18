@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -323,8 +323,12 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
       }
       empty_children.push_back(std::move(empty_child));
     }
-    return cudf::make_structs_column(
-      0, std::move(empty_children), 0, rmm::device_buffer{}, stream, mr);
+    return cudf::make_structs_column(0,
+                                     std::move(empty_children),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     stream,
+                                     mr);
   }
 
   // Extract shared input data pointers (used by scalar, repeated, and nested sections)
@@ -735,7 +739,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
 
   // Build final struct null mask by combining input nulls with PERMISSIVE-mode row invalidation.
   cudf::size_type struct_null_count = 0;
-  rmm::device_buffer struct_mask{0, stream, mr};
+  auto struct_mask = cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr);
   auto const input_null_count = binary_input.null_count();
 
   if (track_permissive_null_rows || input_null_count > 0) {

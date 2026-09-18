@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -400,12 +400,13 @@ std::unique_ptr<cudf::column> convert_impl(cudf::size_type num_rows,
   auto [null_mask, null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(out_mask), stream, mr);
 
-  return cudf::make_strings_column(
-    num_rows,
-    std::move(offsets),
-    chars.release(),
-    null_count,
-    null_count ? std::move(*null_mask.release()) : rmm::device_buffer{});
+  return cudf::make_strings_column(num_rows,
+                                   std::move(offsets),
+                                   chars.release(),
+                                   null_count,
+                                   null_count
+                                     ? std::move(*null_mask.release())
+                                     : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 /**

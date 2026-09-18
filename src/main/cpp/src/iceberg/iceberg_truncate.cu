@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -226,12 +226,12 @@ std::unique_ptr<cudf::column> truncate_binary_impl(cudf::column_view const& inpu
     mr);
   auto new_chars_size = new_chars.size();
 
-  auto new_child =
-    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},  // Data type
-                                   new_chars_size,                         // Number of elements
-                                   new_chars.release(),   // Transfer ownership of the buffer
-                                   rmm::device_buffer{},  // no nulls in child
-                                   0);
+  auto new_child = std::make_unique<cudf::column>(
+    cudf::data_type{cudf::type_id::UINT8},                     // Data type
+    new_chars_size,                                            // Number of elements
+    new_chars.release(),                                       // Transfer ownership of the buffer
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),  // no nulls in child
+    0);
 
   return cudf::make_lists_column(num_rows,
                                  std::move(new_offsets),

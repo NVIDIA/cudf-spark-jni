@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -214,8 +214,11 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
   auto offsets_column = std::get<0>(
     cudf::detail::make_offsets_child_column(offset_begin, offset_begin + num_rows, stream, mr));
 
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_column), std::move(output_data_col), 0, rmm::device_buffer());
+  return cudf::make_lists_column(num_rows,
+                                 std::move(offsets_column),
+                                 std::move(output_data_col),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,

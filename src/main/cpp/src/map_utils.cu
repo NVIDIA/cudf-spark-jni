@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -339,11 +339,12 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   auto gathered_struct       = std::move(gathered_table->release()[0]);
 
   // 2d. Output offsets column directly from out_offsets.
-  auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                    num_rows + 1,
-                                                    out_offsets.release(),
-                                                    rmm::device_buffer{},
-                                                    0);
+  auto offsets_col =
+    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                   num_rows + 1,
+                                   out_offsets.release(),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
 
   // 2e. Assemble the LIST<STRUCT> result with the new null mask.  The public
   // make_lists_column overload only wraps the supplied buffers — no device work — so the

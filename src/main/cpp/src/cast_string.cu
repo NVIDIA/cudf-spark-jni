@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -664,20 +664,23 @@ struct string_to_integer_impl {
                                      rmm::device_async_resource_ref mr)
   {
     if (string_col.size() == 0) {
-      return std::make_unique<column>(
-        data_type{type_to_id<T>()}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
+      return std::make_unique<column>(data_type{type_to_id<T>()},
+                                      0,
+                                      rmm::device_buffer{},
+                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                      0);
     }
 
     rmm::device_uvector<T> data(string_col.size(), stream, mr);
-    auto const num_words = bitmask_allocation_size_bytes(string_col.size()) / sizeof(bitmask_type);
-    rmm::device_uvector<bitmask_type> null_mask(num_words, stream, mr);
+    auto null_mask =
+      cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
     dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
     detail::string_to_integer_kernel<<<blocks, threads, 0, stream.get()>>>(
       data.data(),
-      null_mask.data(),
+      reinterpret_cast<bitmask_type*>(null_mask.data()),
       string_col.chars_begin(stream),
       string_col.offsets().data<size_type>(),
       string_col.null_mask(),
@@ -685,12 +688,13 @@ struct string_to_integer_impl {
       ansi_mode,
       strip);
 
-    auto null_count = cudf::null_count(null_mask.data(), 0, string_col.size(), stream);
+    auto null_count = cudf::null_count(
+      reinterpret_cast<bitmask_type*>(null_mask.data()), 0, string_col.size(), stream);
 
     auto col = std::make_unique<column>(data_type{type_to_id<T>()},
                                         string_col.size(),
                                         data.release(),
-                                        null_mask.release(),
+                                        std::move(null_mask),
                                         null_count);
 
     if (ansi_mode) { validate_ansi_column(col->view(), string_col, stream); }
@@ -738,15 +742,15 @@ struct string_to_decimal_impl {
     using Type = device_storage_type_t<T>;
 
     rmm::device_uvector<Type> data(string_col.size(), stream, mr);
-    auto const num_words = bitmask_allocation_size_bytes(string_col.size()) / sizeof(bitmask_type);
-    rmm::device_uvector<bitmask_type> null_mask(num_words, stream, mr);
+    auto null_mask =
+      cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
     dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
     detail::string_to_decimal_kernel<<<blocks, threads, 0, stream.get()>>>(
       data.data(),
-      null_mask.data(),
+      reinterpret_cast<bitmask_type*>(null_mask.data()),
       string_col.chars_begin(stream),
       string_col.offsets().data<size_type>(),
       string_col.null_mask(),
@@ -755,10 +759,11 @@ struct string_to_decimal_impl {
       precision,
       strip);
 
-    auto null_count = cudf::null_count(null_mask.data(), 0, string_col.size(), stream);
+    auto null_count = cudf::null_count(
+      reinterpret_cast<bitmask_type*>(null_mask.data()), 0, string_col.size(), stream);
 
     auto col = std::make_unique<column>(
-      dtype, string_col.size(), data.release(), null_mask.release(), null_count);
+      dtype, string_col.size(), data.release(), std::move(null_mask), null_count);
 
     if (ansi_mode) { validate_ansi_column(col->view(), string_col, stream); }
 
@@ -839,7 +844,8 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
   }();
 
   if (string_col.size() == 0) {
-    return std::make_unique<column>(dtype, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
+    return std::make_unique<column>(
+      dtype, 0, rmm::device_buffer{}, cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   }
 
   return type_dispatcher(dtype,

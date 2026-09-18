@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -430,7 +430,7 @@ void launch_compute_grandchild_parent_locations(nested_location_provider loc_pro
 
 // Build a row-aligned null mask from `valid[row]` boolean flags.
 template <typename T>
-inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
+inline std::pair<cuda::device_buffer<std::byte>, cudf::size_type> make_null_mask_from_valid(
   rmm::device_uvector<T> const& valid,
   cudf::size_type num_rows,
   cuda::stream_ref stream,
@@ -446,7 +446,7 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_valid(
   };
   auto [mask, null_count] = cudf::detail::valid_if(begin, end, pred, stream, mr);
   // Discarding an all-valid mask keeps the resulting column non-nullable.
-  if (null_count == 0) { mask = rmm::device_buffer{}; }
+  if (null_count == 0) { mask = cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED); }
   return {std::move(mask), null_count};
 }
 
@@ -587,13 +587,23 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
 
   if (num_rows == 0) {
     if (as_bytes) {
-      auto bytes_child = std::make_unique<cudf::column>(
-        cudf::data_type{cudf::type_id::UINT8}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
-      return cudf::make_lists_column(
-        0, std::move(offsets_col), std::move(bytes_child), 0, rmm::device_buffer{});
+      auto bytes_child =
+        std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
+                                       0,
+                                       rmm::device_buffer{},
+                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                       0);
+      return cudf::make_lists_column(0,
+                                     std::move(offsets_col),
+                                     std::move(bytes_child),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     }
-    return cudf::make_strings_column(
-      0, std::move(offsets_col), chars.release(), 0, rmm::device_buffer{});
+    return cudf::make_strings_column(0,
+                                     std::move(offsets_col),
+                                     chars.release(),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }
 
   rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
@@ -604,8 +614,12 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
                     validity_fn);
   auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
   if (as_bytes) {
-    auto bytes_child = std::make_unique<cudf::column>(
-      cudf::data_type{cudf::type_id::UINT8}, total_size, chars.release(), rmm::device_buffer{}, 0);
+    auto bytes_child =
+      std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
+                                     total_size,
+                                     chars.release(),
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     0);
     return cudf::make_lists_column(
       num_rows, std::move(offsets_col), std::move(bytes_child), null_count, std::move(mask));
   }
@@ -774,8 +788,12 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
     stream);
 
   auto offsets_col = make_offsets_column(input.num_rows, std::move(work.offsets));
-  auto child_col   = std::make_unique<cudf::column>(
-    field.output_type, work.total_count, values.release(), rmm::device_buffer{}, 0);
+  auto child_col =
+    std::make_unique<cudf::column>(field.output_type,
+                                   work.total_count,
+                                   values.release(),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
 
   return make_list_column_with_input_nulls(
     input.num_rows, std::move(offsets_col), std::move(child_col), binary_input, stream, mr);
