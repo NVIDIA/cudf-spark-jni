@@ -25,6 +25,7 @@
 #include "jni_utils.hpp"
 #include "nvtx_ranges.hpp"
 
+#include <cudf/io/experimental/parquet_footer.hpp>
 #include <cudf/io/parquet_metadata.hpp>
 #include <cudf/io/parquet_schema.hpp>
 #include <cudf/utilities/span.hpp>
@@ -725,11 +726,12 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
     if (buffer_length < 0) { throw std::invalid_argument("buffer_length must not be negative"); }
     std::size_t len = static_cast<std::size_t>(buffer_length);
     // We don't support encrypted parquet...
-    // Parse leniently (throw_if_type_mismatch::NO): skip a known field whose wire type does not
-    // match cudf's schema (Thrift forward-compat) rather than rejecting real files that use it.
-    auto meta = std::make_unique<rapids::jni::pq::FileMetaData>(cudf::io::read_parquet_footer_bytes(
-      cudf::host_span<uint8_t const>(std::bit_cast<uint8_t const*>(buffer), len),
-      rapids::jni::pq::throw_if_type_mismatch::NO));
+    // Parse leniently (thrift_mismatch_policy::COMPAT): skip a known field whose wire type does
+    // not match cudf's schema (Thrift forward-compat) rather than rejecting real files that use it.
+    auto meta = std::make_unique<rapids::jni::pq::FileMetaData>(
+      cudf::io::parquet::experimental::read_parquet_footer_bytes(
+        std::span<uint8_t const>(std::bit_cast<uint8_t const*>(buffer), len),
+        cudf::io::parquet::experimental::thrift_mismatch_policy::COMPAT));
 
     // Get the filter for the columns first...
     cudf::jni::native_jstringArray n_filter_col_names(env, filter_col_names);
@@ -841,7 +843,8 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
     // chunk whose source footer omitted it (PARQUET-2078) round-trips with a default-valued
     // meta_data instead of staying absent; downstream readers must locate those columns via the
     // preserved RowGroup.file_offset, not this fabricated inline metadata.
-    std::vector<uint8_t> serialized = cudf::io::write_parquet_footer_bytes(*footer->meta);
+    std::vector<uint8_t> serialized =
+      cudf::io::parquet::experimental::write_parquet_footer_bytes(*footer->meta);
     uint8_t* buf_ptr                = serialized.data();
     uint32_t buf_size               = static_cast<uint32_t>(serialized.size());
 
