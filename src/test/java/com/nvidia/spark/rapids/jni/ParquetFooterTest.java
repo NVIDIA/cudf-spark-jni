@@ -159,19 +159,19 @@ public class ParquetFooterTest {
     SchemaElement root = new SchemaElement("schema");
     root.setNum_children(4);
 
-    List<SchemaElement> schema = new ArrayList<>();
-    schema.add(root);
-    schema.add(leaf("id", FieldRepetitionType.OPTIONAL));
-    schema.add(group("names", 1, FieldRepetitionType.OPTIONAL, ConvertedType.LIST));
-    schema.add(group("list", 1, FieldRepetitionType.REPEATED, null));
-    schema.add(leaf("element", FieldRepetitionType.OPTIONAL));
-    schema.add(group("props", 1, FieldRepetitionType.OPTIONAL, ConvertedType.MAP));
-    schema.add(group("key_value", 2, FieldRepetitionType.REPEATED, null));
-    schema.add(leaf("key", FieldRepetitionType.REQUIRED));
-    schema.add(leaf("value", FieldRepetitionType.OPTIONAL));
-    schema.add(group("nested", 2, FieldRepetitionType.OPTIONAL, null));
-    schema.add(leaf("x", FieldRepetitionType.OPTIONAL));
-    schema.add(leaf("y", FieldRepetitionType.OPTIONAL));
+    List<SchemaElement> schema = Arrays.asList(
+        root,
+        leaf("id", FieldRepetitionType.OPTIONAL),
+        group("names", 1, FieldRepetitionType.OPTIONAL, ConvertedType.LIST),
+        group("list", 1, FieldRepetitionType.REPEATED, null),
+        leaf("element", FieldRepetitionType.OPTIONAL),
+        group("props", 1, FieldRepetitionType.OPTIONAL, ConvertedType.MAP),
+        group("key_value", 2, FieldRepetitionType.REPEATED, null),
+        leaf("key", FieldRepetitionType.REQUIRED),
+        leaf("value", FieldRepetitionType.OPTIONAL),
+        group("nested", 2, FieldRepetitionType.OPTIONAL, null),
+        leaf("x", FieldRepetitionType.OPTIONAL),
+        leaf("y", FieldRepetitionType.OPTIONAL));
 
     // One column chunk per leaf column (6 leaves), each with a distinct data page offset.
     List<ColumnChunk> chunks = new ArrayList<>();
