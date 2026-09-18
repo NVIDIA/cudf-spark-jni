@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,13 +14,6 @@
  * limitations under the License.
  */
 
-#include <bit>
-#include <cwctype>
-#include <limits>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <vector>
 #include "cudf_jni_apis.hpp"
 #include "jni_utils.hpp"
 #include "nvtx_ranges.hpp"
@@ -30,9 +23,11 @@
 #include <cudf/io/parquet_schema.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <bit>
 #include <cstring>
 #include <cwctype>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -845,8 +840,8 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
     // preserved RowGroup.file_offset, not this fabricated inline metadata.
     std::vector<uint8_t> serialized =
       cudf::io::parquet::experimental::write_parquet_footer_bytes(*footer->meta);
-    uint8_t* buf_ptr                = serialized.data();
-    uint32_t buf_size               = static_cast<uint32_t>(serialized.size());
+    uint8_t* buf_ptr  = serialized.data();
+    uint32_t buf_size = static_cast<uint32_t>(serialized.size());
 
     // 12 extra is for the MAGIC thrift_footer length MAGIC
     jobject ret = cudf::jni::allocate_host_buffer(env, buf_size + 12, false, host_memory_allocator);
