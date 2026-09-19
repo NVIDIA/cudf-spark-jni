@@ -27,7 +27,6 @@
 #include <cstring>
 #include <cwctype>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
