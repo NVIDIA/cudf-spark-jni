@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -198,6 +198,12 @@ find_library(THRIFT_LIB "libthrift.a" REQUIRED NO_DEFAULT_PATH
 set(CUDFJNI_INCLUDE_DIRS
   "${CUDF_DIR}/java/src/main/native/include"
   "${CUDF_DIR}/java/src/main/native/src"
+)
+
+# Headers generated/vendored from Arrow and Thrift, fetched from upstream and not
+# something we edit; treated as SYSTEM below so their warnings (e.g. deprecated
+# declarations) don't trip our -Werror.
+set(CUDFJNI_VENDORED_INCLUDE_DIRS
   "${GENERATED_PARQUET_INCLUDE}"
   "${CUDFJNI_BUILD_DIR}/_deps/thrift-build/"
   "${CUDFJNI_BUILD_DIR}/_deps/thrift-src/lib/cpp/src/"
@@ -325,8 +331,15 @@ target_compile_options(
 target_include_directories(
   spark_rapids_jni
   PRIVATE "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
-          "${JNI_INCLUDE_DIRS}"
           "${CUDFJNI_INCLUDE_DIRS}"
+)
+
+# Mark include dirs we do not control as SYSTEM so -Werror does not trip on warnings
+# (e.g. deprecated declarations) originating from vendored/generated headers.
+target_include_directories(
+  spark_rapids_jni SYSTEM
+  PRIVATE "${JNI_INCLUDE_DIRS}"
+          "${CUDFJNI_VENDORED_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 
