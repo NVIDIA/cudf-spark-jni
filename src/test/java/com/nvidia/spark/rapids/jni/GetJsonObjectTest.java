@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
@@ -181,13 +182,45 @@ public class GetJsonObjectTest {
     String expectedStr3 = "{\"a\":\"B'\"}";
     String expectedStr4 = "[\"a\",\"b\",\"\\\"C\\\"\"]";
     String expectedStr5 = "中国\"'\\/\b\f\n\r\t\b";
-    String expectedStr6 = "中国\\\"'\\\\/\\b\\f\\n\\r\\t\\b";
+    String expectedStr6 = "[\"中国\\\"'\\\\/\\b\\f\\n\\r\\t\\b\"]";
 
     try (
         ColumnVector jsonCv = ColumnVector.fromStrings(
-            JSON1, JSON2, JSON3, JSON4, JSON5);
+            JSON1, JSON2, JSON3, JSON4, JSON5, JSON6);
         ColumnVector expected = ColumnVector.fromStrings(
-            expectedStr1, expectedStr2, expectedStr3, expectedStr4, expectedStr5);
+            expectedStr1, expectedStr2, expectedStr3, expectedStr4, expectedStr5, expectedStr6);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A unicode escape decoding to a quote, backslash, or control character must be re-emitted
+   * escaped, not only the two-char form, otherwise the re-serialized output is invalid JSON.
+   */
+  @Test
+  void getJsonObjectTest_EscapeUnicodeReescape() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+
+    String JSON1 = "{'a':'\\u0022'}";  // decodes to a quote; must re-escape
+    String JSON2 = "{'a':'\\u005c'}";  // decodes to a backslash
+    String JSON3 = "['\\u0001']";      // control char with no short escape form
+    String JSON4 = "{'a':'\\u000a'}";  // newline; short escape form
+    String JSON5 = "{'a':'\\u0010'}";  // lowest control char needing a 1 high digit
+    String JSON6 = "{'a':'\\u001f'}";  // highest control char; lowercase input hex
+
+    String expectedStr1 = "{\"a\":\"\\\"\"}";
+    String expectedStr2 = "{\"a\":\"\\\\\"}";
+    String expectedStr3 = "[\"\\u0001\"]";
+    String expectedStr4 = "{\"a\":\"\\n\"}";
+    String expectedStr5 = "{\"a\":\"\\u0010\"}";
+    String expectedStr6 = "{\"a\":\"\\u001F\"}";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(
+            JSON1, JSON2, JSON3, JSON4, JSON5, JSON6);
+        ColumnVector expected = ColumnVector.fromStrings(
+            expectedStr1, expectedStr2, expectedStr3, expectedStr4, expectedStr5, expectedStr6);
         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
       assertColumnsAreEqual(expected, actual);
     }
@@ -803,6 +836,206 @@ public class GetJsonObjectTest {
   }
 
   /**
+   * A lone or broken UTF-16 surrogate on the unescaped scalar-leaf path nulls the whole row:
+   * Jackson `writeRaw` throws on one and Spark maps that exception to null.
+   */
+  @Test
+  void getJsonObjectTest_UnescapedLoneSurrogateReturnsNull() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        namedPath("a")
+    };
+
+    String JSON1 = "{'a':'\\uD800'}"; // lone high surrogate
+    String JSON2 = "{'a':'\\uDC00'}"; // lone low surrogate
+    String JSON3 = "{'a':'\\uD800A'}"; // high surrogate followed by a non-low character
+    String JSON4 = "{'a':'abc\\uD800'}"; // surrogate trailing valid text
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(
+            JSON1, JSON2, JSON3, JSON4);
+        ColumnVector expected = ColumnVector.fromStrings(
+            null, null, null, null);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * On the escaped path a raw astral character is emitted as an uppercase surrogate-pair escape,
+   * matching Jackson `writeString`, which never combines surrogate pairs.
+   */
+  @Test
+  void getJsonObjectTest_EscapedRawAstralCharBecomesSurrogatePair() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+
+    // Raw astral characters, not escapes. U+10000 is the boundary where the surrogate offset is
+    // zero and both units are their range minimums.
+    String JSON1 = "{'a':'\uD83D\uDE00'}";
+    String JSON2 = "{'a':'\uD800\uDC00'}";
+    String expectedStr1 = "{\"a\":\"\\uD83D\\uDE00\"}";
+    String expectedStr2 = "{\"a\":\"\\uD800\\uDC00\"}";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1, JSON2);
+        ColumnVector expected = ColumnVector.fromStrings(expectedStr1, expectedStr2);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * On the escaped path every surrogate code unit is re-emitted as an uppercase escape, whether
+   * the pair is valid, lone, or broken.
+   */
+  @Test
+  void getJsonObjectTest_EscapedSurrogateReemittedAsUppercaseEscape() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+
+    String JSON1 = "{'a':'\\uD83D\\uDE00'}"; // valid surrogate pair
+    String JSON2 = "{'a':'\\uD800'}"; // lone high surrogate
+    String JSON3 = "{'a':'\\uDC00'}"; // lone low surrogate
+    String JSON4 = "{'a':'\\uD800A'}"; // high surrogate followed by a non-low character
+    String JSON5 = "{'a':'\\ud83d\\ude00'}"; // lowercase input hex; output must still be upper
+
+    String expectedStr1 = "{\"a\":\"\\uD83D\\uDE00\"}";
+    String expectedStr2 = "{\"a\":\"\\uD800\"}";
+    String expectedStr3 = "{\"a\":\"\\uDC00\"}";
+    String expectedStr4 = "{\"a\":\"\\uD800A\"}";
+    String expectedStr5 = "{\"a\":\"\\uD83D\\uDE00\"}";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(
+            JSON1, JSON2, JSON3, JSON4, JSON5);
+        ColumnVector expected = ColumnVector.fromStrings(
+            expectedStr1, expectedStr2, expectedStr3, expectedStr4, expectedStr5);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * On the unescaped scalar-leaf path a valid astral character passes through as its 4-byte
+   * UTF-8; only a lone or broken surrogate makes Jackson `writeRaw` throw.
+   */
+  @Test
+  void getJsonObjectTest_UnescapedRawAstralCharPreserved() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        namedPath("a")
+    };
+
+    // The raw astral character U+1F600, returned unchanged.
+    String JSON1 = "{'a':'\uD83D\uDE00'}";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1);
+        ColumnVector expected = ColumnVector.fromStrings("\uD83D\uDE00");
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * The nulling rule is limited to the raw scalar-leaf path: under a wildcard the leaf goes
+   * through the escaped writer instead, so a lone surrogate is re-emitted and the row survives.
+   */
+  @Test
+  void getJsonObjectTest_LoneSurrogateUnderWildcardIsQuotedNotNulled() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        wildcardPath()
+    };
+
+    // Two elements keep the outer array, so the surrogate sits beside a clean value.
+    String JSON1 = "['\\uD800','ok']";
+    String expectedStr1 = "[\"\\uD800\",\"ok\"]";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1);
+        ColumnVector expected = ColumnVector.fromStrings(expectedStr1);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A JSON key that contains an escaped lone surrogate must not match a query name that lacks it.
+   * Spark compares field names as full UTF-16 code-unit sequences (Jackson), so a key carrying a
+   * lone surrogate plus 'a' is two code units and cannot equal the single-unit query "a". Pins the
+   * field-name-matching side of lone-surrogate handling: the surrogate is not skipped in a match.
+   */
+  @Test
+  void getJsonObjectTest_FieldNameWithLoneSurrogateDoesNotMatch() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        namedPath("a")
+    };
+
+    // Key is an escaped lone surrogate followed by 'a'; it must not collapse to "a".
+    String JSON1 = "{'\\uD800a': 1}"; // only key is the surrogate key -> no match -> null
+    String JSON2 = "{'\\uD800a': 1, 'a': 2}"; // real "a" matches, surrogate key does not -> "2"
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1, JSON2);
+        ColumnVector expected = ColumnVector.fromStrings(null, "2");
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A lone surrogate earlier in the document must not affect a later, clean value. Spark decides
+   * this per string token, so the parser must not carry the flag across token boundaries.
+   */
+  @Test
+  void getJsonObjectTest_LoneSurrogateDoesNotLeakToLaterValue() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        namedPath("a")
+    };
+
+    // Lone surrogate in an earlier KEY, then in an earlier VALUE; "a" is clean in both.
+    String JSON1 = "{'\\uD800k':'x', 'a':'ok'}";
+    String JSON2 = "{'k':'\\uD800', 'a':'ok'}";
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1, JSON2);
+        ColumnVector expected = ColumnVector.fromStrings("ok", "ok");
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A row nulled by a lone surrogate must not disturb its neighbours. Each row is written by its
+   * own thread into a shared output buffer, and a nulled row returns before writing so it commits
+   * zero bytes; a row that wrote bytes and then nulled would shift the next row's output.
+   * Alternating nulled and written rows over 70 rows also crosses the 32- and 64-row mask edges.
+   */
+  @Test
+  void getJsonObjectTest_LoneSurrogateNullsOnlyItsOwnRow() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        namedPath("a")
+    };
+
+    int rowCount = 70;
+    String[] docs = new String[rowCount];
+    String[] expectedRows = new String[rowCount];
+    for (int i = 0; i < rowCount; i++) {
+      if (i % 2 == 0) {
+        docs[i] = "{'a':'\\uD800'}";
+        expectedRows[i] = null;
+      } else {
+        docs[i] = "{'a':'v" + i + "'}";
+        expectedRows[i] = "v" + i;
+      }
+    }
+
+    try (
+        ColumnVector jsonCv = ColumnVector.fromStrings(docs);
+        ColumnVector expected = ColumnVector.fromStrings(expectedRows);
+        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
    * Test path: '$.store.book[*].reader[*].age'
    * When 'book' array size is one, then return one dimension array,
    * When 'book' array size is bigger than one, then return two dimensions array.
@@ -980,6 +1213,223 @@ public class GetJsonObjectTest {
             "[11]");
         ColumnVector output = JSONUtils.getJsonObject(input, query)) {
       assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  /** Hex string to raw bytes, so a test input can hold sequences no Java String can represent. */
+  private static byte[] hexBytes(String hex) {
+    // Truncating a trailing nibble would silently change the document under test.
+    assertEquals(0, hex.length() % 2, "hex literal needs an even number of digits: " + hex);
+    byte[] out = new byte[hex.length() / 2];
+    for (int i = 0; i < out.length; i++) {
+      out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  private static byte[][] hexRows(String... hex) {
+    byte[][] out = new byte[hex.length][];
+    for (int i = 0; i < hex.length; i++) {
+      out[i] = hexBytes(hex[i]);
+    }
+    return out;
+  }
+
+  // The hex prefix and suffix wrapping every sequence below, spelling {"a":" and "}.
+  private static final String UTF8_DOC_PREFIX = "7B2261223A22";
+  private static final String UTF8_DOC_SUFFIX = "227D";
+
+  // Documents of the form {"a":"<bytes>"} whose value holds malformed or boundary UTF-8.
+  private static final String[] UTF8_INPUT_DOCS = {
+        "7B2261223A22EDA080227D",            // cesu8_lone_high
+        "7B2261223A22EDB080227D",            // cesu8_lone_low
+        "7B2261223A22EDA0BDEDB880227D",      // cesu8_pair_emoji
+        "7B2261223A22C080227D",              // overlong_2byte
+        "7B2261223A22E08080227D",            // overlong_3byte
+        "7B2261223A22E4B8227D",              // truncated_3byte
+        "7B2261223A22F09F98227D",            // truncated_4byte
+        // Fewer than four bytes left in the token at a four-byte lead, which is the only way to
+        // reach the lookahead clamp guarding the read of the fourth byte.
+        "7B2261223A22F09F227D",              // truncated_4byte_short
+        "7B2261223A2280227D",                // bare_continuation
+        "7B2261223A22F5227D",                // bad_lead_F5
+        "7B2261223A22FF227D",                // bad_lead_FF
+        "7B2261223A22ED9FBF227D",            // valid_below_surr
+        "7B2261223A22F48FBFBF227D",          // valid_max_astral
+        "7B2261223A22F4908080227D",          // above_10FFFF
+        "7B2261223A2241EDA08042227D",        // mixed_A_bad_B
+        "7B2261223A22E428AD227D",            // b2_not_cont
+        "7B2261223A22E4B828227D",            // b3_not_cont
+        "7B2261223A22E4B8AD227D",            // valid_3byte_cjk
+        "7B2261223A22C228227D",              // c2_bad_cont
+        "7B2261223A22F09F9828227D",          // f0_bad_b4
+        "7B2261223A22F09F9880227D",          // valid_astral
+        "7B2261223A22C3A9227D",              // valid_2byte
+        "7B2261223A22DFBF227D",              // valid_2byte_max
+  };
+
+  // What Spark returns for $.a. Spark decodes the document bytes through a strict UTF-8 reader
+  // before Jackson tokenizes, so every malformed subsequence becomes U+FFFD (EF BF BD). Values
+  // come from running that decoder, not from this implementation.
+  private static final String[] UTF8_EXPECTED_UNESCAPED = {
+        "EFBFBD",                            // cesu8_lone_high
+        "EFBFBD",                            // cesu8_lone_low
+        "EFBFBDEFBFBD",                      // cesu8_pair_emoji
+        "EFBFBDEFBFBD",                      // overlong_2byte
+        "EFBFBDEFBFBDEFBFBD",                // overlong_3byte
+        "EFBFBD",                            // truncated_3byte
+        "EFBFBD",                            // truncated_4byte
+        "EFBFBD",                            // truncated_4byte_short
+        "EFBFBD",                            // bare_continuation
+        "EFBFBD",                            // bad_lead_F5
+        "EFBFBD",                            // bad_lead_FF
+        "ED9FBF",                            // valid_below_surr
+        "F48FBFBF",                          // valid_max_astral
+        "EFBFBDEFBFBDEFBFBDEFBFBD",          // above_10FFFF
+        "41EFBFBD42",                        // mixed_A_bad_B
+        "EFBFBD28EFBFBD",                    // b2_not_cont
+        "EFBFBD28",                          // b3_not_cont
+        "E4B8AD",                            // valid_3byte_cjk
+        "EFBFBD28",                          // c2_bad_cont
+        "EFBFBD28",                          // f0_bad_b4
+        "F09F9880",                          // valid_astral
+        "C3A9",                              // valid_2byte
+        "DFBF",                              // valid_2byte_max
+  };
+
+  // What Spark returns for the root query, where Jackson re-serializes through writeString.
+  private static final String[] UTF8_EXPECTED_ESCAPED = {
+        "7B2261223A22EFBFBD227D",                   // cesu8_lone_high
+        "7B2261223A22EFBFBD227D",                   // cesu8_lone_low
+        "7B2261223A22EFBFBDEFBFBD227D",             // cesu8_pair_emoji
+        "7B2261223A22EFBFBDEFBFBD227D",             // overlong_2byte
+        "7B2261223A22EFBFBDEFBFBDEFBFBD227D",       // overlong_3byte
+        "7B2261223A22EFBFBD227D",                   // truncated_3byte
+        "7B2261223A22EFBFBD227D",                   // truncated_4byte
+        "7B2261223A22EFBFBD227D",                   // bare_continuation
+        "7B2261223A22EFBFBD227D",                   // bad_lead_F5
+        "7B2261223A22EFBFBD227D",
+      "7B2261223A22EFBFBD227D",                   // bad_lead_FF
+        "7B2261223A22ED9FBF227D",                   // valid_below_surr
+        "7B2261223A225C75444246465C7544464646227D", // valid_max_astral
+        "7B2261223A22EFBFBDEFBFBDEFBFBDEFBFBD227D", // above_10FFFF
+        "7B2261223A2241EFBFBD42227D",               // mixed_A_bad_B
+        "7B2261223A22EFBFBD28EFBFBD227D",           // b2_not_cont
+        "7B2261223A22EFBFBD28227D",                 // b3_not_cont
+        "7B2261223A22E4B8AD227D",                   // valid_3byte_cjk
+        "7B2261223A22EFBFBD28227D",                 // c2_bad_cont
+        "7B2261223A22EFBFBD28227D",                 // f0_bad_b4
+        "7B2261223A225C75443833445C7544453030227D", // valid_astral
+        "7B2261223A22C3A9227D",                     // valid_2byte
+        "7B2261223A22DFBF227D",                     // valid_2byte_max
+  };
+
+  /**
+   * Malformed UTF-8 must be replaced exactly as Spark's decoder replaces it, on the unescaped
+   * scalar-leaf path. Copying the raw bytes through would leave invalid UTF-8 in the column.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedOnUnescapedPath() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] { namedPath("a") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(UTF8_INPUT_DOCS));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(UTF8_EXPECTED_UNESCAPED));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /** The bare sequence of a UTF8_INPUT_DOCS entry, without the document around it. */
+  private static String utf8Sequence(String doc) {
+    return doc.substring(UTF8_DOC_PREFIX.length(), doc.length() - UTF8_DOC_SUFFIX.length());
+  }
+
+  /**
+   * The same writer produces field names, so the corpus must be replaced identically when its
+   * bytes sit in a key rather than a value. Each document here is one corpus sequence used as the
+   * key of {"<key>":"v"}, re-serialized by an empty query.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedInFieldName() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+    String[] inputDocs = new String[UTF8_INPUT_DOCS.length];
+    String[] expectedDocs = new String[UTF8_INPUT_DOCS.length];
+    for (int i = 0; i < inputDocs.length; i++) {
+      // The two hex literals spell {" and ":"v"} around the key.
+      inputDocs[i] = "7B22" + utf8Sequence(UTF8_INPUT_DOCS[i]) + "223A2276227D";
+      expectedDocs[i] = "7B22" + utf8Sequence(UTF8_EXPECTED_ESCAPED[i]) + "223A2276227D";
+    }
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(inputDocs));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(expectedDocs));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * The same replacement must happen on the escaped re-serialization path, where a valid astral
+   * character still becomes an uppercase surrogate-pair escape.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedOnEscapedPath() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(UTF8_INPUT_DOCS));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(UTF8_EXPECTED_ESCAPED));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * Spark replaces a malformed run with U+FFFD before Jackson tokenizes, so a path spelled with the
+   * replacement character is what reaches a key that held malformed bytes. Matching the raw bytes
+   * instead would leave such a key unreachable from any path.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8InFieldNameMatchesReplacementPath() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[] { namedPath("a\uFFFDb") };
+    // {"a<FF>b":"v"} -- one malformed byte between two ASCII letters of the key.
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows("7B2261FF62223A2276227D"));
+         ColumnVector expected = ColumnVector.fromStrings("v");
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * The same key must NOT match a path spelled with the raw malformed byte, which is what the old
+   * byte-for-byte comparison would have matched.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8InFieldNameDoesNotMatchRawBytePath() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[] { namedPath("ab") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows("7B2261FF62223A2276227D"));
+         ColumnVector expected = ColumnVector.fromStrings(new String[] { null });
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * Malformed UTF-8 expands one input byte into the three of U+FFFD, so an unescaped value can now
+   * outgrow the row it came from. That drives the out-of-bound path, which discards the first
+   * kernel result and relaunches with exact sizes. Expected bytes come from running Spark.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8OutgrowsInputRow() {
+    StringBuilder doc = new StringBuilder("7B2261223A22");
+    StringBuilder expectedHex = new StringBuilder();
+    for (int i = 0; i < 16; ++i) {
+      doc.append("FF");
+      expectedHex.append("EFBFBD");
+    }
+    doc.append("227D");
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] { namedPath("a") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(doc.toString()));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(expectedHex.toString()));
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
     }
   }
 
