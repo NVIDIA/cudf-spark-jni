@@ -18,12 +18,27 @@
 #include "get_json_object.hpp"
 #include "json_utils.hpp"
 
+#include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 
+#include <algorithm>
 #include <bit>
+#include <ranges>
 #include <vector>
 
 using path_instruction_type = spark_rapids_jni::path_instruction_type;
+
+namespace {
+
+// A null name would reach `std::string` as a null pointer, surfacing an opaque error instead of
+// naming the bad argument. Both path entry points screen the array before building instructions.
+bool any_name_is_null(cudf::jni::native_jstringArray const& names)
+{
+  return std::ranges::any_of(std::views::iota(0, names.size()),
+                             [&](auto const i) { return names[i].is_null(); });
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -56,7 +71,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
     auto const n_column_view      = std::bit_cast<cudf::column_view const*>(input_column);
     auto const n_strings_col_view = cudf::strings_column_view{*n_column_view};
 
-    std::vector<std::tuple<path_instruction_type, std::string, int32_t>> instructions;
+    spark_rapids_jni::json_path instructions;
 
     auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
     auto const names     = cudf::jni::native_jstringArray(env, j_names);
@@ -66,6 +81,10 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
         type_nums.size() != static_cast<std::size_t>(size)) {
       JNI_THROW_NEW(
         env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", 0);
+    }
+    if (any_name_is_null(names)) {
+      JNI_THROW_NEW(
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "path instruction name is null", 0);
     }
 
     for (int i = 0; i < size; i++) {
@@ -79,6 +98,19 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
       spark_rapids_jni::get_json_object(n_strings_col_view, instructions));
   }
   JNI_CATCH(env, 0);
+}
+
+JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_freeColumn(JNIEnv* env,
+                                                                             jclass,
+                                                                             jlong column_handle)
+{
+  JNI_NULL_CHECK(env, column_handle, "column is null", );
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    delete reinterpret_cast<cudf::column*>(column_handle);
+  }
+  JNI_CATCH(env, );
 }
 
 JNIEXPORT jlongArray JNICALL
@@ -98,7 +130,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
   JNI_NULL_CHECK(env, j_indexes, "j_indexes is null", 0);
   JNI_NULL_CHECK(env, j_path_offsets, "j_path_offsets is null", 0);
 
-  using path_type = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
+  using path_type = spark_rapids_jni::json_path;
 
   JNI_TRY
   {
@@ -106,6 +138,14 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
 
     auto const path_offsets = cudf::jni::native_jintArray(env, j_path_offsets).to_vector();
     CUDF_EXPECTS(path_offsets.size() > 1, "Invalid path offsets.");
+    // The size check below pins only the last offset. Without this guard a decreasing array would
+    // read past the entry arrays, and a late start would silently drop the leading entries.
+    if (path_offsets[0] != 0 || !std::is_sorted(path_offsets.begin(), path_offsets.end())) {
+      JNI_THROW_NEW(env,
+                    cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS,
+                    "path offsets must start at 0 and must not decrease",
+                    0);
+    }
     auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
     auto const names     = cudf::jni::native_jstringArray(env, j_names);
     auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
@@ -118,6 +158,10 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
         type_nums.size() != static_cast<std::size_t>(num_entries)) {
       JNI_THROW_NEW(
         env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", 0);
+    }
+    if (any_name_is_null(names)) {
+      JNI_THROW_NEW(
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "path instruction name is null", 0);
     }
 
     for (std::size_t i = 0; i < num_paths; ++i) {

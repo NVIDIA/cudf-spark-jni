@@ -23,6 +23,8 @@
 #include <cuda/stream>
 
 #include <memory>
+#include <string>
+#include <tuple>
 #include <vector>
 
 namespace spark_rapids_jni {
@@ -38,6 +40,12 @@ constexpr int MAX_JSON_PATH_DEPTH = 16;
 enum class path_instruction_type : int8_t { WILDCARD, INDEX, NAMED };
 
 /**
+ * @brief One JSON path: a sequence of instructions, where `name` is read only for `NAMED` and
+ * `index` only for `INDEX`
+ */
+using json_path = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
+
+/**
  * @brief Extract JSON object from a JSON string based on the specified JSON path.
  *
  * If the input JSON string is invalid, or it does not contain the object at the given path, a null
@@ -45,7 +53,7 @@ enum class path_instruction_type : int8_t { WILDCARD, INDEX, NAMED };
  */
 std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
-  std::vector<std::tuple<path_instruction_type, std::string, int32_t>> const& instructions,
+  json_path const& instructions,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
@@ -64,8 +72,7 @@ std::unique_ptr<cudf::column> get_json_object(
  */
 std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   cudf::strings_column_view const& input,
-  std::vector<std::vector<std::tuple<path_instruction_type, std::string, int32_t>>> const&
-    json_paths,
+  std::vector<json_path> const& json_paths,
   int64_t memory_budget_bytes,
   int32_t parallel_override,
   cuda::stream_ref stream           = cudf::get_default_stream(),
