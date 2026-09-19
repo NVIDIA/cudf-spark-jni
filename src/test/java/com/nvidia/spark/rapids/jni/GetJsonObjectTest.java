@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
@@ -980,6 +981,194 @@ public class GetJsonObjectTest {
             "[11]");
         ColumnVector output = JSONUtils.getJsonObject(input, query)) {
       assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  /** Hex string to raw bytes, so a test input can hold sequences no Java String can represent. */
+  private static byte[] hexBytes(String hex) {
+    // Truncating a trailing nibble would silently change the document under test.
+    assertEquals(0, hex.length() % 2, "hex literal needs an even number of digits: " + hex);
+    byte[] out = new byte[hex.length() / 2];
+    for (int i = 0; i < out.length; i++) {
+      out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  private static byte[][] hexRows(String... hex) {
+    byte[][] out = new byte[hex.length][];
+    for (int i = 0; i < hex.length; i++) {
+      out[i] = hexBytes(hex[i]);
+    }
+    return out;
+  }
+
+  // Hex for {"a":" and "}, wrapping every sequence below.
+  private static final String UTF8_DOC_PREFIX = "7B2261223A22";
+  private static final String UTF8_DOC_SUFFIX = "227D";
+
+  // Documents of the form {"a":"<bytes>"} whose value holds malformed or boundary UTF-8.
+  private static final String[] UTF8_INPUT_DOCS = {
+        "7B2261223A22EDA080227D",            // cesu8_lone_high
+        "7B2261223A22EDB080227D",            // cesu8_lone_low
+        "7B2261223A22EDA0BDEDB880227D",      // cesu8_pair_emoji
+        "7B2261223A22C080227D",              // overlong_2byte
+        "7B2261223A22E08080227D",            // overlong_3byte
+        "7B2261223A22E4B8227D",              // truncated_3byte
+        "7B2261223A22F09F98227D",            // truncated_4byte
+        // A four-byte lead with fewer than four bytes left, the only way to reach the lookahead
+        // clamp on the fourth byte.
+        "7B2261223A22F09F227D",              // truncated_4byte_short
+        "7B2261223A2280227D",                // bare_continuation
+        "7B2261223A22F5227D",                // bad_lead_F5
+        "7B2261223A22FF227D",                // bad_lead_FF
+        "7B2261223A22ED9FBF227D",            // valid_below_surr
+        "7B2261223A22F48FBFBF227D",          // valid_max_astral
+        "7B2261223A22F4908080227D",          // above_10FFFF
+        "7B2261223A2241EDA08042227D",        // mixed_A_bad_B
+        "7B2261223A22E428AD227D",            // b2_not_cont
+        "7B2261223A22E4B828227D",            // b3_not_cont
+        "7B2261223A22E4B8AD227D",            // valid_3byte_cjk
+        "7B2261223A22C228227D",              // c2_bad_cont
+        "7B2261223A22F09F9828227D",          // f0_bad_b4
+        "7B2261223A22F09F9880227D",          // valid_astral
+        "7B2261223A22C3A9227D",              // valid_2byte
+        "7B2261223A22DFBF227D",              // valid_2byte_max
+  };
+
+  // What Spark returns for $.a: its strict UTF-8 reader turns every malformed subsequence into
+  // U+FFFD (EF BF BD) before Jackson tokenizes. Values come from that decoder, not from this code.
+  private static final String[] UTF8_EXPECTED_UNESCAPED = {
+        "EFBFBD",                            // cesu8_lone_high
+        "EFBFBD",                            // cesu8_lone_low
+        "EFBFBDEFBFBD",                      // cesu8_pair_emoji
+        "EFBFBDEFBFBD",                      // overlong_2byte
+        "EFBFBDEFBFBDEFBFBD",                // overlong_3byte
+        "EFBFBD",                            // truncated_3byte
+        "EFBFBD",                            // truncated_4byte
+        "EFBFBD",                            // truncated_4byte_short
+        "EFBFBD",                            // bare_continuation
+        "EFBFBD",                            // bad_lead_F5
+        "EFBFBD",                            // bad_lead_FF
+        "ED9FBF",                            // valid_below_surr
+        "F48FBFBF",                          // valid_max_astral
+        "EFBFBDEFBFBDEFBFBDEFBFBD",          // above_10FFFF
+        "41EFBFBD42",                        // mixed_A_bad_B
+        "EFBFBD28EFBFBD",                    // b2_not_cont
+        "EFBFBD28",                          // b3_not_cont
+        "E4B8AD",                            // valid_3byte_cjk
+        "EFBFBD28",                          // c2_bad_cont
+        "EFBFBD28",                          // f0_bad_b4
+        "F09F9880",                          // valid_astral
+        "C3A9",                              // valid_2byte
+        "DFBF",                              // valid_2byte_max
+  };
+
+  /**
+   * Unescaped scalar leaf: copying the raw bytes through would leave invalid UTF-8 in the column.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedOnUnescapedPath() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] { namedPath("a") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(UTF8_INPUT_DOCS));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(UTF8_EXPECTED_UNESCAPED));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /** The bare sequence of a UTF8_INPUT_DOCS entry, without the document around it. */
+  private static String utf8Sequence(String doc) {
+    return doc.substring(UTF8_DOC_PREFIX.length(), doc.length() - UTF8_DOC_SUFFIX.length());
+  }
+
+  /**
+   * The same corpus on the escaped path, which an empty query takes. Both write styles share one
+   * writer, so the replacement must come out byte-identical; only the quoting differs.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedOnEscapedPath() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+    String[] expectedDocs = new String[UTF8_EXPECTED_UNESCAPED.length];
+    for (int i = 0; i < expectedDocs.length; i++) {
+      expectedDocs[i] = UTF8_DOC_PREFIX + UTF8_EXPECTED_UNESCAPED[i] + UTF8_DOC_SUFFIX;
+    }
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(UTF8_INPUT_DOCS));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(expectedDocs));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * The same writer produces field names, so the corpus must be replaced identically in a key.
+   * Each document is one corpus sequence used as the key of {"<key>":"v"}.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8ReplacedInFieldName() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[0];
+    String[] inputDocs = new String[UTF8_INPUT_DOCS.length];
+    String[] expectedDocs = new String[UTF8_INPUT_DOCS.length];
+    for (int i = 0; i < inputDocs.length; i++) {
+      // The two literals are hex for {" and ":"v"} around the key.
+      inputDocs[i] = "7B22" + utf8Sequence(UTF8_INPUT_DOCS[i]) + "223A2276227D";
+      expectedDocs[i] = "7B22" + UTF8_EXPECTED_UNESCAPED[i] + "223A2276227D";
+    }
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(inputDocs));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(expectedDocs));
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * A key that held malformed bytes is reached by a path spelled with U+FFFD; matching the raw
+   * bytes would leave it unreachable from any path.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8InFieldNameMatchesReplacementPath() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[] { namedPath("a\uFFFDb") };
+    // {"a<FF>b":"v"} -- one malformed byte between two ASCII letters of the key.
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows("7B2261FF62223A2276227D"));
+         ColumnVector expected = ColumnVector.fromStrings("v");
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * The same key must not match a path spelled with the raw malformed byte.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8InFieldNameDoesNotMatchRawBytePath() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[] { namedPath("ab") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows("7B2261FF62223A2276227D"));
+         ColumnVector expected = ColumnVector.fromStrings(new String[] { null });
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * One input byte expands to the three of U+FFFD, so an unescaped value can outgrow its row.
+   * That drives the out-of-bound path, which relaunches with exact sizes.
+   */
+  @Test
+  void getJsonObjectTest_MalformedUtf8OutgrowsInputRow() {
+    StringBuilder doc = new StringBuilder("7B2261223A22");
+    StringBuilder expectedHex = new StringBuilder();
+    for (int i = 0; i < 16; ++i) {
+      doc.append("FF");
+      expectedHex.append("EFBFBD");
+    }
+    doc.append("227D");
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] { namedPath("a") };
+    try (ColumnVector jsonCv = ColumnVector.fromUTF8Strings(hexRows(doc.toString()));
+         ColumnVector expected = ColumnVector.fromUTF8Strings(hexRows(expectedHex.toString()));
+         ColumnVector out = JSONUtils.getJsonObject(jsonCv, query)) {
+      assertColumnsAreEqual(expected, out);
     }
   }
 
