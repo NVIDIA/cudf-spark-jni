@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -306,8 +306,13 @@ target_compile_options(
 target_include_directories(
   spark_rapids_jni
   PRIVATE "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
-          "${JNI_INCLUDE_DIRS}"
           "${CUDFJNI_INCLUDE_DIRS}"
+)
+
+# Mark include dirs we do not control as SYSTEM so -Werror does not trip on warnings
+target_include_directories(
+  spark_rapids_jni SYSTEM
+  PRIVATE "${JNI_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 

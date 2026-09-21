@@ -93,7 +93,7 @@ public class ParquetFooterTest {
   }
 
   /**
-   * Serialize a FileMetaData to thrift compact protocol bytes.
+   * Serialize a FileMetaData to footer compact-protocol bytes.
    */
   private static byte[] serialize(org.apache.parquet.format.FileMetaData meta) throws IOException {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -423,7 +423,7 @@ public class ParquetFooterTest {
         makeRowGroup(2000, 400, 200)));
     try (ParquetFooter footer = readFooter(bytes, 0, -1);
          HostMemoryBuffer out = footer.serializeThriftFile()) {
-      // Framed layout written by serializeThriftFile: "PAR1" + thrift + 4-byte LE length + "PAR1".
+      // Framed layout written by serializeThriftFile: "PAR1" + footer + 4-byte LE length + "PAR1".
       int total = (int) out.getLength();
       byte[] framed = new byte[total];
       out.getBytes(framed, 0, 0, total);
@@ -462,7 +462,7 @@ public class ParquetFooterTest {
   @Test
   void testCorruptFooterThrowsCleanException() throws Exception {
     byte[] bytes = serialize(makeFooter(makeRowGroup(1000, 100, 200)));
-    // A truncated thrift stream is unparseable; the reader must surface a clean Java exception
+    // A truncated footer stream is unparseable; the reader must surface a clean Java exception
     // (CudfException) rather than crashing the JVM.
     byte[] truncated = Arrays.copyOf(bytes, bytes.length / 2);
     assertThrows(CudfException.class, () -> readFooter(truncated, 0, -1));
@@ -615,7 +615,7 @@ public class ParquetFooterTest {
 
   @Test
   void testReadAndFilterToleratesTrailingLengthBytes() throws Exception {
-    // spark-rapids hands readAndFilter the thrift footer plus a trailing 4-byte little-endian
+    // spark-rapids hands readAndFilter the footer plus a trailing 4-byte little-endian
     // footer-length word (its "footer + footerLen" slice, PAR1 magic stripped from both ends).
     // The facade parses buffer.getLength() bytes, so it must tolerate that tail, not reject it.
     byte[] footerBytes = serialize(threeRowGroupFooter());

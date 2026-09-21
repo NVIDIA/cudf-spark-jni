@@ -659,7 +659,7 @@ static row_groups filter_groups(pq::FileMetaData const& meta,
         // use minStartIndex(imprecise in case of padding, but good enough for filtering)
         start_index = (pre_start_index == 0) ? 4 : pre_start_index + pre_compressed_size;
       }
-      // Absent total_compressed_size defaults to 0, preserving the legacy Thrift zero-init.
+      // Absent total_compressed_size defaults to 0, matching the on-disk footer's zero-init.
       pre_start_index     = start_index;
       pre_compressed_size = row_group.total_compressed_size.value_or(0);
     }
@@ -721,7 +721,7 @@ Java_com_nvidia_spark_rapids_jni_ParquetFooter_readAndFilter(JNIEnv* env,
     std::size_t len = static_cast<std::size_t>(buffer_length);
     // We don't support encrypted parquet...
     // Parse leniently (thrift_mismatch_policy::COMPAT): skip a known field whose wire type does
-    // not match cudf's schema (Thrift forward-compat) rather than rejecting real files that use it.
+    // not match cudf's schema (footer forward-compat) rather than rejecting real files that use it.
     auto meta = std::make_unique<rapids::jni::pq::FileMetaData>(
       cudf::io::parquet::experimental::read_parquet_footer_bytes(
         std::span<uint8_t const>(std::bit_cast<uint8_t const*>(buffer), len),
@@ -842,7 +842,7 @@ JNIEXPORT jobject JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_seriali
     uint8_t* buf_ptr  = serialized.data();
     uint32_t buf_size = static_cast<uint32_t>(serialized.size());
 
-    // 12 extra is for the MAGIC thrift_footer length MAGIC
+    // 12 extra is for the MAGIC footer length MAGIC framing
     jobject ret = cudf::jni::allocate_host_buffer(env, buf_size + 12, false, host_memory_allocator);
     uint8_t* ret_addr = std::bit_cast<uint8_t*>(cudf::jni::get_host_buffer_address(env, ret));
     ret_addr[0]       = 'P';
