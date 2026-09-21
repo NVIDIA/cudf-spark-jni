@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,7 +45,9 @@ namespace spark_rapids_jni {
 
 namespace {
 
-template <typename ElementIterator, typename ValidityIterator>  //
+template <percentile_interpolation Interpolation,
+          typename ElementIterator,
+          typename ValidityIterator>  //
 struct fill_percentile_fn {
   __device__ void operator()(cudf::size_type const idx) const
   {
@@ -92,13 +94,24 @@ struct fill_percentile_fn {
       return;
     }
 
-    // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
-    // `upper_part` which may lead to output with different round-off error.
-    double const volatile lower_part =
-      (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
-    double const volatile higher_part =
-      (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
-    output[idx] = lower_part + higher_part;
+    if constexpr (Interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS) {
+      // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
+      // `upper_part` which may lead to output with different round-off error.
+      double const volatile lower_part =
+        (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
+      double const volatile higher_part =
+        (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
+      output[idx] = lower_part + higher_part;
+    } else {
+      // Keep the subtraction, multiplication, and addition as separate operations to match
+      // Spark's endpoint-delta interpolation and prevent fused multiply-add from changing
+      // rounding behavior.
+      double const volatile fraction = position - static_cast<double>(lower);
+      double const volatile endpoint_delta =
+        static_cast<double>(higher_element) - static_cast<double>(lower_element);
+      double const volatile scaled_delta = fraction * endpoint_delta;
+      output[idx]                        = static_cast<double>(lower_element) + scaled_delta;
+    }
   }
 
   fill_percentile_fn(cudf::size_type const* const offsets_,
@@ -163,6 +176,7 @@ struct percentile_dispatcher {
                          cudf::column_device_view const& data,
                          cudf::device_span<int64_t const> accumulated_counts,
                          cudf::device_span<double const> percentages,
+                         percentile_interpolation interpolation,
                          bool has_null,
                          cudf::size_type num_histograms,
                          cuda::stream_ref stream,
@@ -195,16 +209,33 @@ struct percentile_dispatcher {
     auto const fill_percentile = [&](auto const sorted_validity_it) {
       auto const sorted_input_it =
         cuda::make_permutation_iterator(data.begin<T>(), ordered_indices);
-      thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                         cuda::make_counting_iterator(0),
-                         num_histograms * static_cast<cudf::size_type>(percentages.size()),
-                         fill_percentile_fn{offsets,
-                                            sorted_input_it,
-                                            sorted_validity_it,
-                                            accumulated_counts,
-                                            percentages,
-                                            percentiles->mutable_view().begin<double>(),
-                                            out_validities.begin()});
+      auto const launch_fill = [&](auto const interpolation_constant) {
+        constexpr auto interpolation_value = std::decay_t<decltype(interpolation_constant)>::value;
+        using fill_fn                      = fill_percentile_fn<interpolation_value,
+                                                                std::decay_t<decltype(sorted_input_it)>,
+                                                                std::decay_t<decltype(sorted_validity_it)>>;
+        thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                           cuda::make_counting_iterator(0),
+                           num_histograms * static_cast<cudf::size_type>(percentages.size()),
+                           fill_fn{offsets,
+                                   sorted_input_it,
+                                   sorted_validity_it,
+                                   accumulated_counts,
+                                   percentages,
+                                   percentiles->mutable_view().begin<double>(),
+                                   out_validities.begin()});
+      };
+
+      switch (interpolation) {
+        case percentile_interpolation::WEIGHTED_ENDPOINTS:
+          launch_fill(std::integral_constant<percentile_interpolation,
+                                             percentile_interpolation::WEIGHTED_ENDPOINTS>{});
+          break;
+        case percentile_interpolation::ENDPOINT_DELTA:
+          launch_fill(std::integral_constant<percentile_interpolation,
+                                             percentile_interpolation::ENDPOINT_DELTA>{});
+          break;
+      }
     };
 
     if (!has_null) {
@@ -417,10 +448,15 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
 std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
                                                         std::vector<double> const& percentages,
                                                         bool output_as_list,
+                                                        percentile_interpolation interpolation,
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   check_input(input, percentages);
+  CUDF_EXPECTS(interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS ||
+                 interpolation == percentile_interpolation::ENDPOINT_DELTA,
+               "Unsupported percentile interpolation algorithm.",
+               std::invalid_argument);
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
@@ -477,6 +513,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                     *d_data,
                     d_accumulated_counts,
                     d_percentages,
+                    interpolation,
                     data_col.has_nulls(),
                     input.size(),
                     stream,
