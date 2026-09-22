@@ -147,6 +147,18 @@ public class HistogramTest {
   }
 
   @Test
+  void testEndpointDeltaDoesNotFuseMultiplyAdd() {
+    List<HostColumnVector.StructData> row =
+        Arrays.asList(entry(-100.0, 1L), entry(-99.3, 1L));
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE, row);
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.1}, false, ENDPOINT_DELTA)) {
+      // Spark's separate multiply and add differs from fused multiply-add by one ULP.
+      assertDoubleColumnExactly(result, Double.longBitsToDouble(0xc058fb851eb851ecL));
+    }
+  }
+
+  @Test
   void testEndpointDeltaIsMonotonicForLargeFiniteValues() {
     HostColumnVector.StructData[] entries = new HostColumnVector.StructData[20];
     for (int i = 0; i < entries.length; i++) {
