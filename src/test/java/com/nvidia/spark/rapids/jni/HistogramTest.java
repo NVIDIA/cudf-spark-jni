@@ -147,6 +147,19 @@ public class HistogramTest {
   }
 
   @Test
+  void testWeightedEndpointsDoesNotFuseMultiplyAdd() {
+    List<HostColumnVector.StructData> row =
+        Arrays.asList(entry(-100.0, 1L), entry(-99.0, 1L));
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE, row);
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.21}, false, WEIGHTED_ENDPOINTS)) {
+      // Separately rounding both products before adding differs from either possible FMA
+      // by one ULP.
+      assertDoubleColumnExactly(result, Double.longBitsToDouble(0xc058f28f5c28f5c2L));
+    }
+  }
+
+  @Test
   void testEndpointDeltaDoesNotFuseMultiplyAdd() {
     List<HostColumnVector.StructData> row =
         Arrays.asList(entry(-100.0, 1L), entry(-99.3, 1L));
