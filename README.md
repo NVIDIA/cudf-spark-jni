@@ -1,5 +1,7 @@
 # NVIDIA cuDF plugin JNI for Apache Spark
 
+<!-- CI trigger test only. Do not merge. -->
+
 This repository contains native support code for the
 [NVIDIA cuDF plugin for Apache Spark](https://github.com/NVIDIA/cudf-spark).
 
