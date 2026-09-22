@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023-2026, NVIDIA CORPORATION.
+* Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -239,12 +239,18 @@ public class GpuTimeZoneDB {
    * E.g.: Give transition date "2000-01-02", and transition time diff in seconds
    * "-3600",
    * then the actual transition datetime is "2000-01-01 23:00:00"
+   * <p>
+   * A midnight-at-end-of-day rule is represented as 86400 seconds so the
+   * transition occurs at midnight on the following day.
+   * This method is visible for testing.
    *
    * @param rule transition rule
    * @return the time diff in seconds compared to the midnight
    */
-  private static int getTransitionRuleTimeDiffComparedToMidnight(ZoneOffsetTransitionRule rule) {
-    int localTimeInSeconds = rule.getLocalTime().toSecondOfDay();
+  static int getTransitionRuleTimeDiffComparedToMidnight(ZoneOffsetTransitionRule rule) {
+    int localTimeInSeconds = rule.isMidnightEndOfDay()
+        ? 24 * 3_600
+        : rule.getLocalTime().toSecondOfDay();
     ZoneOffsetTransitionRule.TimeDefinition timeDef = rule.getTimeDefinition();
     if (ZoneOffsetTransitionRule.TimeDefinition.UTC == timeDef) {
       // UTC mode
@@ -348,12 +354,6 @@ public class GpuTimeZoneDB {
             }
 
             dstTransitionRules.forEach(dstRule -> {
-              if (dstRule.isMidnightEndOfDay()) {
-                // Checked all the timezones, there is no midnight end of day for DST rules.
-                // This is a protection in case JVM adds new timezones in the future.
-                throw new IllegalStateException("Unsupported midnight end of day for DST rules.");
-              }
-
               DayOfWeek dow = dstRule.getDayOfWeek();
               int dayOfWeek = dow != null ? dow.getValue() - 1 : -1;
               dstData.add(dstRule.getMonth().getValue()); // from 1 (January) to 12 (December)
