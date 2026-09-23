@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -308,9 +308,10 @@ std::unique_ptr<cudf::column> truncate_datetime(cudf::column_view const& datetim
 
   auto [null_mask, null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(validity), stream, mr);
-  output->set_null_mask(
-    null_count > 0 ? std::move(*null_mask.release()) : rmm::device_buffer{0, stream, mr},
-    null_count);
+  output->set_null_mask(null_count > 0
+                          ? std::move(*null_mask.release())
+                          : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
+                        null_count);
   return output;
 }
 

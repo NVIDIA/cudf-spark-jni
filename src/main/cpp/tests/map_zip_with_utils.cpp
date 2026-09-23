@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,8 +42,12 @@ TEST_F(MapZipWithUtilsTests, BasicMapZipTest)
     auto list_offsets_column =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows = list_offsets_column->size() - 1;
-    auto list_col1     = cudf::make_lists_column(
-      num_list_rows, std::move(list_offsets_column), std::move(struct_col1), 0, {});
+    auto list_col1 =
+      cudf::make_lists_column(num_list_rows,
+                              std::move(list_offsets_column),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2 = cudf::test::fixed_width_column_wrapper<int32_t>{7, 8, 9, 10, 11, 12};
     auto vals2 = cudf::test::fixed_width_column_wrapper<int32_t>{{12, 35, 25, 31, 351, 351},
@@ -54,8 +58,12 @@ TEST_F(MapZipWithUtilsTests, BasicMapZipTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows2 = list_offsets_column2->size() - 1;
-    auto list_col2      = cudf::make_lists_column(
-      num_list_rows2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+    auto list_col2 =
+      cudf::make_lists_column(num_list_rows2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto const k =
       cudf::test::fixed_width_column_wrapper<size_type>{1, 2, 7, 8, 3, 9, 4, 5, 10, 11, 6, 12};
@@ -87,7 +95,7 @@ TEST_F(MapZipWithUtilsTests, NullMapTest)
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows = list_offsets_column->size() - 1;
     auto mask          = cudf::create_null_mask(4, cudf::mask_state::ALL_VALID);
-    cudf::set_null_mask(static_cast<cudf::bitmask_type*>(mask.data()), 1, 2, false);
+    cudf::set_null_mask(reinterpret_cast<cudf::bitmask_type*>(mask.data()), 1, 2, false);
     auto list_col1 = cudf::make_lists_column(
       num_list_rows, std::move(list_offsets_column), std::move(struct_col1), 1, std::move(mask));
 
@@ -100,8 +108,12 @@ TEST_F(MapZipWithUtilsTests, NullMapTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows2 = list_offsets_column2->size() - 1;
-    auto list_col2      = cudf::make_lists_column(
-      num_list_rows2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+    auto list_col2 =
+      cudf::make_lists_column(num_list_rows2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto const k = cudf::test::fixed_width_column_wrapper<size_type>{
       {1, 2, 7, 8, 4, 5, 10, 11, 6, 12}, {1, 1, 1, 1, 1, 1, 1, 1, 1, 1}};
@@ -134,8 +146,12 @@ TEST_F(MapZipWithUtilsTests, CharKeysTest)
     auto list_offsets_column =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows = list_offsets_column->size() - 1;
-    auto list_col1     = cudf::make_lists_column(
-      num_list_rows, std::move(list_offsets_column), std::move(struct_col1), 0, {});
+    auto list_col1 =
+      cudf::make_lists_column(num_list_rows,
+                              std::move(list_offsets_column),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     std::initializer_list<std::string> names2 = {"g", "h", "i", "j", "k", "l"};
     auto keys2 = cudf::test::strings_column_wrapper{names2.begin(), names2.end()};
@@ -147,8 +163,12 @@ TEST_F(MapZipWithUtilsTests, CharKeysTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3, 5, 6}.release();
     auto num_list_rows2 = list_offsets_column2->size() - 1;
-    auto list_col2      = cudf::make_lists_column(
-      num_list_rows2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+    auto list_col2 =
+      cudf::make_lists_column(num_list_rows2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto const k = cudf::test::strings_column_wrapper{
       "a", "b", "g", "h", "c", "i", "d", "e", "j", "k", "f", "l"};
@@ -181,8 +201,12 @@ TEST_F(MapZipWithUtilsTests, StringKeysTest)
     auto list_offsets_column1 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 4, 7}.release();
     auto num_list_rows1 = list_offsets_column1->size() - 1;
-    auto list_col1      = cudf::make_lists_column(
-      num_list_rows1, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+    auto list_col1 =
+      cudf::make_lists_column(num_list_rows1,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     std::initializer_list<std::string> names2 = {
       "banana", "cherry", "date", "fig", "grape", "honeydew", "kiwi"};
@@ -194,8 +218,12 @@ TEST_F(MapZipWithUtilsTests, StringKeysTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 3, 5, 7}.release();
     auto num_list_rows2 = list_offsets_column2->size() - 1;
-    auto list_col2      = cudf::make_lists_column(
-      num_list_rows2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+    auto list_col2 =
+      cudf::make_lists_column(num_list_rows2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results  = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -237,7 +265,11 @@ TEST_F(MapZipWithUtilsTests, OneEmptyMapTest)
     auto list_offsets_column1 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 3}.release();
     auto list_col1 =
-      cudf::make_lists_column(2, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(2,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2       = cudf::test::fixed_width_column_wrapper<int32_t>{};
     auto vals2       = cudf::test::fixed_width_column_wrapper<int32_t>{};
@@ -245,7 +277,11 @@ TEST_F(MapZipWithUtilsTests, OneEmptyMapTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 0, 0}.release();
     auto list_col2 =
-      cudf::make_lists_column(2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -272,7 +308,11 @@ TEST_F(MapZipWithUtilsTests, OverlappingKeysTest)
     auto struct_col1 = cudf::test::structs_column_wrapper({keys1, vals1}, {1, 1, 1, 1}).release();
     auto list_offsets_column1 = cudf::test::fixed_width_column_wrapper<size_type>{0, 4}.release();
     auto list_col1 =
-      cudf::make_lists_column(1, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2 = cudf::test::fixed_width_column_wrapper<int32_t>{2, 3, 5, 6};
     auto vals2 =
@@ -280,7 +320,11 @@ TEST_F(MapZipWithUtilsTests, OverlappingKeysTest)
     auto struct_col2 = cudf::test::structs_column_wrapper({keys2, vals2}, {1, 1, 1, 1}).release();
     auto list_offsets_column2 = cudf::test::fixed_width_column_wrapper<size_type>{0, 4}.release();
     auto list_col2 =
-      cudf::make_lists_column(1, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -308,14 +352,22 @@ TEST_F(MapZipWithUtilsTests, NonOverlappingKeysTest)
     auto struct_col1 = cudf::test::structs_column_wrapper({keys1, vals1}, {1, 1, 1}).release();
     auto list_offsets_column1 = cudf::test::fixed_width_column_wrapper<size_type>{0, 3}.release();
     auto list_col1 =
-      cudf::make_lists_column(1, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2       = cudf::test::fixed_width_column_wrapper<int32_t>{4, 5, 6};
     auto vals2       = cudf::test::fixed_width_column_wrapper<int32_t>{{40, 50, 60}, {1, 1, 1}};
     auto struct_col2 = cudf::test::structs_column_wrapper({keys2, vals2}, {1, 1, 1}).release();
     auto list_offsets_column2 = cudf::test::fixed_width_column_wrapper<size_type>{0, 3}.release();
     auto list_col2 =
-      cudf::make_lists_column(1, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -346,7 +398,11 @@ TEST_F(MapZipWithUtilsTests, MultipleRowsTest)
     auto list_offsets_column1 = cudf::test::fixed_width_column_wrapper<size_type>{0, 2, 5}
                                   .release();  // 2 rows: [1,2], [3,4,5]
     auto list_col1 =
-      cudf::make_lists_column(2, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(2,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2 = cudf::test::fixed_width_column_wrapper<int32_t>{2, 3, 4, 6, 7};
     auto vals2 =
@@ -356,7 +412,11 @@ TEST_F(MapZipWithUtilsTests, MultipleRowsTest)
     auto list_offsets_column2 = cudf::test::fixed_width_column_wrapper<size_type>{0, 3, 5}
                                   .release();  // 2 rows: [2,3,4], [6,7]
     auto list_col2 =
-      cudf::make_lists_column(2, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(2,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -384,14 +444,22 @@ TEST_F(MapZipWithUtilsTests, SingleElementMapsTest)
     auto struct_col1          = cudf::test::structs_column_wrapper({keys1, vals1}, {1}).release();
     auto list_offsets_column1 = cudf::test::fixed_width_column_wrapper<size_type>{0, 1}.release();
     auto list_col1 =
-      cudf::make_lists_column(1, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2                = cudf::test::fixed_width_column_wrapper<int32_t>{2};
     auto vals2                = cudf::test::fixed_width_column_wrapper<int32_t>{{200}, {1}};
     auto struct_col2          = cudf::test::structs_column_wrapper({keys2, vals2}, {1}).release();
     auto list_offsets_column2 = cudf::test::fixed_width_column_wrapper<size_type>{0, 1}.release();
     auto list_col2 =
-      cudf::make_lists_column(1, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -417,14 +485,22 @@ TEST_F(MapZipWithUtilsTests, IdenticalKeysTest)
     auto struct_col1 = cudf::test::structs_column_wrapper({keys1, vals1}, {1, 1, 1}).release();
     auto list_offsets_column1 = cudf::test::fixed_width_column_wrapper<size_type>{0, 3}.release();
     auto list_col1 =
-      cudf::make_lists_column(1, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2       = cudf::test::fixed_width_column_wrapper<int32_t>{1, 2, 3};
     auto vals2       = cudf::test::fixed_width_column_wrapper<int32_t>{{150, 250, 350}, {1, 1, 1}};
     auto struct_col2 = cudf::test::structs_column_wrapper({keys2, vals2}, {1, 1, 1}).release();
     auto list_offsets_column2 = cudf::test::fixed_width_column_wrapper<size_type>{0, 3}.release();
     auto list_col2 =
-      cudf::make_lists_column(1, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(1,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));
@@ -452,7 +528,11 @@ TEST_F(MapZipWithUtilsTests, LargeMapsTest)
     auto list_offsets_column1 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 3, 4, 6, 6, 10}.release();
     auto list_col1 =
-      cudf::make_lists_column(5, std::move(list_offsets_column1), std::move(struct_col1), 0, {});
+      cudf::make_lists_column(5,
+                              std::move(list_offsets_column1),
+                              std::move(struct_col1),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto keys2 =
       cudf::test::fixed_width_column_wrapper<int32_t>{3, 11, 12, 13, 4, 5, 6, 7, 9, 8, 14, 15};
@@ -462,7 +542,11 @@ TEST_F(MapZipWithUtilsTests, LargeMapsTest)
     auto list_offsets_column2 =
       cudf::test::fixed_width_column_wrapper<size_type>{0, 4, 5, 8, 8, 12}.release();
     auto list_col2 =
-      cudf::make_lists_column(5, std::move(list_offsets_column2), std::move(struct_col2), 0, {});
+      cudf::make_lists_column(5,
+                              std::move(list_offsets_column2),
+                              std::move(struct_col2),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
                                              cudf::lists_column_view(*list_col2));

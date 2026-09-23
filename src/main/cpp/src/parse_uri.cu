@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -912,7 +912,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   auto src_offsets = rmm::device_uvector<size_type>(strings_count, stream);
 
   // copy null mask
-  rmm::device_buffer null_mask =
+  cuda::device_buffer<std::byte> null_mask =
     input.parent().nullable()
       ? cudf::copy_bitmask(input.parent(), stream, mr)
       : cudf::create_null_mask(input.size(), mask_state::ALL_VALID, stream, mr);
@@ -926,7 +926,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
     input.chars_begin(stream),
     offsets_mutable_view.begin<size_type>(),
     src_offsets.data(),
-    static_cast<bitmask_type*>(null_mask.data()),
+    reinterpret_cast<bitmask_type*>(null_mask.data()),
     d_matches ? cuda::std::optional<column_device_view const>{*d_matches} : cuda::std::nullopt);
 
   // use scan to transform number of bytes into offsets
@@ -954,7 +954,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
     static_cast<char*>(d_out_chars.data()));
 
   auto null_count =
-    cudf::null_count(static_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
+    cudf::null_count(reinterpret_cast<bitmask_type*>(null_mask.data()), 0, strings_count);
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
@@ -996,7 +996,8 @@ void validate_input_uris(strings_column_view const& input, cuda::stream_ref stre
   // Create validation column for throw_row_error_if_any
   auto validation_column = std::make_unique<column>(
     std::move(validity_flags),
-    null_count > 0 ? std::move(*validation_mask.release()) : rmm::device_buffer{0, stream},
+    null_count > 0 ? std::move(*validation_mask.release())
+                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream),
     null_count);
   throw_row_error_if_any(input.parent(), validation_column->view(), stream);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1303,11 +1303,12 @@ static std::unique_ptr<column> fixed_width_convert_to_rows(
     input_nm.data(),
     data->mutable_view().data<int8_t>());
 
-  return make_lists_column(num_rows,
-                           std::move(offsets),
-                           std::move(data),
-                           0,
-                           rmm::device_buffer{0, cudf::get_default_stream(), mr});
+  return make_lists_column(
+    num_rows,
+    std::move(offsets),
+    std::move(data),
+    0,
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, cudf::get_default_stream(), mr));
 }
 
 /**
@@ -2027,29 +2028,31 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   std::vector<std::unique_ptr<column>> ret;
   ret.reserve(batch_info.row_batches.size());
   auto counting_iter = cuda::make_counting_iterator(0);
-  std::transform(counting_iter,
-                 counting_iter + batch_info.row_batches.size(),
-                 std::back_inserter(ret),
-                 [&](auto batch) {
-                   auto const offset_count = batch_info.row_batches[batch].row_offsets.size();
-                   auto offsets =
-                     std::make_unique<column>(data_type{type_id::INT32},
-                                              (size_type)offset_count,
-                                              batch_info.row_batches[batch].row_offsets.release(),
-                                              rmm::device_buffer{},
-                                              0);
-                   auto data = std::make_unique<column>(data_type{type_id::INT8},
-                                                        batch_info.row_batches[batch].num_bytes,
-                                                        std::move(output_buffers[batch]),
-                                                        rmm::device_buffer{},
-                                                        0);
+  std::transform(
+    counting_iter,
+    counting_iter + batch_info.row_batches.size(),
+    std::back_inserter(ret),
+    [&](auto batch) {
+      auto const offset_count = batch_info.row_batches[batch].row_offsets.size();
+      auto offsets =
+        std::make_unique<column>(data_type{type_id::INT32},
+                                 (size_type)offset_count,
+                                 batch_info.row_batches[batch].row_offsets.release(),
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                 0);
+      auto data = std::make_unique<column>(data_type{type_id::INT8},
+                                           batch_info.row_batches[batch].num_bytes,
+                                           std::move(output_buffers[batch]),
+                                           cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                           0);
 
-                   return make_lists_column(batch_info.row_batches[batch].row_count,
-                                            std::move(offsets),
-                                            std::move(data),
-                                            0,
-                                            rmm::device_buffer{0, cudf::get_default_stream(), mr});
-                 });
+      return make_lists_column(
+        batch_info.row_batches[batch].row_count,
+        std::move(offsets),
+        std::move(data),
+        0,
+        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, cudf::get_default_stream(), mr));
+    });
 
   // Drain the async H2D uploads above before input_data, input_nm, output_data and
   // validity_tile_infos go out of scope: CUDA 13+ may read the host source only when the stream
@@ -2560,14 +2563,15 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
     for (int i = 0; i < static_cast<int>(schema.size()); ++i) {
       if (schema[i].id() == type_id::STRING) {
         // stuff real string column
-        auto string_data = string_row_offset_columns[string_idx].release()->release();
-        output_columns[i] =
-          make_strings_column(num_rows,
-                              std::make_unique<cudf::column>(
-                                std::move(string_col_offsets[string_idx]), rmm::device_buffer{}, 0),
-                              string_data_cols[string_idx].release(),
-                              0,
-                              std::move(*string_data.null_mask.release()));
+        auto string_data  = string_row_offset_columns[string_idx].release()->release();
+        output_columns[i] = make_strings_column(
+          num_rows,
+          std::make_unique<cudf::column>(std::move(string_col_offsets[string_idx]),
+                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                         0),
+          string_data_cols[string_idx].release(),
+          0,
+          std::move(*string_data.null_mask.release()));
         // Null count set to 0, temporarily. Will be fixed up before return.
         string_idx++;
       }

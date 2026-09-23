@@ -227,12 +227,13 @@ std::unique_ptr<column> convert_to_utc_with_multiple_timezones(
     transitions.column(1), stream, cudf::get_current_device_resource_ref());
   auto const dst_rules = cudf::lists_column_device_view{*dst_cdv_ptr};
 
-  auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
-                                            input_seconds.size(),
-                                            rmm::device_buffer{},
-                                            0,
-                                            stream,
-                                            mr);
+  auto result =
+    cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
+                                input_seconds.size(),
+                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                0,
+                                stream,
+                                mr);
   auto null_mask = cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
                                                  input_seconds.size(),
                                                  cudf::mask_state::UNALLOCATED,
