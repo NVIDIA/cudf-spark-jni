@@ -29,6 +29,7 @@
 
 #include <rmm/device_uvector.hpp>
 
+#include <cuda/iterator>
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
 
@@ -266,10 +267,11 @@ void expect_locations(Actual const& actual, Expected const& expected)
 TEST_F(ProtobufHelpersTest, FieldLocationPresence)
 {
   EXPECT_FALSE(field_location::missing().is_present());
-  EXPECT_FALSE((field_location{-2, 7}.is_present()));
+  EXPECT_FALSE((field_location{field_location::INVALID_OFFSET, 7}.is_present()));
   EXPECT_TRUE((field_location{0, 0}.is_present()));
   EXPECT_TRUE((field_location{0, 7}.is_present()));
   EXPECT_TRUE((field_location{std::numeric_limits<int32_t>::max(), 0}.is_present()));
+  EXPECT_TRUE((field_location{field_location::INVALID_OFFSET - 1, 0}.is_present()));
 }
 
 TEST_F(ProtobufHelpersTest, TopLevelInputLocationsRebaseSlices)
@@ -402,8 +404,10 @@ TEST_F(ProtobufHelpersTest, RebaseLocationChecksBoundsAndReportsOverflow)
   using protobuf_detail::protobuf_error;
   auto const stream     = cudf::get_default_stream();
   auto const mr         = cudf::get_current_device_resource_ref();
-  auto const max_offset = std::numeric_limits<int32_t>::max();
+  auto const max_offset = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
   auto const expected   = std::to_array<field_location>({{max_offset, 0},
+                                                         field_location::missing(),
+                                                         field_location::missing(),
                                                          field_location::missing(),
                                                          field_location::missing(),
                                                          field_location::missing(),
@@ -415,7 +419,9 @@ TEST_F(ProtobufHelpersTest, RebaseLocationChecksBoundsAndReportsOverflow)
     {{max_offset, 0}, 1, errors.data() + 1},
     {{2, 0}, -1, errors.data() + 2},
     {{1, 0}, std::numeric_limits<int64_t>::max(), errors.data() + 3},
-    {field_location::missing(), 0, errors.data() + 4}};
+    {field_location::missing(), 0, errors.data() + 4},
+    {{max_offset + 1, 0}, 0, errors.data() + 5},
+    {{field_location::INVALID_OFFSET - 1, 0}, 0, errors.data() + 6}};
   auto const d_probes = cudf::detail::make_device_uvector_async(probes, stream, mr);
   rmm::device_uvector<field_location> output(probes.size(), stream, mr);
   auto const num_probes = static_cast<int>(probes.size());
@@ -427,7 +433,9 @@ TEST_F(ProtobufHelpersTest, RebaseLocationChecksBoundsAndReportsOverflow)
                                                     protobuf_error::OVERFLOW,
                                                     protobuf_error::OVERFLOW,
                                                     protobuf_error::OVERFLOW,
-                                                    protobuf_error::NONE};
+                                                    protobuf_error::NONE,
+                                                    protobuf_error::OVERFLOW,
+                                                    protobuf_error::OVERFLOW};
   EXPECT_EQ(cudf::detail::make_std_vector(errors, stream), expected_errors);
 }
 
@@ -441,12 +449,101 @@ TEST_F(ProtobufHelpersTest, ByteLengthsUseDefaultOnlyForMissingFields)
     std::vector<field_location>{{0, 3}, field_location::missing(), {0, 0}}, stream, mr);
   protobuf_detail::top_level_location_provider const provider{
     offsets.data(), 0, locations.data(), 0, 1};
-  rmm::device_uvector<int32_t> lengths(3, stream, mr);
+  rmm::device_uvector<uint32_t> lengths(3, stream, mr);
   protobuf_detail::extract_lengths_kernel<<<1, 3, 0, stream.get()>>>(provider, 3, lengths.data());
   CUDF_CHECK_CUDA(stream.get());
-  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<int32_t>{3, 0, 0}));
+  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<uint32_t>{3, 0, 0}));
   protobuf_detail::extract_lengths_kernel<<<1, 3, 0, stream.get()>>>(
     provider, 3, lengths.data(), 7);
   CUDF_CHECK_CUDA(stream.get());
-  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<int32_t>{3, 7, 0}));
+  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<uint32_t>{3, 7, 0}));
+}
+
+TEST_F(ProtobufHelpersTest, UnsignedFragmentLengthsRetainSignedOffsetLimit)
+{
+  auto const stream     = cudf::get_default_stream();
+  auto const mr         = cudf::get_current_device_resource_ref();
+  auto const max_length = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+  auto make_offsets     = [&](uint32_t length, int count) {
+    return protobuf_detail::make_list_offsets_from_counts(
+      cuda::make_constant_iterator(length), count, "Merged singular message", stream, mr, mr);
+  };
+  auto const empty = make_offsets(0, 0);
+  EXPECT_EQ(empty.total_count, 0);
+  EXPECT_EQ(cudf::detail::make_std_vector(empty.offsets, stream), (std::vector<int32_t>{0}));
+  auto const zero = make_offsets(0, 1);
+  EXPECT_EQ(zero.total_count, 0);
+  EXPECT_EQ(cudf::detail::make_std_vector(zero.offsets, stream), (std::vector<int32_t>{0, 0}));
+  auto const boundary = make_offsets(max_length, 1);
+  EXPECT_EQ(boundary.total_count, std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(cudf::detail::make_std_vector(boundary.offsets, stream),
+            (std::vector<int32_t>{0, std::numeric_limits<int32_t>::max()}));
+
+  auto const lengths   = std::to_array<uint32_t>({0, 1, max_length - 1});
+  auto const d_lengths = cudf::detail::make_device_uvector_async(lengths, stream, mr);
+  auto const offsets   = protobuf_detail::make_list_offsets_from_counts(
+    d_lengths.begin(), lengths.size(), "Merged singular message", stream, mr, mr);
+  EXPECT_EQ(offsets.total_count, std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(cudf::detail::make_std_vector(offsets.offsets, stream),
+            (std::vector<int32_t>{0, 0, 1, std::numeric_limits<int32_t>::max()}));
+  EXPECT_THROW(make_offsets(max_length + 1, 1), cudf::logic_error);
+  EXPECT_THROW(make_offsets(max_length, 2), cudf::logic_error);
+  EXPECT_THROW(make_offsets(std::numeric_limits<uint32_t>::max(), 1), cudf::logic_error);
+}
+
+TEST_F(ProtobufHelpersTest, FragmentValidationDistinguishesLengthsFromBounds)
+{
+  using protobuf_detail::protobuf_error;
+  auto const stream    = cudf::get_default_stream();
+  auto const mr        = cudf::get_current_device_resource_ref();
+  auto const oversized = static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) + 1;
+  struct validation_case {
+    field_location parent;
+    field_location fragment;
+    protobuf_error expected;
+  };
+  auto const cases = std::to_array<validation_case>(
+    {{{0, 8}, {0, 0}, protobuf_error::NONE},
+     {{0, 8}, {0, oversized}, protobuf_error::FIELD_SIZE},
+     {{0, oversized}, {0, 0}, protobuf_error::FIELD_SIZE},
+     {{0, 8}, {0, std::numeric_limits<uint32_t>::max()}, protobuf_error::FIELD_SIZE},
+     {{0, 8}, {7, 2}, protobuf_error::BOUNDS},
+     {field_location::missing(), {0, 0}, protobuf_error::BOUNDS},
+     {{0, 8}, field_location::missing(), protobuf_error::BOUNDS},
+     {field_location::missing(), {0, oversized}, protobuf_error::FIELD_SIZE}});
+  auto const bytes   = cudf::detail::make_zeroed_device_uvector_async<uint8_t>(8, stream, mr);
+  auto const offsets = cudf::detail::make_device_uvector(std::vector<int32_t>{0, 8, 8}, stream, mr);
+  auto const top_rows = cudf::detail::make_device_uvector(std::vector<int32_t>{1, 0}, stream, mr);
+  protobuf_detail::protobuf_input_view const input{bytes.data(), 8, offsets.data(), 0, 2};
+  for (size_t i = 0; i < cases.size(); ++i) {
+    SCOPED_TRACE(i);
+    auto const& test   = cases[i];
+    auto const parents = cudf::detail::make_device_uvector(
+      std::vector<field_location>{test.parent, {0, 0}}, stream, mr);
+    auto const occurrences = cudf::detail::make_device_uvector(
+      std::vector<protobuf_detail::field_occurrence>{
+        {0, test.fragment.offset, test.fragment.length}},
+      stream,
+      mr);
+    auto invalid_rows     = cudf::detail::make_zeroed_device_uvector_async<bool>(2, stream, mr);
+    auto invalid_top_rows = cudf::detail::make_zeroed_device_uvector_async<bool>(2, stream, mr);
+    auto error = cudf::detail::make_zeroed_device_uvector_async<protobuf_error>(1, stream, mr);
+    protobuf_detail::launch_validate_message_fragments(
+      {input, {parents.data(), 2, top_rows.data()}, occurrences.data()},
+      {},
+      1,
+      invalid_rows.data(),
+      invalid_top_rows.data(),
+      error.data(),
+      0,
+      stream);
+    EXPECT_EQ(cudf::detail::make_std_vector(error, stream)[0], test.expected);
+    auto const failed     = test.expected != protobuf_error::NONE;
+    auto const row_errors = cudf::detail::make_host_vector(invalid_rows, stream);
+    auto const top_errors = cudf::detail::make_host_vector(invalid_top_rows, stream);
+    EXPECT_EQ(row_errors[0], failed);
+    EXPECT_FALSE(row_errors[1]);
+    EXPECT_FALSE(top_errors[0]);
+    EXPECT_EQ(top_errors[1], failed);
+  }
 }

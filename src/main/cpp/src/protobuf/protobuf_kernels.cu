@@ -67,7 +67,7 @@ __device__ bool read_enum_value(field_descriptor const& descriptor,
   if (descriptor.num_valid_enum_values == 0) return true;
 
   uint32_t raw_value;
-  [[maybe_unused]] int value_size;
+  [[maybe_unused]] uint32_t value_size;
   if (!read_varint32(value_start, value_end, raw_value, value_size)) {
     set_error_once(error_flag, protobuf_error::VARINT);
     return false;
@@ -145,12 +145,12 @@ __device__ bool scan_message_field_locations(message_scan_context context,
       continue;
     }
 
-    auto const data_offset = static_cast<int>(cur - msg_base);
+    auto const data_offset = static_cast<uint32_t>(cur - msg_base);
     field_location location;
     if (tag.wire_type == proto_wire_type::LEN) {
       // Length prefixes use raw-varint32 semantics and may consume up to ten bytes.
       uint32_t len;
-      int len_bytes;
+      uint32_t len_bytes;
       if (!read_varint32(cur, msg_end, len, len_bytes)) {
         set_error_once(error_flag, protobuf_error::VARINT);
         return false;
@@ -160,14 +160,13 @@ __device__ bool scan_message_field_locations(message_scan_context context,
         set_error_once(error_flag, protobuf_error::OVERFLOW);
         return false;
       }
-      auto const data_location =
-        rebase_location({data_offset, static_cast<int32_t>(len)}, len_bytes, error_flag);
+      auto const data_location = rebase_location({data_offset, len}, len_bytes, error_flag);
       if (!data_location.is_present()) { return false; }
       location = data_location;
     } else {
       // Fixed-width / varint: record the offset and the wire-type-derived size.
-      int field_size = get_wire_type_size(tag.wire_type, cur, msg_end);
-      if (field_size < 0) {
+      uint32_t field_size;
+      if (!get_wire_type_size(tag.wire_type, cur, msg_end, field_size)) {
         set_error_once(error_flag, protobuf_error::FIELD_SIZE);
         return false;
       }
@@ -258,13 +257,13 @@ CUDF_KERNEL void scan_all_fields_kernel(cudf::column_device_view const d_in,
 /**
  * Visit each occurrence of a repeated field (packed or unpacked) and invoke `f` for it.
  *
- * `f(int32_t elem_offset, int32_t elem_len) -> bool` runs once per occurrence with the
+ * `f(uint32_t elem_offset, uint32_t elem_len) -> bool` runs once per occurrence with the
  * element's offset relative to `msg_base` and its length. Returning false aborts the walk.
  * The walker handles wire-type validation, packed-vs-unpacked dispatch, varint/fixed-width
  * length decoding, and packed-buffer bounds checking.
  */
 template <wire_type_mismatch_policy MismatchPolicy, typename F>
-  requires std::is_invocable_r_v<bool, F, int32_t /*elem_offset*/, int32_t /*elem_len*/>
+  requires std::is_invocable_r_v<bool, F, uint32_t /*elem_offset*/, uint32_t /*elem_len*/>
 __device__ bool walk_repeated_element(uint8_t const* cur,
                                       uint8_t const* msg_base,
                                       uint8_t const* msg_end,
@@ -286,7 +285,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
 
   if (is_packed) {
     uint32_t packed_len;
-    int len_bytes;
+    uint32_t len_bytes;
     if (!read_varint32(cur, msg_end, packed_len, len_bytes)) {
       set_error_once(error_flag, protobuf_error::VARINT);
       return false;
@@ -305,9 +304,9 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
         // potential "used before set" warning. `read_varint64` validates the varint stays
         // within `packed_end` (the packed payload's end), not `msg_end` — switching to a
         // generic skip helper here would over-read past the packed buffer.
-        int vbytes = cuda::std::numeric_limits<int>::max();
+        uint32_t vbytes = cuda::std::numeric_limits<uint32_t>::max();
         for (uint8_t const* p = packed_start; p < packed_end; p += vbytes) {
-          int32_t elem_offset = static_cast<int32_t>(p - msg_base);
+          auto const elem_offset = static_cast<uint32_t>(p - msg_base);
           uint64_t dummy;
           if (!read_varint64(p, packed_end, dummy, vbytes)) {
             set_error_once(error_flag, protobuf_error::VARINT);
@@ -319,13 +318,13 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
       }
       case proto_wire_type::I32BIT:
       case proto_wire_type::I64BIT: {
-        int const width = expected_wt == proto_wire_type::I32BIT ? 4 : 8;
+        uint32_t const width = expected_wt == proto_wire_type::I32BIT ? 4 : 8;
         if ((packed_len % width) != 0) {
           set_error_once(error_flag, protobuf_error::FIXED_LEN);
           return false;
         }
         for (uint8_t const* p = packed_start; p < packed_end; p += width) {
-          int32_t elem_offset = static_cast<int32_t>(p - msg_base);
+          auto const elem_offset = static_cast<uint32_t>(p - msg_base);
           if (!f(elem_offset, width)) return false;
         }
         break;
@@ -343,12 +342,12 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     // occurrence; `skip_field` advances past the field but doesn't surface those. The count
     // path's `f` ignores them, but sharing one helper keeps the walker generic over both
     // actions and avoids re-validating field bounds twice.
-    int32_t data_offset, data_length;
+    uint32_t data_offset, data_length;
     if (!get_field_data_location(cur, msg_end, wt, data_offset, data_length)) {
       set_error_once(error_flag, protobuf_error::FIELD_SIZE);
       return false;
     }
-    auto const abs_offset = static_cast<int32_t>(cur - msg_base) + data_offset;
+    auto const abs_offset = static_cast<uint32_t>(cur - msg_base) + data_offset;
     if (!f(abs_offset, data_length)) return false;
   }
   return true;
@@ -378,9 +377,17 @@ CUDF_KERNEL void validate_message_fragments_kernel(field_occurrence_location_pro
 
   auto const parent =
     locations.parent.locations == nullptr
-      ? field_location{0, locations.input.row_offsets[row + 1] - locations.input.row_offsets[row]}
+      ? field_location{0,
+                       static_cast<uint32_t>(locations.input.row_offsets[row + 1] -
+                                             locations.input.row_offsets[row])}
       : locations.parent.locations[row];
-  if (!parent.is_present() || parent.length < 0 || !fragment.is_present() || fragment.length < 0) {
+  if (!cuda::std::in_range<int32_t>(parent.length) ||
+      !cuda::std::in_range<int32_t>(fragment.length)) {
+    set_error_once(error_flag, protobuf_error::FIELD_SIZE);
+    mark_row_error();
+    return;
+  }
+  if (!parent.is_present() || !fragment.is_present()) {
     set_error_once(error_flag, protobuf_error::BOUNDS);
     mark_row_error();
     return;
@@ -403,7 +410,7 @@ CUDF_KERNEL void validate_message_fragments_kernel(field_occurrence_location_pro
   auto const* fragment_begin = locations.input.message_data + fragment_start;
   auto const* fragment_limit = locations.input.message_data + fragment_end;
   auto validate_repeated     = [&](int f, uint8_t const* cur, proto_wire_type wire_type) {
-    auto ignore_occurrence = [](int32_t, int32_t) { return true; };
+    auto ignore_occurrence = [](uint32_t, uint32_t) { return true; };
     return walk_repeated_element<wire_type_mismatch_policy::continue_silently>(
       cur,
       fragment_begin,
@@ -489,7 +496,7 @@ CUDF_KERNEL void count_repeated_fields_kernel(cudf::column_device_view const d_i
   auto count_repeated = [&](int f, uint8_t const* cur, proto_wire_type wire_type) {
     auto const& field = fields.lookup.data[f];
     auto& info        = field_repeated_info[field.output_index];
-    auto count_action = [&](int32_t offset, int32_t length) {
+    auto count_action = [&](uint32_t offset, uint32_t length) {
       bool recognized;
       auto const* value_start = msg_base + offset;
       // Spark applies the same root UnknownFieldSet check to repeated enums; nested unknown values
@@ -545,18 +552,17 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
 
   auto unreachable_singular = [](int, field_location) { return true; };
 
-  auto const row_i32    = static_cast<int32_t>(row);
   auto on_repeated_scan = [&](int f, uint8_t const* cur, proto_wire_type wt) {
     auto const& field = fields.data[f];
     auto* occs        = field.occurrences;
     int& wi           = write_idx[f];
     int const we      = field.row_offsets[row + 1];
-    auto scan_action  = [&](int32_t off, int32_t len) {
+    auto scan_action  = [&](uint32_t off, uint32_t len) {
       if (wi >= we) {
         set_error_once(error_flag, protobuf_error::REPEATED_COUNT_MISMATCH);
         return false;
       }
-      occs[wi] = {row_i32, off, len};
+      occs[wi] = {row, off, len};
       wi++;
       return true;
     };
@@ -623,8 +629,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= input.num_rows) return;
 
-  auto const top_row =
-    parent.top_row_indices != nullptr ? parent.top_row_indices[row] : static_cast<int32_t>(row);
+  auto const top_row = parent.top_row_indices != nullptr ? parent.top_row_indices[row] : row;
   // Multiple nested values may map back to the same top-level row.
   auto mark_row_error = [&]() { set_atomically(row_has_invalid_data, top_row); };
 
@@ -680,7 +685,7 @@ CUDF_KERNEL void scan_nested_message_fields_kernel(protobuf_input_view input,
   };
   auto validate_repeated = [&](int f, uint8_t const* cur, proto_wire_type wt) {
     auto const expected_wire_type = fields.lookup.data[f].expected_wire_type;
-    auto count_occurrence         = [&](int32_t, int32_t) {
+    auto count_occurrence         = [&](uint32_t, uint32_t) {
       if (field_repeated_info != nullptr) { field_repeated_info[f].count++; }
       return true;
     };
@@ -829,9 +834,8 @@ CUDF_KERNEL void check_required_fields_kernel(
   for (int f = 0; f < num_fields; f++) {
     if (is_required[f] != 0 && !input.locations[flat_index(row, num_fields, f)].is_present()) {
       if (row_force_null != nullptr) {
-        auto const top_row = input.values.top_row_indices != nullptr
-                               ? input.values.top_row_indices[row]
-                               : static_cast<int32_t>(row);
+        auto const top_row =
+          input.values.top_row_indices != nullptr ? input.values.top_row_indices[row] : row;
         // Nested value rows may converge on the same top-level row.
         set_atomically(row_force_null, top_row);
       }
@@ -884,7 +888,7 @@ CUDF_KERNEL void validate_enum_values_kernel(enum_value_device_view input,
  */
 CUDF_KERNEL void compute_enum_string_lengths_kernel(enum_value_device_view input,
                                                     enum_string_lookup_device_view lookup,
-                                                    int32_t* lengths)
+                                                    uint32_t* lengths)
 {
   auto row = static_cast<cudf::size_type>(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= input.size) return;
@@ -896,7 +900,8 @@ CUDF_KERNEL void compute_enum_string_lengths_kernel(enum_value_device_view input
 
   int idx = enum_binary_search(lookup.domain.valid_values, lookup.domain.size, input.values[row]);
   // Should not happen when validate_enum_values_kernel has already run, but keep safe.
-  lengths[row] = idx >= 0 ? (lookup.name_offsets[idx + 1] - lookup.name_offsets[idx]) : 0;
+  lengths[row] =
+    idx >= 0 ? static_cast<uint32_t>(lookup.name_offsets[idx + 1] - lookup.name_offsets[idx]) : 0u;
 }
 
 /**
@@ -1130,7 +1135,7 @@ void launch_validate_enum_values(enum_value_device_view input,
 
 void launch_compute_enum_string_lengths(enum_value_device_view input,
                                         enum_string_lookup_device_view lookup,
-                                        int32_t* lengths,
+                                        uint32_t* lengths,
                                         cuda::stream_ref stream)
 {
   if (input.size == 0) return;
