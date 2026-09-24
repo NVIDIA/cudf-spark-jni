@@ -90,12 +90,12 @@ class json_generator {
   }
 
   // write [
-  // add an extra comma if needed,
+  // add an extra separator if needed,
   // e.g.: when JSON content is: [[1,2,3]
   // writing a new [ should result: [[1,2,3],[
   __device__ void write_start_array(char* out_begin)
   {
-    try_write_comma(out_begin);
+    try_write_separator(out_begin);
 
     out_begin[offset + output_len] = '[';
     output_len++;
@@ -125,17 +125,24 @@ class json_generator {
     is_curr_array_empty = true;
   }
 
-  // return true if it's in a array context and it's not writing the first item.
-  __device__ inline bool need_comma() const { return (array_depth > 0 && !is_curr_array_empty); }
+  // True when a value follows another at the same level: inside a non-empty array, or at the root
+  // once a value has been written.
+  __device__ inline bool need_separator() const
+  {
+    return array_depth > 0 ? !is_curr_array_empty : output_len > 0;
+  }
+
+  // Jackson separates array items with a comma and root-level values with a single space. Both
+  // are one byte, so sizing is the same either way.
+  __device__ inline char separator_char() const { return array_depth > 0 ? ',' : ' '; }
 
   /**
-   * write comma accroding to current generator state
+   * write the separator that must precede the next value, if one is needed
    */
-  __device__ void try_write_comma(char* out_begin)
+  __device__ void try_write_separator(char* out_begin)
   {
-    if (need_comma()) {
-      // in array context and writes first item
-      out_begin[offset + output_len] = ',';
+    if (need_separator()) {
+      out_begin[offset + output_len] = separator_char();
       output_len++;
     }
   }
@@ -147,8 +154,8 @@ class json_generator {
    */
   __device__ bool copy_current_structure(json_parser& parser, char* out_begin)
   {
-    // first try add comma
-    try_write_comma(out_begin);
+    // first try add the separator
+    try_write_separator(out_begin);
 
     if (array_depth > 0) { is_curr_array_empty = false; }
 
@@ -177,7 +184,7 @@ class json_generator {
    * e.g.:
    *
    * write_outer_array_tokens = false
-   * need_comma = true
+   * need_separator = true, array_depth > 0 (at the root the separator is a space)
    * [1,2,3]1,2,3
    *        ^
    *        |
@@ -187,7 +194,7 @@ class json_generator {
    *
    *
    * write_outer_array_tokens = true
-   * need_comma = true
+   * need_separator = true
    *   [12,3,4
    *     ^
    *     |
@@ -206,34 +213,37 @@ class json_generator {
                                         int child_block_len,
                                         bool write_outer_array_tokens)
   {
-    bool insert_comma = need_comma();
+    // Read before the state update below, which would make `need_separator()` report a preceding
+    // item even for this array's first one.
+    bool const insert_separator = need_separator();
+    char const separator        = separator_char();
 
     if (array_depth > 0) { is_curr_array_empty = false; }
 
     if (write_outer_array_tokens) {
-      if (insert_comma) {
+      if (insert_separator) {
         *(child_block_begin + child_block_len + 2) = ']';
         move_forward(child_block_begin, child_block_len, 2);
         *(child_block_begin + 1) = '[';
-        *(child_block_begin)     = ',';
+        *(child_block_begin)     = separator;
       } else {
         *(child_block_begin + child_block_len + 1) = ']';
         move_forward(child_block_begin, child_block_len, 1);
         *(child_block_begin) = '[';
       }
     } else {
-      if (insert_comma) {
+      if (insert_separator) {
         move_forward(child_block_begin, child_block_len, 1);
-        *(child_block_begin) = ',';
+        *(child_block_begin) = separator;
       } else {
-        // do not need comma && do not need write outer array tokens
+        // do not need separator && do not need write outer array tokens
         // do nothing, because child generator buff is directly after the
         // parent generator
       }
     }
 
     // update length
-    if (insert_comma) { output_len++; }
+    if (insert_separator) { output_len++; }
     if (write_outer_array_tokens) { output_len += 2; }
     output_len += child_block_len;
   }
@@ -274,7 +284,7 @@ class json_generator {
 
   // whether already worte a item in current array
   // used to decide whether add a comma before writing out a new item.
-  bool is_curr_array_empty;
+  bool is_curr_array_empty = true;
 };
 
 /**
@@ -346,8 +356,8 @@ struct context {
 
   cudf::device_span<path_instruction const> path;
 
-  // whether written output
-  // if dirty > 0, indicates success
+  // Whether the task produced output: > 0 means success. Each child contributes at most 1, so for
+  // an array wildcard this counts matching elements, which case path 6 compares against 1.
   int dirty;
 
   // which case path that this task is from
@@ -458,32 +468,27 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
       // case path 4
       else if (json_token::START_OBJECT == ctx.token &&
                ctx.path.front().type == path_instruction_type::NAMED) {
-        if (!ctx.is_first_enter) {
-          // 2st enter
-          // skip the following children after the expect
-          if (ctx.dirty > 0) {
-            while (json_token::END_OBJECT != p.next_token()) {
-              // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
+        if (ctx.dirty > 0) {
+          // A field already produced output, so skip every remaining field of this object.
+          while (json_token::END_OBJECT != p.next_token()) {
+            // JSON validation check
+            if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
 
-              // skip FIELD_NAME token
-              p.next_token();
-              // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
+            // skip FIELD_NAME token
+            p.next_token();
+            // JSON validation check
+            if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
 
-              // skip value of FIELD_NAME
-              if (!p.try_skip_children()) {
-                // JSON validation check
-                return {false, 0};
-              }
+            // skip value of FIELD_NAME
+            if (!p.try_skip_children()) {
+              // JSON validation check
+              return {false, 0};
             }
           }
-          // Mark task is done regardless whether the expected child was found.
           ctx.task_is_done = true;
         } else {
-          // below is 1st enter
-          ctx.is_first_enter = false;
-          // match first mached children with expected name
+          // Nothing matched yet: scan on first entry, and again after a matched child produced no
+          // output, so a later field with a duplicate name still gets its chance.
           bool found_expected_child = false;
           auto const to_match_name  = ctx.path.front().name;
           while (true) {
@@ -493,15 +498,15 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
             // JSON validation check
             if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
 
-            // current token is FIELD_NAME
-            if (is_name_matched) {
-              // skip FIELD_NAME token
-              p.next_token();
-              // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
+            // current token is FIELD_NAME; skip it so both arms start on the field's value
+            p.next_token();
+            // JSON validation check
+            if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
 
-              // meets null token, it's not expected, return false
-              if (json_token::VALUE_NULL == p.get_current_token()) { return {false, 0}; }
+            if (is_name_matched) {
+              // A null value fails only this field, so keep scanning the rest of the object.
+              if (json_token::VALUE_NULL == p.get_current_token()) { continue; }
+
               // push sub task; sub task will update the result of path 4
               push_context(evaluation_case_path::START_OBJECT___MATCHED_NAME_PATH,
                            ctx.g,
@@ -509,23 +514,18 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
                            {ctx.path.data() + 1, ctx.path.size() - 1});
               found_expected_child = true;
               break;
-            } else {
-              // skip FIELD_NAME token
-              p.next_token();
-              // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
+            }
 
-              // current child is not expected, skip current child
-              if (!p.try_skip_children()) {
-                // JSON validation check
-                return {false, 0};
-              }
+            // current child is not expected, skip current child
+            if (!p.try_skip_children()) {
+              // JSON validation check
+              return {false, 0};
             }
           }
           if (!found_expected_child) {
             // did not find any expected sub child
             ctx.task_is_done = true;
-            ctx.dirty        = false;
+            ctx.dirty        = 0;
           }
         }
       }
@@ -635,32 +635,31 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
                cuda::std::get<0>(path_match_index_wildcard(ctx.path))) {
         int idx = cuda::std::get<1>(path_match_index_wildcard(ctx.path));
 
+        ctx.is_first_enter = false;
         p.next_token();
         // JSON validation check
         if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
-        ctx.is_first_enter = false;
 
-        int i = idx;
-        while (i > 0) {
-          if (p.get_current_token() == json_token::END_ARRAY) {
-            // terminate, nothing has been written
-            return {false, 0};
-          }
-
+        for (int i = idx; i > 0 && json_token::END_ARRAY != p.get_current_token(); --i) {
           if (!p.try_skip_children()) { return {false, 0}; }
 
           p.next_token();
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
-
-          --i;
         }
 
-        // i == 0
-        push_context(evaluation_case_path::START_ARRAY___MATCHED_INDEX_AND_WILDCARD,
-                     ctx.g,
-                     write_style::QUOTED,
-                     {ctx.path.data() + 1, ctx.path.size() - 1});
+        if (json_token::END_ARRAY == p.get_current_token()) {
+          // Running past the last element fails only this subscript, so an enclosing wildcard can
+          // still match a later element.
+          ctx.dirty        = 0;
+          ctx.task_is_done = true;
+        } else {
+          // Reached element idx.
+          push_context(evaluation_case_path::START_ARRAY___MATCHED_INDEX_AND_WILDCARD,
+                       ctx.g,
+                       write_style::QUOTED,
+                       {ctx.path.data() + 1, ctx.path.size() - 1});
+        }
       }
       // case (START_ARRAY, Index(idx) :: xs)
       // case path 9
@@ -672,27 +671,26 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         // JSON validation check
         if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
 
-        int i = idx;
-        while (i > 0) {
-          if (p.get_current_token() == json_token::END_ARRAY) {
-            // terminate, nothing has been written
-            return {false, 0};
-          }
-
+        for (int i = idx; i > 0 && json_token::END_ARRAY != p.get_current_token(); --i) {
           if (!p.try_skip_children()) { return {false, 0}; }
 
           p.next_token();
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
-
-          --i;
         }
 
-        // i == 0
-        push_context(evaluation_case_path::START_ARRAY___MATCHED_INDEX,
-                     ctx.g,
-                     ctx.style,
-                     {ctx.path.data() + 1, ctx.path.size() - 1});
+        if (json_token::END_ARRAY == p.get_current_token()) {
+          // Running past the last element fails only this subscript, so an enclosing wildcard can
+          // still match a later element.
+          ctx.dirty        = 0;
+          ctx.task_is_done = true;
+        } else {
+          // Reached element idx.
+          push_context(evaluation_case_path::START_ARRAY___MATCHED_INDEX,
+                       ctx.g,
+                       ctx.style,
+                       {ctx.path.data() + 1, ctx.path.size() - 1});
+        }
       }
       // case _ =>
       // case path 12
@@ -733,7 +731,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           // case (START_OBJECT, Named :: xs)
           // case path 4
         case evaluation_case_path::START_OBJECT___MATCHED_NAME_PATH: {
-          p_ctx.dirty = ctx.dirty;
+          // Clamp: a child reports only whether it wrote anything, never how many items. Defensive
+          // rather than load-bearing, since case path 6 accumulates only its own clamped counts.
+          p_ctx.dirty = (ctx.dirty > 0) ? 1 : 0;
           // copy generator states to parent task;
           p_ctx.g = ctx.g;
 
@@ -743,8 +743,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           // case (START_ARRAY, Wildcard :: xs) if style != QuotedStyle
           // case path 6
         case evaluation_case_path::START_ARRAY___MATCHED_WILDCARD___STYLE_NOT_QUOTED: {
-          // collect result from child task
-          p_ctx.dirty += ctx.dirty;
+          // Count one per matching element, not the child's item count, or the outer array tokens
+          // would be kept when they should not and the output would over-nest.
+          p_ctx.dirty += (ctx.dirty > 0) ? 1 : 0;
           // update child generator for parent task
           p_ctx.child_g = ctx.g;
 
