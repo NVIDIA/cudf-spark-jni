@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,15 @@
 #include <cudf_test/type_lists.hpp>
 
 #include <cudf/strings/convert/convert_floats.hpp>
+#include <cudf/utilities/error.hpp>
+#include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
 
 #include <cast_string.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -600,6 +603,34 @@ TEST_F(StringToDecimalTests, Empty)
   EXPECT_EQ(result->size(), 0);
   EXPECT_EQ(result->type().id(), type_id::DECIMAL32);
   EXPECT_EQ(result->type().scale(), 2);
+}
+
+TEST_F(StringToDecimalTests, MismatchedJsonQuoteCountsThrows)
+{
+  auto const strings      = test::strings_column_wrapper{"0", "0"};
+  auto const scv          = strings_column_view{strings};
+  auto const stream       = cudf::get_default_stream();
+  auto short_quote_counts = rmm::device_uvector<int8_t>(1, stream);
+  auto long_quote_counts  = rmm::device_uvector<int8_t>(3, stream);
+
+  EXPECT_THROW(
+    static_cast<void>(spark_rapids_jni::string_to_decimal(
+      1, 0, scv, false, false, cudf::device_span<int8_t const>{short_quote_counts}, stream)),
+    cudf::logic_error);
+  EXPECT_THROW(
+    static_cast<void>(spark_rapids_jni::string_to_decimal(
+      1, 0, scv, false, false, cudf::device_span<int8_t const>{long_quote_counts}, stream)),
+    cudf::logic_error);
+}
+
+TEST_F(StringToDecimalTests, ExtremeExponentCarryDoesNotOverflowPosition)
+{
+  auto const stream  = cudf::get_default_stream();
+  auto const strings = test::strings_column_wrapper{"9.9e2147483646"};
+  auto const result =
+    spark_rapids_jni::string_to_decimal(1, 0, strings_column_view{strings}, false, false, stream);
+  auto const expected = test::fixed_point_column_wrapper<int32_t>({0}, {0}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
 TEST_F(StringToDecimalTests, NonEmptyNulls)

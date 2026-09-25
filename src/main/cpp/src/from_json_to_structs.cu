@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/span.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/device_buffer.hpp>
@@ -543,7 +544,6 @@ std::unique_ptr<cudf::column> cast_strings_to_floats(cudf::column_view const& in
     output_type, cudf::strings_column_view{input}, /*ansi_mode*/ false, stream, mr);
 }
 
-// TODO there is a bug here around 0 https://github.com/NVIDIA/cudf-spark/issues/10898
 std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& input,
                                                        cudf::data_type output_type,
                                                        int precision,
@@ -635,6 +635,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                                input_sv,
                                                /*ansi_mode*/ false,
                                                /*strip*/ false,
+                                               cudf::device_span<int8_t const>{quote_counts},
                                                stream,
                                                mr);
   }
@@ -684,6 +685,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                              cudf::strings_column_view{unquoted_strings->view()},
                                              /*ansi_mode*/ false,
                                              /*strip*/ false,
+                                             cudf::device_span<int8_t const>{quote_counts},
                                              stream,
                                              mr);
 }
