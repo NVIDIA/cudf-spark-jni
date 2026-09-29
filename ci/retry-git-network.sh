@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-set -u
+set -uo pipefail
 
 max_attempts=${GIT_NETWORK_RETRY_ATTEMPTS:-3}
 delay_seconds=${GIT_NETWORK_RETRY_DELAY_SECONDS:-10}
@@ -31,17 +31,18 @@ if ((delay_seconds < 0)); then
 fi
 
 is_transient_git_transport_failure() {
-  grep -Eiq     'connection timed out|failed to connect .*timed out|operation timed out|could not resolve host|temporary failure in name resolution|connection reset by peer|remote end hung up unexpectedly|rpc failed;.*curl (18|28|35|52|56)|gnutls recv error|tls.*(timeout|connection.*(closed|reset))'
+  grep -Eiq \
+    'connection timed out|failed to connect .*timed out|operation timed out|could not resolve host|temporary failure in name resolution|connection reset by peer|remote end hung up unexpectedly|rpc failed;.*curl (18|28|35|52|56)|http (408|429|5[0-9][0-9])|requested url returned error: (408|429|5[0-9][0-9])|gnutls recv error|tls.*(timeout|connection.*(closed|reset))'
 }
 
 attempt=1
 while ((attempt <= max_attempts)); do
   log_file=$(mktemp "${TMPDIR:-/tmp}/git-network-retry-XXXXXX")
-  if "$@" > >(tee "$log_file") 2>&1; then
+  "$@" 2>&1 | tee "$log_file"
+  status=${PIPESTATUS[0]}
+  if ((status == 0)); then
     rm -f "$log_file"
     exit 0
-  else
-    status=$?
   fi
 
   if ! is_transient_git_transport_failure < "$log_file"; then
