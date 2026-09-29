@@ -66,7 +66,7 @@ if [[ $phase != validate ]]; then
   export GIT_COMMITTER_NAME="cudf-spark automation"
   export GIT_AUTHOR_EMAIL="70000568+nvauto@users.noreply.github.com"
   export GIT_COMMITTER_EMAIL="70000568+nvauto@users.noreply.github.com"
-  git submodule update --init --recursive
+  ci/retry-git-network.sh git submodule update --init --recursive
 
   # try cleanup remote first if no open PR for HEAD targeting BASE
   $WORKSPACE/.github/workflows/action-helper/python/cleanup-bot-branch \
@@ -85,7 +85,7 @@ if [[ $phase != validate ]]; then
   if [ -n "$CUDF_TAG" ]; then
     git -C thirdparty/cudf checkout tags/$CUDF_TAG
   else
-    git submodule update --remote --merge
+    ci/retry-git-network.sh git submodule update --remote --merge
   fi
   cudf_version='<missing>'
   if [[ -r thirdparty/cudf/VERSION ]]; then
