@@ -29,13 +29,19 @@
 
 extern "C" {
 
-// Returns [buffer_address, allocation_size, rmm_buffer_handle, event_handle], all zero when there
-// is nothing to copy.
-JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_copyAsync(
-  JNIEnv* env, jclass, jlongArray j_addrs, jlongArray j_lens, jboolean on_side_stream)
+// Returns the event recorded after the copies.
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_copyAsync(JNIEnv* env,
+                                                                  jclass,
+                                                                  jlongArray j_addrs,
+                                                                  jlongArray j_lens,
+                                                                  jlong j_dst_addr,
+                                                                  jlong j_dst_length,
+                                                                  jboolean on_side_stream)
 {
-  JNI_NULL_CHECK(env, j_addrs, "host buffer addresses are null", nullptr);
-  JNI_NULL_CHECK(env, j_lens, "host buffer lengths are null", nullptr);
+  JNI_NULL_CHECK(env, j_addrs, "host buffer addresses are null", 0);
+  JNI_NULL_CHECK(env, j_lens, "host buffer lengths are null", 0);
+  JNI_NULL_CHECK(env, j_dst_addr, "destination is null", 0);
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
@@ -54,17 +60,12 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDevice
     addrs.cancel();
     lens.cancel();
 
-    cudf::jni::native_jlongArray result(env, 4);
-    auto copy = spark_rapids_jni::copy_host_buffers_to_device_async(buffers, on_side_stream);
-    if (copy.buffer) {
-      result[0] = cudf::jni::ptr_as_jlong(copy.buffer->data());
-      result[1] = static_cast<jlong>(copy.buffer->size());
-      result[2] = cudf::jni::release_as_jlong(copy.buffer);
-      result[3] = cudf::jni::ptr_as_jlong(copy.event);
-    }
-    return result.get_jArray();
+    auto const destination = cudf::device_span<uint8_t>(reinterpret_cast<uint8_t*>(j_dst_addr),
+                                                        static_cast<std::size_t>(j_dst_length));
+    return cudf::jni::ptr_as_jlong(
+      spark_rapids_jni::copy_host_buffers_to_device_async(buffers, destination, on_side_stream));
   }
-  JNI_CATCH(env, nullptr);
+  JNI_CATCH(env, 0);
 }
 
 JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_waitOnEvent(

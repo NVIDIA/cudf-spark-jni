@@ -22,7 +22,6 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/resource_ref.hpp>
 
@@ -30,7 +29,6 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
-#include <memory>
 
 namespace spark_rapids_jni {
 
@@ -57,31 +55,22 @@ std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
- * @brief Host buffers packed into one device allocation, with the event that marks their copies
- */
-struct packed_host_to_device_copy {
-  std::unique_ptr<rmm::device_buffer> buffer;  ///< The packed allocation, null if nothing to copy
-  cudaEvent_t event{};  ///< Recorded after the copies, null if nothing to copy; caller destroys it
-};
-
-/**
- * @brief Queue copies of host buffers into one device allocation, packed back to back in order
+ * @brief Queue copies of host buffers into a device buffer, packed back to back in order
  *
- * Buffers adjacent in host memory move in a single copy. The allocation is padded past the last
- * buffer, because the Parquet decode kernels read beyond the end of the column chunk data. The
- * host buffers must stay valid until the returned event completes.
+ * Buffers adjacent in host memory move in a single copy. The host buffers and `destination` must
+ * stay valid until the returned event completes.
  *
  * @param buffers The host buffers to copy
+ * @param destination The device buffer to copy into, at least as large as the host buffers combined
  * @param on_side_stream Whether to queue the copies on a stream forked from `stream`, so they can
  *        overlap work queued on `stream` afterwards
- * @param stream CUDA stream the allocation is made on, and the copies are queued on or forked from
- * @param mr Device memory resource used to allocate the packed buffer
- * @return The packed buffer and the event recorded after the copies
+ * @param stream CUDA stream the copies are queued on or forked from
+ * @return The event recorded after the copies, which the caller must destroy
  */
-packed_host_to_device_copy copy_host_buffers_to_device_async(
+cudaEvent_t copy_host_buffers_to_device_async(
   cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
+  cudf::device_span<uint8_t> destination,
   bool on_side_stream,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+  cuda::stream_ref stream = cudf::get_default_stream());
 
 }  // namespace spark_rapids_jni

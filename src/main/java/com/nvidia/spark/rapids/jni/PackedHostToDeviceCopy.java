@@ -25,8 +25,8 @@ import ai.rapids.cudf.NativeDepsLoader;
  * host buffer's slice of it.
  * <p>
  * The buffers are packed back to back in the order given, and buffers adjacent in host memory move
- * in a single copy. The allocation is padded past the last buffer, because the Parquet decode
- * kernels read beyond the end of the column chunk data.
+ * in a single copy. The allocation size is rounded up to a multiple of 8 bytes, as libcudf does for
+ * the column chunk buffers it reads into.
  * <p>
  * The copies are only queued, and they read the host buffers asynchronously: the host buffers must
  * stay open until this is closed, which waits for the copies to finish. On a side stream the
@@ -40,16 +40,18 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
     NativeDepsLoader.loadNativeDeps();
   }
 
+  // The allocation size is rounded up to a multiple of this, as libcudf does for the column chunk
+  // buffers it reads into. Matches libcudf's BUFFER_PADDING_MULTIPLE.
+  private static final long PADDING_MULTIPLE = 8;
+
   private final DeviceMemoryBuffer packed;
   private final DeviceMemoryBuffer[] buffers;
-  private long event;
+  private long event = 0;
   private boolean closed = false;
 
-  private PackedHostToDeviceCopy(DeviceMemoryBuffer packed, DeviceMemoryBuffer[] buffers,
-      long event) {
+  private PackedHostToDeviceCopy(DeviceMemoryBuffer packed, DeviceMemoryBuffer[] buffers) {
     this.packed = packed;
     this.buffers = buffers;
-    this.event = event;
   }
 
   /**
@@ -64,45 +66,32 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
       boolean onSideStream) {
     long[] addrs = new long[hostBuffers.length];
     long[] lens = new long[hostBuffers.length];
+    long total = 0;
     for (int i = 0; i < hostBuffers.length; i++) {
       addrs[i] = hostBuffers[i].getAddress();
       lens[i] = hostBuffers[i].getLength();
+      total += lens[i];
     }
-    // [buffer address, allocation size, rmm buffer handle, event handle]
-    long[] result = copyAsync(addrs, lens, onSideStream);
     DeviceMemoryBuffer[] buffers = new DeviceMemoryBuffer[hostBuffers.length];
-    if (result[2] == 0) {
-      try {
+    if (total == 0) {
+      return Arms.closeIfException(new PackedHostToDeviceCopy(null, buffers), copy -> {
         for (int i = 0; i < buffers.length; i++) {
           buffers[i] = DeviceMemoryBuffer.allocate(0);
         }
-      } catch (Throwable t) {
-        closeAll(buffers);
-        throw t;
-      }
-      return new PackedHostToDeviceCopy(null, buffers, 0);
+        return copy;
+      });
     }
-    DeviceMemoryBuffer packed = null;
-    try {
-      packed = DeviceMemoryBuffer.fromRmm(result[0], result[1], result[2]);
+    long size = (total + PADDING_MULTIPLE - 1) / PADDING_MULTIPLE * PADDING_MULTIPLE;
+    DeviceMemoryBuffer packed = DeviceMemoryBuffer.allocate(size);
+    return Arms.closeIfException(new PackedHostToDeviceCopy(packed, buffers), copy -> {
       long offset = 0;
       for (int i = 0; i < buffers.length; i++) {
         buffers[i] = packed.slice(offset, lens[i]);
         offset += lens[i];
       }
-    } catch (Throwable t) {
-      // The copies may still be writing the allocation, so wait for them before it is freed.
-      try {
-        finish(result[3]);
-      } finally {
-        closeAll(buffers);
-        if (packed != null) {
-          packed.close();
-        }
-      }
-      throw t;
-    }
-    return new PackedHostToDeviceCopy(packed, buffers, result[3]);
+      copy.event = copyAsync(addrs, lens, packed.getAddress(), packed.getLength(), onSideStream);
+      return copy;
+    });
   }
 
   /**
@@ -130,30 +119,23 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
       return;
     }
     closed = true;
-    try {
-      if (event != 0) {
-        long toFinish = event;
-        event = 0;
+    long toFinish = event;
+    event = 0;
+    AutoCloseable[] resources = new AutoCloseable[buffers.length + 2];
+    // The copies may still be writing the allocation, so wait for them before it is freed.
+    resources[0] = () -> {
+      if (toFinish != 0) {
         finish(toFinish);
       }
-    } finally {
-      closeAll(buffers);
-      if (packed != null) {
-        packed.close();
-      }
-    }
+    };
+    System.arraycopy(buffers, 0, resources, 1, buffers.length);
+    resources[buffers.length + 1] = packed;
+    Arms.closeAll(resources);
   }
 
-  private static void closeAll(DeviceMemoryBuffer[] buffers) {
-    for (int i = 0; i < buffers.length; i++) {
-      if (buffers[i] != null) {
-        buffers[i].close();
-        buffers[i] = null;
-      }
-    }
-  }
-
-  private static native long[] copyAsync(long[] addrs, long[] lens, boolean onSideStream);
+  // Returns the event recorded after the copies.
+  private static native long copyAsync(long[] addrs, long[] lens, long dstAddr, long dstLength,
+      boolean onSideStream);
 
   private static native void waitOnEvent(long event);
 

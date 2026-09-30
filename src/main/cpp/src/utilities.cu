@@ -16,7 +16,6 @@
 
 #include "utilities.hpp"
 
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/types.hpp>
@@ -35,14 +34,6 @@
 #include <cstddef>
 
 namespace spark_rapids_jni {
-
-namespace {
-
-// The Parquet decode kernels read past the end of the column chunk data, so the allocation is
-// padded out to a multiple of this. Matches libcudf's BUFFER_PADDING_MULTIPLE.
-constexpr std::size_t padding_multiple = 8;
-
-}  // namespace
 
 bool is_basic_spark_numeric(cudf::data_type type)
 {
@@ -92,52 +83,55 @@ std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
   return out;
 }
 
-packed_host_to_device_copy copy_host_buffers_to_device_async(
+cudaEvent_t copy_host_buffers_to_device_async(
   cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
+  cudf::device_span<uint8_t> destination,
   bool on_side_stream,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cuda::stream_ref stream)
 {
   std::size_t total = 0;
   for (auto const& buffer : buffers) {
     total += buffer.size();
   }
-  if (total == 0) { return {}; }
+  CUDF_EXPECTS(total <= destination.size(), "host buffers do not fit in the destination");
 
-  auto packed = std::make_unique<rmm::device_buffer>(
-    cudf::util::round_up_safe(total, padding_multiple), stream, mr);
-
-  // Forking after the allocation orders the side stream behind it, and behind every copy
-  // already queued on `stream`, so an earlier copy has the link to itself.
+  // Forking orders the side stream behind everything already queued on `stream`, including the
+  // destination's allocation and any earlier copy into it.
   auto const copy_stream = on_side_stream ? cudf::detail::fork_streams(stream, 1).front() : stream;
 
-  // Buffers adjacent in host memory land adjacent in the allocation, so a run of them moves as
-  // one copy.
-  auto* const base   = static_cast<uint8_t*>(packed->data());
-  std::size_t offset = 0;
-  for (std::size_t run_start = 0; run_start < buffers.size();) {
-    auto const* const src = buffers[run_start].data();
-    auto run_bytes        = buffers[run_start].size();
-    auto run_end          = run_start + 1;
-    while (run_end < buffers.size() && buffers[run_end].data() == src + run_bytes) {
-      run_bytes += buffers[run_end].size();
-      ++run_end;
+  try {
+    // Buffers adjacent in host memory land adjacent in the destination, so a run of them moves as
+    // one copy.
+    auto* const base   = destination.data();
+    std::size_t offset = 0;
+    for (std::size_t run_start = 0; run_start < buffers.size();) {
+      auto const* const src = buffers[run_start].data();
+      auto run_bytes        = buffers[run_start].size();
+      auto run_end          = run_start + 1;
+      while (run_end < buffers.size() && buffers[run_end].data() == src + run_bytes) {
+        run_bytes += buffers[run_end].size();
+        ++run_end;
+      }
+      if (run_bytes > 0) {
+        CUDF_CUDA_TRY(
+          cudaMemcpyAsync(base + offset, src, run_bytes, cudaMemcpyDefault, copy_stream.get()));
+      }
+      offset += run_bytes;
+      run_start = run_end;
     }
-    if (run_bytes > 0) {
-      CUDF_CUDA_TRY(
-        cudaMemcpyAsync(base + offset, src, run_bytes, cudaMemcpyHostToDevice, copy_stream.get()));
-    }
-    offset += run_bytes;
-    run_start = run_end;
-  }
 
-  cudaEvent_t event;
-  CUDF_CUDA_TRY(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-  if (auto const err = cudaEventRecord(event, copy_stream.get()); err != cudaSuccess) {
-    cudaEventDestroy(event);
-    CUDF_CUDA_TRY(err);
+    cudaEvent_t event;
+    CUDF_CUDA_TRY(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+    if (auto const err = cudaEventRecord(event, copy_stream.get()); err != cudaSuccess) {
+      cudaEventDestroy(event);
+      CUDF_CUDA_TRY(err);
+    }
+    return event;
+  } catch (...) {
+    // Block until the copies already queued finish, since no event reaches the caller to wait on
+    cudaStreamSynchronize(copy_stream.get());
+    throw;
   }
-  return {std::move(packed), event};
 }
 
 }  // namespace spark_rapids_jni
