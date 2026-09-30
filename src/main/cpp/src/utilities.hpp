@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,15 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/resource_ref.hpp>
 
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
+
+#include <cstdint>
+#include <memory>
 
 namespace spark_rapids_jni {
 
@@ -48,6 +53,34 @@ bool is_basic_spark_numeric(cudf::data_type type);
  */
 std::unique_ptr<rmm::device_buffer> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+
+/**
+ * @brief Host buffers packed into one device allocation, with the event that marks their copies
+ */
+struct packed_host_to_device_copy {
+  std::unique_ptr<rmm::device_buffer> buffer;  ///< The packed allocation, null if nothing to copy
+  cudaEvent_t event{};  ///< Recorded after the copies, null if nothing to copy; caller destroys it
+};
+
+/**
+ * @brief Queue copies of host buffers into one device allocation, packed back to back in order
+ *
+ * Buffers adjacent in host memory move in a single copy. The allocation is padded past the last
+ * buffer, because the Parquet decode kernels read beyond the end of the column chunk data. The
+ * host buffers must stay valid until the returned event completes.
+ *
+ * @param buffers The host buffers to copy
+ * @param on_side_stream Whether to queue the copies on a stream forked from `stream`, so they can
+ *        overlap work queued on `stream` afterwards
+ * @param stream CUDA stream the allocation is made on, and the copies are queued on or forked from
+ * @param mr Device memory resource used to allocate the packed buffer
+ * @return The packed buffer and the event recorded after the copies
+ */
+packed_host_to_device_copy copy_host_buffers_to_device_async(
+  cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
+  bool on_side_stream,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
