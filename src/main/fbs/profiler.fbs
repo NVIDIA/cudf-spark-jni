@@ -1,0 +1,287 @@
+// Copyright (c) 2024, NVIDIA CORPORATION.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Flatbuffer schema for the profiler
+// NOTE: The schema needs to be in a single file because the build embeds it
+//       into the converter tool to be able to emit profile records as JSON.
+
+// Profiling data is written as a series of size-prefixed flatbuffers.
+// The first flatbuffer is always ProfileHeader followed by zero or more ActivityRecords.
+
+namespace spark_rapids_jni.profiler;
+
+table ActivityObjectId {
+  process_id:uint32;  // present if object kind is Process or Thread
+  thread_id:uint32;   // present if object kind is Thread
+  device_id:uint32;   // present if object kind is Device or Context or Stream
+  context_id:uint32;  // present if object kind is Context or Stream
+  stream_id:uint32;   // present if object kind is Stream
+}
+
+enum ApiKind:byte {
+  Driver = 0,
+  Runtime = 1
+}
+
+enum ChannelType:uint8 {
+  Invalid = 0,
+  Compute = 1,
+  AsyncMemcpy = 2
+}
+
+table CommandBufferFullData {
+  command_buffer_length:uint32;
+  channel_id:uint32;
+  channel_type:uint32;
+}
+
+enum LaunchType:uint8 {
+  Regular = 0,
+  CooperativeSingleDevice = 1,
+  CooperativeMultiDevice = 2
+}
+
+enum MarkerFlags:uint8 (bit_flags) {
+  Instantaneous = 0,
+  Start = 1,
+  End = 2,
+  SyncAcquire = 3,
+  SyncAcquireSuccess = 4,
+  SyncAcquireFailed = 5,
+  SyncRelease = 6
+}
+
+enum MemcpyFlags:uint8 (bit_flags) {
+  Async = 0
+}
+
+enum MemcpyKind:uint8 {
+  Unknown = 0,
+  HtoD = 1,
+  DtoH = 2,
+  HtoA = 3,
+  AtoH = 4,
+  AtoA = 5,
+  AtoD = 6,
+  DtoA = 7,
+  DtoD = 8,
+  HtoH = 9,
+  PtoP = 10
+}
+
+enum MemoryKind:uint8 {
+  Unknown = 0,
+  Pageable = 1,
+  Pinned = 2,
+  Device = 3,
+  Array = 4,
+  Managed = 5,
+  DeviceStatic = 6,
+  ManagedStatic = 7
+}
+
+enum MemsetFlags:uint8 (bit_flags) {
+  Async = 0
+}
+
+enum OverheadKind:uint8 {
+  Unknown = 0,
+  DriverCompiler = 1,
+  CUptiBufferFlush = 2,
+  CUptiInstrumentation = 3,
+  CUptiResource = 4
+}
+
+enum PartitionedGlobalCacheConfig:uint8 {
+  Unknown = 0,
+  NotSupported = 1,
+  Off = 2,
+  On = 3
+}
+
+enum ShmemLimitConfig:uint8 {
+  Default = 0,
+  Optin = 1
+}
+
+table ProfileHeader {
+  magic:string;
+  version:uint32;
+  writer_version:string;
+}
+
+table ActivityRecords {
+  api:[ApiActivity];
+  device:[DeviceActivity];
+  dropped:[DroppedRecords];
+  kernel:[KernelActivity];
+  marker:[MarkerActivity];
+  marker_data:[MarkerData];
+  memcpy:[MemcpyActivity];
+  memset:[MemsetActivity];
+  overhead:[OverheadActivity];
+}
+
+table ApiActivity {
+  kind:ApiKind = Runtime;
+  cbid:uint32;
+  start:uint64;
+  end:uint64;
+  process_id:uint32;
+  thread_id:uint32;
+  correlation_id:uint32;
+  return_value:uint32 = 0;
+}
+
+table DeviceActivity {
+  global_memory_bandwidth:uint64;
+  global_memory_size:uint64;
+  constant_memory_size:uint32;
+  l2_cache_size:uint32;
+  num_threads_per_warp:uint32;
+  core_clock_rate:uint32;
+  num_memcpy_engines:uint32;
+  num_multiprocessors:uint32;
+  max_ipc:uint32;
+  max_warps_per_multiprocessor:uint32;
+  max_blocks_per_multiprocessor:uint32;
+  max_shared_memory_per_multiprocessor:uint32;
+  max_registers_per_multiprocessor:uint32;
+  max_registers_per_block:uint32;
+  max_shared_memory_per_block:uint32;
+  max_threads_per_block:uint32;
+  max_block_dim_x:uint32;
+  max_block_dim_y:uint32;
+  max_block_dim_z:uint32;
+  max_grid_dim_x:uint32;
+  max_grid_dim_y:uint32;
+  max_grid_dim_z:uint32;
+  compute_capability_major:uint32;
+  compute_capability_minor:uint32;
+  id:uint32;
+  ecc_enabled:uint32;
+  name:string;
+}
+
+table DroppedRecords {
+  num_dropped:uint64;
+}
+
+table KernelActivity {
+  requested:uint8;
+  executed:uint8;
+  shared_memory_config:uint8;
+  registers_per_thread:uint16;
+  partitioned_global_cache_requested:PartitionedGlobalCacheConfig;
+  partitioned_global_cache_executed:PartitionedGlobalCacheConfig;
+  start:uint64;
+  end:uint64;
+  completed:uint64 = 0;
+  device_id:uint32;
+  context_id:uint32;
+  stream_id:uint32;
+  grid_x:int32;
+  grid_y:int32;
+  grid_z:int32;
+  block_x:int32;
+  block_y:int32;
+  block_z:int32;
+  static_shared_memory:int32;
+  dynamic_shared_memory:int32;
+  local_memory_per_thread:uint32;
+  local_memory_total:uint32;
+  correlation_id:uint32;
+  grid_id:int64;
+  name:string;
+  queued:uint64 = 0;
+  submitted:uint64 = 0;
+  launch_type:LaunchType = Regular;
+  is_shared_memory_carveout_requested:uint8;
+  shared_memory_carveout_requested:uint8;
+  shared_memory_executed:uint32;
+  graph_node_id:uint64 = 0;
+  shmem_limit_config:ShmemLimitConfig = Default;
+  graph_id:uint32 = 0;
+  //access_policy_window:???;
+  channel_id:uint32;
+  channel_type:ChannelType;
+  cluster_x:uint32;
+  cluster_y:uint32;
+  cluster_z:uint32;
+  cluster_scheduling_policy:uint32;
+  local_memory_total_v2:uint64;
+}
+
+table MarkerActivity {
+  flags:MarkerFlags = Start;
+  timestamp:uint64;
+  id:int32;
+  object_id:ActivityObjectId;
+  name:string;
+  domain:string;
+}
+
+table MarkerData {
+  flags:MarkerFlags = Start;
+  id:int32;
+  //payload_kind:MetricValueKind;
+  //payload:MetricValue;
+  color:uint32;
+  category:uint32;
+}
+
+table MemcpyActivity {
+  copy_kind:MemcpyKind;
+  src_kind:MemoryKind;
+  dst_kind:MemoryKind;
+  flags:MemcpyFlags;
+  bytes:uint64;
+  start:uint64;
+  end:uint64;
+  device_id:uint32;
+  context_id:uint32;
+  stream_id:uint32;
+  correlation_id:uint32;
+  runtime_correlation_id:uint32;
+  graph_node_id:uint64 = 0;
+  graph_id:uint32 = 0;
+  channel_id:uint32;
+  channel_type:ChannelType;
+}
+
+table MemsetActivity {
+  value:uint32;
+  bytes:uint64;
+  start:uint64;
+  end:uint64;
+  device_id:uint32;
+  context_id:uint32;
+  stream_id:uint32;
+  correlation_id:uint32;
+  flags:MemsetFlags;
+  memory_kind:MemoryKind;
+  graph_node_id:uint64 = 0;
+  graph_id:uint32 = 0;
+  channel_id:uint32;
+  channel_type:ChannelType;
+}
+
+table OverheadActivity {
+  overhead_kind:OverheadKind;
+  object_id:ActivityObjectId;
+  start:uint64;
+  end:uint64;
+}
+
+root_type ActivityRecords;

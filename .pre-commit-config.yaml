@@ -1,0 +1,78 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ci:
+  autofix_commit_msg: "[pre-commit.ci] auto code formatting"
+  autofix_prs: false
+  autoupdate_branch: ""
+  autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
+  autoupdate_schedule: quarterly
+  submodules: true
+
+repos:
+  - repo: local
+    hooks:
+      - id: check-clang-format-version
+        name: Check clang-format version matches cudf
+        entry: >-
+          bash -c '
+          clang_format_pattern="https://github.com/pre-commit/mirrors-clang-format";
+          our_ver=$(grep -A1 "repo: $clang_format_pattern" ".pre-commit-config.yaml" | grep "rev:" | tail -1 | sed "s/.*rev: *//");
+          cudf_ver=$(grep -A1 "repo: $clang_format_pattern" "thirdparty/cudf/.pre-commit-config.yaml" | grep "rev:" | tail -1 | sed "s/.*rev: *//");
+          if [ -z "$our_ver" ] || [ -z "$cudf_ver" ] || [ "$our_ver" != "$cudf_ver" ]; then
+            echo "ERROR: clang-format version mismatch or failed to extract version!";
+            echo "  cudf-spark-jni: ${our_ver:-(empty)}";
+            echo "  cudf:             ${cudf_ver:-(empty)}";
+            echo "Please update .pre-commit-config.yaml to use the same rev as cudf";
+            exit 1;
+          fi'
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: forbid-deprecated-annotation
+        name: Forbid Java deprecation markers; comment unused APIs for later removal
+        entry: '(?i)@(?:java\.lang\.)?deprecated\b'
+        language: pygrep
+        types: [java]
+      - id: use-cuda-memcpy-default
+        name: Use cudaMemcpyDefault
+        description: Enforce cudaMemcpyDefault instead of explicit host/device cudaMemcpyKind policies
+        entry: '\bcudaMemcpy(?:HostToHost|HostToDevice|DeviceToHost|DeviceToDevice)\b'
+        language: pygrep
+        types_or: [c, c++, cuda]
+        files: '^src/main/cpp/'
+      - id: use-rmm-exec-policy-nosync
+        name: Use rmm::exec_policy_nosync
+        description: Enforce rmm::exec_policy_nosync instead of rmm::exec_policy
+        entry: '\brmm::exec_policy\s*\('
+        language: pygrep
+        types_or: [c, c++, cuda]
+        files: '^src/main/cpp/'
+  - repo: https://github.com/rapidsai/pre-commit-hooks
+    rev: v1.6.0
+    hooks:
+      - id: verify-copyright
+        args: [--fix]
+        files: |
+          (?x)
+            [.](cpp|hpp|cu|cuh|java|sh|yml|yaml|txt|xml|fbs)$|
+            (^|/)[^/]*(Dockerfile|Jenkinsfile)[^/]*$|
+            ^build/
+        exclude: ^thirdparty/
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v20.1.8
+    hooks:
+      - id: clang-format
+        types_or: [c, c++, cuda]
+        args: ["-fallback-style=none", "-style=file:thirdparty/cudf/.clang-format", "-i"]

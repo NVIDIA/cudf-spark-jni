@@ -1,0 +1,63 @@
+#!/bin/bash
+
+#
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# Build the cudf-spark-jni artifact in a Docker container with devtoolset
+
+set -e
+
+# Base paths relative to this script's location
+SCRIPTDIR=$(cd $(dirname $0); pwd)
+
+LOCAL_MAVEN_REPO=${LOCAL_MAVEN_REPO:-"$HOME/.m2/repository"}
+USE_GDS=${USE_GDS:-ON}
+export CMAKE_GENERATOR=${CMAKE_GENERATOR:-"Ninja"}
+# Make CUDA_VERSION consistent with the file run-in-docker
+export CUDA_VERSION=${CUDA_VERSION:-12.9.1}
+CUDA_CLASSIFIER=cuda${CUDA_VERSION%%.*}
+BUILD_FAULTINJ=${BUILD_FAULTINJ:-ON}
+BUILD_PROFILER=${BUILD_PROFILER:-ON}
+CMAKE_EXPORT_COMPILE_COMMANDS=${CMAKE_EXPORT_COMPILE_COMMANDS:-ON}
+
+if (( $# == 0 )); then
+  echo "Usage: $0 <Maven build arguments>"
+  exit 1
+fi
+
+# Set env for arm64 build, The possible values of 'uname -m' : [x86_64/i386/aarch64/mips/...]
+if [ "$(uname -m)" == "aarch64" ]; then
+  USE_GDS="OFF" # The GDS cuFiles RDMA libraries are not included in the arm64 CUDA toolkit.
+  # libcupti_static.a linked by cufaultinj and the profiler, does not exist in the arm64 CUDA toolkit.
+  BUILD_FAULTINJ="OFF"
+  BUILD_PROFILER="OFF"
+fi
+
+# disable the profiler and cufaultinj, since there are issues linking
+# against libcupti_static.a in CUDA 13
+if [ "$CUDA_CLASSIFIER" == "cuda13" ]; then
+  BUILD_FAULTINJ="OFF"
+  BUILD_PROFILER="OFF"
+fi
+
+$SCRIPTDIR/run-in-docker mvn \
+    -Dmaven.repo.local=$LOCAL_MAVEN_REPO \
+    -DUSE_GDS=$USE_GDS \
+    -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
+    -DBUILD_PROFILER=${BUILD_PROFILER} \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=${CMAKE_EXPORT_COMPILE_COMMANDS} \
+    -Dcuda.version=$CUDA_CLASSIFIER \
+    "$@"

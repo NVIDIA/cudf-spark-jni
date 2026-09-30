@@ -1,0 +1,1007 @@
+/*
+* Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+package com.nvidia.spark.rapids.jni;
+
+import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
+import ai.rapids.cudf.DType;
+import ai.rapids.cudf.HostColumnVector;
+import ai.rapids.cudf.HostColumnVectorCore;
+import ai.rapids.cudf.Table;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.DateTimeException;
+import java.time.DayOfWeek;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.zone.ZoneOffsetTransition;
+import java.time.zone.ZoneOffsetTransitionRule;
+import java.time.zone.ZoneRules;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.TimeZone;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Gpu timezone utility.
+ * <p>
+ * Provides the following APIs
+ * - Timezone rebasing APIs: `fromTimestampToUtcTimestamp`, etc.
+ * - Utilities for casting string with timezone to timestamp APIs
+ * - Loading, shutdown, and checking APIs, etc.
+ */
+public class GpuTimeZoneDB {
+  private static final Logger log = LoggerFactory.getLogger(GpuTimeZoneDB.class);
+
+  /**
+   * Timezone fixed transitions column, column type is:
+   * LIST<STRUCT<utcInstant: int64, localInstant: int64, offset: int32>>
+   * This is from `ZoneRules.getTransitions()`
+   */
+  private static HostColumnVector fixedTransitions;
+
+  /**
+   * Timezone DST rules column, column type is: LIST<INT32>
+   * This is from `ZoneRules.getTransitionRules()`
+   * `fixedTransitions` and `dstRules` compose the full timezone database.
+   * If a timezone has no DST, then the list is empty.
+   * If a timezone has DST, then the list has 12 integers, which contains 2
+   * rules(start rule and end rule)
+   * The integers in a list are:
+   * <p>
+   * index 0: month:int, // from 1 (January) to 12 (December)
+   * index 1: dayOfMonth: int, // from -28 to 31 excluding 0
+   * index 2: dayOfWeek: int, // from 0 (Monday) to 6 (Sunday), -1 means ignore
+   * index 3: timeDiffToMidnight: int, // transition time in seconds compared to
+   * midnight
+   * index 4: offsetBefore: int, // the offset before the cutover
+   * index 5: offsetAfter: int // The offset after the cutover
+   * index 6: the 2nd rule begin
+   * ...
+   * index 11: the 2nd rule end
+   *
+   */
+  private static HostColumnVector dstRules;
+
+  // Map from timezone name to the index in the timezone info table
+  private static java.util.Map<String, Integer> zoneIdToTable;
+
+  /**
+   * Used by Casting string with timezone to timestamp.
+   * Host column STRUCT<tz_name: string, index_to_tz_info_table: int>,
+   * sorted by timezone names.
+   * Casting string with timezone to timestamp needs loading all timezone.
+   * If this is not null, it indicates loading is successful, because it's the
+   * last variable to construct in `loadData` function.
+   * The tz_name column contains both normalized and non-normalized tz names.
+   */
+  private static volatile HostColumnVector tzNameToIndexMap;
+
+  /**
+   * Load the timezone database asynchronously.
+   * This should be called on startup of an executor.
+   * If `shutdown` was called ever, then this will not reload the cache.
+   */
+  public static void cacheDatabaseAsync() {
+    // start a new thread to load
+    Runnable runnable = () -> {
+      try {
+        cacheDatabaseImpl();
+      } catch (Exception e) {
+        log.error("cache timezone info cache failed", e);
+      }
+    };
+    Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+    thread.setName("gpu-timezone-database-0");
+    thread.setDaemon(true);
+    thread.start();
+  }
+
+  /**
+   * Verify Timezone database is already cached. Only for test purpose
+   * This function is synchronized, wait until the loading is done.
+   * Refer to `cacheDatabaseImpl` which is also synchronized.
+   * If loading was failed, throws an exception
+   * @throws RuntimeException if Timezone database loading was failed
+   */
+  static void verifyDatabaseCached() {
+    if (tzNameToIndexMap != null) {
+      // already loaded, this is the fast path
+      return;
+    }
+
+    // wait until loading is done
+    synchronized (GpuTimeZoneDB.class) {
+      if (tzNameToIndexMap == null) {
+        // null indicates error
+        throw new RuntimeException("Timezone DB loading was failed.");
+      }
+    }
+  }
+
+  /**
+   * Cache the database. This will take some time like several seconds.
+   * If one `cacheDatabase` is running, other `cacheDatabase` will wait until
+   * caching is done.
+   * If cache is exits, do not load cache again.
+   */
+  public static void cacheDatabase() {
+    cacheDatabaseImpl();
+  }
+
+  /**
+   * close the cache, used when Plugin is closing
+   */
+  public static synchronized void shutdown() {
+    closeResources();
+  }
+
+  private static synchronized void cacheDatabaseImpl() {
+    if (fixedTransitions == null) {
+      try {
+        loadData();
+      } catch (Exception e) {
+        closeResources();
+        throw e;
+      }
+    }
+  }
+
+  private static synchronized void closeResources() {
+    if (zoneIdToTable != null) {
+      zoneIdToTable.clear();
+      zoneIdToTable = null;
+    }
+    if (fixedTransitions != null) {
+      fixedTransitions.close();
+      fixedTransitions = null;
+    }
+    if (dstRules != null) {
+      dstRules.close();
+      dstRules = null;
+    }
+    if (tzNameToIndexMap != null) {
+      tzNameToIndexMap.close();
+      tzNameToIndexMap = null;
+    }
+  }
+
+  public static boolean isSupportedTimeZone(String zoneId) {
+    try {
+      // check that zoneID is valid and supported by Java
+      getZoneId(zoneId);
+      return true;
+    } catch (DateTimeException e) {
+      return false;
+    }
+  }
+
+  public static ColumnVector fromTimestampToUtcTimestamp(ColumnVector input, ZoneId currentTimeZone) {
+    // there is technically a race condition on shutdown. Shutdown could be called
+    // after
+    // the database is cached. This would result in a null pointer exception at some
+    // point
+    // in the processing. This should be rare enough that it is not a big deal.
+    Integer tzIndex = zoneIdToTable.get(currentTimeZone.normalized().toString());
+    try (Table timezoneInfo = getTimezoneInfo()) {
+      return new ColumnVector(convertTimestampColumnToUTC(input.getNativeView(),
+          timezoneInfo.getNativeView(), tzIndex));
+    }
+  }
+
+  public static ColumnVector fromUtcTimestampToTimestamp(ColumnVector input, ZoneId desiredTimeZone) {
+    // there is technically a race condition on shutdown. Shutdown could be called
+    // after
+    // the database is cached. This would result in a null pointer exception at some
+    // point
+    // in the processing. This should be rare enough that it is not a big deal.
+    Integer tzIndex = zoneIdToTable.get(desiredTimeZone.normalized().toString());
+    try (Table timezoneInfo = getTimezoneInfo()) {
+      return new ColumnVector(convertUTCTimestampColumnToTimeZone(input.getNativeView(),
+          timezoneInfo.getNativeView(), tzIndex));
+    }
+  }
+
+  // Ported from Spark. Used to format timezone ID string with (+|-)h:mm and
+  // (+|-)hh:m
+  public static ZoneId getZoneId(String timeZoneId) {
+    String formattedZoneId = timeZoneId
+        // To support the (+|-)h:mm format because it was supported before Spark 3.0.
+        .replaceFirst("(\\+|\\-)(\\d):", "$10$2:")
+        // To support the (+|-)hh:m format because it was supported before Spark 3.0.
+        .replaceFirst("(\\+|\\-)(\\d\\d):(\\d)$", "$1$2:0$3");
+    return ZoneId.of(formattedZoneId, ZoneId.SHORT_IDS);
+  }
+
+  /**
+   * Get the time difference in seconds compared to the midnight for a transition
+   * rule.
+   * Note: The returned time is based on Time 00:00:00, may be negative.
+   * E.g.: Give transition date "2000-01-02", and transition time diff in seconds
+   * "-3600",
+   * then the actual transition datetime is "2000-01-01 23:00:00"
+   * <p>
+   * A midnight-at-end-of-day rule is represented as 86400 seconds so the
+   * transition occurs at midnight on the following day.
+   * This method is visible for testing.
+   *
+   * @param rule transition rule
+   * @return the time diff in seconds compared to the midnight
+   */
+  static int getTransitionRuleTimeDiffComparedToMidnight(ZoneOffsetTransitionRule rule) {
+    int localTimeInSeconds = rule.isMidnightEndOfDay()
+        ? 24 * 3_600
+        : rule.getLocalTime().toSecondOfDay();
+    ZoneOffsetTransitionRule.TimeDefinition timeDef = rule.getTimeDefinition();
+    if (ZoneOffsetTransitionRule.TimeDefinition.UTC == timeDef) {
+      // UTC mode
+      return localTimeInSeconds + rule.getOffsetBefore().getTotalSeconds();
+    } else if (ZoneOffsetTransitionRule.TimeDefinition.STANDARD == timeDef) {
+      // STANDARD mode
+      return localTimeInSeconds + rule.getOffsetBefore().getTotalSeconds()
+          - rule.getStandardOffset().getTotalSeconds();
+    } else {
+      // WALL mode
+      return localTimeInSeconds;
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static synchronized void loadData() {
+    try {
+      // Spark uses timezones from TimeZone.getAvailableIDs
+      // We use ZoneId.normalized to reduce the number of timezone names.
+      // `fixedTransitions` and `dstRules` only save info for normalized timezones,
+      // while `zoneIdToTable` contains both normalized and non-normalized timezones.
+      //
+      // e.g.:
+      // "Etc/GMT" and "Etc/GMT+0" are from TimeZone.getAvailableIDs
+      // ZoneId.of("Etc/GMT").normalized.getId = Z;
+      // ZoneId.of("Etc/GMT+0").normalized.getId = Z
+      // Both Etc/GMT and Etc/GMT+0 have normalized Z.
+      // Use the normalized form will dedupe timezone info table size.
+      //
+      // For `fromTimestampToUtcTimestamp` and `fromUtcTimestampToTimestamp`, it will
+      // first normalize the timezone, e.g.: Etc/GMT => Z, then use Z to find the
+      // transition index. But for cast string(with timezone) to timestamp, it may
+      // contain non-normalized tz. E.g.: '2025-01-01 00:00:00 Etc/GMT', so should
+      // map "Etc/GMT", "Etc/GMT+0" and "Z" to the same transition index.
+      // This means size of `zoneIdToTable` > `fixedTransitions` and `dstRules` size
+      //
+
+      // get and sort timezones
+      String[] timeZones = TimeZone.getAvailableIDs();
+      List<String> sortedTimeZones = new ArrayList<>(Arrays.asList(timeZones));
+      // Note: Z is a special normalized timezone from UTC:
+      // ZoneId.of("UTC").normalized = Z
+      // TimeZone.getAvailableIDs does not contain Z
+      // Should add Z to `zoneIdToTable`
+      sortedTimeZones.add("Z");
+      Collections.sort(sortedTimeZones);
+
+      List<List<HostColumnVector.StructData>> masterTransitions = new ArrayList<>();
+      List<List<Integer>> masterDsts = new ArrayList<>();
+
+      zoneIdToTable = new HashMap<>();
+      for (String nonNormalizedTz : sortedTimeZones) {
+        // we use the normalized form to dedupe
+        ZoneId zoneId = ZoneId.of(nonNormalizedTz, ZoneId.SHORT_IDS).normalized();
+
+        String normalizedTz = zoneId.getId();
+        ZoneRules zoneRules = zoneId.getRules();
+        if (!zoneIdToTable.containsKey(normalizedTz)) {
+          List<ZoneOffsetTransition> zoneOffsetTransitions = new ArrayList<>(zoneRules.getTransitions());
+          zoneOffsetTransitions.sort(Comparator.comparing(ZoneOffsetTransition::getInstant));
+          List<ZoneOffsetTransitionRule> dstTransitionRules = zoneRules.getTransitionRules();
+          int idx = masterTransitions.size();
+          List<HostColumnVector.StructData> data = new ArrayList<>();
+          List<Integer> dstData = new ArrayList<>();
+          if (zoneRules.isFixedOffset()) {
+            data.add(new HostColumnVector.StructData(Long.MIN_VALUE, Long.MIN_VALUE,
+                zoneRules.getOffset(Instant.now()).getTotalSeconds()));
+          } else {
+            // Capture the first official offset (before any transition) using Long min
+            ZoneOffsetTransition first = zoneOffsetTransitions.get(0);
+            data.add(new HostColumnVector.StructData(Long.MIN_VALUE, Long.MIN_VALUE,
+                first.getOffsetBefore().getTotalSeconds()));
+            zoneOffsetTransitions.forEach(t -> {
+              // Whether transition is an overlap vs gap.
+              // In Spark:
+              // if it's a gap, then we use the offset after *on* the instant
+              // If it's an overlap, then there are 2 sets of valid timestamps in that are
+              // overlapping
+              // So, for the transition to UTC, you need to compare to instant + {offset
+              // before}
+              // The time math still uses {offset after}
+              if (t.isGap()) {
+                data.add(
+                    new HostColumnVector.StructData(
+                        t.getInstant().getEpochSecond(),
+                        t.getInstant().getEpochSecond() + t.getOffsetAfter().getTotalSeconds(),
+                        t.getOffsetAfter().getTotalSeconds()));
+              } else {
+                data.add(
+                    new HostColumnVector.StructData(
+                        t.getInstant().getEpochSecond(),
+                        t.getInstant().getEpochSecond() + t.getOffsetBefore().getTotalSeconds(),
+                        t.getOffsetAfter().getTotalSeconds()));
+              }
+            });
+
+            // collect DST rules
+            if (!dstTransitionRules.isEmpty() && dstTransitionRules.size() != 2) {
+              // Checked all the timezones, the size of DST rules for a timezone is 2.
+              throw new IllegalStateException("DST rules size is not 2.");
+            }
+
+            dstTransitionRules.forEach(dstRule -> {
+              DayOfWeek dow = dstRule.getDayOfWeek();
+              int dayOfWeek = dow != null ? dow.getValue() - 1 : -1;
+              dstData.add(dstRule.getMonth().getValue()); // from 1 (January) to 12 (December)
+              dstData.add(dstRule.getDayOfMonthIndicator()); // from -28 to 31 excluding 0
+              dstData.add(dayOfWeek); // from 0 (Monday) to 6 (Sunday), -1 means not specified
+              dstData.add(getTransitionRuleTimeDiffComparedToMidnight(dstRule)); // transition time
+              dstData.add(dstRule.getOffsetBefore().getTotalSeconds()); // the offset before the cutover
+              dstData.add(dstRule.getOffsetAfter().getTotalSeconds()); // the offset after the cutover
+            });
+          }
+          masterTransitions.add(data);
+          masterDsts.add(dstData);
+          // add index for normalized timezone
+          zoneIdToTable.put(normalizedTz, idx);
+        } // end of: if (!zoneIdToTable.containsKey(normalizedTz)) {
+
+        // Add index for non-normalized timezones
+        // e.g.:
+        // normalize "Etc/GMT" = Z
+        // normalize "Etc/GMT+0" = Z
+        // use the index of Z for Etc/GMT and Etc/GMT+0
+        zoneIdToTable.put(nonNormalizedTz, zoneIdToTable.get(normalizedTz));
+      } // end of for
+
+      fixedTransitions = HostColumnVector.fromLists(getFixedTransitionDataType(),
+          masterTransitions.toArray(new List[0]));
+      dstRules = HostColumnVector.fromLists(getDstDataType(), masterDsts.toArray(new List[0]));
+      tzNameToIndexMap = getTzNameToIndexMap(sortedTimeZones, zoneIdToTable);
+    } catch (Exception e) {
+      throw new IllegalStateException("load timezone DB cache failed!", e);
+    }
+  }
+
+  private static HostColumnVector.DataType getFixedTransitionDataType() {
+    return new HostColumnVector.ListType(false,
+        new HostColumnVector.StructType(false,
+            new HostColumnVector.BasicType(false, DType.INT64),
+            new HostColumnVector.BasicType(false, DType.INT64),
+            new HostColumnVector.BasicType(false, DType.INT32)));
+  }
+
+  private static HostColumnVector.DataType getDstDataType() {
+    return new HostColumnVector.ListType(false,
+        new HostColumnVector.BasicType(false, DType.INT32));
+  }
+
+  /**
+   * Get the timezone info table, which contains two columns:
+   * - fixed transitions: LIST<STRUCT<utcInstant: int64, localInstant: int64,
+   * offset: int32>>
+   * - dst rules: LIST<INT32>
+   * The caller is responsible to close the returned table.
+   * 
+   * @return timezone info table
+   */
+  public static Table getTimezoneInfo() {
+    verifyDatabaseCached();
+    try (ColumnVector fixedInfo = fixedTransitions.copyToDevice();
+        ColumnVector dstInfo = dstRules.copyToDevice()) {
+      return new Table(fixedInfo, dstInfo);
+    }
+  }
+
+  private static Table getTimezoneInfo(int tzIndex) {
+    try (HostColumnVector.ColumnBuilder fixedRow =
+            new HostColumnVector.ColumnBuilder(getFixedTransitionDataType(), 1);
+        HostColumnVector.ColumnBuilder dstRow =
+            new HostColumnVector.ColumnBuilder(getDstDataType(), 1)) {
+      HostColumnVectorCore transitions = fixedTransitions.getChildColumnView(0);
+      HostColumnVector.ColumnBuilder transition = fixedRow.getChild(0);
+      long transitionEnd = fixedTransitions.getEndListOffset(tzIndex);
+      for (long i = fixedTransitions.getStartListOffset(tzIndex); i < transitionEnd; i++) {
+        transition.getChild(0).append(transitions.getChildColumnView(0).getLong(i));
+        transition.getChild(1).append(transitions.getChildColumnView(1).getLong(i));
+        transition.getChild(2).append(transitions.getChildColumnView(2).getInt(i));
+        transition.endStruct();
+      }
+      fixedRow.endList();
+
+      HostColumnVectorCore rules = dstRules.getChildColumnView(0);
+      long ruleEnd = dstRules.getEndListOffset(tzIndex);
+      for (long i = dstRules.getStartListOffset(tzIndex); i < ruleEnd; i++) {
+        dstRow.getChild(0).append(rules.getInt(i));
+      }
+      dstRow.endList();
+
+      try (ColumnVector fixedInfo = fixedRow.buildAndPutOnDevice();
+          ColumnVector dstInfo = dstRow.buildAndPutOnDevice()) {
+        return new Table(fixedInfo, dstInfo);
+      }
+    }
+  }
+
+  /**
+   * FOR TESTING PURPOSES ONLY, DO NOT USE IN PRODUCTION
+   * This method retrieves the raw list of struct data that forms the list of
+   * fixed transitions for a particular zoneId.
+   * It has default visibility so the test can access it.
+   * 
+   * @param zoneId timezone id
+   * @return list of fixed transitions
+   */
+  static synchronized List getHostTransitions(String zoneId) {
+    verifyDatabaseCached();
+    zoneId = ZoneId.of(zoneId).normalized().toString(); // we use the normalized form to dedupe
+    Integer idx = zoneIdToTable.get(zoneId);
+    if (idx == null) {
+      return null;
+    }
+    return fixedTransitions.getList(idx);
+  }
+
+  /**
+   * Generate a map from timezone name to index of transition table.
+   * return a column of STRUCT<tz_name: string, index_to_tz_info_table: int>
+   * The struct column is sorted by tz_name, it is used to query the index to the
+   * transition table.
+   *
+   * @param sortedTimezones is sorted and supported timezones
+   * @param zoneIdToTable   is a map from non-normalized timezone to index in
+   *                        transition table
+   */
+  private static HostColumnVector getTzNameToIndexMap(List<String> sortedTimezones,
+      java.util.Map<String, Integer> zoneIdToTable) {
+    HostColumnVector.DataType type = new HostColumnVector.StructType(false,
+        new HostColumnVector.BasicType(false, DType.STRING),
+        new HostColumnVector.BasicType(false, DType.INT32));
+    ArrayList<HostColumnVector.StructData> data = new ArrayList<>();
+
+    for (String tz : sortedTimezones) {
+      Integer indexToTable = zoneIdToTable.get(tz);
+      if (indexToTable != null) {
+        data.add(new HostColumnVector.StructData(tz, indexToTable));
+      } else {
+        throw new IllegalStateException("Could not find timezone " + tz);
+      }
+    }
+    return HostColumnVector.fromStructs(type, data);
+  }
+
+  /**
+   * Return a struct column which contains timezone information
+   * STRUCT<tz_name: string, index_to_tz_info_table: int>
+   * The struct column is sorted by tz_name, it is used to query the index to the
+   * timezone information table from timezone name.
+   * The caller is responsible to close the returned column vector.
+   */
+  public static synchronized ColumnVector getTzNameToIndexMap() {
+    verifyDatabaseCached();
+    return tzNameToIndexMap.copyToDevice();
+  }
+
+  public static Integer getIndexToTransitionTable(String timezone) {
+    verifyDatabaseCached();
+    return zoneIdToTable.get(timezone);
+  }
+
+  /**
+   * Convert the intermediate result of casting string to timestamp.
+   * This is used for casting string with timezone to timestamp.
+   *
+   * @param invalid            if the parsing from string to timestamp is valid
+   * @param input_seconds      long column with UTC seconds part parsed from string
+   *                           E.g.: for string '2025-01-01 00:00:00.123456',
+   *                           the input seconds is from '2025-01-01 00:00:00'
+   * @param input_microseconds int column with UTC microseconds part parsed from string
+   *                           E.g.: for string '2025-01-01 00:00:00.123456',
+   *                           the input microseconds is from '.123456'
+   * @param tzType             fixed offset or other type, e.g.: fixed offset type +01:02:03
+   * @param tzOffset           if `tzType` is fixed, it stores the parsed offset in seconds.
+   * @param tzIndex            the index to the timezone info table
+   * @return timestamp column in microseconds
+   */
+  public static ColumnVector fromTimestampToUtcTimestampWithTzCv(
+      ColumnView invalid,
+      ColumnView input_seconds,
+      ColumnView input_microseconds,
+      ColumnView tzType,
+      ColumnView tzOffset,
+      ColumnView tzIndex) {
+    try (Table timezoneInfo = getTimezoneInfo()) {
+      return new ColumnVector(convertTimestampColumnToUTCWithTzCv(
+          input_seconds.getNativeView(),
+          input_microseconds.getNativeView(),
+          invalid.getNativeView(),
+          tzType.getNativeView(),
+          tzOffset.getNativeView(),
+          timezoneInfo.getNativeView(),
+          tzIndex.getNativeView()));
+    }
+  }
+
+  public static boolean isDST(String timezone) {
+    ZoneId zoneId = ZoneId.of(timezone, ZoneId.SHORT_IDS);
+    return !zoneId.getRules().getTransitionRules().isEmpty();
+  }
+
+  /**
+   * ORC stores timestamp seconds as a diff from 2015-01-01 00:00:00 in the writer timezone.
+   * Use the writer offset at that base timestamp so native code can reconstruct the same
+   * timestamp frame before applying ORC's negative nanos borrow and timezone conversion.
+   */
+  private static int getOrc2015YearBaseOffsetMillis(String timezoneId, OrcTimezoneInfo info) {
+    if (info.transitions == null && info.dstRule == null) {
+      return info.rawOffset;
+    }
+    TimeZone tz = TimeZone.getTimeZone(getZoneId(timezoneId).getId());
+    return tz.getOffset(OrcTimezoneInfo.utcMillisForDate(2015, 1, 1));
+  }
+
+  private static ColumnVector getTransitionsForUtilTZ(OrcTimezoneInfo info) {
+    long[] transitions = info.transitions;
+    if (needsTerminalOffsetSentinel(info)) {
+      transitions = Arrays.copyOf(transitions, transitions.length + 1);
+      transitions[transitions.length - 1] = Long.MAX_VALUE;
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromLongs(transitions)) {
+      return hcv.copyToDevice();
+    }
+  }
+
+  private static ColumnVector getOffsetsForUtilTZ(OrcTimezoneInfo info) {
+    int[] offsets = info.offsets;
+    if (needsTerminalOffsetSentinel(info)) {
+      offsets = Arrays.copyOf(offsets, offsets.length + 1);
+      offsets[offsets.length - 1] = offsets[offsets.length - 2];
+    }
+    try (HostColumnVector hcv = HostColumnVector.fromInts(offsets)) {
+      return hcv.copyToDevice();
+    }
+  }
+
+  private static boolean needsTerminalOffsetSentinel(OrcTimezoneInfo info) {
+    // Native lookup normally falls back to rawOffset beyond the last historical
+    // transition. Some JDK TimeZone implementations instead retain the final
+    // wall offset indefinitely. Keep every timestamp_us lookup inside the table
+    // with a Long.MAX_VALUE-millisecond sentinel when those offsets differ.
+    return info.dstRule == null
+        && info.offsets != null
+        && info.offsets.length > 0
+        && info.offsets[info.offsets.length - 1] != info.rawOffset;
+  }
+
+  private static Table getTableForUtilTZ(OrcTimezoneInfo info) {
+    if (info.transitions == null) {
+      return null;
+    }
+    try (ColumnVector trans = getTransitionsForUtilTZ(info);
+        ColumnVector offsets = getOffsetsForUtilTZ(info)) {
+      return new Table(trans, offsets);
+    } catch (Exception e) {
+      throw new IllegalStateException("get timezone info for Orc failed!", e);
+    }
+  }
+
+  /**
+   * Only for testing purpose.
+   * Get all supported timezones for ORC timezone conversion. The returned list
+   * is the same as {@link OrcTimezoneInfo#getAllTimezoneIds()}: it is already
+   * filtered to ids that {@link OrcTimezoneInfo#get(String)} can build, so
+   * callers do not need to pre-filter via {@link #isSupportedTimeZone(String)}.
+   */
+  static List<String> getOrcSupportedTimezones() {
+    return OrcTimezoneInfo.getAllTimezoneIds();
+  }
+
+  /**
+   * Reusable device-side metadata for converting ORC timestamps between one writer/reader
+   * timezone pair. This context is not thread-safe. Callers must not use it concurrently from
+   * multiple threads or call {@link #close()} while a conversion is in progress.
+   */
+  public static final class OrcTimezoneContext implements AutoCloseable {
+    private Table writerTzInfoTable;
+    private Table readerTzInfoTable;
+    private Table readerJavaTimeTzInfoTable;
+    private final long writerTzOffsetAtOrc2015BaseUs;
+    private final int writerInitialOffset;
+    private final int writerRawOffset;
+    private final int[] writerDstRule;
+    private final int readerInitialOffset;
+    private final int readerRawOffset;
+    private final int[] readerDstRule;
+    private final long readerFirstTransitionUs;
+    private final long readerHistoricalDifferenceEndUtcUs;
+    private final long readerHistoricalDifferenceEndLocalUs;
+    private final String readerJavaTimeZoneId;
+    private int readerJavaTimeTzIndex = -1;
+    private final boolean writerReaderRulesDiffer;
+    private boolean closed;
+
+    private OrcTimezoneContext(Table writerTzInfoTable, Table readerTzInfoTable,
+        String writerTimezone, String readerTimezone,
+        OrcTimezoneInfo writerTzInfo, OrcTimezoneInfo readerTzInfo) {
+      this.writerTzInfoTable = writerTzInfoTable;
+      this.readerTzInfoTable = readerTzInfoTable;
+      this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
+          getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
+      this.writerInitialOffset = writerTzInfo.initialOffset;
+      this.writerRawOffset = writerTzInfo.rawOffset;
+      this.writerDstRule = dstRuleToArray(writerTzInfo.dstRule);
+      this.readerInitialOffset = readerTzInfo.initialOffset;
+      this.readerRawOffset = readerTzInfo.rawOffset;
+      this.readerDstRule = dstRuleToArray(readerTzInfo.dstRule);
+      this.readerFirstTransitionUs =
+          readerTzInfo.transitions == null || readerTzInfo.transitions.length == 0
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.transitions[0] + readerTzInfo.rawOffset);
+      this.readerHistoricalDifferenceEndUtcUs = readerTzInfo.historicalDifferenceEndUtcMillis
+          == Long.MIN_VALUE
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.historicalDifferenceEndUtcMillis);
+      this.readerHistoricalDifferenceEndLocalUs = readerTzInfo.historicalDifferenceEndLocalMillis
+          == Long.MIN_VALUE
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.historicalDifferenceEndLocalMillis);
+      this.readerJavaTimeZoneId = getZoneId(readerTimezone).normalized().toString();
+      TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone));
+      TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone));
+      this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
+    }
+
+    /**
+     * Returns the reader timezone's first transition in the local ORC timestamp frame.
+     * This method is retained for compatibility with existing callers.
+     *
+     * @return the first transition in microseconds, or {@link Long#MIN_VALUE} if the reader
+     *         timezone has no transitions
+     * @throws IllegalStateException if this context is closed
+     */
+    public long getReaderFirstTransitionUs() {
+      ensureOpen();
+      return readerFirstTransitionUs;
+    }
+
+    long getReaderHistoricalDifferenceEndUtcUs() {
+      ensureOpen();
+      return readerHistoricalDifferenceEndUtcUs;
+    }
+
+    long getReaderHistoricalDifferenceEndLocalUs() {
+      ensureOpen();
+      return readerHistoricalDifferenceEndLocalUs;
+    }
+
+    private void ensureOpen() {
+      if (closed) {
+        throw new IllegalStateException("ORC timezone context is closed");
+      }
+    }
+
+    private void ensureJavaTimeInfo() {
+      ensureOpen();
+      if ((readerHistoricalDifferenceEndUtcUs == Long.MIN_VALUE
+          && readerHistoricalDifferenceEndLocalUs == Long.MIN_VALUE)
+          || readerJavaTimeTzInfoTable != null) {
+        return;
+      }
+
+      verifyDatabaseCached();
+      Integer tzIndex = zoneIdToTable.get(readerJavaTimeZoneId);
+      if (tzIndex == null) {
+        throw new IllegalStateException(
+            "java.time timezone is not present in the GPU timezone database: "
+                + readerJavaTimeZoneId);
+      }
+      // Copy only the reader row, rather than retaining the full database for each context.
+      readerJavaTimeTzInfoTable = getTimezoneInfo(tzIndex);
+      readerJavaTimeTzIndex = 0;
+    }
+
+    @Override
+    public void close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      Table writerTable = writerTzInfoTable;
+      Table readerTable = readerTzInfoTable;
+      Table readerJavaTimeTable = readerJavaTimeTzInfoTable;
+      writerTzInfoTable = null;
+      readerTzInfoTable = null;
+      readerJavaTimeTzInfoTable = null;
+      Arms.closeAll(writerTable, readerTable, readerJavaTimeTable);
+    }
+  }
+
+  /**
+   * Build reusable GPU metadata for one ORC writer/reader timezone pair.
+   *
+   * @param writerTimezone writer timezone from ORC stripe metadata
+   * @param readerTimezone reader timezone from the current JVM default timezone
+   * @return a context owned by the caller
+   */
+  public static OrcTimezoneContext buildOrcTimezoneContext(
+      String writerTimezone, String readerTimezone) {
+    OrcTimezoneInfo writerTzInfo = OrcTimezoneInfo.get(writerTimezone);
+    OrcTimezoneInfo readerTzInfo = OrcTimezoneInfo.get(readerTimezone);
+    Table writerTzInfoTable = null;
+    Table readerTzInfoTable = null;
+    try {
+      writerTzInfoTable = getTableForUtilTZ(writerTzInfo);
+      readerTzInfoTable = getTableForUtilTZ(readerTzInfo);
+      return new OrcTimezoneContext(writerTzInfoTable, readerTzInfoTable,
+          writerTimezone, readerTimezone, writerTzInfo, readerTzInfo);
+    } catch (RuntimeException | Error e) {
+      try {
+        Arms.closeAll(writerTzInfoTable, readerTzInfoTable);
+      } catch (Throwable closeError) {
+        if (e != closeError) {
+          e.addSuppressed(closeError);
+        }
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Convert timestamps using a pre-built ORC timezone context. This entry point is staged for the
+   * DST-enabled dispatch path so callers can reuse transition tables across timestamp columns.
+   *
+   * @param input input timestamp column in microseconds
+   * @param context writer/reader timezone metadata; must not be used concurrently or closed while
+   *                this method is running
+   * @return converted timestamp column
+   */
+  public static ColumnVector convertOrcTimezones(
+      ColumnView input, OrcTimezoneContext context) {
+    context.ensureOpen();
+    return new ColumnVector(convertOrcTimezonesWithRules(
+        input.getNativeView(),
+        context.writerTzOffsetAtOrc2015BaseUs,
+        context.writerTzInfoTable != null ? context.writerTzInfoTable.getNativeView() : 0L,
+        context.writerInitialOffset,
+        context.writerRawOffset,
+        context.writerDstRule,
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
+        context.readerDstRule,
+        context.writerReaderRulesDiffer));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics using a pre-built
+   * ORC timezone context. The input must be TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS.
+   * Millisecond input supports floating-point schema evolution without overflowing a preliminary
+   * conversion to microseconds.
+   *
+   * @param input values to convert
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, OrcTimezoneContext context) {
+    context.ensureOpen();
+    return new ColumnVector(convertOrcFromUtcWithRules(
+        input.getNativeView(),
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
+        context.readerDstRule));
+  }
+
+  /**
+   * Convert a physical ORC timestamp to Spark's timestamp representation.
+   *
+   * <p>This fuses Apache ORC's {@link TimeZone} writer/reader conversion with the historical
+   * {@link ZoneId} rebase performed when Spark materializes a {@code java.sql.Timestamp}.</p>
+   *
+   * @param input physical ORC timestamps read as TIMESTAMP_MICROSECONDS
+   * @param context writer/reader timezone metadata
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector convertOrcTimestampToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_PHYSICAL_TIMESTAMP);
+  }
+
+  /**
+   * Convert integer-derived local timestamps produced by ORC schema evolution to Spark timestamps.
+   *
+   * <p>This preserves the offset selected by ORC's {@link TimeZone}-based conversion when Spark's
+   * historical rebase encounters an ambiguous local time.</p>
+   *
+   * @param input local TIMESTAMP_MICROSECONDS values
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector convertOrcIntegerTimestampToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_LOCAL_TIMESTAMP);
+  }
+
+  /**
+   * Apply Spark's historical rebase to an instant already converted by Apache ORC.
+   *
+   * <p>Floating-point schema evolution must apply the legacy timezone offset before rounding to
+   * milliseconds, then rebase that rounded instant. Rounding can cross a historical transition,
+   * so this operation cannot be combined with the earlier offset lookup.</p>
+   *
+   * @param input already converted and rounded TIMESTAMP_MICROSECONDS values
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector rebaseOrcInstantToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_INSTANT);
+  }
+
+  // Keep these values synchronized with orc_timestamp_kind in timezones.hpp.
+  private static final int ORC_PHYSICAL_TIMESTAMP = 0;
+  private static final int ORC_LOCAL_TIMESTAMP = 1;
+  private static final int ORC_INSTANT = 2;
+
+  private static ColumnVector convertOrcToSpark(
+      ColumnView input, OrcTimezoneContext context, int inputKind) {
+    context.ensureJavaTimeInfo();
+    return new ColumnVector(convertOrcToSparkWithRules(
+        input.getNativeView(),
+        inputKind,
+        context.writerTzOffsetAtOrc2015BaseUs,
+        context.writerTzInfoTable != null ? context.writerTzInfoTable.getNativeView() : 0L,
+        context.writerInitialOffset,
+        context.writerRawOffset,
+        context.writerDstRule,
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
+        context.readerDstRule,
+        context.writerReaderRulesDiffer,
+        context.readerJavaTimeTzInfoTable != null
+            ? context.readerJavaTimeTzInfoTable.getNativeView() : 0L,
+        context.readerJavaTimeTzIndex,
+        context.readerHistoricalDifferenceEndUtcUs,
+        context.readerHistoricalDifferenceEndLocalUs));
+  }
+
+  /**
+   * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics.
+   *
+   * @param input TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS values
+   * @param readerTimezone target timezone
+   * @return converted values with the same type as {@code input}
+   */
+  public static ColumnVector convertOrcFromUtc(
+      ColumnView input, String readerTimezone) {
+    try (OrcTimezoneContext context =
+        buildOrcTimezoneContext(readerTimezone, readerTimezone)) {
+      return convertOrcFromUtc(input, context);
+    }
+  }
+
+  private static int[] dstRuleToArray(OrcDstRuleExtractor.DstRule rule) {
+    if (rule == null) {
+      return null;
+    }
+    // Keep this field order synchronized with parse_dst_rule in GpuTimeZoneDBJni.cpp.
+    return new int[]{
+        rule.dstSavings,
+        rule.startMonth,
+        rule.startDay,
+        rule.startDayOfWeek,
+        rule.startTime,
+        rule.startTimeMode.nativeValue(),
+        rule.startMode.nativeValue(),
+        rule.endMonth,
+        rule.endDay,
+        rule.endDayOfWeek,
+        rule.endTime,
+        rule.endTimeMode.nativeValue(),
+        rule.endMode.nativeValue()
+    };
+  }
+
+  /**
+   * Convert timestamps between writer/reader timezones for ORC reading.
+   * Similar to Apache ORC, this first reconstructs the timestamp from ORC's
+   * writer-timezone 2015 base instant and applies the negative nanos borrow,
+   * then applies the offset from
+   * `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`.
+   * For more details, refer to:
+   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/TreeReaderFactory.java#L1284-L1286">borrow logic</a>
+   * and
+   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/SerializationUtils.java#L1440">timezone conversion logic</a>
+   *
+   * @param input          input timestamp column in microseconds.
+   * @param writerTimezone writer timezone, it's from ORC stripe metadata.
+   * @param readerTimezone reader timezone, it's from current JVM default
+   *                       timezone.
+   * @return timestamp column in microseconds after converting between timezones
+   */
+  public static ColumnVector convertOrcTimezones(
+      ColumnVector input,
+      String writerTimezone,
+      String readerTimezone) {
+    try (OrcTimezoneContext context =
+        buildOrcTimezoneContext(writerTimezone, readerTimezone)) {
+      return convertOrcTimezones(input, context);
+    }
+  }
+
+  private static native long convertTimestampColumnToUTC(long input, long timezoneInfo, int tzIndex);
+
+  private static native long convertUTCTimestampColumnToTimeZone(long input, long timezoneInfo, int tzIndex);
+
+  private static native long convertTimestampColumnToUTCWithTzCv(
+      long input_seconds, long input_microseconds, long invalid, long tzType,
+      long tzOffset, long timezoneInfo, long tzIndex);
+
+  private static native long convertOrcTimezonesWithRules(
+      long input,
+      long writerTzOffsetAtOrc2015BaseUs,
+      long writerTzInfoTable,
+      int writerTzInitialOffset,
+      int writerTzRawOffset,
+      int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule,
+      boolean writerReaderRulesDiffer);
+
+  private static native long convertOrcFromUtcWithRules(
+      long input,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule);
+
+  private static native long convertOrcToSparkWithRules(
+      long input,
+      int inputKind,
+      long writerTzOffsetAtOrc2015BaseUs,
+      long writerTzInfoTable,
+      int writerTzInitialOffset,
+      int writerTzRawOffset,
+      int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule,
+      boolean writerReaderRulesDiffer,
+      long javaTimeInfoTable,
+      int javaTimeTzIndex,
+      long readerHistoricalDifferenceEndUtcUs,
+      long readerHistoricalDifferenceEndLocalUs);
+}

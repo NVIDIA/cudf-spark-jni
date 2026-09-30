@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import sys
+from argparse import ArgumentParser
+
+from utils import EnvDefault, PullRequest, strtobool
+
+
+def main():
+    parser = ArgumentParser(description="Submodule Sync")
+    parser.add_argument("--owner", action=EnvDefault, env="OWNER",
+                        help="github token, will try use env OWNER if empty")
+    parser.add_argument("--repo", action=EnvDefault, env="REPO",
+                        help="repo name, will try use env REPO if empty")
+    parser.add_argument("--head", action=EnvDefault, env="HEAD",
+                        help="HEAD ref, will try use env HEAD if empty")
+    parser.add_argument("--base", action=EnvDefault, env="BASE",
+                        help="Base ref, will try use env BASE if empty")
+    parser.add_argument("--token", action=EnvDefault, env="TOKEN",
+                        help="github token, will try use env TOKEN if empty")
+    parser.add_argument("--sha", required=True,
+                        help="current HEAD commit SHA")
+    parser.add_argument("--cudf_sha", required=True,
+                        help="cudf commit SHA")
+    parser.add_argument("--passed", default=False, type=lambda x: bool(strtobool(x)),
+                        help="if the test passed")
+    parser.add_argument("--delete_head", default=False, type=lambda x: bool(strtobool(x)),
+                        help="if delete HEAD branch after auto-merge")
+    args = parser.parse_args()
+
+    pr = PullRequest(head_owner=args.owner, head=args.head, head_token=args.token,
+                     base_owner=args.owner, repo=args.repo, base=args.base, base_token=args.token)
+    try:
+        if exist := pr.get_open():
+            number = exist[0].get('number')
+            sha = exist[0].get('head').get('sha')
+        else:
+            params = {
+                'title': f"[submodule-sync] {pr.head} to {pr.base} [skip ci] [bot]",
+                'head': f"{pr.head_owner}:{pr.head}",
+                'base': pr.base,
+                'body': "submodule-sync to create a PR keeping thirdparty/cudf up-to-date.\n"
+                        f"HEAD commit SHA: {args.sha}, "
+                        f"cudf commit SHA: https://github.com/NVIDIA/cudf/commit/{args.cudf_sha}\n\n"
+                        "This PR will be auto-merged if test passed. "
+                        "If failed, it will remain open until test pass or manually fix.",
+                'maintainer_can_modify': True
+            }
+            number, sha, term = pr.create(params)
+            if term:  # no change between HEAD and BASE
+                sys.exit(0)
+
+        pr.comment(number, content=f"HEAD commit SHA: {args.sha}, "
+                                   f"CUDF commit SHA: https://github.com/NVIDIA/cudf/commit/{args.cudf_sha}\n"
+                                   f"Test passed: **{args.passed}**")
+
+        if args.passed:
+            if args.sha == sha:
+                pr.auto_merge(number, sha, merge_method='squash')
+                if args.delete_head:
+                    pr.delete_head()
+            else:
+                raise Exception(f'Failed to auto-merge, inconsistent HEAD sha local:{args.sha}, remote: {sha}')
+    except Exception as e:
+        print(e)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

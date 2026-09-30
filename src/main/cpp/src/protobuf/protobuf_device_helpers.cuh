@@ -1,0 +1,399 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include "protobuf/protobuf_types.cuh"
+
+#include <cudf/strings/detail/utf8.hpp>
+#include <cudf/utilities/error.hpp>
+
+#include <cuda/atomic>
+#include <cuda/std/limits>
+#include <cuda/std/type_traits>
+#include <cuda/std/utility>
+#include <cuda/stream>
+
+#include <type_traits>
+
+namespace spark_rapids_jni::protobuf::detail {
+
+// ============================================================================
+// Device helper functions
+// ============================================================================
+
+struct proto_tag {
+  int field_number;
+  proto_wire_type wire_type;
+};
+
+template <typename T>
+  requires(cuda::std::is_same_v<T, uint32_t> || cuda::std::is_same_v<T, uint64_t>)
+__device__ inline bool read_varint(uint8_t const* cur, uint8_t const* end, T& out, int& bytes)
+{
+  out   = 0;
+  bytes = 0;
+  // Protobuf varint uses 7 bits per byte with MSB as continuation flag.
+  for (int shift = 0; cur < end && bytes < MAX_VARINT_BYTES; shift += 7) {
+    uint8_t const b = *cur++;
+    ++bytes;
+    // Spark calls DynamicMessage.parseFrom(byte[]), whose protobuf-java array fast path
+    // sign-extends after the ninth continuation byte and uses the tenth only for termination.
+    if (shift == sizeof(T) * 8 - 1) {
+      // Only uint64_t reaches this branch: 63 is divisible by 7, but 31 is not.
+      out |= T{1} << shift;
+    } else if (shift < sizeof(T) * 8) {
+      out |= static_cast<T>(b & 0x7Fu) << shift;
+    }
+    if ((b & 0x80u) == 0) { return true; }
+  }
+  return false;
+}
+
+__device__ inline bool read_varint64(uint8_t const* cur,
+                                     uint8_t const* end,
+                                     uint64_t& out,
+                                     int& bytes)
+{
+  return read_varint(cur, end, out, bytes);
+}
+
+__device__ inline bool read_varint32(uint8_t const* cur,
+                                     uint8_t const* end,
+                                     uint32_t& out,
+                                     int& bytes)
+{
+  return read_varint(cur, end, out, bytes);
+}
+
+__device__ inline void set_error_once(protobuf_error* error_flag, protobuf_error error)
+{
+  auto expected = protobuf_error::NONE;
+  cuda::atomic_ref<protobuf_error, cuda::thread_scope_device> ref(*error_flag);
+  ref.compare_exchange_strong(expected, error, cuda::memory_order_relaxed);
+}
+
+// Store a decoded varint into an output slot. BOOL8 (uint8_t) follows protobuf's
+// "any non-zero is true" rule and must coerce values >= 256 to 1, not silently truncate.
+template <typename T>
+__device__ __forceinline__ void write_varint_value(T* dst, uint64_t val)
+{
+  if constexpr (cuda::std::is_same_v<T, uint8_t>) {
+    *dst = static_cast<uint8_t>(val != 0 ? 1 : 0);
+  } else {
+    *dst = static_cast<T>(val);
+  }
+}
+
+void set_error_once_async(protobuf_error* error_flag,
+                          protobuf_error error,
+                          cuda::stream_ref stream);
+
+__device__ inline int get_wire_type_size(proto_wire_type wt, uint8_t const* cur, uint8_t const* end)
+{
+  switch (wt) {
+    case proto_wire_type::VARINT: {
+      uint64_t dummy_value;
+      int bytes;
+      return read_varint64(cur, end, dummy_value, bytes) ? bytes : -1;
+    }
+    case proto_wire_type::I64BIT:
+      // Check if there's enough data for 8 bytes
+      if (end - cur < 8) return -1;
+      return 8;
+    case proto_wire_type::I32BIT:
+      // Check if there's enough data for 4 bytes
+      if (end - cur < 4) return -1;
+      return 4;
+    case proto_wire_type::LEN: {
+      uint32_t len;
+      int n;
+      if (!read_varint32(cur, end, len, n)) return -1;
+      if (len > static_cast<uint32_t>(end - cur - n) ||
+          len > static_cast<uint32_t>(cuda::std::numeric_limits<int>::max() - n)) {
+        return -1;
+      }
+      return n + static_cast<int>(len);
+    }
+    default: return -1;
+  }
+}
+
+// Keep the rare group stack out of the scanner hot paths.
+static __device__ __noinline__ bool skip_group(uint8_t const* cur,
+                                               uint8_t const* end,
+                                               int field_number,
+                                               int max_group_depth,
+                                               uint8_t const*& out_cur)
+{
+  if (max_group_depth < 1) return false;
+  int group_fields[PROTOBUF_JAVA_RECURSION_LIMIT];
+  int depth       = 1;
+  group_fields[0] = field_number;
+
+  while (cur < end) {
+    uint32_t key;
+    int key_bytes;
+    if (!read_varint32(cur, end, key, key_bytes)) return false;
+    cur += key_bytes;
+
+    int const inner_field_number = static_cast<int>(key >> 3);
+    if (inner_field_number == 0 || inner_field_number > MAX_FIELD_NUMBER) { return false; }
+    auto const inner_wire_type = static_cast<proto_wire_type>(key & 0x7);
+    if (inner_wire_type == proto_wire_type::EGROUP) {
+      if (inner_field_number != group_fields[depth - 1]) return false;
+      if (--depth == 0) {
+        out_cur = cur;
+        return true;
+      }
+      continue;
+    } else if (inner_wire_type == proto_wire_type::SGROUP) {
+      if (depth == max_group_depth) return false;
+      group_fields[depth++] = inner_field_number;
+      continue;
+    }
+
+    int const inner_size = get_wire_type_size(inner_wire_type, cur, end);
+    if (inner_size < 0 || inner_size > end - cur) return false;
+    cur += inner_size;
+  }
+  return false;
+}
+
+__device__ inline bool skip_field(uint8_t const* cur,
+                                  uint8_t const* end,
+                                  proto_tag tag,
+                                  int max_group_depth,
+                                  uint8_t const*& out_cur)
+{
+  // A bare end-group is only valid while a start-group payload is being parsed by skip_group.
+  // The scan/count kernels should never accept it as a standalone field because Spark CPU treats
+  // unmatched end-groups as malformed protobuf.
+  if (tag.wire_type == proto_wire_type::EGROUP) { return false; }
+  if (tag.wire_type == proto_wire_type::SGROUP) {
+    return skip_group(cur, end, tag.field_number, max_group_depth, out_cur);
+  }
+
+  int size = get_wire_type_size(tag.wire_type, cur, end);
+  if (size < 0) return false;
+  // Ensure we don't skip past the end of the buffer
+  if (cur + size > end) return false;
+  out_cur = cur + size;
+  return true;
+}
+
+/**
+ * Get the data offset and length for a field at current position.
+ * Returns true on success, false on error.
+ */
+__device__ inline bool get_field_data_location(uint8_t const* cur,
+                                               uint8_t const* end,
+                                               proto_wire_type wt,
+                                               int32_t& data_offset,
+                                               int32_t& data_length)
+{
+  if (wt == proto_wire_type::LEN) {
+    // For length-delimited, read the length prefix
+    uint32_t len;
+    int len_bytes;
+    if (!read_varint32(cur, end, len, len_bytes)) return false;
+    if (len > static_cast<uint32_t>(end - cur - len_bytes) || !cuda::std::in_range<int>(len)) {
+      return false;
+    }
+    data_offset = len_bytes;  // offset past the length prefix
+    data_length = static_cast<int32_t>(len);
+  } else {
+    // For fixed-size and varint fields
+    int field_size = get_wire_type_size(wt, cur, end);
+    if (field_size < 0) return false;
+    data_offset = 0;
+    data_length = field_size;
+  }
+  return true;
+}
+
+struct utf8_sequence {
+  uint8_t bytes;
+  bool valid;
+};
+
+__device__ inline utf8_sequence inspect_utf8_sequence(uint8_t const* cur, uint8_t const* end)
+{
+  auto const b0 = *cur;
+  if (b0 < 0x80u) return {1, true};
+  if (b0 < 0xC2u || b0 > 0xF4u) return {1, false};
+
+  if (b0 <= 0xDFu) {
+    return cur + 1 < end && cudf::strings::detail::is_utf8_continuation_char(cur[1])
+             ? utf8_sequence{2, true}
+             : utf8_sequence{1, false};
+  }
+
+  if (cur + 1 >= end) return {1, false};
+  auto const b1                     = cur[1];
+  bool const second_is_continuation = cudf::strings::detail::is_utf8_continuation_char(b1);
+  // Java consumes a UTF-8-encoded surrogate as one malformed subsequence.
+  if (b0 == 0xEDu && second_is_continuation && b1 >= 0xA0u) {
+    uint8_t const bytes = cur + 2 < end && cudf::strings::detail::is_utf8_continuation_char(cur[2])
+                            ? uint8_t{3}
+                            : uint8_t{2};
+    return {bytes, false};
+  }
+  bool const valid_second = second_is_continuation && (b0 != 0xE0u || b1 >= 0xA0u) &&
+                            (b0 != 0xEDu || b1 < 0xA0u) && (b0 != 0xF0u || b1 >= 0x90u) &&
+                            (b0 != 0xF4u || b1 < 0x90u);
+  if (!valid_second) return {1, false};
+
+  if (cur + 2 >= end || !cudf::strings::detail::is_utf8_continuation_char(cur[2])) {
+    return {2, false};
+  }
+  if (b0 <= 0xEFu) return {3, true};
+  if (cur + 3 >= end || !cudf::strings::detail::is_utf8_continuation_char(cur[3])) {
+    return {3, false};
+  }
+  return {4, true};
+}
+
+__device__ inline uint64_t repaired_utf8_length(uint8_t const* data, uint32_t size)
+{
+  uint64_t result = 0;
+  auto const* cur = data;
+  auto const* end = data + size;
+  while (cur < end) {
+    auto const sequence = inspect_utf8_sequence(cur, end);
+    result += sequence.valid ? sequence.bytes : 3;
+    cur += sequence.bytes;
+  }
+  return result;
+}
+
+__device__ inline void copy_repaired_utf8(uint8_t const* data, uint32_t size, char* output)
+{
+  auto const* cur = data;
+  auto const* end = data + size;
+  while (cur < end) {
+    auto const sequence = inspect_utf8_sequence(cur, end);
+    if (sequence.valid) {
+      for (int i = 0; i < sequence.bytes; ++i) {
+        *output++ = static_cast<char>(cur[i]);
+      }
+    } else {
+      *output++ = static_cast<char>(0xEFu);
+      *output++ = static_cast<char>(0xBFu);
+      *output++ = static_cast<char>(0xBDu);
+    }
+    cur += sequence.bytes;
+  }
+}
+
+// `T` defaults to int32 for the top-level callers; nested message offsets are computed in int64
+// (parent row offset + relative field offset) and instantiate the int64 form.
+template <std::integral T = int32_t>
+__device__ inline bool check_message_bounds(T start,
+                                            T end_pos,
+                                            cudf::size_type total_size,
+                                            protobuf_error* error_flag)
+{
+  if (start < 0 || end_pos < start || end_pos > total_size) {
+    set_error_once(error_flag, protobuf_error::BOUNDS);
+    return false;
+  }
+  return true;
+}
+
+__device__ inline bool decode_tag(uint8_t const*& cur,
+                                  uint8_t const* end,
+                                  proto_tag& tag,
+                                  protobuf_error* error_flag)
+{
+  uint32_t key;
+  int key_bytes;
+  if (!read_varint32(cur, end, key, key_bytes)) {
+    set_error_once(error_flag, protobuf_error::VARINT);
+    return false;
+  }
+
+  cur += key_bytes;
+  uint32_t fn = key >> 3;
+  if (fn == 0 || fn > static_cast<uint32_t>(MAX_FIELD_NUMBER)) {
+    set_error_once(error_flag, protobuf_error::FIELD_NUMBER);
+    return false;
+  }
+  tag.field_number = static_cast<int>(fn);
+  tag.wire_type    = static_cast<proto_wire_type>(key & 0x7);
+  return true;
+}
+
+/**
+ * Load a little-endian value from unaligned memory.
+ * Reads bytes individually to avoid unaligned-access issues on GPU.
+ */
+template <typename T>
+__device__ inline T load_le(uint8_t const* p);
+
+template <>
+__device__ inline uint32_t load_le<uint32_t>(uint8_t const* p)
+{
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+         (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+template <>
+__device__ inline uint64_t load_le<uint64_t>(uint8_t const* p)
+{
+  uint64_t v = 0;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    v |= (static_cast<uint64_t>(p[i]) << (8 * i));
+  }
+  return v;
+}
+
+/**
+ * O(1) lookup of field_number -> field_index using a direct-mapped table.
+ * Falls back to linear search when the table is empty.
+ *
+ * `match(int candidate, int field_number) -> bool` decides whether the candidate index
+ * actually corresponds to `field_number` (and any other criteria the caller wants to
+ * enforce, such as schema depth). The lookup-table fast path applies the same `match`
+ * predicate, so a buggy lookup table can't silently dispatch to the wrong index.
+ *
+ * Returns the matching candidate index in `[0, table.size)`, or `-1` if not found.
+ */
+template <typename T, typename Match>
+  requires std::is_invocable_r_v<bool, Match, int, int>
+__device__ __forceinline__ int lookup_field(int field_number, lookup_view<T> table, Match&& match)
+{
+  if (table.direct != nullptr && field_number > 0 && field_number < table.direct_size) {
+    int const f = table.direct[field_number];
+    // Bound `f` against `table.size` before invoking `match`, so a buggy table can't
+    // cause an out-of-range read inside the predicate.
+    return (f >= 0 && f < table.size && match(f, field_number)) ? f : -1;
+  }
+  for (int f = 0; f < table.size; f++) {
+    if (match(f, field_number)) return f;
+  }
+  return -1;
+}
+
+template <typename T>
+__device__ __forceinline__ int lookup_field(int field_number, lookup_view<T> table)
+{
+  return lookup_field(
+    field_number, table, [&table](int f, int n) { return table.data[f].field_number == n; });
+}
+
+}  // namespace spark_rapids_jni::protobuf::detail

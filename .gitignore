@@ -1,0 +1,55 @@
+## Common
+__pycache__
+*.py[cod]
+*$py.class
+*.a
+*.o
+*.so
+*.dylib
+.cache
+.vscode
+*.swp
+*.pytest_cache
+DartConfiguration.tcl
+.DS_Store
+*.manifest
+*.spec
+.nfs*
+.clangd
+*#*#
+*.#*
+*.pyc
+*.pyo
+*.swp
+*~
+
+## Patching
+*.diff
+*.orig
+*.rej
+
+## Eclipse IDE
+.project
+.cproject
+.settings
+
+## IntelliJ IDE
+.idea/
+.idea_modules/
+*.iml
+*.ipr
+*.iws
+
+#Java
+dependency-reduced-pom.xml
+hs_err*.log
+target/
+
+## VSCode IDE
+.vscode
+
+#Generated files
+cufile.log
+rmm_log.txt
+sanitizer_for_pid_*.log
+compile_commands.json

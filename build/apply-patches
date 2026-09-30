@@ -1,0 +1,81 @@
+#!/bin/bash
+
+#
+# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+set -e
+
+BASE_DIR=$( git rev-parse --show-toplevel )
+
+PATCH_DIR=${PATCH_DIR:-"$BASE_DIR/patches/"}
+
+if [ ! -d "$PATCH_DIR" ] ; then
+  echo "No patches to apply"
+  exit 0
+fi
+
+PATCH_DIR=$(realpath "$PATCH_DIR")
+
+CUDF_DIR=${CUDF_DIR:-$(realpath "$BASE_DIR/thirdparty/cudf/")}
+
+# Apply pattches to CUDF is problematic in a number of ways. But ultimately it comes down to
+# making sure that a user can do development work in cudf-spark-jni without the patches
+# getting in the way
+# The operations I really want to support no matter what state CUDF is in are
+# 1) Build the repo from scratch
+# 2) Rebuild the repo without having to clean and start over
+# 3) upmerge to a new version of the plugin including updating the cudf submodule
+#
+# Building from scratch is simple. We want clean to unapply any patches and 
+# build to apply them. But if we want to rebuild without a clean we need to know what
+# state the CUDF repo is in. Did we apply patches to it or not. The fastest way to do this
+# is to save some state files about what happened. But a user could mess with CUDF directly
+# so we want to have ways to double check that they are indeed correct.
+
+FULLY_PATCHED_FILE="$CUDF_DIR/cudf-spark-jni.patch"
+
+pushd "$CUDF_DIR"
+
+PATCH_FILES=$(find "$PATCH_DIR" -type f -not -empty)
+
+if [ -z "$PATCH_FILES" ] ; then
+  echo "No patches to apply"
+  exit 0
+fi
+
+CHANGED_FILES=$(git status --porcelain --untracked-files=no)
+
+if [ -s "$FULLY_PATCHED_FILE" ] && [ -n "$CHANGED_FILES" ] ; then 
+  if git apply -R --check "$FULLY_PATCHED_FILE" ; then
+    echo "Patches appear to have been applied already"
+    exit 0
+  fi
+fi
+
+if [ -n "$CHANGED_FILES" ] ; then
+  echo "Error: CUDF repository has uncommitted changes. No patches will be applied. Please clean the repository so we can try and add the needed patches"
+  echo "$CHANGED_FILES"
+  exit 1
+fi
+
+find "$PATCH_DIR" -maxdepth 1 -type f -print0 | sort -zV | while IFS= read -r -d '' file; do
+  echo "patching with: $file"
+  git apply -v "$file"
+done
+
+git diff > "$FULLY_PATCHED_FILE"
+
+popd
