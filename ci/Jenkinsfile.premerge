@@ -275,10 +275,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         def jniVer = readMavenPom(file: 'pom.xml').version
                                         common.restoreJniCcache(this, jniVer, 'cuda13', 'ART_CREDS')
-                                        // Temporary verification of CUDA 13 sanitizer regression #4127.
-                                        withEnv(["MAVEN_OPTS=${env.MAVEN_OPTS ?: ''} -DUSE_SANITIZER=ON"]) {
-                                            runPremergeBuild()
-                                        }
+                                        runPremergeBuild()
                                     }
                                 }
                             }
