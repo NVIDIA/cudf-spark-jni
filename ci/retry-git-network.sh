@@ -20,15 +20,29 @@ set -uo pipefail
 max_attempts=${GIT_NETWORK_RETRY_ATTEMPTS:-3}
 delay_seconds=${GIT_NETWORK_RETRY_DELAY_SECONDS:-10}
 
+if [[ ! $max_attempts =~ ^[0-9]+$ ]]; then
+  echo "GIT_NETWORK_RETRY_ATTEMPTS must be a decimal integer" >&2
+  exit 2
+fi
+if [[ ! $delay_seconds =~ ^[0-9]+$ ]]; then
+  echo "GIT_NETWORK_RETRY_DELAY_SECONDS must be a decimal integer" >&2
+  exit 2
+fi
+
+# Force decimal interpretation so values such as 08 are valid instead of being
+# parsed as invalid octal by Bash arithmetic.
+max_attempts=$((10#$max_attempts))
+delay_seconds=$((10#$delay_seconds))
+
 if ((max_attempts < 1)); then
   echo "GIT_NETWORK_RETRY_ATTEMPTS must be at least 1" >&2
   exit 2
 fi
 
-if ((delay_seconds < 0)); then
-  echo "GIT_NETWORK_RETRY_DELAY_SECONDS must be non-negative" >&2
-  exit 2
-fi
+is_permanent_git_failure() {
+  grep -Eiq \
+    'authentication failed|permission denied|repository not found|could not read username|refusing to merge unrelated histories|automatic merge failed|merge conflict'
+}
 
 is_transient_git_transport_failure() {
   grep -Eiq \
@@ -43,6 +57,12 @@ while ((attempt <= max_attempts)); do
   if ((status == 0)); then
     rm -f "$log_file"
     exit 0
+  fi
+
+  if is_permanent_git_failure < "$log_file"; then
+    echo "Git command failed with a permanent error; not retrying." >&2
+    rm -f "$log_file"
+    exit "$status"
   fi
 
   if ! is_transient_git_transport_failure < "$log_file"; then

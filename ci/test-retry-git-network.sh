@@ -34,7 +34,7 @@ count=0
 count=\$((count + 1))
 echo "\$count" > "\$count_file"
 if ((count <= $failures)); then
-  echo '$message' >&2
+  printf '%b\n' '$message' >&2
   exit 128
 fi
 echo success
@@ -54,7 +54,8 @@ assert_count() {
 }
 
 make_fake_command transient_then_success 2 "fatal: unable to access 'https://github.com/NVIDIA/cudf/': Failed to connect to github.com port 443: Connection timed out"
-GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0   "$retry" "$tmp/transient_then_success"
+GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+  "$retry" "$tmp/transient_then_success"
 assert_count transient_then_success 3
 
 make_fake_command http_503_then_success 1 "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503"
@@ -67,25 +68,52 @@ GIT_NETWORK_RETRY_ATTEMPTS=2 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
   "$retry" "$tmp/http_502_then_success"
 assert_count http_502_then_success 2
 
+make_fake_command leading_zero_attempts 0 "unused"
+GIT_NETWORK_RETRY_ATTEMPTS=08 GIT_NETWORK_RETRY_DELAY_SECONDS=00 \
+  "$retry" "$tmp/leading_zero_attempts"
+assert_count leading_zero_attempts 1
+
+make_fake_command invalid_attempts 0 "unused"
+if GIT_NETWORK_RETRY_ATTEMPTS=not-a-number GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$retry" "$tmp/invalid_attempts"; then
+  echo "invalid retry-attempt value unexpectedly succeeded" >&2
+  exit 1
+fi
+[[ ! -e "$tmp/invalid_attempts.count" ]] || {
+  echo "command ran despite invalid retry configuration" >&2
+  exit 1
+}
+
 make_fake_command persistent_transient 5 "fatal: unable to access 'https://github.com/NVIDIA/cudf/': Could not resolve host: github.com"
-if GIT_NETWORK_RETRY_ATTEMPTS=2 GIT_NETWORK_RETRY_DELAY_SECONDS=0     "$retry" "$tmp/persistent_transient"; then
+if GIT_NETWORK_RETRY_ATTEMPTS=2 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$retry" "$tmp/persistent_transient"; then
   echo "persistent transient failure unexpectedly succeeded" >&2
   exit 1
 fi
 assert_count persistent_transient 2
 
 make_fake_command merge_conflict 1 "fatal: refusing to merge unrelated histories"
-if GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0     "$retry" "$tmp/merge_conflict"; then
+if GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$retry" "$tmp/merge_conflict"; then
   echo "deterministic merge failure unexpectedly succeeded" >&2
   exit 1
 fi
 assert_count merge_conflict 1
 
 make_fake_command auth_failure 1 "fatal: Authentication failed for 'https://github.com/NVIDIA/cudf/'"
-if GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0     "$retry" "$tmp/auth_failure"; then
+if GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$retry" "$tmp/auth_failure"; then
   echo "authentication failure unexpectedly succeeded" >&2
   exit 1
 fi
 assert_count auth_failure 1
+
+make_fake_command mixed_transient_auth 1 "fatal: unable to access 'https://github.com/NVIDIA/cudf/': Could not resolve host: github.com\nfatal: Authentication failed for 'https://github.com/NVIDIA/cudf/'"
+if GIT_NETWORK_RETRY_ATTEMPTS=3 GIT_NETWORK_RETRY_DELAY_SECONDS=0 \
+    "$retry" "$tmp/mixed_transient_auth"; then
+  echo "mixed permanent/transient failure unexpectedly succeeded" >&2
+  exit 1
+fi
+assert_count mixed_transient_auth 1
 
 echo "retry-git-network tests passed"
