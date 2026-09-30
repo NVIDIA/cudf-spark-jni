@@ -119,18 +119,42 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
       return;
     }
     closed = true;
-    long toFinish = event;
-    event = 0;
-    AutoCloseable[] resources = new AutoCloseable[buffers.length + 2];
-    // The copies may still be writing the allocation, so wait for them before it is freed.
-    resources[0] = () -> {
-      if (toFinish != 0) {
+    // Nothing here allocates on the success path, so running out of heap cannot skip the cleanup.
+    Throwable failure = null;
+    if (event != 0) {
+      long toFinish = event;
+      event = 0;
+      // The copies may still be writing the allocation, so wait for them before it is freed.
+      try {
         finish(toFinish);
+      } catch (Throwable t) {
+        failure = t;
       }
-    };
-    System.arraycopy(buffers, 0, resources, 1, buffers.length);
-    resources[buffers.length + 1] = packed;
-    Arms.closeAll(resources);
+    }
+    for (DeviceMemoryBuffer buffer : buffers) {
+      failure = closeCollecting(buffer, failure);
+    }
+    failure = closeCollecting(packed, failure);
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    if (failure != null) {
+      throw (RuntimeException) failure;
+    }
+  }
+
+  private static Throwable closeCollecting(DeviceMemoryBuffer buffer, Throwable failure) {
+    if (buffer != null) {
+      try {
+        buffer.close();
+      } catch (Throwable t) {
+        if (failure == null) {
+          return t;
+        }
+        failure.addSuppressed(t);
+      }
+    }
+    return failure;
   }
 
   // Returns the event recorded after the copies.
