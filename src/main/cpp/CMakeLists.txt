@@ -179,9 +179,34 @@ find_library(ARROW_LIB "libarrow.a" REQUIRED NO_DEFAULT_PATH
   HINTS "${CUDFJNI_BUILD_DIR}/_deps/arrow-build/release/"
 )
 
+# parquet
+find_library(PARQUET_LIB "libparquet.a" REQUIRED NO_DEFAULT_PATH
+  HINTS "${CUDFJNI_BUILD_DIR}/_deps/arrow-build/release/"
+)
+
+# Internal parquet headers
+set (GENERATED_PARQUET_INCLUDE
+    "${CUDFJNI_BUILD_DIR}/_deps/arrow-src/cpp/src/"
+    CACHE STRING "generated parquet thrift headers"
+)
+
+# thrift
+find_library(THRIFT_LIB "libthrift.a" REQUIRED NO_DEFAULT_PATH
+    HINTS "${CUDFJNI_BUILD_DIR}/lib/"
+)
+
 set(CUDFJNI_INCLUDE_DIRS
   "${CUDF_DIR}/java/src/main/native/include"
   "${CUDF_DIR}/java/src/main/native/src"
+)
+
+# Headers generated/vendored from Arrow and Thrift, fetched from upstream and not
+# something we edit; treated as SYSTEM below so their warnings (e.g. deprecated
+# declarations) don't trip our -Werror.
+set(CUDFJNI_VENDORED_INCLUDE_DIRS
+  "${GENERATED_PARQUET_INCLUDE}"
+  "${CUDFJNI_BUILD_DIR}/_deps/thrift-build/"
+  "${CUDFJNI_BUILD_DIR}/_deps/thrift-src/lib/cpp/src/"
 )
 
 # ##################################################################################################
@@ -310,9 +335,11 @@ target_include_directories(
 )
 
 # Mark include dirs we do not control as SYSTEM so -Werror does not trip on warnings
+# (e.g. deprecated declarations) originating from vendored/generated headers.
 target_include_directories(
   spark_rapids_jni SYSTEM
   PRIVATE "${JNI_INCLUDE_DIRS}"
+          "${CUDFJNI_VENDORED_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 
@@ -338,6 +365,8 @@ target_link_libraries(
     cuco::cuco
     spdlog::spdlog_header_only
     ${ARROW_LIB}
+    ${PARQUET_LIB}
+    ${THRIFT_LIB}
 )
 if(HIDE_PRIVATE_CUDA_SYMBOLS)
   # These toolkit implementation symbols are not part of the cuDF or JNI ABI. Localizing them keeps

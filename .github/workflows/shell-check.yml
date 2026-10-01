@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,4 +38,6 @@ jobs:
           # SC3010: In POSIX sh, [[ ]] is undefined.
           # SC2054: Use spaces, not commas, to separate array elements.
           # SC2124: Assigning an array to a string! Assign as array, or use * instead of @ to concatenate.
-          
+
+      - name: Run Git network retry regression tests
+        run: ci/test-retry-git-network.sh
