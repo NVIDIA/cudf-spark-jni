@@ -1,6 +1,6 @@
 #!/usr/local/env groovy
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -202,107 +202,112 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 }
             }
             failFast false
-            parallel {
-                stage ('cuda12') {
-                    options {
-                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+            matrix {
+                axes {
+                    axis {
+                        name 'CUDA13_RUN'
+                        values '1', '2', '3', '4'
                     }
-                    agent {
-                        kubernetes {
-                            label "cu12-${BUILD_TAG}"
-                            cloud "${common.CLOUD_NAME}"
-                            yaml pod.getGPUYAML("${IMAGE_PREMERGE_CU12}", "${env.GPU_RESOURCE}", '10', '48Gi')
-                            customWorkspace "${CUSTOM_WORKSPACE}-cu12"
+                }
+                stages {
+                    stage ('cuda12') {
+                        when {
+                            beforeOptions true
+                            expression { false } // CUDA 13-only verification.
                         }
-                    }
-                    environment {
-                        CCACHE_BASEDIR = "${WORKSPACE}"
-                    }
+                        options {
+                            lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                        }
+                        agent {
+                            kubernetes {
+                                label "cu12-${BUILD_TAG}"
+                                cloud "${common.CLOUD_NAME}"
+                                yaml pod.getGPUYAML("${IMAGE_PREMERGE_CU12}", "${env.GPU_RESOURCE}", '10', '48Gi')
+                                customWorkspace "${CUSTOM_WORKSPACE}-cu12"
+                            }
+                        }
+                        environment {
+                            CCACHE_BASEDIR = "${WORKSPACE}"
+                        }
 
-                    steps {
-                        script {
-                            unstash "source_tree"
-                            container('gpu') {
-                                timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
-                                    common.resolveIncompatibleDriverIssue(this)
-                                    def jniVer = readMavenPom(file: 'pom.xml').version
-                                    common.restoreJniCcache(this, jniVer, 'cuda12', 'ART_CREDS')
-                                    try {
-                                        runPremergeBuild()
-                                        sh 'bash ci/fuzz-test.sh'
-                                    } catch (e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'cudf-spark-jni', 'cuda12')
-                                        throw e
+                        steps {
+                            script {
+                                unstash "source_tree"
+                                container('gpu') {
+                                    timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        def jniVer = readMavenPom(file: 'pom.xml').version
+                                        common.restoreJniCcache(this, jniVer, 'cuda12', 'ART_CREDS')
+                                        try {
+                                            runPremergeBuild()
+                                            sh 'bash ci/fuzz-test.sh'
+                                        } catch (e) {
+                                            common.printJVMCoreDumps(this)
+                                            common.uploadDebugBundle(this, 'cudf-spark-jni', 'cuda12')
+                                            throw e
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                stage ('cuda13') {
-                    options {
-                        lock(label: "cuda13", quantity: 1, variable: 'GPU_RESOURCE')
-                    }
-                    agent {
-                        kubernetes {
-                            label "cu13-${BUILD_TAG}"
-                            cloud "${common.CLOUD_NAME}"
-                            yaml pod.getGPUYAMLwithDriver("${IMAGE_PREMERGE_CU13}", "${env.GPU_RESOURCE}", '590.44.01', '10', '48Gi')
-                            customWorkspace "${CUSTOM_WORKSPACE}-cu13"
+                    stage ('cuda13') {
+                        options {
+                            lock(label: "cuda13", quantity: 1, variable: 'GPU_RESOURCE')
                         }
-                    }
-                    environment {
-                        CCACHE_BASEDIR = "${WORKSPACE}"
-                    }
+                        agent {
+                            kubernetes {
+                                label "cu13-${CUDA13_RUN}-${BUILD_TAG}"
+                                cloud "${common.CLOUD_NAME}"
+                                yaml pod.getGPUYAMLwithDriver("${IMAGE_PREMERGE_CU13}", "${env.GPU_RESOURCE}", '590.44.01', '10', '48Gi')
+                            }
+                        }
+                        environment {
+                            CCACHE_BASEDIR = "${WORKSPACE}"
+                        }
 
-                    steps {
-                        script {
-                            unstash "source_tree"
-                            container('gpu') {
-                                timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
-                                    common.resolveIncompatibleDriverIssue(this)
-                                    def jniVer = readMavenPom(file: 'pom.xml').version
-                                    common.restoreJniCcache(this, jniVer, 'cuda13', 'ART_CREDS')
-                                    try {
+                        steps {
+                            script {
+                                unstash "source_tree"
+                                container('gpu') {
+                                    timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        def jniVer = readMavenPom(file: 'pom.xml').version
+                                        common.restoreJniCcache(this, jniVer, 'cuda13', 'ART_CREDS')
                                         runPremergeBuild()
-                                        sh 'bash ci/fuzz-test.sh'
-                                    } catch (e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'cudf-spark-jni', 'cuda13')
-                                        throw e
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                stage ('sonarqube') {
-                    steps {
-                        script {
-                            def prNumber = githubHelper.getIssue().number
+                    stage ('sonarqube') {
+                        when { expression { false } } // Verification only; no analysis needed.
+                        steps {
+                            script {
+                                def prNumber = githubHelper.getIssue().number
 
-                            def sonarBuild = build(
-                                job: 'sonar-scan',
-                                wait: true,
-                                propagate: false,
-                                parameters: [
-                                    string(name: 'REPO_URL', value: githubHelper.getCloneUrl()),
-                                    string(name: 'REF', value: githubHelper.getMergedSHA()),
-                                    string(name: 'BRANCH_NAME', value: "PR-${prNumber}"),
-                                    string(name: 'REFSPEC', value:
-                                        "+refs/pull/${prNumber}/merge:" +
-                                        "refs/remotes/origin/pr/${prNumber}"),
-                                    booleanParam(name: 'CHECK_QUALITY_GATE', value: true),
-                                    booleanParam(name: 'MUTE_SLACK', value: true),
-                                ])
+                                def sonarBuild = build(
+                                    job: 'sonar-scan',
+                                    wait: true,
+                                    propagate: false,
+                                    parameters: [
+                                        string(name: 'REPO_URL', value: githubHelper.getCloneUrl()),
+                                        string(name: 'REF', value: githubHelper.getMergedSHA()),
+                                        string(name: 'BRANCH_NAME', value: "PR-${prNumber}"),
+                                        string(name: 'REFSPEC', value:
+                                            "+refs/pull/${prNumber}/merge:" +
+                                            "refs/remotes/origin/pr/${prNumber}"),
+                                        booleanParam(name: 'CHECK_QUALITY_GATE', value: true),
+                                        booleanParam(name: 'MUTE_SLACK', value: true),
+                                    ])
 
-                            if (sonarBuild.result == 'UNSTABLE') {
-                                unstable('SonarQube Quality Gate failed')
-                            } else if (sonarBuild.result != 'SUCCESS') {
-                                error("SonarQube pipeline was ${sonarBuild.result}")
+                                if (sonarBuild.result == 'UNSTABLE') {
+                                    unstable('SonarQube Quality Gate failed')
+                                } else if (sonarBuild.result != 'SUCCESS') {
+                                    error("SonarQube pipeline was ${sonarBuild.result}")
+                                }
                             }
                         }
                     }
