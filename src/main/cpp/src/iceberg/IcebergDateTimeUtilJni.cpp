@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "iceberg/iceberg_datetime_util.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergDateTimeUtil_yearsFromEpoch(
@@ -27,9 +29,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergDateTime
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::years_from_epoch(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -44,9 +46,9 @@ Java_com_nvidia_spark_rapids_jni_iceberg_IcebergDateTimeUtil_monthsFromEpoch(JNI
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::months_from_epoch(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -59,9 +61,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergDateTime
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::days_from_epoch(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -74,9 +76,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergDateTime
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input);
     auto output         = spark_rapids_jni::hours_from_epoch(*input_cv);
-    return reinterpret_cast<jlong>(output.release());
+    return std::bit_cast<jlong>(output.release());
   }
   JNI_CATCH(env, 0);
 }

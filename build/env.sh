@@ -16,4 +16,4 @@
 #
 
 set -ex
-export sclCMD=${sclCMD:-"scl enable gcc-toolset-13"}
+export sclCMD=${sclCMD:-"scl enable gcc-toolset-14"}

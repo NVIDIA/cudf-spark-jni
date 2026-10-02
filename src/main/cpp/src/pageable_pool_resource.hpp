@@ -150,7 +150,9 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
                                     std::size_t = cuda::mr::default_cuda_malloc_host_alignment)
   {
     if (bytes == 0) { return nullptr; }
+    if (bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     bytes = align_up(bytes);
+    if (bytes == 0 || bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     std::lock_guard<std::mutex> lock(mtx_);
     auto blk = free_list_.get_block(bytes);
     if (!blk.is_valid()) { throw pageable_pool_exhausted{}; }

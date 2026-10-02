@@ -23,11 +23,12 @@
 #include <cudf/null_mask.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
@@ -82,7 +83,7 @@ struct write_hex_fn {
 }  // namespace
 
 std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& input,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) { return cudf::make_empty_column(cudf::type_id::STRING); }
@@ -100,8 +101,9 @@ std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& inpu
   // Write hex chars in a single pass.
   auto chars = rmm::device_uvector<char>(total_bytes, stream, mr);
   if (total_bytes > 0) {
-    auto const d_column = cudf::column_device_view::create(input.parent(), stream);
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    auto const d_column = cudf::column_device_view::create(
+      input.parent(), stream, cudf::get_current_device_resource_ref());
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(cudf::size_type{0}),
                      thrust::make_counting_iterator(input.size()),
                      write_hex_fn{*d_column, input.chars_begin(stream), chars.data()});
@@ -117,7 +119,7 @@ std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& inpu
 }  // namespace detail
 
 std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& input,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

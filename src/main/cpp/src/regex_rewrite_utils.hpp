@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 /**
@@ -40,6 +42,6 @@ std::unique_ptr<cudf::column> literal_range_pattern(
   int const len,
   int const start,
   int const end,
-  rmm::cuda_stream_view stream      = rmm::cuda_stream_default,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 }  // namespace spark_rapids_jni

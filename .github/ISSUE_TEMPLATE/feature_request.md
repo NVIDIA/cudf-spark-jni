@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for the RAPIDS Accelerator JNI for Apache Spark
+about: Suggest an idea for the NVIDIA cuDF plugin JNI for Apache Spark
 title: "[FEA]"
 labels: "? - Needs Triage, feature request"
 assignees: ''
@@ -8,7 +8,7 @@ assignees: ''
 ---
 
 **Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I wish the RAPIDS Accelerator JNI for Apache Spark would [...]
+A clear and concise description of what the problem is. Ex. I wish the NVIDIA cuDF plugin JNI for Apache Spark would [...]
 
 **Describe the solution you'd like**
 A clear and concise description of what you want to happen.

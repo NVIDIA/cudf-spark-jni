@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,9 @@
 #include <cudf/hashing.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/types.hpp>
+
+#include <cuda/std/array>
+#include <cuda/std/bit>
 
 namespace spark_rapids_jni {
 
@@ -66,7 +69,8 @@ struct MurmurHash3_32 {
   template <typename T>
   result_type __device__ inline compute(T const& key) const
   {
-    return compute_bytes(reinterpret_cast<cuda::std::byte const*>(&key), sizeof(T));
+    auto const bytes = cuda::std::bit_cast<cuda::std::array<cuda::std::byte, sizeof(T)>>(key);
+    return compute_bytes(bytes.data(), bytes.size());
   }
 
   result_type __device__ inline compute_remaining_bytes(cuda::std::byte const* data,
@@ -130,7 +134,9 @@ struct MurmurHash3_32 {
 template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<bool>::operator()(bool const& key) const
 {
-  return compute<uint32_t>(key);
+  // BOOL8 stores false as zero and true as any non-zero byte. Canonicalize
+  // before hashing so noncanonical true values hash exactly like Spark true.
+  return compute<uint32_t>(key ? 1u : 0u);
 }
 
 template <>
@@ -199,9 +205,8 @@ template <>
 murmur_hash_value_type __device__ inline MurmurHash3_32<numeric::decimal128>::operator()(
   numeric::decimal128 const& key) const
 {
-  auto [java_d, length] = to_java_bigdecimal(key);
-  auto bytes            = reinterpret_cast<cuda::std::byte*>(&java_d);
-  return compute_bytes(bytes, length);
+  auto const java_d = to_java_bigdecimal(key);
+  return compute_bytes(java_d.bytes.data(), java_d.length);
 }
 
 }  // namespace spark_rapids_jni

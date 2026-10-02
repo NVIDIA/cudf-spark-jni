@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+
+#include <cuda/stream>
 
 #include <memory>
 #include <variant>
@@ -49,7 +51,7 @@ std::unique_ptr<cudf::column> convert(
   convert_number_t const& input,
   convert_number_t const& from_base,
   convert_number_t const& to_base,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -68,7 +70,7 @@ bool is_convert_overflow(
   convert_number_t const& input,
   convert_number_t const& from_base,
   convert_number_t const& to_base,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

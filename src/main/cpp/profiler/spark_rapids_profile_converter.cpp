@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/* A tool that converts a spark-rapids profile binary into other forms. */
+/* A tool that converts a cuDF plugin profile binary into other forms. */
 
 #if 0
 #include <stdexcept>
@@ -114,7 +114,7 @@ void print_usage()
 {
   std::cout << "spark_rapids_profile_converter [OPTION]... profilebin" << std::endl;
   std::cout << R"(
-Converts the spark-rapids profile in profile.bin into other forms.
+Converts the cuDF plugin profile in profile.bin into other forms.
 
   -h, --help                show this usage message
   -j, --json                convert to JSON, default output is stdout
@@ -365,9 +365,7 @@ void verify_profile_header(std::ifstream& in)
   auto fb_ptr = read_flatbuffer(in);
   auto header = validate_fb<spark_rapids_jni::profiler::ProfileHeader>(*fb_ptr, "profile header");
   auto magic  = header->magic();
-  if (magic == nullptr) {
-    throw std::runtime_error("does not appear to be a spark-rapids profile");
-  }
+  if (magic == nullptr) { throw std::runtime_error("does not appear to be a cuDF plugin profile"); }
   if (magic->str() != "spark-rapids profile") {
     std::ostringstream oss;
     oss << "bad profile magic, expected 'spark-rapids profile' found '" << magic->str() << "'";
@@ -686,8 +684,12 @@ void convert_to_nvtxt(std::ifstream& in, std::ostream& out, program_options cons
               color    = it->second->color();
               category = it->second->category();
             }
-            marker_start ms{
-              m->timestamp(), process_id, thread_id, color, category, m->name()->str()};
+            marker_start ms{m->timestamp(),
+                            process_id,
+                            thread_id,
+                            color,
+                            category,
+                            m->name() ? m->name()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;
@@ -970,8 +972,8 @@ int convert_to_nvtxw(std::ifstream& in,
                             thread_id,
                             color,
                             category,
-                            m->name()->str(),
-                            m->domain()->str()};
+                            m->name() ? m->name()->str() : "",
+                            m->domain() ? m->domain()->str() : ""};
             auto [ignored, inserted] = marker_start_map.insert({m->id(), ms});
             if (not inserted) {
               std::ostringstream oss;

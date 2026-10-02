@@ -20,6 +20,8 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
+#include <bit>
+
 namespace {
 
 /**
@@ -60,8 +62,7 @@ cudf::detail::host_vector<uint8_t> jni_byte_array_to_vector(JNIEnv* env, jobject
     return cudf::detail::make_host_vector<uint8_t>(0, cudf::get_default_stream());
   }
   auto vec = cudf::detail::make_host_vector<uint8_t>(len, cudf::get_default_stream());
-  std::copy(
-    reinterpret_cast<uint8_t*>(bytes), reinterpret_cast<uint8_t*>(bytes) + len, vec.begin());
+  std::copy(std::bit_cast<uint8_t*>(bytes), std::bit_cast<uint8_t*>(bytes) + len, vec.begin());
   env->ReleaseByteArrayElements(byte_arr, bytes, JNI_ABORT);
   return vec;
 }
@@ -119,7 +120,7 @@ Java_com_nvidia_spark_rapids_jni_Protobuf_decodeToStruct(JNIEnv* env,
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const* input = reinterpret_cast<cudf::column_view const*>(binary_input_view);
+    auto const* input = std::bit_cast<cudf::column_view const*>(binary_input_view);
 
     cudf::jni::native_jintArray n_field_numbers(env, field_numbers);
     cudf::jni::native_jintArray n_parent_indices(env, parent_indices);

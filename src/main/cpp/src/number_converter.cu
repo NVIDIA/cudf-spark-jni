@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,11 +21,13 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/std/cmath>
 #include <cuda/std/functional>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/count.h>
 #include <thrust/for_each.h>
 
@@ -367,7 +369,7 @@ std::unique_ptr<cudf::column> convert_impl(cudf::size_type num_rows,
                                            STR_ITERATOR input,
                                            FROM_BASE_ITERATOR from_base,
                                            TO_BASE_ITERATOR to_base,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   static constexpr bool IS_CONST_BASES = cuda::std::is_same_v<const_base, FROM_BASE_ITERATOR> &&
@@ -398,12 +400,13 @@ std::unique_ptr<cudf::column> convert_impl(cudf::size_type num_rows,
   auto [null_mask, null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(out_mask), stream, mr);
 
-  return cudf::make_strings_column(
-    num_rows,
-    std::move(offsets),
-    chars.release(),
-    null_count,
-    null_count ? std::move(*null_mask.release()) : rmm::device_buffer{});
+  return cudf::make_strings_column(num_rows,
+                                   std::move(offsets),
+                                   chars.release(),
+                                   null_count,
+                                   null_count
+                                     ? std::move(*null_mask.release())
+                                     : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 /**
@@ -453,7 +456,7 @@ bool is_convert_overflow_impl(cudf::size_type num_rows,
                               STR_ITERATOR input,
                               FROM_BASE_ITERATOR from_base,
                               TO_BASE_ITERATOR to_base,
-                              rmm::cuda_stream_view stream,
+                              cuda::stream_ref stream,
                               rmm::device_async_resource_ref mr)
 {
   static constexpr bool IS_CONST_BASES = cuda::std::is_same_v<const_base, FROM_BASE_ITERATOR> &&
@@ -466,7 +469,7 @@ bool is_convert_overflow_impl(cudf::size_type num_rows,
     }
   }
   auto num_overflow = thrust::count_if(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::counting_iterator<cudf::size_type>(0),
     thrust::counting_iterator<cudf::size_type>(num_rows),
     is_overflow_fn<STR_ITERATOR, FROM_BASE_ITERATOR, TO_BASE_ITERATOR>{input, from_base, to_base});
@@ -478,7 +481,7 @@ bool is_cv(convert_number_t const& t) { return std::holds_alternative<cudf::colu
 void check_types(convert_number_t const& input,
                  convert_number_t const& from_base,
                  convert_number_t const& to_base,
-                 rmm::cuda_stream_view stream)
+                 cuda::stream_ref stream)
 {
   // check input type
   if (is_cv(input)) {
@@ -512,22 +515,25 @@ void check_types(convert_number_t const& input,
 std::unique_ptr<cudf::column> convert(convert_number_t const& input,
                                       convert_number_t const& from_base,
                                       convert_number_t const& to_base,
-                                      rmm::cuda_stream_view stream,
+                                      cuda::stream_ref stream,
                                       rmm::device_async_resource_ref mr)
 {
   check_types(input, from_base, to_base, stream);
 
   if (is_cv(input)) {
     auto const input_cv = std::get<cudf::column_view>(input);
-    auto const d_strs   = cudf::column_device_view::create(input_cv, stream);
+    auto const d_strs =
+      cudf::column_device_view::create(input_cv, stream, cudf::get_current_device_resource_ref());
 
     if (is_cv(from_base)) {
       auto const from_base_cv = std::get<cudf::column_view>(from_base);
-      auto const d_from_bases = cudf::column_device_view::create(from_base_cv, stream);
+      auto const d_from_bases = cudf::column_device_view::create(
+        from_base_cv, stream, cudf::get_current_device_resource_ref());
 
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string cv, from base is cv, to base is cv
         return convert_impl<str_iter, base_iter, base_iter>(input_cv.size(),
                                                             str_iter{*d_strs},
@@ -549,7 +555,8 @@ std::unique_ptr<cudf::column> convert(convert_number_t const& input,
       auto const from_base_scalar = std::get<int>(from_base);
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string cv, from base is int scalar, to base is cv
         return convert_impl<str_iter, const_base, base_iter>(input_cv.size(),
                                                              str_iter{*d_strs},
@@ -574,11 +581,13 @@ std::unique_ptr<cudf::column> convert(convert_number_t const& input,
 
     if (is_cv(from_base)) {
       auto const from_base_cv = std::get<cudf::column_view>(from_base);
-      auto const d_from_bases = cudf::column_device_view::create(from_base_cv, stream);
+      auto const d_from_bases = cudf::column_device_view::create(
+        from_base_cv, stream, cudf::get_current_device_resource_ref());
 
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string scalar, from base is cv, to base is cv
         return convert_impl<const_str, base_iter, base_iter>(from_base_cv.size(),
                                                              const_str{str_scalar},
@@ -600,7 +609,8 @@ std::unique_ptr<cudf::column> convert(convert_number_t const& input,
       auto const from_base_scalar = std::get<int>(from_base);
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string scalar, from base is int scalar, to base is cv
         return convert_impl<const_str, const_base, base_iter>(to_base_cv.size(),
                                                               const_str{str_scalar},
@@ -619,22 +629,25 @@ std::unique_ptr<cudf::column> convert(convert_number_t const& input,
 bool is_convert_overflow(convert_number_t const& input,
                          convert_number_t const& from_base,
                          convert_number_t const& to_base,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr)
 {
   check_types(input, from_base, to_base, stream);
 
   if (is_cv(input)) {
     auto const input_cv = std::get<cudf::column_view>(input);
-    auto const d_strs   = cudf::column_device_view::create(input_cv, stream);
+    auto const d_strs =
+      cudf::column_device_view::create(input_cv, stream, cudf::get_current_device_resource_ref());
 
     if (is_cv(from_base)) {
       auto const from_base_cv = std::get<cudf::column_view>(from_base);
-      auto const d_from_bases = cudf::column_device_view::create(from_base_cv, stream);
+      auto const d_from_bases = cudf::column_device_view::create(
+        from_base_cv, stream, cudf::get_current_device_resource_ref());
 
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string cv, from base is cv, to base is cv
         return is_convert_overflow_impl<str_iter, base_iter, base_iter>(input_cv.size(),
                                                                         str_iter{*d_strs},
@@ -656,7 +669,8 @@ bool is_convert_overflow(convert_number_t const& input,
       auto const& from_base_scalar = std::get<int>(from_base);
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string cv, from base is int scalar, to base is cv
         return is_convert_overflow_impl<str_iter, const_base, base_iter>(
           input_cv.size(),
@@ -683,11 +697,13 @@ bool is_convert_overflow(convert_number_t const& input,
 
     if (is_cv(from_base)) {
       auto const from_base_cv = std::get<cudf::column_view>(from_base);
-      auto const d_from_bases = cudf::column_device_view::create(from_base_cv, stream);
+      auto const d_from_bases = cudf::column_device_view::create(
+        from_base_cv, stream, cudf::get_current_device_resource_ref());
 
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string scalar, from base is cv, to base is cv
         return is_convert_overflow_impl<const_str, base_iter, base_iter>(from_base_cv.size(),
                                                                          const_str{str_scalar},
@@ -710,7 +726,8 @@ bool is_convert_overflow(convert_number_t const& input,
       auto const from_base_scalar = std::get<int>(from_base);
       if (is_cv(to_base)) {
         auto const to_base_cv = std::get<cudf::column_view>(to_base);
-        auto const d_to_bases = cudf::column_device_view::create(to_base_cv, stream);
+        auto const d_to_bases = cudf::column_device_view::create(
+          to_base_cv, stream, cudf::get_current_device_resource_ref());
         // input is string scalar, from base is int scalar, to base is cv
         return is_convert_overflow_impl<const_str, const_base, base_iter>(
           to_base_cv.size(),

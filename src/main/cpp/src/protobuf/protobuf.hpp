@@ -21,9 +21,11 @@
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/types.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/stream>
+
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -37,14 +39,9 @@ enum class proto_encoding : int {
   ENUM_STRING = 3,
 };
 
-CUDF_HOST_DEVICE constexpr int encoding_value(proto_encoding encoding)
-{
-  return static_cast<int>(encoding);
-}
-
 constexpr int MAX_FIELD_NUMBER = (1 << 29) - 1;
 
-enum class proto_wire_type : int {
+enum class proto_wire_type : uint32_t {
   VARINT = 0,
   I64BIT = 1,
   LEN    = 2,
@@ -52,11 +49,6 @@ enum class proto_wire_type : int {
   EGROUP = 4,
   I32BIT = 5,
 };
-
-CUDF_HOST_DEVICE constexpr int wire_type_value(proto_wire_type wire_type)
-{
-  return static_cast<int>(wire_type);
-}
 
 constexpr int MAX_NESTING_DEPTH = 10;
 
@@ -73,6 +65,26 @@ struct nested_field_descriptor {
 };
 
 struct protobuf_decode_context {
+  protobuf_decode_context(std::vector<nested_field_descriptor> schema,
+                          std::vector<int64_t> default_ints,
+                          std::vector<double> default_floats,
+                          std::vector<bool> default_bools,
+                          std::vector<cudf::detail::host_vector<uint8_t>> default_strings,
+                          std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values,
+                          std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names,
+                          bool fail_on_errors,
+                          std::vector<bool> output_fields = {});
+
+  protobuf_decode_context(std::vector<nested_field_descriptor> schema,
+                          bool fail_on_errors,
+                          cuda::stream_ref stream,
+                          std::vector<bool> output_fields = {});
+
+  protobuf_decode_context(protobuf_decode_context const&)            = delete;
+  protobuf_decode_context& operator=(protobuf_decode_context const&) = delete;
+  protobuf_decode_context(protobuf_decode_context&&)                 = default;
+  protobuf_decode_context& operator=(protobuf_decode_context&&)      = default;
+
   std::vector<nested_field_descriptor> schema;
   std::vector<int64_t> default_ints;
   std::vector<double> default_floats;
@@ -81,10 +93,17 @@ struct protobuf_decode_context {
   std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names;
   bool fail_on_errors;
-  // Per-field flag (parallel to `schema`) controlling whether a field appears in the
-  // returned struct. Hidden fields are still decoded so required/enum/wire validation
-  // runs, but they are dropped from the final output. An empty vector means "all output".
+  // Hidden fields are still decoded so required/enum/wire validation runs. An empty vector means
+  // all fields are included in the returned struct.
   std::vector<bool> output_fields;
+
+ private:
+  // For delegation only.
+  protobuf_decode_context(std::size_t num_fields,
+                          std::vector<nested_field_descriptor> schema,
+                          bool fail_on_errors,
+                          cuda::stream_ref stream,
+                          std::vector<bool> output_fields);
 };
 
 struct protobuf_field_meta_view {
@@ -104,14 +123,11 @@ bool is_encoding_compatible(nested_field_descriptor const& field, cudf::data_typ
 
 void validate_decode_context(protobuf_decode_context const& context);
 
-protobuf_field_meta_view make_field_meta_view(protobuf_decode_context const& context,
-                                              int schema_idx);
-
 }  // namespace detail
 
 std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const& binary_input,
                                                         protobuf_decode_context const& context,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr);
 
 }  // namespace spark_rapids_jni::protobuf

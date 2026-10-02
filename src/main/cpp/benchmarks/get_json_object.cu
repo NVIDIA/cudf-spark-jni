@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <benchmarks/common/generate_input.hpp>
+#include "common/generate_input.hpp"
 
 #include <cudf_test/column_wrapper.hpp>
 
@@ -22,6 +22,8 @@
 #include <cudf/io/types.hpp>
 #include <cudf/strings/split/split.hpp>
 #include <cudf/utilities/default_stream.hpp>
+
+#include <cuda/stream>
 
 #include <get_json_object.hpp>
 #include <nvbench/nvbench.cuh>
@@ -44,7 +46,7 @@ struct strings_to_host_fn {
   void operator()(std::vector<std::string>& host_data,
                   char const* chars,
                   cudf::column_view const& offsets,
-                  rmm::cuda_stream_view stream)
+                  cuda::stream_ref stream)
   {
     auto const h_offsets = cudf::detail::make_std_vector_sync(
       cudf::device_span<OffsetType const>(offsets.data<OffsetType>(), offsets.size()), stream);
@@ -62,7 +64,7 @@ struct strings_to_host_fn {
   void operator()(std::vector<std::string>&,
                   char const*,
                   cudf::column_view const&,
-                  rmm::cuda_stream_view)
+                  cuda::stream_ref)
   {
     CUDF_FAIL("invalid offsets type");
   }
@@ -147,7 +149,7 @@ void BM_get_json_object(nvbench::state& state)
     instructions.emplace_back(path_instruction_type::NAMED, "0", -1);
   }
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
     // Can also verify at https://jsonpath.com/.
     [[maybe_unused]] auto const output = spark_rapids_jni::get_json_object(

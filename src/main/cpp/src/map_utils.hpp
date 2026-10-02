@@ -20,7 +20,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -58,7 +58,7 @@ namespace spark_rapids_jni {
 [[nodiscard]] bool is_valid_map(
   cudf::column_view const& input,
   bool throw_on_null_key,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -97,7 +97,7 @@ namespace spark_rapids_jni {
 [[nodiscard]] std::unique_ptr<cudf::column> map_from_entries(
   cudf::column_view const& input,
   bool throw_on_null_key,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

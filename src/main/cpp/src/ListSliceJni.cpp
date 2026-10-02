@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "list_slice.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuListSliceUtils_listSliceIntInt(
@@ -29,7 +31,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuListSliceUtils_listS
 
     // The following constructor expects that the type of the input_column is LIST.
     // If the type is not LIST, an exception will be thrown.
-    cudf::lists_column_view lcv{*reinterpret_cast<cudf::column_view const*>(input_column)};
+    cudf::lists_column_view lcv{*std::bit_cast<cudf::column_view const*>(input_column)};
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::list_slice(lcv, start, length, check_start_length));
   }
@@ -47,8 +49,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuListSliceUtils_listS
 
     // The following constructor expects that the type of the input_column is LIST.
     // If the type is not LIST, an exception will be thrown.
-    cudf::lists_column_view lcv{*reinterpret_cast<cudf::column_view const*>(input_column)};
-    auto const& length_cv = *reinterpret_cast<cudf::column_view const*>(length);
+    cudf::lists_column_view lcv{*std::bit_cast<cudf::column_view const*>(input_column)};
+    auto const& length_cv = *std::bit_cast<cudf::column_view const*>(length);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::list_slice(lcv, start, length_cv, check_start_length));
   }
@@ -66,8 +68,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuListSliceUtils_listS
 
     // The following constructor expects that the type of the input_column is LIST.
     // If the type is not LIST, an exception will be thrown.
-    cudf::lists_column_view lcv{*reinterpret_cast<cudf::column_view const*>(input_column)};
-    auto const& start_cv = *reinterpret_cast<cudf::column_view const*>(start);
+    cudf::lists_column_view lcv{*std::bit_cast<cudf::column_view const*>(input_column)};
+    auto const& start_cv = *std::bit_cast<cudf::column_view const*>(start);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::list_slice(lcv, start_cv, length, check_start_length));
   }
@@ -86,9 +88,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuListSliceUtils_listS
 
     // The following constructor expects that the type of the input_column is LIST.
     // If the type is not LIST, an exception will be thrown.
-    cudf::lists_column_view lcv{*reinterpret_cast<cudf::column_view const*>(input_column)};
-    auto const& start_cv  = *reinterpret_cast<cudf::column_view const*>(start);
-    auto const& length_cv = *reinterpret_cast<cudf::column_view const*>(length);
+    cudf::lists_column_view lcv{*std::bit_cast<cudf::column_view const*>(input_column)};
+    auto const& start_cv  = *std::bit_cast<cudf::column_view const*>(start);
+    auto const& length_cv = *std::bit_cast<cudf::column_view const*>(length);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::list_slice(lcv, start_cv, length_cv, check_start_length));
   }

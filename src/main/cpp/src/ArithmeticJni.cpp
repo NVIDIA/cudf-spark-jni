@@ -20,6 +20,8 @@
 #include "multiply.hpp"
 #include "round_float.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Arithmetic_multiply(JNIEnv* env,
@@ -39,18 +41,18 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Arithmetic_multiply(JNI
     cudf::jni::auto_set_device(env);
 
     if (is_left_cv && is_right_cv) {
-      auto const& left_cv  = *reinterpret_cast<cudf::column_view const*>(left);
-      auto const& right_cv = *reinterpret_cast<cudf::column_view const*>(right);
+      auto const& left_cv  = *std::bit_cast<cudf::column_view const*>(left);
+      auto const& right_cv = *std::bit_cast<cudf::column_view const*>(right);
       return cudf::jni::release_as_jlong(
         spark_rapids_jni::multiply(left_cv, right_cv, ansi_enabled, is_try_mode));
     } else if (is_left_cv && !is_right_cv) {
-      auto const& left_cv      = *reinterpret_cast<cudf::column_view const*>(left);
-      auto const& right_scalar = *reinterpret_cast<cudf::scalar const*>(right);
+      auto const& left_cv      = *std::bit_cast<cudf::column_view const*>(left);
+      auto const& right_scalar = *std::bit_cast<cudf::scalar const*>(right);
       return cudf::jni::release_as_jlong(
         spark_rapids_jni::multiply(left_cv, right_scalar, ansi_enabled, is_try_mode));
     } else if (!is_left_cv && is_right_cv) {
-      auto const& left_scalar = *reinterpret_cast<cudf::scalar const*>(left);
-      auto const& right_cv    = *reinterpret_cast<cudf::column_view*>(right);
+      auto const& left_scalar = *std::bit_cast<cudf::scalar const*>(left);
+      auto const& right_cv    = *std::bit_cast<cudf::column_view*>(right);
       return cudf::jni::release_as_jlong(
         spark_rapids_jni::multiply(left_scalar, right_cv, ansi_enabled, is_try_mode));
     } else {
@@ -73,7 +75,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Arithmetic_round(JNIEnv
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::column_view* input     = reinterpret_cast<cudf::column_view*>(input_ptr);
+    cudf::column_view* input     = std::bit_cast<cudf::column_view*>(input_ptr);
     cudf::rounding_method method = static_cast<cudf::rounding_method>(rounding_method);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::round(*input, decimal_places, method, is_ansi_mode));

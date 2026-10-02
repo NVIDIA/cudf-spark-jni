@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+
+#include <cuda/stream>
 
 namespace spark_rapids_jni {
 
@@ -51,7 +53,7 @@ std::unique_ptr<cudf::column> multiply(
   cudf::column_view const& right_input,
   bool is_ansi_mode,
   bool is_try_mode,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -84,7 +86,7 @@ std::unique_ptr<cudf::column> multiply(
   cudf::scalar const& right_input,
   bool is_ansi_mode,
   bool is_try_mode,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -117,7 +119,7 @@ std::unique_ptr<cudf::column> multiply(
   cudf::column_view const& right_input,
   bool is_ansi_mode,
   bool is_try_mode,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

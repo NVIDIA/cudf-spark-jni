@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,10 +25,12 @@
 #include <cudf/strings/detail/utf8.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/algorithm>
+#include <cuda/stream>
 #include <thrust/tabulate.h>
 
 #include <cstdint>
@@ -130,9 +132,9 @@ template <typename RepT>
 void truncate_integral_and_fill(std::unique_ptr<cudf::column>& output,
                                 cudf::column_device_view d_input,
                                 int32_t width,
-                                rmm::cuda_stream_view stream)
+                                cuda::stream_ref stream)
 {
-  thrust::tabulate(rmm::exec_policy_nosync(stream),
+  thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    output->mutable_view().begin<RepT>(),
                    output->mutable_view().end<RepT>(),
                    truncate_integral_fn<RepT>{d_input, width});
@@ -140,7 +142,7 @@ void truncate_integral_and_fill(std::unique_ptr<cudf::column>& output,
 
 std::unique_ptr<cudf::column> truncate_integral_impl(cudf::column_view const& input,
                                                      int32_t width,
-                                                     rmm::cuda_stream_view stream,
+                                                     cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(width != 0, "Width must not be zero");
@@ -149,7 +151,8 @@ std::unique_ptr<cudf::column> truncate_integral_impl(cudf::column_view const& in
   cudf::size_type num_rows = input.size();
   auto output              = cudf::make_fixed_width_column(
     input.type(), num_rows, cudf::copy_bitmask(input, stream, mr), input.null_count(), stream, mr);
-  auto d_input = cudf::column_device_view::create(input, stream);
+  auto d_input =
+    cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
 
   if (input_type_id == cudf::type_id::INT32 || input_type_id == cudf::type_id::DECIMAL32) {
     // treat DECIMAL32 column as int32 column
@@ -168,7 +171,7 @@ std::unique_ptr<cudf::column> truncate_integral_impl(cudf::column_view const& in
 
 std::unique_ptr<cudf::column> truncate_string_impl(cudf::column_view const& input,
                                                    int32_t truncate_length,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Input must be STRING");
@@ -196,7 +199,7 @@ std::unique_ptr<cudf::column> truncate_string_impl(cudf::column_view const& inpu
 
 std::unique_ptr<cudf::column> truncate_binary_impl(cudf::column_view const& input,
                                                    int32_t truncate_length,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(truncate_length > 0, "Length must be positive");
@@ -223,12 +226,12 @@ std::unique_ptr<cudf::column> truncate_binary_impl(cudf::column_view const& inpu
     mr);
   auto new_chars_size = new_chars.size();
 
-  auto new_child =
-    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},  // Data type
-                                   new_chars_size,                         // Number of elements
-                                   new_chars.release(),   // Transfer ownership of the buffer
-                                   rmm::device_buffer{},  // no nulls in child
-                                   0);
+  auto new_child = std::make_unique<cudf::column>(
+    cudf::data_type{cudf::type_id::UINT8},                     // Data type
+    new_chars_size,                                            // Number of elements
+    new_chars.release(),                                       // Transfer ownership of the buffer
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),  // no nulls in child
+    0);
 
   return cudf::make_lists_column(num_rows,
                                  std::move(new_offsets),
@@ -241,7 +244,7 @@ std::unique_ptr<cudf::column> truncate_binary_impl(cudf::column_view const& inpu
 
 std::unique_ptr<cudf::column> truncate_integral(cudf::column_view const& input,
                                                 int32_t width,
-                                                rmm::cuda_stream_view stream,
+                                                cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -250,7 +253,7 @@ std::unique_ptr<cudf::column> truncate_integral(cudf::column_view const& input,
 
 std::unique_ptr<cudf::column> truncate_string(cudf::column_view const& input,
                                               int32_t truncate_length,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -259,7 +262,7 @@ std::unique_ptr<cudf::column> truncate_string(cudf::column_view const& input,
 
 std::unique_ptr<cudf::column> truncate_binary(cudf::column_view const& input,
                                               int32_t truncate_length,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

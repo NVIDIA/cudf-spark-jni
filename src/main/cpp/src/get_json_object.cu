@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -40,6 +41,7 @@
 #include <cuda/functional>
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform_reduce.h>
 
@@ -869,7 +871,7 @@ struct kernel_launcher {
   static void exec(cudf::column_device_view const& input,
                    cudf::device_span<json_path_processing_data> path_data,
                    int8_t* max_path_depth_exceeded,
-                   rmm::cuda_stream_view stream)
+                   cuda::stream_ref stream)
   {
     // The optimal values for block_size and min_block_per_sm were found through testing,
     // which are either 128-8 or 256-4. The pair 128-8 seems a bit better.
@@ -884,7 +886,7 @@ struct kernel_launcher {
     auto const num_blocks = cudf::util::div_rounding_up_safe(num_threads_per_row * input.size(),
                                                              static_cast<std::size_t>(block_size));
     get_json_object_kernel<block_size, min_block_per_sm>
-      <<<num_blocks, block_size, 0, stream.value()>>>(
+      <<<num_blocks, block_size, 0, stream.get()>>>(
         input, path_data, num_threads_per_row, max_path_depth_exceeded);
   }
 };
@@ -905,7 +907,7 @@ std::tuple<std::vector<rmm::device_uvector<path_instruction>>,
 construct_path_commands(
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   // Concatenate all names from path instructions.
   auto h_inst_names = [&] {
@@ -924,7 +926,8 @@ construct_path_commands(
     }
     return all_names;
   }();
-  auto d_inst_names = cudf::string_scalar(h_inst_names, true, stream);
+  auto d_inst_names =
+    cudf::string_scalar(h_inst_names, true, stream, cudf::get_current_device_resource_ref());
 
   std::size_t name_pos{0};
   auto h_path_commands = std::make_unique<std::vector<std::vector<path_instruction>>>();
@@ -964,10 +967,10 @@ construct_path_commands(
 
 int64_t calc_scratch_size(cudf::strings_column_view const& input,
                           cudf::detail::input_offsetalator const& in_offsets,
-                          rmm::cuda_stream_view stream)
+                          cuda::stream_ref stream)
 {
   auto const max_row_size = thrust::transform_reduce(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(input.size()),
     cuda::proclaim_return_type<int64_t>(
@@ -1016,7 +1019,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
   int64_t scratch_size,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const [d_json_paths, h_json_paths, d_inst_names, h_inst_names] =
@@ -1055,7 +1058,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   auto d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), d_error_check.begin(), d_error_check.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_error_check.begin(),
+    d_error_check.end(),
+    0);
 
   kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, stream);
   auto h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
@@ -1075,7 +1081,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   }
   // From here, we had out-of-bound write. Although this is very rare, it may still happen.
 
-  std::vector<std::pair<rmm::device_buffer, cudf::size_type>> out_null_masks_and_null_counts;
+  std::vector<std::pair<cuda::device_buffer<std::byte>, cudf::size_type>>
+    out_null_masks_and_null_counts;
   std::vector<std::pair<std::unique_ptr<cudf::column>, int64_t>> out_offsets_and_sizes;
   std::vector<rmm::device_uvector<char>> out_char_buffers;
   std::vector<std::size_t> oob_indices;
@@ -1138,7 +1145,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), d_error_check.begin(), d_error_check.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    d_error_check.begin(),
+    d_error_check.end(),
+    0);
   kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, stream);
   h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
   has_no_oob    = check_error(h_error_check);
@@ -1165,7 +1175,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
     json_paths,
   int64_t memory_budget_bytes,
   int32_t parallel_override,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const num_outputs = json_paths.size();
@@ -1193,7 +1203,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   if (memory_budget_bytes <= 0 && parallel_override <= 0) {
     parallel_override = static_cast<int>(sorted_indices.size());
   }
-  auto const d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  auto const d_input_ptr = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
 
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;
@@ -1238,7 +1249,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
 std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
   std::vector<std::tuple<path_instruction_type, std::string, int32_t>> const& instructions,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1251,7 +1262,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
     json_paths,
   int64_t memory_budget_bytes,
   int32_t parallel_override,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

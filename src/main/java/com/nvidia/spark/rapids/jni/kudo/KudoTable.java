@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,21 +59,21 @@ public class KudoTable implements AutoCloseable {
     requireNonNull(in, "Input stream must not be null");
 
     DataInputStream din = readerFrom(in);
-    return KudoTableHeader.readFrom(din).map(header -> {
-      // Header only
-      if (header.getNumColumns() == 0) {
-        return new KudoTable(header, null);
-      }
+    Optional<KudoTableHeader> maybeHeader = KudoTableHeader.readFrom(din);
+    if (!maybeHeader.isPresent()) {
+      return Optional.empty();
+    }
+    KudoTableHeader header = maybeHeader.get();
+    // Header only
+    if (header.getNumColumns() == 0) {
+      return Optional.of(new KudoTable(header, null));
+    }
 
-      return Arms.closeIfException(HostMemoryBuffer.allocate(header.getTotalDataLen(), false), buffer -> {
-        try {
+    return Arms.closeIfExceptionChecked(
+        HostMemoryBuffer.allocate(header.getTotalDataLen(), false), buffer -> {
           buffer.copyFromStream(0, din, header.getTotalDataLen());
-          return new KudoTable(header, buffer);
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        }
-      });
-    });
+          return Optional.of(new KudoTable(header, buffer));
+        });
   }
 
   public KudoTableHeader getHeader() {

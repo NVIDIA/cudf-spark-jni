@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -44,13 +44,13 @@ rapids_cuda_init_architectures(SPARK_RAPIDS_JNI)
 
 project(
   SPARK_RAPIDS_JNI
-  VERSION 26.08.00
+  VERSION 26.12.00
   LANGUAGES CXX CUDA
 )
 
 # We use no C++20 modules; disable module scanning so CMake emits no ninja dyndep phase. Otherwise
 # its dyndep refresh trips ninja's RefreshDyndepDependents assertion on incremental rebuilds after
-# a structural source change. Mirrors libcudf (rapidsai/cudf#19192).
+# a structural source change. Mirrors libcudf (nvidia/cudf#19192).
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # ##################################################################################################
@@ -62,6 +62,7 @@ option(BUILD_TESTS "Configure CMake to build tests" OFF)
 option(BUILD_BENCHMARKS "Configure CMake to build (google) benchmarks" OFF)
 option(BUILD_FAULTINJ "Configure CMake to build fault injection" ON)
 option(BUILD_PROFILER "Configure CMake to build profiler" ON)
+option(HIDE_PRIVATE_CUDA_SYMBOLS "Hide private symbols from static CUDA compiler libraries" ON)
 
 message(
   VERBOSE "SPARK_RAPIDS_JNI: Build with per-thread default stream:
@@ -70,6 +71,9 @@ message(
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build tests: ${BUILD_TESTS}")
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build (nvbench) benchmarks: ${BUILD_BENCHMARKS}")
 message(VERBOSE "SPARK_RAPIDS_JNI: Configure CMake to build fault injection: ${BUILD_FAULTINJ}")
+message(VERBOSE
+        "SPARK_RAPIDS_JNI: Hide private static CUDA compiler symbols: ${HIDE_PRIVATE_CUDA_SYMBOLS}"
+)
 
 set(SPARK_RAPIDS_JNI_BUILD_TESTS ${BUILD_TESTS})
 set(SPARK_RAPIDS_JNI_BUILD_BENCHMARKS ${BUILD_BENCHMARKS})
@@ -151,10 +155,10 @@ else()
 endif()
 
 # cuCollections
-# As of rapidsai/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
+# As of nvidia/cudf PR #22277 (commit 5a375a3417ef70c55564bd0c4c6255a2da5dca49), libcudf
 # wraps its `cuco::cuco` link with `$<BUILD_LOCAL_INTERFACE:...>`, so the cuco headers are no
 # longer transitively exposed to downstream consumers via `find_package(cudf)`. Several
-# spark-rapids-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
+# cudf-spark-jni sources (e.g. the hash kernels) include cudf detail headers that pull in
 # `<cuco/hash_functions.cuh>`, so we need to fetch cuco ourselves.
 include(${rapids-cmake-dir}/cpm/cuco.cmake)
 rapids_cpm_cuco()
@@ -194,6 +198,12 @@ find_library(THRIFT_LIB "libthrift.a" REQUIRED NO_DEFAULT_PATH
 set(CUDFJNI_INCLUDE_DIRS
   "${CUDF_DIR}/java/src/main/native/include"
   "${CUDF_DIR}/java/src/main/native/src"
+)
+
+# Headers generated/vendored from Arrow and Thrift, fetched from upstream and not
+# something we edit; treated as SYSTEM below so their warnings (e.g. deprecated
+# declarations) don't trip our -Werror.
+set(CUDFJNI_VENDORED_INCLUDE_DIRS
   "${GENERATED_PARQUET_INCLUDE}"
   "${CUDFJNI_BUILD_DIR}/_deps/thrift-build/"
   "${CUDFJNI_BUILD_DIR}/_deps/thrift-src/lib/cpp/src/"
@@ -274,6 +284,7 @@ add_library(
   src/json_utils.cu
   src/join_primitives.cu
   src/list_slice.cu
+  src/like.cu
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
@@ -285,6 +296,7 @@ add_library(
   src/protobuf/protobuf_builders.cu
   src/protobuf/protobuf_kernels.cu
   src/regex_rewrite_utils.cu
+  src/reverse_strings.cu
   src/row_conversion.cu
   src/round_float.cu
   src/shuffle_assemble.cu
@@ -320,8 +332,15 @@ target_compile_options(
 target_include_directories(
   spark_rapids_jni
   PRIVATE "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
-          "${JNI_INCLUDE_DIRS}"
           "${CUDFJNI_INCLUDE_DIRS}"
+)
+
+# Mark include dirs we do not control as SYSTEM so -Werror does not trip on warnings
+# (e.g. deprecated declarations) originating from vendored/generated headers.
+target_include_directories(
+  spark_rapids_jni SYSTEM
+  PRIVATE "${JNI_INCLUDE_DIRS}"
+          "${CUDFJNI_VENDORED_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 
@@ -350,6 +369,18 @@ target_link_libraries(
     ${PARQUET_LIB}
     ${THRIFT_LIB}
 )
+if(HIDE_PRIVATE_CUDA_SYMBOLS)
+  # These toolkit implementation symbols are not part of the cuDF or JNI ABI. Localizing them keeps
+  # the regular ELF symbol table for diagnostics while removing them from the dynamic export table.
+  target_link_options(
+    spark_rapids_jni
+    PRIVATE "LINKER:--exclude-libs,libnvrtc_static.a"
+            "LINKER:--exclude-libs,libnvrtc-builtins_static.a"
+            "LINKER:--exclude-libs,libnvptxcompiler_static.a"
+            "LINKER:--exclude-libs,libnvJitLink_static.a"
+            "LINKER:--exclude-libs,libnvcomp_static.a"
+  )
+endif()
 rapids_cuda_set_runtime(spark_rapids_jni USE_STATIC ON)
 set_target_properties(spark_rapids_jni PROPERTIES LINK_LANGUAGE "CXX")
 # For backwards-compatibility with the cudf Java bindings and RAPIDS accelerated UDFs,

@@ -24,11 +24,12 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/null_mask.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/logical.h>
 
 using namespace cudf;
@@ -39,10 +40,10 @@ namespace detail {
 
 namespace {
 
-void assert_start_is_not_zero(column_device_view const& start, rmm::cuda_stream_view stream)
+void assert_start_is_not_zero(column_device_view const& start, cuda::stream_ref stream)
 {
   bool start_valid =
-    thrust::all_of(rmm::exec_policy(stream),
+    thrust::all_of(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(start.size()),
                    cuda::proclaim_return_type<bool>([start] __device__(size_type index) {
@@ -52,10 +53,10 @@ void assert_start_is_not_zero(column_device_view const& start, rmm::cuda_stream_
   CUDF_EXPECTS(start_valid, "Invalid start value: start must not be 0");
 }
 
-void assert_length_is_not_negative(column_device_view const& length, rmm::cuda_stream_view stream)
+void assert_length_is_not_negative(column_device_view const& length, cuda::stream_ref stream)
 {
   bool length_valid =
-    thrust::all_of(rmm::exec_policy(stream),
+    thrust::all_of(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    thrust::make_counting_iterator(0),
                    thrust::make_counting_iterator(length.size()),
                    cuda::proclaim_return_type<bool>([length] __device__(size_type index) {
@@ -147,7 +148,7 @@ auto generate_starts_and_sizes(size_type const* offsets_of_input_lists,
                                size_type const num_rows,
                                SRART_ITERATOR const start_iterator,
                                LENGTH_ITERATOR const length_iterator,
-                               rmm::cuda_stream_view stream)
+                               cuda::stream_ref stream)
 {
   auto starts              = make_numeric_column(data_type{type_id::INT32},
                                     num_rows,
@@ -161,7 +162,7 @@ auto generate_starts_and_sizes(size_type const* offsets_of_input_lists,
                                    cudf::get_current_device_resource_ref());
   constexpr int block_size = 256;
   auto grid                = cudf::detail::grid_1d{num_rows, block_size};
-  compute_starts_and_sizes_kernel<<<grid.num_blocks, block_size, 0, stream.value()>>>(
+  compute_starts_and_sizes_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(
     offsets_of_input_lists,
     num_rows,
     start_iterator,
@@ -174,7 +175,7 @@ auto generate_starts_and_sizes(size_type const* offsets_of_input_lists,
 std::unique_ptr<cudf::column> legal_list_slice(lists_column_view const& input,
                                                column_view const& starts,
                                                column_view const& sizes,
-                                               rmm::cuda_stream_view stream,
+                                               cuda::stream_ref stream,
                                                rmm::device_async_resource_ref mr)
 {
   auto const num_rows = input.size();
@@ -186,7 +187,7 @@ std::unique_ptr<cudf::column> legal_list_slice(lists_column_view const& input,
   constexpr int block_size = 256;
   auto grid                = cudf::detail::grid_1d{num_rows, block_size};
   rmm::device_uvector<int32_t> gather_map(num_total_elements, stream);
-  compute_gather_map<<<grid.num_blocks, block_size, 0, stream.value()>>>(
+  compute_gather_map<<<grid.num_blocks, block_size, 0, stream.get()>>>(
     num_rows,
     input.offsets_begin(),
     starts.begin<int32_t>(),
@@ -219,7 +220,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          size_type const start,
                                          size_type const length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   if (check_start_length) {
@@ -243,7 +244,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          size_type const start,
                                          column_view const& length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(length.type().id() == type_id::INT32,
@@ -276,7 +277,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          column_view const& start,
                                          size_type const length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(start.type().id() == type_id::INT32,
@@ -309,7 +310,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          column_view const& start,
                                          column_view const& length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(start.type().id() == type_id::INT32,
@@ -352,7 +353,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          size_type const start,
                                          size_type const length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -363,7 +364,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          size_type const start,
                                          column_view const& length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -374,7 +375,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          column_view const& start,
                                          size_type const length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -385,7 +386,7 @@ std::unique_ptr<cudf::column> list_slice(lists_column_view const& input,
                                          column_view const& start,
                                          column_view const& length,
                                          bool check_start_length,
-                                         rmm::cuda_stream_view stream,
+                                         cuda::stream_ref stream,
                                          rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

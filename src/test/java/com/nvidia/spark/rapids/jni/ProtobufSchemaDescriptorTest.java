@@ -93,6 +93,65 @@ public class ProtobufSchemaDescriptorTest {
   }
 
   @Test
+  void testEnumMetadataRejectsNonEnumTypeOrEncoding() {
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_FIXED, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        makeDescriptor(false, false, Protobuf.ENC_ZIGZAG, new int[]{0, 1}, null));
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT64).enumValidValues(new int[]{0, 1})
+            .build());
+  }
+
+  @Test
+  void testEnumDefaultMustBeARecognizedValue() {
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).defaultValue(99)
+                .enumValidValues(new int[]{0, 1, 2})
+            .build());
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).defaultValue(1L << 42)
+                .enumValidValues(new int[]{0, 1, 2})
+            .build());
+    assertDoesNotThrow(() ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).defaultValue(2)
+                .enumValidValues(new int[]{0, 1, 2})
+            .build());
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.STRING)
+                .enumMetadata("A", "B")
+                .defaultValue(2)
+            .build());
+  }
+
+  @Test
+  void testEnumMetadataRequiresCompatibleOutputType() {
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT64).enumValidValues(new int[]{0, 1})
+            .build());
+    assertThrows(IllegalArgumentException.class, () ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).wireType(Protobuf.WT_32BIT)
+                .encoding(Protobuf.ENC_FIXED).enumValidValues(new int[]{0, 1})
+            .build());
+    assertDoesNotThrow(() ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.INT32).enumValidValues(new int[]{0, 1})
+            .build());
+    assertDoesNotThrow(() ->
+        new ProtobufSchemaDescriptorBuilder()
+            .addField(1, DType.STRING)
+                .enumMetadata("A", "B")
+            .build());
+  }
+
+  @Test
   void testDuplicateFieldNumbersUnderSameParentRejected() {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
@@ -139,7 +198,7 @@ public class ProtobufSchemaDescriptorTest {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
             .addField(1, DType.STRING).wireType(Protobuf.WT_LEN)
-                .enumMetadata(new int[]{0, 1}, new byte[][]{"A".getBytes(), "B".getBytes()})
+                .enumMetadata("A", "B")
             .build());
   }
 
@@ -210,9 +269,10 @@ public class ProtobufSchemaDescriptorTest {
   void testSerializationRoundTripPreservesContentsAndIsolation() throws Exception {
     ProtobufSchemaDescriptor original = new ProtobufSchemaDescriptorBuilder()
         .addField(1, DType.STRING)
-            .enumMetadata(new int[]{0, 1}, new byte[][]{"A".getBytes(), "B".getBytes()})
-            .defaultValue("def".getBytes())
-            .defaultValue(7)  // non-zero numeric default to exercise scalar round-trip
+            .enumMetadata("A", "B")
+            .defaultValue(1)
+        .addField(2, DType.STRING).defaultValue("def")
+        .addField(3, DType.INT32).defaultValue(7)
         .build();
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -228,12 +288,12 @@ public class ProtobufSchemaDescriptorTest {
     assertEquals(original.numFields(), roundTrip.numFields());
     assertArrayEquals(original.fieldNumbers, roundTrip.fieldNumbers);
     assertArrayEquals(original.defaultInts, roundTrip.defaultInts);
-    assertArrayEquals(original.defaultStrings[0], roundTrip.defaultStrings[0]);
+    assertArrayEquals(original.defaultStrings[1], roundTrip.defaultStrings[1]);
     assertArrayEquals(original.enumValidValues[0], roundTrip.enumValidValues[0]);
     assertArrayEquals(original.enumNames[0][0], roundTrip.enumNames[0][0]);
     assertArrayEquals(original.enumNames[0][1], roundTrip.enumNames[0][1]);
     assertNotSame(original.defaultStrings, roundTrip.defaultStrings);
-    assertNotSame(original.defaultStrings[0], roundTrip.defaultStrings[0]);
+    assertNotSame(original.defaultStrings[1], roundTrip.defaultStrings[1]);
     assertNotSame(original.enumValidValues, roundTrip.enumValidValues);
     assertNotSame(original.enumValidValues[0], roundTrip.enumValidValues[0]);
     assertNotSame(original.enumNames, roundTrip.enumNames);

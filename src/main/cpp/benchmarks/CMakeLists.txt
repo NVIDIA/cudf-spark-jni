@@ -60,7 +60,7 @@ function(ConfigureBench CMAKE_BENCH_NAME)
     install(
         TARGETS ${CMAKE_BENCH_NAME}
         COMPONENT testing
-        DESTINATION bin/benchmarks/spark-rapids-jni
+        DESTINATION bin/benchmarks/cudf-spark-jni
         EXCLUDE_FROM_ALL
     )
 endfunction(ConfigureBench)
@@ -84,8 +84,14 @@ ConfigureBench(BLOOM_FILTER_BENCH
 ConfigureBench(GET_JSON_OBJECT_BENCH
   get_json_object.cu)
 
+ConfigureBench(FROM_JSON_TO_STRUCTS_BENCH
+  from_json_to_structs.cu)
+
 ConfigureBench(PARSE_URI_BENCH
   parse_uri.cpp)
+
+ConfigureBench(PROTOBUF_DECODE_BENCH
+  protobuf_decode.cu)
 
 ConfigureBench(FROM_JSON_BENCH
   from_json.cu)

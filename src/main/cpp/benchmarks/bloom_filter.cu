@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-#include <benchmarks/common/generate_input.hpp>
+#include "common/generate_input.hpp"
 
 #include <cudf_test/column_utilities.hpp>
+
+#include <cuda/stream>
 
 #include <bloom_filter.hpp>
 #include <hash/hash.hpp>
@@ -39,13 +41,13 @@ void bloom_filter_put_impl(nvbench::state& state, int version)
   auto const src   = create_random_table({{cudf::type_id::INT64}}, row_count{num_rows}, builder);
   auto const input = spark_rapids_jni::xxhash64(*src);
 
-  auto const stream = cudf::get_default_stream();
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
+  cuda::stream_ref const stream = cudf::get_default_stream();
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   state.exec(nvbench::exec_tag::timer | nvbench::exec_tag::sync,
              [&](nvbench::launch&, auto& timer) {
                timer.start();
                spark_rapids_jni::bloom_filter_put(*bloom_filter, *input);
-               stream.synchronize();
+               stream.sync();
                timer.stop();
              });
 

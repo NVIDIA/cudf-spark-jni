@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -91,6 +91,94 @@ public class StringUtilsTest {
         ColumnVector round2 = StringUtils.randomUUIDsWithSeed(rowCount, seed)) {
       // Same seed should generate the same UUIDs.
       assertColumnsAreEqual(round1, round2);
+    }
+  }
+
+  @Test
+  void testReverseStringsWellFormed() {
+    try (ColumnVector input = ColumnVector.fromUTF8Strings(
+            "ABC".getBytes(),
+            new byte[]{0x41, (byte) 0xC3, (byte) 0xA9},
+            new byte[]{0x41, (byte) 0xE4, (byte) 0xB8, (byte) 0x96});
+         ColumnVector expected = ColumnVector.fromUTF8Strings(
+            "CBA".getBytes(),
+            new byte[]{(byte) 0xC3, (byte) 0xA9, 0x41},
+            new byte[]{(byte) 0xE4, (byte) 0xB8, (byte) 0x96, 0x41});
+         ColumnVector result = StringUtils.reverseStrings(input)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testReverseStringsTruncatedTrailingNoOverread() {
+    // Neighbor rows use sentinel bytes so an over-read would change the first-row result.
+    try (ColumnVector input = ColumnVector.fromUTF8Strings(
+            new byte[]{0x41, (byte) 0xCE},
+            new byte[]{(byte) 0xA9, 0x42},
+            new byte[]{0x41, (byte) 0xE4, (byte) 0xB8},
+            new byte[]{(byte) 0x96, 0x43},
+            new byte[]{0x41, (byte) 0xF0, (byte) 0x90},
+            new byte[]{(byte) 0x8D, (byte) 0x88, 0x44},
+            new byte[]{(byte) 0xE4, (byte) 0xB8, (byte) 0x96, (byte) 0xCE},
+            new byte[]{0x45});
+         ColumnVector expected = ColumnVector.fromUTF8Strings(
+            new byte[]{(byte) 0xCE, 0x41},
+            new byte[]{0x42, (byte) 0xA9},
+            new byte[]{(byte) 0xE4, (byte) 0xB8, 0x41},
+            new byte[]{0x43, (byte) 0x96},
+            new byte[]{(byte) 0xF0, (byte) 0x90, 0x41},
+            new byte[]{0x44, (byte) 0x88, (byte) 0x8D},
+            new byte[]{(byte) 0xCE, (byte) 0xE4, (byte) 0xB8, (byte) 0x96},
+            new byte[]{0x45});
+         ColumnVector result = StringUtils.reverseStrings(input)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testLikeWithColumnPatterns() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+            "azaa", "ababaabba", "aaxa", "abc_def", "abc1def", "", "éclair", null, "x");
+         ColumnVector patterns = ColumnVector.fromStrings(
+            "%a", "a%b%", "a__a", "abc\\_d%", "abc\\_d%", "", "é%", "%", null);
+         Scalar escape = Scalar.fromString("\\");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans(
+            true, true, true, true, false, true, true, null, null);
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testLikeWithCustomEscape() {
+    try (ColumnVector input = ColumnVector.fromStrings("abc_def", "abc1def", "20%", "20x");
+         ColumnVector patterns = ColumnVector.fromStrings("abc#_d%", "abc#_d%", "20#%", "20#%");
+         Scalar escape = Scalar.fromString("#");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans(true, false, true, false);
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testLikeInvalidPatternReportsFirstActiveRow() {
+    try (ColumnVector input = ColumnVector.fromStrings(null, "abc", "def");
+         ColumnVector patterns = ColumnVector.fromStrings("bad\\x", "bad\\x", "trailing\\");
+         Scalar escape = Scalar.fromString("\\")) {
+      ExceptionWithRowIndex error = assertThrows(
+          ExceptionWithRowIndex.class, () -> StringUtils.like(input, patterns, escape).close());
+      assertEquals(1, error.getRowIndex());
+    }
+  }
+
+  @Test
+  void testLikeEmptyColumns() {
+    try (ColumnVector input = ColumnVector.fromStrings();
+         ColumnVector patterns = ColumnVector.fromStrings();
+         Scalar escape = Scalar.fromString("\\");
+         ColumnVector expected = ColumnVector.fromBoxedBooleans();
+         ColumnVector result = StringUtils.like(input, patterns, escape)) {
+      assertColumnsAreEqual(expected, result);
     }
   }
 }

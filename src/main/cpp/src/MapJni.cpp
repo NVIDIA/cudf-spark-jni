@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@
 #include "jni_utils.hpp"
 #include "map.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong Java_com_nvidia_spark_rapids_jni_Map_sort(JNIEnv* env,
@@ -31,7 +33,7 @@ JNIEXPORT jlong Java_com_nvidia_spark_rapids_jni_Map_sort(JNIEnv* env,
   {
     cudf::jni::auto_set_device(env);
     auto sort_order = is_descending ? cudf::order::DESCENDING : cudf::order::ASCENDING;
-    cudf::column_view const& map_view = *reinterpret_cast<cudf::column_view const*>(map_haldle);
+    cudf::column_view const& map_view = *std::bit_cast<cudf::column_view const*>(map_haldle);
     return cudf::jni::release_as_jlong(spark_rapids_jni::sort_map_column(map_view, sort_order));
   }
   JNI_CATCH(env, 0);

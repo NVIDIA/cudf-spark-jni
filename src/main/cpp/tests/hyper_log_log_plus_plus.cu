@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,9 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+
+#include <cuda/stream>
 
 #include <hyper_log_log_plus_plus.hpp>
 #include <hyper_log_log_plus_plus_host_udf.hpp>
@@ -86,7 +87,7 @@ std::vector<int64_t const*> get_column_ptrs_from_struct_scalars(
 std::unique_ptr<cudf::column> make_struct_column_from_scalars(
   std::vector<std::unique_ptr<cudf::scalar>>& scalars,
   int num_longs_in_scalar,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   // asserts
@@ -123,15 +124,16 @@ std::unique_ptr<cudf::column> make_struct_column_from_scalars(
   auto d_output = cudf::detail::make_device_uvector(host_results_pointers, stream, mr);
 
   // concatenate struct scalars into a struct column
-  concat_struct_scalars_to_struct_column_kernel<<<1, 1, 0, stream.value()>>>(
+  concat_struct_scalars_to_struct_column_kernel<<<1, 1, 0, stream.get()>>>(
     d_col_ptrs, scalars.size(), num_longs_in_scalar, d_output);
 
   // create struct column
-  return cudf::make_structs_column(scalars.size(),  // num_rows
-                                   std::move(children),
-                                   0,                     // null count
-                                   rmm::device_buffer{},  // null mask
-                                   stream);
+  return cudf::make_structs_column(
+    scalars.size(),  // num_rows
+    std::move(children),
+    0,                                                         // null count
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),  // null mask
+    stream);
 }
 
 /**
@@ -139,7 +141,7 @@ std::unique_ptr<cudf::column> make_struct_column_from_scalars(
  */
 std::unique_ptr<cudf::column> make_struct_column_from_scalar(std::unique_ptr<cudf::scalar>& scalar,
                                                              int num_longs_in_scalar,
-                                                             rmm::cuda_stream_view stream,
+                                                             cuda::stream_ref stream,
                                                              rmm::device_async_resource_ref mr)
 {
   std::vector<std::unique_ptr<cudf::scalar>> scalars;

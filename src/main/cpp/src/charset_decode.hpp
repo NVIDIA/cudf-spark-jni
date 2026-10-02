@@ -21,8 +21,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/mr/per_device_resource.hpp>
+
+#include <cuda/stream>
 
 #include <cstdint>
 
@@ -77,7 +78,7 @@ struct decode_result {
   cudf::column_view const& input,
   charset_type charset,
   error_action action,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

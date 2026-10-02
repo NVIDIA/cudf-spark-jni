@@ -1,6 +1,7 @@
-# Spark Rapids Profile Converter Tool
+# NVIDIA cuDF plugin for Apache Spark Profile Converter Tool
 
-This directory contains the Spark Rapids Profile Converter, a tool for converting NVTX profiling data from the Spark Rapids JNI library.
+This directory contains the NVIDIA cuDF plugin for Apache Spark Profile Converter, a tool for
+converting NVTX profiling data from the cuDF plugin JNI library.
 
 ## Building the Tool
 

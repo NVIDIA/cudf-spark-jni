@@ -16,7 +16,7 @@
 #
 
 #
-# Script to build native code in cudf and spark-rapids-jni
+# Script to build native code in cudf and cudf-spark-jni
 #
 
 set -e
@@ -70,6 +70,9 @@ LIBCUDF_CONFIGURE_ONLY=${LIBCUDF_CONFIGURE_ONLY:-OFF}" > "$PROJECT_BUILD_DIR/bui
 fi
 
 source "$PROJECT_BUILD_DIR/buildcpp-env.sh"
+
+CMAKE_NETRC=${CMAKE_NETRC:-IGNORED}
+CMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}
 
 if [[ "$GPU_ARCHS" != "DEPRECATED" ]]; then
     CMAKE_CUDA_ARCHITECTURES="$GPU_ARCHS"    
@@ -144,6 +147,8 @@ CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
   -DCUDF_JNI_LIBCUDF_STATIC=ON \
   -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
   -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
+  -DCMAKE_NETRC="$CMAKE_NETRC" \
+  -DCMAKE_NETRC_FILE="$CMAKE_NETRC_FILE" \
   -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
   -DUSE_GDS="$USE_GDS" \
   -C="$CUDF_PIN_PATH/setup.cmake"
@@ -158,7 +163,7 @@ cmake --build "$LIBCUDFJNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"
 #
 mkdir -p "$SPARK_JNI_BUILD_PATH"
 cd "$SPARK_JNI_BUILD_PATH"
-echo "Configuring spark-rapids-jni native libs"
+echo "Configuring cudf-spark-jni native libs"
 CUDF_ROOT="$CUDF_PATH" \
   CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" \
   CUDFJNI_BUILD_DIR="$LIBCUDFJNI_BUILD_PATH" \
@@ -178,5 +183,5 @@ CUDF_ROOT="$CUDF_PATH" \
 
 create_compile_commands_symlink "$SPARK_JNI_BUILD_PATH" "$PROJECT_BASE_DIR/src/main/cpp"
 
-echo "Building spark-rapids-jni native libs"
+echo "Building cudf-spark-jni native libs"
 cmake --build "$SPARK_JNI_BUILD_PATH" "-j$CPP_PARALLEL_LEVEL"

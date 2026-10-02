@@ -31,7 +31,9 @@
 #include <task_priority.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <format>
 #include <iostream>
@@ -1479,7 +1481,7 @@ class spark_resource_adaptor_impl {
 
       if (thread_should_be_removed) {
         JNIEnv* env = nullptr;
-        if (jvm->GetEnv(reinterpret_cast<void**>(&env), cudf::jni::MINIMUM_JNI_VERSION) == JNI_OK) {
+        if (jvm->GetEnv(std::bit_cast<void**>(&env), cudf::jni::MINIMUM_JNI_VERSION) == JNI_OK) {
           cache_thread_reg_jni(env);
           env->CallStaticVoidMethod(ThreadStateRegistry_jclass, removeThread_method, thread_id);
         }
@@ -2777,7 +2779,7 @@ Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_postCpuAllocSuccess(JNIEnv
   JNI_TRY
   {
     auto mr = get_spark_adaptor(ptr);
-    mr->cpu_postalloc_success(reinterpret_cast<void*>(addr), amount, blocking, was_recursive);
+    mr->cpu_postalloc_success(std::bit_cast<void*>(addr), amount, blocking, was_recursive);
   }
   JNI_CATCH(env, );
 }
@@ -2801,7 +2803,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_cpu
   JNI_TRY
   {
     auto mr = get_spark_adaptor(ptr);
-    mr->cpu_dealloc(reinterpret_cast<void*>(addr), amount);
+    mr->cpu_dealloc(std::bit_cast<void*>(addr), amount);
   }
   JNI_CATCH(env, );
 }
@@ -2896,7 +2898,8 @@ Java_com_nvidia_spark_rapids_jni_RmmSparkDeallocationFailureTest_00024Child_trig
 
     auto const tid = static_cast<long>(pthread_self());
     adaptor->start_dedicated_task_thread(tid, 1);
-    adaptor->deallocate(cuda::stream_ref{cudaStream_t{nullptr}}, reinterpret_cast<void*>(0x1), 1);
+    adaptor->deallocate(
+      cuda::stream_ref{cudaStream_t{nullptr}}, std::bit_cast<void*>(std::uintptr_t{1}), 1);
   }
   JNI_CATCH(env, );
 }

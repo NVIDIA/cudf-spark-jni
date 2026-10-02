@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@
 #include <cudf/types.hpp>
 
 #include <rmm/device_uvector.hpp>
+
+#include <bit>
 
 namespace {
 
@@ -96,7 +98,6 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeSortMergeInnerJoin(JNIEnv*
                                                                          jclass,
                                                                          jlong j_left_keys,
                                                                          jlong j_right_keys,
-                                                                         jboolean j_is_left_sorted,
                                                                          jboolean j_is_right_sorted,
                                                                          jboolean j_nulls_equal)
 {
@@ -107,16 +108,15 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeSortMergeInnerJoin(JNIEnv*
   {
     cudf::jni::auto_set_device(env);
 
-    auto const left_keys  = reinterpret_cast<cudf::table_view const*>(j_left_keys);
-    auto const right_keys = reinterpret_cast<cudf::table_view const*>(j_right_keys);
+    auto const left_keys  = std::bit_cast<cudf::table_view const*>(j_left_keys);
+    auto const right_keys = std::bit_cast<cudf::table_view const*>(j_right_keys);
 
-    auto const is_left_sorted  = j_is_left_sorted ? cudf::sorted::YES : cudf::sorted::NO;
     auto const is_right_sorted = j_is_right_sorted ? cudf::sorted::YES : cudf::sorted::NO;
     auto const nulls_equal =
       j_nulls_equal ? cudf::null_equality::EQUAL : cudf::null_equality::UNEQUAL;
 
     auto result = spark_rapids_jni::sort_merge_inner_join(
-      *left_keys, *right_keys, is_left_sorted, is_right_sorted, nulls_equal);
+      *left_keys, *right_keys, is_right_sorted, nulls_equal);
 
     return gather_maps_to_java(env, std::move(result));
   }
@@ -133,8 +133,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nat
   {
     cudf::jni::auto_set_device(env);
 
-    auto const left_keys  = reinterpret_cast<cudf::table_view const*>(j_left_keys);
-    auto const right_keys = reinterpret_cast<cudf::table_view const*>(j_right_keys);
+    auto const left_keys  = std::bit_cast<cudf::table_view const*>(j_left_keys);
+    auto const right_keys = std::bit_cast<cudf::table_view const*>(j_right_keys);
 
     auto const nulls_equal =
       j_nulls_equal ? cudf::null_equality::EQUAL : cudf::null_equality::UNEQUAL;
@@ -190,15 +190,15 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeFilterGatherMapsByAST(
   {
     cudf::jni::auto_set_device(env);
 
-    auto const left_table  = reinterpret_cast<cudf::table_view const*>(j_left_table);
-    auto const right_table = reinterpret_cast<cudf::table_view const*>(j_right_table);
-    auto const condition   = reinterpret_cast<cudf::jni::ast::compiled_expr const*>(j_condition);
+    auto const left_table  = std::bit_cast<cudf::table_view const*>(j_left_table);
+    auto const right_table = std::bit_cast<cudf::table_view const*>(j_right_table);
+    auto const condition   = std::bit_cast<cudf::jni::ast::compiled_expr const*>(j_condition);
 
     // Wrap buffer addresses as device_spans (zero-copy, does not take ownership)
     auto left_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_left_buffer_address), j_left_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_left_buffer_address), j_left_buffer_length);
     auto right_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_right_buffer_address), j_right_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_right_buffer_address), j_right_buffer_length);
 
     auto result = spark_rapids_jni::filter_gather_maps_by_ast(
       left_indices, right_indices, *left_table, *right_table, condition->get_top_expression());
@@ -249,9 +249,9 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeMakeLeftOuter(JNIEnv* env,
 
     // Wrap buffer addresses as device_spans (zero-copy, does not take ownership)
     auto left_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_left_buffer_address), j_left_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_left_buffer_address), j_left_buffer_length);
     auto right_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_right_buffer_address), j_right_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_right_buffer_address), j_right_buffer_length);
 
     auto result = spark_rapids_jni::make_left_outer(
       left_indices, right_indices, j_left_table_size, j_right_table_size);
@@ -298,9 +298,9 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeMakeFullOuter(JNIEnv* env,
 
     // Wrap buffer addresses as device_spans (zero-copy, does not take ownership)
     auto left_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_left_buffer_address), j_left_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_left_buffer_address), j_left_buffer_length);
     auto right_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_right_buffer_address), j_right_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_right_buffer_address), j_right_buffer_length);
 
     auto result = spark_rapids_jni::make_full_outer(
       left_indices, right_indices, j_left_table_size, j_right_table_size);
@@ -335,7 +335,7 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeMakeSemi(JNIEnv* env,
 
     // Wrap buffer address as device_span (zero-copy, does not take ownership)
     auto left_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_left_buffer_address), j_left_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_left_buffer_address), j_left_buffer_length);
 
     auto result = spark_rapids_jni::make_semi(left_indices, j_left_table_size);
 
@@ -365,7 +365,7 @@ Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeMakeAnti(JNIEnv* env,
 
     // Wrap buffer address as device_span (zero-copy, does not take ownership)
     auto left_indices =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_left_buffer_address), j_left_buffer_length);
+      wrap_buffer_as_span(std::bit_cast<void*>(j_left_buffer_address), j_left_buffer_length);
 
     auto result = spark_rapids_jni::make_anti(left_indices, j_left_table_size);
 
@@ -394,8 +394,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JoinPrimitives_nativeGe
     cudf::jni::auto_set_device(env);
 
     // Wrap buffer address as device_span (zero-copy, does not take ownership)
-    auto gather_map =
-      wrap_buffer_as_span(reinterpret_cast<void*>(j_buffer_address), j_buffer_length);
+    auto gather_map = wrap_buffer_as_span(std::bit_cast<void*>(j_buffer_address), j_buffer_length);
 
     auto result = spark_rapids_jni::get_matched_rows(gather_map, j_table_size);
 

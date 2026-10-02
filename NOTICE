@@ -1,5 +1,5 @@
-RAPIDS Accelerator JNI For Apache Spark
-Copyright (c) 2022-2024, NVIDIA CORPORATION
+NVIDIA cuDF plugin JNI for Apache Spark
+Copyright (c) 2022-2026, NVIDIA CORPORATION
 
 --------------------------------------------------------------------------------
 

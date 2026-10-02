@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,21 @@
 #include <cudf/utilities/default_stream.hpp>
 
 //
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/stream>
+
+#include <cstdint>
+
 namespace spark_rapids_jni {
+
+/**
+ * @brief Algorithms for interpolating between adjacent percentile values.
+ *
+ * The numeric values must remain aligned with
+ * `com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation`.
+ */
+enum class percentile_interpolation : int32_t { WEIGHTED_ENDPOINTS = 0, ENDPOINT_DELTA = 1 };
 
 /**
  * @brief Check the input if they are valid and create a histogram from them.
@@ -51,7 +62,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(
   cudf::column_view const& values,
   cudf::column_view const& frequencies,
   bool output_as_lists,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
@@ -62,6 +73,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(
  * @param input The lists of input histograms
  * @param percentages The input percentage values
  * @param output_as_lists Specify whether the output percentiles will be wrapped in a list
+ * @param interpolation The algorithm used to interpolate between adjacent values
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate the returned column's device memory
  * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
@@ -71,7 +83,8 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
   cudf::column_view const& input,
   std::vector<double> const& percentage,
   bool output_as_lists,
-  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+  percentile_interpolation interpolation = percentile_interpolation::WEIGHTED_ENDPOINTS,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr      = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -299,7 +299,7 @@ public class ParseURITest {
     String[] testData = {
       "https://nvidia.com/https&#://nvidia.com",
       "https://http://www.nvidia.com",
-      // commented out until https://github.com/NVIDIA/spark-rapids/issues/10036 is fixed
+      // commented out until https://github.com/NVIDIA/cudf-spark/issues/10036 is fixed
       //"http://www.nvidia.com/object.php?object=ะก-Ð%9Fะฑ-ะฟ-ะกÑ%82Ñ%80ะตะปÑ%8Cะฝะฐ-Ñ%83ะป-Ð%97ะฐะฒะพะดÑ%81ะบะฐÑ%8F.htm",
       "http://www.nvidia.com/object.php?object=ะก-Ðะฑ-ะฟ-ะกÑÑะตะปÑ%20ะฝะฐ-Ñะป-ÐะฐะฒะพะดÑะบะฐÑ.htm",
       "filesystemmagicthing://bob.yaml",
@@ -359,7 +359,7 @@ public class ParseURITest {
       String[] queries = {
         "a",
         "h",
-        // commented out until https://github.com/NVIDIA/spark-rapids/issues/10036 is fixed
+        // commented out until https://github.com/NVIDIA/cudf-spark/issues/10036 is fixed
         //"object",
         "object",
         "a",

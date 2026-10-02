@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,12 @@
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/sequence.h>
 
@@ -125,7 +127,7 @@ __launch_bounds__(block_size) CUDF_KERNEL void generate_uuids_kernel(
 
 std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
                                              long seed,
-                                             rmm::cuda_stream_view stream,
+                                             cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 
 {
@@ -151,30 +153,34 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
   rmm::device_uvector<curandState> states(
     num_states, stream, cudf::get_current_device_resource_ref());
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      thrust::make_counting_iterator(0),
                      num_states,
                      init_curand_fn{states.data(), seed});
 
   // generate offsets for the UUIDs
   rmm::device_uvector<cudf::size_type> offsets(row_count + 1, stream, mr);
-  thrust::sequence(
-    rmm::exec_policy_nosync(stream), offsets.begin(), offsets.end(), 0, CHAR_COUNT_PER_UUID);
+  thrust::sequence(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   offsets.begin(),
+                   offsets.end(),
+                   0,
+                   CHAR_COUNT_PER_UUID);
 
   // generate chars for the UUIDs
   auto const num_chars = row_count * CHAR_COUNT_PER_UUID;
   rmm::device_uvector<char> chars(num_chars, stream, mr);
   auto grid = cudf::detail::grid_1d(num_states, block_size);
   generate_uuids_kernel<block_size>
-    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(
+    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.get()>>>(
       row_count, chars.data(), states.data(), num_states);
 
   return cudf::make_strings_column(
     row_count,
-    std::make_unique<cudf::column>(std::move(offsets), rmm::device_buffer{}, 0),
+    std::make_unique<cudf::column>(
+      std::move(offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0),
     chars.release(),
-    0,                    // null count
-    rmm::device_buffer{}  // all UUIDs are non-null
+    0,                                                        // null count
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)  // all UUIDs are non-null
   );
 }
 
@@ -182,7 +188,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
 
 std::unique_ptr<cudf::column> random_uuids(int row_count,
                                            long seed,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 
 {

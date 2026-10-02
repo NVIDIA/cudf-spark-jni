@@ -1,5 +1,5 @@
 # =============================================================================
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 # in compliance with the License. You may obtain a copy of the License at
@@ -67,6 +67,29 @@ find_library(CUPTI_LIBRARY_PATH cupti_static PATHS
 target_link_libraries(profilerjni
   PRIVATE ${CUPTI_LIBRARY_PATH} nvtx3::nvtx3-cpp flatbuffers::flatbuffers
 )
+
+if(SPARK_RAPIDS_JNI_BUILD_TESTS)
+  find_package(Threads REQUIRED)
+  add_executable(PROFILER_INIT_TEST
+    profiler_init_test.cpp
+    "${SPARK_RAPIDS_JNI_GENERATED_INCLUDE_DIR}/profiler_generated.h"
+  )
+  target_compile_features(PROFILER_INIT_TEST PRIVATE cxx_std_20)
+  target_include_directories(PROFILER_INIT_TEST PRIVATE
+    ${JNI_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
+    "${SPARK_RAPIDS_JNI_GENERATED_INCLUDE_DIR}"
+    "${SPARK_RAPIDS_JNI_SOURCE_DIR}/src"
+  )
+  target_link_libraries(PROFILER_INIT_TEST PRIVATE
+    GTest::gtest_main flatbuffers::flatbuffers Threads::Threads
+  )
+  set_target_properties(PROFILER_INIT_TEST PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/gtests"
+  )
+  add_test(NAME PROFILER_INIT_TEST COMMAND PROFILER_INIT_TEST)
+  set_tests_properties(PROFILER_INIT_TEST PROPERTIES TIMEOUT 30)
+endif()
 
 file(READ "${SPARK_RAPIDS_JNI_FBS_DIR}/profiler.fbs" SPARK_RAPIDS_JNI_PROFILER_SCHEMA)
 configure_file(

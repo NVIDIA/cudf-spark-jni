@@ -27,6 +27,15 @@ public class CastStrings {
     NativeDepsLoader.loadNativeDeps();
   }
 
+  /** Corrected time parser policy. */
+  public static final int TIME_PARSER_POLICY_CORRECTED = 0;
+
+  /** Legacy time parser policy. */
+  public static final int TIME_PARSER_POLICY_LEGACY = 1;
+
+  /** Exception time parser policy. */
+  public static final int TIME_PARSER_POLICY_EXCEPTION = 2;
+
   /**
    * Convert a string column to an integer column of a specified type stripping away leading and
    * trailing spaces.
@@ -364,21 +373,46 @@ public class CastStrings {
    * must have length 2; longer runs (e.g. {@code MMM} for month name) are rejected because
    * this kernel does not implement text forms. Unsupported letters, including lowercase
    * {@code h} for 12-hour clock, {@code S} for fractional seconds, and timezone pattern
-   * letters, are rejected. Space matches space or 'T' (Spark's
-   * permissive date/time separator); quoted literals ({@code 'T'}) are not supported, use
-   * a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year digit fields
-   * accept 1 or 2 digits unless adjacent to another digit field (which forces exact width
-   * for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
+   * letters, are rejected. Space matches exactly one space; quoted literals ({@code 'T'}) are
+   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year
+   * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
+   * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
    * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
+   *
+   * <p>This compatibility overload is retained for existing callers. New callers should use
+   * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
    *
    * @param input the input string column.
    * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
-   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED/EXCEPTION.
+   * @param legacy true for {@code LegacyTimeParserPolicy}, false for CORRECTED.
    * @return a timestamp_us column where invalid rows have nulls.
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
       boolean legacy) {
-    return new ColumnVector(parseTimestampWithFormat(input.getNativeView(), format, legacy));
+    return parseTimestampWithFormat(input, format,
+        legacy ? TIME_PARSER_POLICY_LEGACY : TIME_PARSER_POLICY_CORRECTED);
+  }
+
+  /**
+   * Parse a string column using the selected time parser policy.
+   *
+   * @param input the input string column.
+   * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
+   * @param timeParserPolicy one of {@link #TIME_PARSER_POLICY_CORRECTED},
+   *                         {@link #TIME_PARSER_POLICY_LEGACY}, or
+   *                         {@link #TIME_PARSER_POLICY_EXCEPTION}.
+   * @throws CastException if CORRECTED rejects a row that LEGACY accepts under EXCEPTION policy.
+   * @throws IllegalArgumentException if {@code timeParserPolicy} is invalid.
+   * @return a timestamp_us column where invalid rows have nulls.
+   */
+  public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
+      int timeParserPolicy) {
+    if (timeParserPolicy < TIME_PARSER_POLICY_CORRECTED ||
+        timeParserPolicy > TIME_PARSER_POLICY_EXCEPTION) {
+      throw new IllegalArgumentException("Invalid time parser policy: " + timeParserPolicy);
+    }
+    return new ColumnVector(
+        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy));
   }
 
   private static native long toInteger(long nativeColumnView, boolean ansi_enabled, boolean strip,
@@ -402,6 +436,7 @@ public class CastStrings {
 
   private static native long parseDateStringsToDate(long input);
 
-  private static native long parseTimestampWithFormat(long input, String format, boolean legacy);
+  private static native long parseTimestampWithFormat(
+      long input, String format, int timeParserPolicy);
 
 }

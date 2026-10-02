@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@
 #include "dtype_utils.hpp"
 #include "row_conversion.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlongArray JNICALL
@@ -30,7 +32,7 @@ Java_com_nvidia_spark_rapids_jni_RowConversion_convertToRowsFixedWidthOptimized(
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::table_view const* n_input_table = reinterpret_cast<cudf::table_view const*>(input_table);
+    cudf::table_view const* n_input_table = std::bit_cast<cudf::table_view const*>(input_table);
     std::vector<std::unique_ptr<cudf::column>> cols =
       spark_rapids_jni::convert_to_rows_fixed_width_optimized(*n_input_table);
     int const num_columns = cols.size();
@@ -51,7 +53,7 @@ Java_com_nvidia_spark_rapids_jni_RowConversion_convertToRows(JNIEnv* env, jclass
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::table_view const* n_input_table = reinterpret_cast<cudf::table_view const*>(input_table);
+    cudf::table_view const* n_input_table = std::bit_cast<cudf::table_view const*>(input_table);
     std::vector<std::unique_ptr<cudf::column>> cols =
       spark_rapids_jni::convert_to_rows(*n_input_table);
     int const num_columns = cols.size();
@@ -74,7 +76,7 @@ Java_com_nvidia_spark_rapids_jni_RowConversion_convertFromRowsFixedWidthOptimize
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::lists_column_view const list_input{*reinterpret_cast<cudf::column_view*>(input_column)};
+    cudf::lists_column_view const list_input{*std::bit_cast<cudf::column_view*>(input_column)};
     cudf::jni::native_jintArray n_types(env, types);
     cudf::jni::native_jintArray n_scale(env, scale);
     if (n_types.size() != n_scale.size()) {
@@ -103,7 +105,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_RowConversion_conv
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    cudf::lists_column_view const list_input{*reinterpret_cast<cudf::column_view*>(input_column)};
+    cudf::lists_column_view const list_input{*std::bit_cast<cudf::column_view*>(input_column)};
     cudf::jni::native_jintArray n_types(env, types);
     cudf::jni::native_jintArray n_scale(env, scale);
     if (n_types.size() != n_scale.size()) {

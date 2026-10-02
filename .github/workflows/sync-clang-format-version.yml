@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A workflow to sync the clang-format version between spark-rapids-jni and cudf
+# A workflow to sync the clang-format version between cudf-spark-jni and cudf
 name: sync clang-format version with cudf
 
 on:
@@ -60,8 +60,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
           NEW_VER: ${{ steps.update_clang_format_version.outputs.new_ver }}
-          GIT_AUTHOR_NAME: "spark-rapids automation"
-          GIT_COMMITTER_NAME: "spark-rapids automation"
+          GIT_AUTHOR_NAME: "cudf-spark automation"
+          GIT_COMMITTER_NAME: "cudf-spark automation"
           GIT_AUTHOR_EMAIL: "70000568+nvauto@users.noreply.github.com"
           GIT_COMMITTER_EMAIL: "70000568+nvauto@users.noreply.github.com"
         run: |

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,12 @@
 
 #include <cast_string.hpp>
 
+#include <cstddef>
 #include <limits>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
 
 using namespace cudf;
 
@@ -35,11 +40,22 @@ struct StringToIntegerTests : public test::BaseFixture {};
 
 struct StringToDecimalTests : public test::BaseFixture {};
 
+struct ParseTimestampWithFormatTests : public test::BaseFixture {};
+
 template <typename T>
 struct StringToFloatTests : public test::BaseFixture {};
 
 TYPED_TEST_SUITE(StringToIntegerTests, cudf::test::IntegralTypesNotBool);
 TYPED_TEST_SUITE(StringToFloatTests, cudf::test::FloatingPointTypes);
+
+TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
+{
+  auto const strings = test::strings_column_wrapper{"2024-05-06"};
+  strings_column_view scv{strings};
+
+  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
+               std::invalid_argument);
+}
 
 TYPED_TEST(StringToIntegerTests, Simple)
 {
@@ -89,7 +105,7 @@ TYPED_TEST(StringToIntegerTests, Ansi)
     }();
 
     EXPECT_EQ(e.get_row_number(), row);
-    EXPECT_STREQ(e.get_string_with_error(), first_error_string);
+    EXPECT_EQ(e.get_string_with_error(), first_error_string);
   }
 
   auto const result = spark_rapids_jni::string_to_integer(
@@ -239,8 +255,11 @@ TYPED_TEST(StringToIntegerTests, Overflow)
 
 TYPED_TEST(StringToIntegerTests, Empty)
 {
-  auto empty = std::make_unique<column>(
-    data_type{type_id::STRING}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
+  auto empty = std::make_unique<column>(data_type{type_id::STRING},
+                                        0,
+                                        rmm::device_buffer{},
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                        0);
 
   auto result = spark_rapids_jni::string_to_integer(data_type{type_to_id<TypeParam>()},
                                                     strings_column_view{empty->view()},
@@ -575,8 +594,11 @@ TEST_F(StringToDecimalTests, Edges)
 
 TEST_F(StringToDecimalTests, Empty)
 {
-  auto empty = std::make_unique<column>(
-    data_type{type_id::STRING}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
+  auto empty = std::make_unique<column>(data_type{type_id::STRING},
+                                        0,
+                                        rmm::device_buffer{},
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                        0);
 
   auto const result = spark_rapids_jni::string_to_decimal(
     8, 2, strings_column_view{empty->view()}, false, true, cudf::get_default_stream());
@@ -638,6 +660,47 @@ TYPED_TEST(StringToFloatTests, Simple)
     data_type{type_to_id<TypeParam>()}, strings_column_view{in}, false, cudf::get_default_stream());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected->view());
+}
+
+TYPED_TEST(StringToFloatTests, DecimalPointAfterTruncatedDigitsAcrossBatches)
+{
+  auto const make_value = [](std::size_t digits) { return std::string(digits, '9') + ".0"; };
+  std::vector<std::string> const input{make_value(31),
+                                       make_value(32),
+                                       make_value(38),
+                                       "-" + make_value(38),
+                                       std::string(38, '9') + "." + std::string(100, '0') + "1",
+                                       make_value(300),
+                                       make_value(307),
+                                       make_value(38) + "e-38"};
+  auto const in = cudf::test::strings_column_wrapper{input.begin(), input.end()};
+
+  auto const expected = []() {
+    if constexpr (std::is_same_v<TypeParam, float>) {
+      return test::fixed_width_column_wrapper<TypeParam>{static_cast<TypeParam>(1.0e31),
+                                                         static_cast<TypeParam>(1.0e32),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(-1.0e38),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         std::numeric_limits<TypeParam>::infinity(),
+                                                         std::numeric_limits<TypeParam>::infinity(),
+                                                         static_cast<TypeParam>(1.0)};
+    } else {
+      return test::fixed_width_column_wrapper<TypeParam>{static_cast<TypeParam>(1.0e31),
+                                                         static_cast<TypeParam>(1.0e32),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(-1.0e38),
+                                                         static_cast<TypeParam>(1.0e38),
+                                                         static_cast<TypeParam>(1.0e300),
+                                                         static_cast<TypeParam>(1.0e307),
+                                                         static_cast<TypeParam>(1.0)};
+    }
+  }();
+
+  auto const result = spark_rapids_jni::string_to_float(
+    data_type{type_to_id<TypeParam>()}, strings_column_view{in}, false, cudf::get_default_stream());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(result->view(), expected);
 }
 
 TYPED_TEST(StringToFloatTests, InfNaN)
@@ -751,8 +814,11 @@ TYPED_TEST(StringToFloatTests, TrickyValues)
 
 TYPED_TEST(StringToFloatTests, Empty)
 {
-  auto empty = std::make_unique<column>(
-    data_type{type_id::STRING}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
+  auto empty = std::make_unique<column>(data_type{type_id::STRING},
+                                        0,
+                                        rmm::device_buffer{},
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                        0);
 
   auto const result = spark_rapids_jni::string_to_float(data_type{type_to_id<TypeParam>()},
                                                         strings_column_view{empty->view()},

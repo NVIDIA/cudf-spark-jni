@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,43 @@
 #include "jni_utils.hpp"
 #include "task_priority.hpp"
 
+#include <limits>
+#include <mutex>
 #include <unordered_map>
 
 namespace {
-// Track the next priority to assign and maintain a map of attempt_id to priority
-static long next_task_priority = std::numeric_limits<long>::max() - 1;
-static std::mutex priority_mutex;
-static std::unordered_map<long, long> attempt_priorities;
+
+class task_priority_tracker {
+ public:
+  long get(long attempt_id)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto const it = attempt_priorities_.find(attempt_id);
+    if (it != attempt_priorities_.end()) { return it->second; }
+
+    auto const priority = next_task_priority_--;
+    attempt_priorities_.emplace(attempt_id, priority);
+    return priority;
+  }
+
+  void done(long attempt_id)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    attempt_priorities_.erase(attempt_id);
+  }
+
+ private:
+  long next_task_priority_ = std::numeric_limits<long>::max() - 1;
+  std::mutex mutex_;
+  std::unordered_map<long, long> attempt_priorities_;
+};
+
+task_priority_tracker& get_task_priority_tracker()
+{
+  static task_priority_tracker tracker;
+  return tracker;
+}
+
 }  // namespace
 
 namespace spark_rapids_jni {
@@ -36,17 +66,7 @@ long get_task_priority(long attempt_id)
     return std::numeric_limits<long>::max();
   }
 
-  std::lock_guard<std::mutex> lock(priority_mutex);
-  auto it = attempt_priorities.find(attempt_id);
-  if (it != attempt_priorities.end()) {
-    // Return existing priority for this attempt_id
-    return it->second;
-  }
-
-  // Assign new priority for this attempt_id
-  long priority                  = next_task_priority--;
-  attempt_priorities[attempt_id] = priority;
-  return priority;
+  return get_task_priority_tracker().get(attempt_id);
 }
 
 void task_done(long attempt_id)
@@ -55,8 +75,7 @@ void task_done(long attempt_id)
     return;  // Nothing to do for special case
   }
 
-  std::lock_guard<std::mutex> lock(priority_mutex);
-  attempt_priorities.erase(attempt_id);
+  get_task_priority_tracker().done(attempt_id);
 }
 
 }  // namespace spark_rapids_jni

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,11 +21,12 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/types.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/stream>
 #include <thrust/for_each.h>
 
 namespace {
@@ -135,7 +136,7 @@ __device__ uint_backed_array<uint64_t> hilbert_transposed_index(
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   auto num_columns = tbl.num_columns();
@@ -160,15 +161,17 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
 
   cudf::size_type output_size = static_cast<cudf::size_type>(total_output_size);
 
-  auto input_dv = cudf::table_device_view::create(tbl, stream);
+  auto input_dv =
+    cudf::table_device_view::create(tbl, stream, cudf::get_current_device_resource_ref());
 
   auto output_data_col = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::UINT8}, output_size, cudf::mask_state::UNALLOCATED, stream, mr);
 
-  auto output_dv_ptr = cudf::mutable_column_device_view::create(*output_data_col, stream);
+  auto output_dv_ptr = cudf::mutable_column_device_view::create(
+    *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::for_each_n(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     output_size,
     [col = *output_dv_ptr, num_columns, data_type_size, input = *input_dv] __device__(
@@ -211,13 +214,16 @@ std::unique_ptr<cudf::column> interleave_bits(cudf::table_view const& tbl,
   auto offsets_column = std::get<0>(
     cudf::detail::make_offsets_child_column(offset_begin, offset_begin + num_rows, stream, mr));
 
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_column), std::move(output_data_col), 0, rmm::device_buffer());
+  return cudf::make_lists_column(num_rows,
+                                 std::move(offsets_column),
+                                 std::move(output_data_col),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,
                                             cudf::table_view const& tbl,
-                                            rmm::cuda_stream_view stream,
+                                            cuda::stream_ref stream,
                                             rmm::device_async_resource_ref mr)
 {
   auto const num_rows    = tbl.num_rows();
@@ -236,15 +242,17 @@ std::unique_ptr<cudf::column> hilbert_index(int32_t const num_bits_per_entry,
                            }),
                "All columns of the input table must be INT32.");
 
-  auto const input_dv = cudf::table_device_view::create(tbl, stream);
+  auto const input_dv =
+    cudf::table_device_view::create(tbl, stream, cudf::get_current_device_resource_ref());
 
   auto output_data_col = cudf::make_numeric_column(
     cudf::data_type{cudf::type_id::INT64}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr);
 
-  auto const output_dv_ptr = cudf::mutable_column_device_view::create(*output_data_col, stream);
+  auto const output_dv_ptr = cudf::mutable_column_device_view::create(
+    *output_data_col, stream, cudf::get_current_device_resource_ref());
 
   thrust::transform(
-    rmm::exec_policy(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     cuda::make_counting_iterator<cudf::size_type>(0),
     cuda::make_counting_iterator<cudf::size_type>(num_rows),
     output_dv_ptr->begin<int64_t>(),

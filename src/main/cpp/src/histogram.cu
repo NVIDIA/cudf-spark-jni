@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,8 +31,10 @@
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/std/functional>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/for_each.h>
 #include <thrust/scan.h>
@@ -43,7 +45,9 @@ namespace spark_rapids_jni {
 
 namespace {
 
-template <typename ElementIterator, typename ValidityIterator>  //
+template <percentile_interpolation Interpolation,
+          typename ElementIterator,
+          typename ValidityIterator>  //
 struct fill_percentile_fn {
   __device__ void operator()(cudf::size_type const idx) const
   {
@@ -90,13 +94,24 @@ struct fill_percentile_fn {
       return;
     }
 
-    // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
-    // `upper_part` which may lead to output with different round-off error.
-    double const volatile lower_part =
-      (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
-    double const volatile higher_part =
-      (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
-    output[idx] = lower_part + higher_part;
+    if constexpr (Interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS) {
+      // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
+      // `upper_part` which may lead to output with different round-off error.
+      double const volatile lower_part =
+        (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
+      double const volatile higher_part =
+        (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
+      output[idx] = lower_part + higher_part;
+    } else {
+      // Keep the subtraction, multiplication, and addition as separate operations to match
+      // Spark's endpoint-delta interpolation and prevent fused multiply-add from changing
+      // rounding behavior.
+      double const volatile fraction = position - static_cast<double>(lower);
+      double const volatile endpoint_delta =
+        static_cast<double>(higher_element) - static_cast<double>(lower_element);
+      double const volatile scaled_delta = fraction * endpoint_delta;
+      output[idx]                        = static_cast<double>(lower_element) + scaled_delta;
+    }
   }
 
   fill_percentile_fn(cudf::size_type const* const offsets_,
@@ -147,7 +162,7 @@ struct percentile_dispatcher {
   //  2. Null mask to apply for the final output column containing percentile values, and
   //  3. Null count corresponding to that null mask.
   using output_type =
-    std::tuple<std::unique_ptr<cudf::column>, rmm::device_buffer, cudf::size_type>;
+    std::tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<std::byte>, cudf::size_type>;
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
@@ -161,9 +176,10 @@ struct percentile_dispatcher {
                          cudf::column_device_view const& data,
                          cudf::device_span<int64_t const> accumulated_counts,
                          cudf::device_span<double const> percentages,
+                         percentile_interpolation interpolation,
                          bool has_null,
                          cudf::size_type num_histograms,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr) const
   {
     // Returns all nulls for totally empty input.
@@ -193,16 +209,33 @@ struct percentile_dispatcher {
     auto const fill_percentile = [&](auto const sorted_validity_it) {
       auto const sorted_input_it =
         cuda::make_permutation_iterator(data.begin<T>(), ordered_indices);
-      thrust::for_each_n(rmm::exec_policy(stream),
-                         cuda::make_counting_iterator(0),
-                         num_histograms * static_cast<cudf::size_type>(percentages.size()),
-                         fill_percentile_fn{offsets,
-                                            sorted_input_it,
-                                            sorted_validity_it,
-                                            accumulated_counts,
-                                            percentages,
-                                            percentiles->mutable_view().begin<double>(),
-                                            out_validities.begin()});
+      auto const launch_fill = [&](auto const interpolation_constant) {
+        constexpr auto interpolation_value = std::decay_t<decltype(interpolation_constant)>::value;
+        using fill_fn                      = fill_percentile_fn<interpolation_value,
+                                                                std::decay_t<decltype(sorted_input_it)>,
+                                                                std::decay_t<decltype(sorted_validity_it)>>;
+        thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                           cuda::make_counting_iterator(0),
+                           num_histograms * static_cast<cudf::size_type>(percentages.size()),
+                           fill_fn{offsets,
+                                   sorted_input_it,
+                                   sorted_validity_it,
+                                   accumulated_counts,
+                                   percentages,
+                                   percentiles->mutable_view().begin<double>(),
+                                   out_validities.begin()});
+      };
+
+      switch (interpolation) {
+        case percentile_interpolation::WEIGHTED_ENDPOINTS:
+          launch_fill(std::integral_constant<percentile_interpolation,
+                                             percentile_interpolation::WEIGHTED_ENDPOINTS>{});
+          break;
+        case percentile_interpolation::ENDPOINT_DELTA:
+          launch_fill(std::integral_constant<percentile_interpolation,
+                                             percentile_interpolation::ENDPOINT_DELTA>{});
+          break;
+      }
     };
 
     if (!has_null) {
@@ -219,7 +252,7 @@ struct percentile_dispatcher {
       return {std::move(percentiles), std::move(*null_mask.release()), null_count};
     }
 
-    return {std::move(percentiles), rmm::device_buffer{}, 0};
+    return {std::move(percentiles), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0};
   }
 };
 
@@ -250,11 +283,11 @@ void check_input(cudf::column_view const& input, std::vector<double> const& perc
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
-                                           rmm::device_buffer&& null_mask,
+                                           cuda::device_buffer<std::byte>&& null_mask,
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
-                                           rmm::cuda_stream_view stream,
+                                           cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
 {
   if (input->size() == 0) { return cudf::make_empty_lists_column(input->type()); }
@@ -274,7 +307,7 @@ std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input
 std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const& values,
                                                         cudf::column_view const& frequencies,
                                                         bool output_as_lists,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(
@@ -292,7 +325,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                                      cudf::make_empty_column(cudf::type_to_id<cudf::size_type>()),
                                      cudf::reduction::detail::make_empty_histogram_like(values),
                                      0,
-                                     {});
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     } else {
       return cudf::reduction::detail::make_empty_histogram_like(values);
     }
@@ -307,7 +340,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
   // We need to check and remember which rows are valid (positive) so we can do filtering later on.
   auto check_valid = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
 
-  thrust::for_each_n(rmm::exec_policy(stream),
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      cuda::make_counting_iterator(0),
                      frequencies.size(),
                      [frequencies   = frequencies.begin<int64_t>(),
@@ -325,7 +358,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                "The input frequencies must not contain negative values.",
                std::invalid_argument);
 
-  auto const make_structs_histogram = [&](rmm::device_buffer&& null_mask,
+  auto const make_structs_histogram = [&](cuda::device_buffer<std::byte>&& null_mask,
                                           cudf::size_type null_count) {
     // Copy values and frequencies into a new structs column.
     std::vector<std::unique_ptr<cudf::column>> values_and_frequencies;
@@ -356,7 +389,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
       // cudf MERGE_HISTOGRAM aggregation.
       // Therefore, we manually set `1` for the frequencies of nulls.
       thrust::for_each_n(
-        rmm::exec_policy(stream),
+        rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
         cuda::make_counting_iterator(0),
         frequencies.size(),
         [frequencies = values_and_frequencies.back()->mutable_view().begin<int64_t>(),
@@ -367,8 +400,12 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
         });
     }
 
-    return cudf::make_structs_column(
-      values.size(), std::move(values_and_frequencies), 0, rmm::device_buffer{}, stream, mr);
+    return cudf::make_structs_column(values.size(),
+                                     std::move(values_and_frequencies),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     stream,
+                                     mr);
   };
 
   auto const make_lists_histograms = [&](cudf::size_type num_elements,
@@ -377,12 +414,16 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
     auto const sizes_itr = cuda::make_constant_iterator(1);
     auto offsets         = std::get<0>(
       cudf::detail::make_offsets_child_column(sizes_itr, sizes_itr + num_elements, stream, mr));
-    return cudf::make_lists_column(
-      num_elements, std::move(offsets), std::move(structs_histogram), 0, rmm::device_buffer{});
+    return cudf::make_lists_column(num_elements,
+                                   std::move(offsets),
+                                   std::move(structs_histogram),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   };
 
   if (output_as_lists) {
-    auto child            = make_structs_histogram(rmm::device_buffer{}, 0);
+    auto child =
+      make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     auto lists_histograms = make_lists_histograms(values.size(), std::move(child));
 
     if (!h_checks.back()) {  // all frequencies are positive
@@ -398,11 +439,11 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
       cudf::bools_to_mask(cudf::device_span<bool const>(check_valid), stream, default_mr);
     lists_histograms->set_null_mask(std::move(*null_mask.release()), null_count);
     lists_histograms = cudf::purge_nonempty_nulls(lists_histograms->view(), stream, mr);
-    lists_histograms->set_null_mask(rmm::device_buffer{}, 0);
+    lists_histograms->set_null_mask(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     return lists_histograms;
   } else {                   // output_as_lists==false
     if (!h_checks.back()) {  // all frequencies are positive
-      return make_structs_histogram(rmm::device_buffer{}, 0);
+      return make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     }
 
     // We nullify the values corresponding to zero frequencies.
@@ -415,10 +456,15 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
 std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
                                                         std::vector<double> const& percentages,
                                                         bool output_as_list,
-                                                        rmm::cuda_stream_view stream,
+                                                        percentile_interpolation interpolation,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   check_input(input, percentages);
+  CUDF_EXPECTS(interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS ||
+                 interpolation == percentile_interpolation::ENDPOINT_DELTA,
+               "Unsupported percentile interpolation algorithm.",
+               std::invalid_argument);
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
@@ -426,7 +472,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
   auto const counts_col     = cudf::structs_column_view{histograms}.get_sliced_child(1);
 
   auto const default_mr    = rmm::mr::get_current_device_resource_ref();
-  auto const d_data        = cudf::column_device_view::create(data_col, stream);
+  auto const d_data        = cudf::column_device_view::create(data_col, stream, default_mr);
   auto const d_percentages = cudf::detail::make_device_uvector(percentages, stream, default_mr);
 
   // Attach histogram labels to the input.
@@ -458,11 +504,12 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
     auto accumulated_counts = rmm::device_uvector<int64_t>(counts_col.size(), stream, default_mr);
     // We don't need a permutation iterator for the labels, since the same labels always
     // stay together after sorting.
-    thrust::inclusive_scan_by_key(rmm::exec_policy(stream),
-                                  histogram_labels.begin(),
-                                  histogram_labels.end(),
-                                  sorted_counts,
-                                  accumulated_counts.begin());
+    thrust::inclusive_scan_by_key(
+      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+      histogram_labels.begin(),
+      histogram_labels.end(),
+      sorted_counts,
+      accumulated_counts.begin());
     return accumulated_counts;
   }();
 
@@ -474,6 +521,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                     *d_data,
                     d_accumulated_counts,
                     d_percentages,
+                    interpolation,
                     data_col.has_nulls(),
                     input.size(),
                     stream,

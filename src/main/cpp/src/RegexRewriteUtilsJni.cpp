@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include "jni_utils.hpp"
 #include "regex_rewrite_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_RegexRewriteUtils_literalRangePattern(
@@ -31,9 +33,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_RegexRewriteUtils_liter
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::column_view* cv = reinterpret_cast<cudf::column_view*>(input);
+    cudf::column_view* cv = std::bit_cast<cudf::column_view*>(input);
     cudf::strings_column_view scv(*cv);
-    cudf::string_scalar* ss_scalar = reinterpret_cast<cudf::string_scalar*>(target);
+    cudf::string_scalar* ss_scalar = std::bit_cast<cudf::string_scalar*>(target);
     return cudf::jni::release_as_jlong(
       spark_rapids_jni::literal_range_pattern(scv, *ss_scalar, d, start, end));
   }

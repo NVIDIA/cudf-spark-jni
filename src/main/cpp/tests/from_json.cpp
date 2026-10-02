@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,9 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -98,11 +100,29 @@ std::unique_ptr<cudf::column> make_expected_raw_map(std::vector<std::vector<kv>>
                                  std::move(offsets_col),
                                  std::move(structs_child),
                                  null_count,
-                                 null_count > 0 ? std::move(*null_mask) : rmm::device_buffer{});
+                                 null_count > 0
+                                   ? std::move(*null_mask)
+                                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Convenience: every row valid.
 std::vector<bool> all_valid(std::size_t n) { return std::vector<bool>(n, true); }
+
+// Returns the delimiter `concat_json` picks for `input`; used to pin delimiter selection.
+char selected_delimiter(std::string const& input)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{input};
+  auto const result    = spark_rapids_jni::concat_json(cudf::strings_column_view{input_col});
+  return std::get<1>(result);
+}
+
+char selected_delimiter(std::vector<std::string> const& input, bool nullify_invalid_rows)
+{
+  auto const input_col = cudf::test::strings_column_wrapper{input.begin(), input.end()};
+  auto const result =
+    spark_rapids_jni::concat_json(cudf::strings_column_view{input_col}, nullify_invalid_rows);
+  return std::get<1>(result);
+}
 
 // Default leniency options shared by all calls and the single source of truth for the defaults.
 // Individual tests override only the field a case exercises (designated initializers below).
@@ -126,6 +146,95 @@ std::unique_ptr<cudf::column> raw_map_array(cudf::strings_column_view const& inp
 }
 
 }  // namespace
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_PrefersLineFeedWithEmbeddedNul)
+{
+  auto input = std::string{R"({"v":"a)"};
+  input.push_back('\0');
+  input.append(R"(b"})");
+
+  EXPECT_EQ(selected_delimiter(input), '\n');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_SkipsPresentPrintable)
+{
+  auto const input = std::string{"{\n!}"};
+
+  EXPECT_EQ(selected_delimiter(input), '#');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_CountsDelAndSkipsNulFallback)
+{
+  auto input = std::string{"{\n"};
+  for (int byte = 0x20; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x01');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_PrefersDelBeforeC0Fallback)
+{
+  // '\n' plus every printable 0x20..0x7e are present, but DEL (0x7f) is absent. DEL is preferred
+  // over the C0 control-byte fallback, so it must be selected instead of dropping to 0x01.
+  auto input = std::string{"{\n"};
+  for (int byte = 0x20; byte <= 0x7e; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x7f');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_UsesLastC0Fallback)
+{
+  auto input = std::string{"{"};
+  for (int byte = 0x01; byte <= 0x1e; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+  for (int byte = 0x21; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_EQ(selected_delimiter(input), '\x1f');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_IgnoresInvalidRowsWhenExhausted)
+{
+  auto invalid_row = std::string{"not-json"};
+  for (int byte = 0; byte <= 0x7f; ++byte) {
+    invalid_row.push_back(static_cast<char>(byte));
+  }
+
+  std::vector<std::string> rows{R"({"k":"v"})", std::move(invalid_row)};
+  EXPECT_EQ(selected_delimiter(rows, /*nullify_invalid_rows=*/true), '\n');
+}
+
+TEST_F(FromJsonTest, ConcatJsonDelimiter_ThrowsWhenAsciiExhausted)
+{
+  auto input = std::string{"{"};
+  for (int byte = 0; byte <= 0x7f; ++byte) {
+    input.push_back(static_cast<char>(byte));
+  }
+
+  EXPECT_THROW(selected_delimiter(input), std::logic_error);
+}
+
+TEST_F(FromJsonTest, RawMapOpt_UnquotedControlCharactersStrict)
+{
+  std::vector<std::string> rows{R"({"str":"value"})",
+                                "{\"str\":\t\"value\"}",
+                                "{\"str\":\"val\001ue\"}",
+                                "{\"str\":\"val\002ue\"}",
+                                "{\"str\":\"v\003alue\"}",
+                                "{\"str\":\"value\",\"other\":\"in\001fo\"}"};
+  auto const input_col = cudf::test::strings_column_wrapper{rows.begin(), rows.end()};
+  auto const input     = cudf::strings_column_view{input_col};
+
+  auto const expected =
+    make_expected_raw_map({{{"str", "value"}}, {{"str", "value"}}, {}, {}, {}, {}},
+                          {true, true, false, false, false, false});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*raw_map(input), *expected);
+}
 
 // ===========================================================================
 // RawMapOpt_* : pin the exact LIST<STRUCT<STRING,STRING>> output of `from_json_to_raw_map`.
@@ -422,21 +531,34 @@ TEST_F(FromJsonTest, RawMapOpt_EmptyInput)
   EXPECT_EQ(scv.child(1).type().id(), cudf::type_id::STRING);  // value.
 }
 
-// allow_unquoted_control=true: a literal control char (tab) inside a quoted value is accepted and
-// copied verbatim into the value bytes.
+// allow_unquoted_control=true: literal C0 bytes inside quoted values are accepted and copied
+// verbatim. Keeping several distinct bytes present also guards delimiter selection.
 TEST_F(FromJsonTest, RawMapOpt_UnquotedControl)
 {
-  auto const input_col = cudf::test::strings_column_wrapper{"{\"k\":\"a\tb\"}"};
+  std::vector<std::string> rows{R"({"str":"value"})",
+                                "{\"str\":\t\"value\"}",
+                                "{\"str\":\"val\001ue\"}",
+                                "{\"str\":\"val\002ue\"}",
+                                "{\"str\":\"v\003alue\"}",
+                                "{\"str\":\"value\",\"other\":\"in\001fo\"}"};
+  auto const input_col = cudf::test::strings_column_wrapper{rows.begin(), rows.end()};
   auto const input     = cudf::strings_column_view{input_col};
 
   auto const result = spark_rapids_jni::from_json_to_raw_map(
     input,
-    spark_rapids_jni::json_parse_options{default_options.normalize_single_quotes,
-                                         default_options.allow_leading_zeros,
-                                         default_options.allow_nonnumeric_numbers,
-                                         /*allow_unquoted_control=*/true});
+    spark_rapids_jni::json_parse_options{
+      .normalize_single_quotes  = default_options.normalize_single_quotes,
+      .allow_leading_zeros      = default_options.allow_leading_zeros,
+      .allow_nonnumeric_numbers = default_options.allow_nonnumeric_numbers,
+      .allow_unquoted_control   = true});
 
-  auto const expected = make_expected_raw_map({{{"k", "a\tb"}}}, all_valid(1));
+  auto const expected = make_expected_raw_map({{{"str", "value"}},
+                                               {{"str", "value"}},
+                                               {{"str", "val\001ue"}},
+                                               {{"str", "val\002ue"}},
+                                               {{"str", "v\003alue"}},
+                                               {{"str", "value"}, {"other", "in\001fo"}}},
+                                              all_valid(rows.size()));
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*result, *expected);
 }
 
@@ -565,18 +687,22 @@ std::unique_ptr<cudf::column> make_expected_raw_map_array(std::vector<std::vecto
   auto [inner_mask, inner_null_count] = cudf::bools_to_mask(
     cudf::test::fixed_width_column_wrapper<bool>(inner_valid.begin(), inner_valid.end()));
 
-  auto inner_list =
-    cudf::make_lists_column(num_pairs,
-                            std::move(inner_offsets_col),
-                            elements_child.release(),
-                            inner_null_count,
-                            inner_null_count > 0 ? std::move(*inner_mask) : rmm::device_buffer{});
+  auto inner_list = cudf::make_lists_column(
+    num_pairs,
+    std::move(inner_offsets_col),
+    elements_child.release(),
+    inner_null_count,
+    inner_null_count > 0 ? std::move(*inner_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
   struct_children.emplace_back(keys_child.release());
   struct_children.emplace_back(std::move(inner_list));
   auto structs_child =
-    cudf::make_structs_column(num_pairs, std::move(struct_children), 0, rmm::device_buffer{});
+    cudf::make_structs_column(num_pairs,
+                              std::move(struct_children),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
   auto outer_offsets_col = cudf::test::fixed_width_column_wrapper<cudf::size_type>(
                              outer_offsets.begin(), outer_offsets.end())
@@ -585,12 +711,13 @@ std::unique_ptr<cudf::column> make_expected_raw_map_array(std::vector<std::vecto
   auto [outer_mask, outer_null_count] = cudf::bools_to_mask(
     cudf::test::fixed_width_column_wrapper<bool>(row_valid.begin(), row_valid.end()));
 
-  return cudf::make_lists_column(
-    static_cast<cudf::size_type>(num_rows),
-    std::move(outer_offsets_col),
-    std::move(structs_child),
-    outer_null_count,
-    outer_null_count > 0 ? std::move(*outer_mask) : rmm::device_buffer{});
+  return cudf::make_lists_column(static_cast<cudf::size_type>(num_rows),
+                                 std::move(outer_offsets_col),
+                                 std::move(structs_child),
+                                 outer_null_count,
+                                 outer_null_count > 0
+                                   ? std::move(*outer_mask)
+                                   : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Convenience builders for `array_value` literals.

@@ -20,6 +20,7 @@
 #include "jni_utils.hpp"
 #include "utilities.hpp"
 
+#include <bit>
 #include <limits>
 
 extern "C" {
@@ -47,7 +48,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_BloomFilter_creategpu(
     auto const bloom_filter_longs = static_cast<int32_t>((bloomFilterBits + 63) / 64);
     auto bloom_filter =
       spark_rapids_jni::bloom_filter_create(version, numHashes, bloom_filter_longs, seed);
-    return reinterpret_cast<jlong>(bloom_filter.release());
+    return std::bit_cast<jlong>(bloom_filter.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -61,8 +62,8 @@ JNIEXPORT jint JNICALL Java_com_nvidia_spark_rapids_jni_BloomFilter_put(JNIEnv* 
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::column_view const& input_column = *reinterpret_cast<cudf::column_view const*>(cv);
-    spark_rapids_jni::bloom_filter_put(*(reinterpret_cast<cudf::list_scalar*>(bloomFilter)),
+    cudf::column_view const& input_column = *std::bit_cast<cudf::column_view const*>(cv);
+    spark_rapids_jni::bloom_filter_put(*(std::bit_cast<cudf::list_scalar*>(bloomFilter)),
                                        input_column);
     return 0;
   }
@@ -78,9 +79,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_BloomFilter_merge(JNIEn
     cudf::jni::auto_set_device(env);
 
     cudf::column_view const& input_bloom_filter =
-      *reinterpret_cast<cudf::column_view const*>(bloomFilters);
+      *std::bit_cast<cudf::column_view const*>(bloomFilters);
     auto bloom_filter = spark_rapids_jni::bloom_filter_merge(input_bloom_filter);
-    return reinterpret_cast<jlong>(bloom_filter.release());
+    return std::bit_cast<jlong>(bloom_filter.release());
   }
   JNI_CATCH(env, 0);
 }
@@ -94,9 +95,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_BloomFilter_probe(JNIEn
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::column_view const& input_column = *reinterpret_cast<cudf::column_view const*>(cv);
+    cudf::column_view const& input_column = *std::bit_cast<cudf::column_view const*>(cv);
     return cudf::jni::release_as_jlong(spark_rapids_jni::bloom_filter_probe(
-      input_column, *(reinterpret_cast<cudf::list_scalar*>(bloomFilter))));
+      input_column, *(std::bit_cast<cudf::list_scalar*>(bloomFilter))));
   }
   JNI_CATCH(env, 0);
 }
@@ -108,8 +109,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_BloomFilter_probebuffer
   {
     cudf::jni::auto_set_device(env);
 
-    cudf::column_view const& input_column = *reinterpret_cast<cudf::column_view const*>(cv);
-    auto buf                              = reinterpret_cast<uint8_t const*>(bloomFilter);
+    cudf::column_view const& input_column = *std::bit_cast<cudf::column_view const*>(cv);
+    auto buf                              = std::bit_cast<uint8_t const*>(bloomFilter);
     return cudf::jni::release_as_jlong(spark_rapids_jni::bloom_filter_probe(
       input_column, cudf::device_span<uint8_t const>{buf, static_cast<size_t>(bloomFilterSize)}));
   }

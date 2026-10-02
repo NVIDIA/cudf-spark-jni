@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #include "cudf_jni_apis.hpp"
 #include "decimal_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlongArray JNICALL
@@ -32,8 +34,8 @@ Java_com_nvidia_spark_rapids_jni_DecimalUtils_multiply128(JNIEnv* env,
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto view_a = reinterpret_cast<cudf::column_view const*>(j_view_a);
-    auto view_b = reinterpret_cast<cudf::column_view const*>(j_view_b);
+    auto view_a = std::bit_cast<cudf::column_view const*>(j_view_a);
+    auto view_b = std::bit_cast<cudf::column_view const*>(j_view_b);
     auto scale  = static_cast<int>(j_product_scale);
     return cudf::jni::convert_table_for_return(
       env, cudf::jni::multiply_decimal128(*view_a, *view_b, scale, cast_interim_result));
@@ -49,8 +51,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_DecimalUtils_divid
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto view_a          = reinterpret_cast<cudf::column_view const*>(j_view_a);
-    auto view_b          = reinterpret_cast<cudf::column_view const*>(j_view_b);
+    auto view_a          = std::bit_cast<cudf::column_view const*>(j_view_a);
+    auto view_b          = std::bit_cast<cudf::column_view const*>(j_view_b);
     auto scale           = static_cast<int>(j_quotient_scale);
     auto is_int_division = static_cast<bool>(j_is_int_div);
     if (is_int_division) {
@@ -72,8 +74,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_DecimalUtils_remai
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto view_a = reinterpret_cast<cudf::column_view const*>(j_view_a);
-    auto view_b = reinterpret_cast<cudf::column_view const*>(j_view_b);
+    auto view_a = std::bit_cast<cudf::column_view const*>(j_view_a);
+    auto view_b = std::bit_cast<cudf::column_view const*>(j_view_b);
     auto scale  = static_cast<int>(j_remainder_scale);
     return cudf::jni::convert_table_for_return(
       env, cudf::jni::remainder_decimal128(*view_a, *view_b, scale));
@@ -89,8 +91,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_DecimalUtils_add12
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const view_a = reinterpret_cast<cudf::column_view const*>(j_view_a);
-    auto const view_b = reinterpret_cast<cudf::column_view const*>(j_view_b);
+    auto const view_a = std::bit_cast<cudf::column_view const*>(j_view_a);
+    auto const view_b = std::bit_cast<cudf::column_view const*>(j_view_b);
     auto const scale  = static_cast<int>(j_target_scale);
     return cudf::jni::convert_table_for_return(env,
                                                cudf::jni::add_decimal128(*view_a, *view_b, scale));
@@ -106,8 +108,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_DecimalUtils_subtr
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const view_a = reinterpret_cast<cudf::column_view const*>(j_view_a);
-    auto const view_b = reinterpret_cast<cudf::column_view const*>(j_view_b);
+    auto const view_a = std::bit_cast<cudf::column_view const*>(j_view_a);
+    auto const view_b = std::bit_cast<cudf::column_view const*>(j_view_b);
     auto const scale  = static_cast<int>(j_target_scale);
     return cudf::jni::convert_table_for_return(env,
                                                cudf::jni::sub_decimal128(*view_a, *view_b, scale));
@@ -122,7 +124,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_DecimalUtils_float
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input = reinterpret_cast<cudf::column_view const*>(j_input);
+    auto const input = std::bit_cast<cudf::column_view const*>(j_input);
     cudf::jni::native_jlongArray output(env, 2);
 
     auto [casted_col, failure_row_id] = cudf::jni::floating_point_to_decimal(

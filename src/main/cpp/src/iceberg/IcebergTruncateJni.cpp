@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@
 #include "iceberg/iceberg_truncate.hpp"
 #include "jni_utils.hpp"
 
+#include <bit>
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergTruncate_truncate(
@@ -28,7 +30,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_iceberg_IcebergTruncate
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const input_cv = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const input_cv = std::bit_cast<cudf::column_view const*>(input_column);
     auto const type_id  = input_cv->type().id();
     // Switch on type_id to call appropriate truncate function
     switch (type_id) {

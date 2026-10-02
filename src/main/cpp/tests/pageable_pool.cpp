@@ -26,9 +26,9 @@ using namespace spark_rapids_jni;
 
 namespace {
 
-static constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
+constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
-static pageable_pool_resource make_pool(std::size_t size = kPoolSize, int threads = 1)
+pageable_pool_resource make_pool(std::size_t size = kPoolSize, int threads = 1)
 {
   // Explicit any_resource construction is required because the converting constructor
   // of any_resource is not implicit in this CCCL version.
@@ -83,6 +83,16 @@ TEST(PageablePool, ZeroByteAllocationDoesNotConsumePool)
   EXPECT_EQ(p, nullptr);
   pool.deallocate_sync(p, 0);
 
+  void* full = pool.allocate_sync(kPoolSize);
+  ASSERT_NE(full, nullptr);
+  pool.deallocate_sync(full, kPoolSize);
+}
+
+TEST(PageablePool, OversizedAllocationDoesNotCorruptPool)
+{
+  auto pool = make_pool();
+  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(SIZE_MAX); },
+               pageable_pool_exhausted);
   void* full = pool.allocate_sync(kPoolSize);
   ASSERT_NE(full, nullptr);
   pool.deallocate_sync(full, kPoolSize);

@@ -22,7 +22,7 @@ The tool is a dynamically linked library `libcufaultinj.so` that is loaded by
 the CUDA process via CUDA Driver API `cuInit` if it is provided
 via the `CUDA_INJECTION64_PATH` environment variable.
 
-As an example it can be used to test RAPIDS Accelerator for Apache Spark.
+As an example it can be used to test the NVIDIA cuDF plugin for Apache Spark.
 Consult documentation to find how to set these variables correctly in the
 context of the framework under test.
 

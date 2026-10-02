@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,12 @@
  */
 
 #include "cudf_jni_apis.hpp"
+#include "exception_with_row_index.hpp"
+#include "like.hpp"
+#include "reverse_strings.hpp"
 #include "uuid.hpp"
+
+#include <bit>
 
 extern "C" {
 
@@ -30,5 +35,37 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_StringUtils_randomUUIDs
     return cudf::jni::release_as_jlong(spark_rapids_jni::random_uuids(row_count, seed));
   }
   JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_StringUtils_reverseStrings(JNIEnv* env, jclass, jlong input_handle)
+{
+  JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input = std::bit_cast<cudf::column_view const*>(input_handle);
+    return cudf::jni::release_as_jlong(
+      spark_rapids_jni::reverse_strings(cudf::strings_column_view{*input}));
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_StringUtils_like(
+  JNIEnv* env, jclass, jlong input_handle, jlong patterns_handle, jlong escape_char_handle)
+{
+  JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
+  JNI_NULL_CHECK(env, patterns_handle, "patterns column is null", 0);
+  JNI_NULL_CHECK(env, escape_char_handle, "escape character is null", 0);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input       = std::bit_cast<cudf::column_view const*>(input_handle);
+    auto const patterns    = std::bit_cast<cudf::column_view const*>(patterns_handle);
+    auto const escape_char = std::bit_cast<cudf::string_scalar const*>(escape_char_handle);
+    return cudf::jni::release_as_jlong(spark_rapids_jni::like(
+      cudf::strings_column_view{*input}, cudf::strings_column_view{*patterns}, *escape_char));
+  }
+  CATCH_EXCEPTION_WITH_ROW_INDEX(env, 0);
 }
 }

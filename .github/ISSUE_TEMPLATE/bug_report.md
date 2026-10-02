@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Create a bug report to help us improve the RAPIDS Accelerator JNI for Apache Spark
+about: Create a bug report to help us improve the NVIDIA cuDF plugin JNI for Apache Spark
 title: "[BUG]"
 labels: "? - Needs Triage, bug"
 assignees: ''

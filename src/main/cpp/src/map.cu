@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,11 +24,13 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <cuda/stream>
+
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> sort_map_column(cudf::column_view const& input,
                                               cudf::order sort_order,
-                                              rmm::cuda_stream_view stream,
+                                              cuda::stream_ref stream,
                                               rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,

@@ -4,9 +4,9 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/a5630ac57111e1aaef8cfe0069ede566c3d15f60.tar.gz",
-      "url_hash" : "SHA256=cbd4051441fe2fa19fe0da2987e8dea90bc51fe9d2111e55b75b0ec1301f33ae",
-      "version" : "3.4.0"
+      "url" : "https://github.com/NVIDIA/cccl/archive/cb9bee55d3f52b06b839c0895edd2d58655c4391.tar.gz",
+      "url_hash" : "SHA256=e44f9f1375516150234e3657396c9d0372d1a9094450c8a7da17d4a37f84c581",
+      "version" : "3.6.0"
     },
     "GTest" : 
     {
@@ -18,6 +18,7 @@
     "bs_thread_pool" : 
     {
       "always_download" : true,
+      "source_subdir" : ".rapids-cmake-download-only/bs_thread_pool",
       "url" : "https://github.com/bshoshany/thread-pool/archive/097aa718f25d44315cadb80b407144ad455ee4f9.tar.gz",
       "url_hash" : "SHA256=8e54280b4d9af3e4d2fd3dfa3f8d1198fc1c3a572d6f22c5eaf1abe38f2db0a8",
       "version" : "4.1.0"
@@ -25,8 +26,8 @@
     "cuco" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cuCollections/archive/0883368d39296f3bef3a058033141bcc642c5c54.tar.gz",
-      "url_hash" : "SHA256=4ec8320a0372839b991f0b431c7f8bf0e770006cb3c8631c6e373c434471fd45",
+      "url" : "https://github.com/NVIDIA/cuCollections/archive/8ed532dc0ba3ba664d1d41027269908ddcde04c8.tar.gz",
+      "url_hash" : "SHA256=676f95da52d8ac6a6b3f494b33757112755322685d010dfa30779e200b412ec6",
       "version" : "0.0.1"
     },
     "dlpack" : 
@@ -35,6 +36,7 @@
       "git_shallow" : false,
       "git_tag" : "365b823cedb281cd0240ca601aba9b78771f91a3",
       "git_url" : "https://github.com/dmlc/dlpack.git",
+      "source_subdir" : ".rapids-cmake-download-only/dlpack",
       "version" : "0.8"
     },
     "flatbuffers" : 
@@ -45,22 +47,14 @@
       "git_url" : "https://github.com/google/flatbuffers.git",
       "version" : "24.3.25"
     },
-    "fmt" : 
-    {
-      "always_download" : true,
-      "git_shallow" : false,
-      "git_tag" : "0c9fce2ffefecfdce794e1859584e25877b7b592",
-      "git_url" : "https://github.com/fmtlib/fmt.git",
-      "version" : "11.0.2"
-    },
     "kvikio" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "72f51b1afde57c2053a92a80df09affe1cfad3da",
+      "git_tag" : "257d08b41ef4e566cba6f5f64cb365e681961a3b",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
-      "version" : "26.08"
+      "version" : "26.12"
     },
     "nanoarrow" : 
     {
@@ -81,18 +75,26 @@
     "rapids_logger" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/rapidsai/rapids-logger/archive/4c72b598f99c8aa06af49468b3fc82f3931c6bf6.tar.gz",
-      "url_hash" : "SHA256=4e7cbbde62ba8517dabd1a327b45955d50db2dfa1240d0124662071ce8f1afc9",
-      "version" : "0.2.3"
+      "url" : "https://github.com/rapidsai/rapids-logger/archive/1124de618517654cce3636d69d022ee76e9df4b0.tar.gz",
+      "url_hash" : "SHA256=96a2f4ef04ad06d55546dbeee355cfe6e4fc94a33dee156d40f4f55dddc31686",
+      "version" : "0.3.0"
     },
     "rmm" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a5037ca70e0a85d1e06205347a06ec3acd171a13",
+      "git_tag" : "2d645925a1aea7ce8809aa57e6d78e32bdb0e36b",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
-      "version" : "26.08"
+      "version" : "26.12"
+    },
+    "rtcx" : 
+    {
+      "always_download" : true,
+      "git_shallow" : false,
+      "git_tag" : "da8150f0a83e22953e598844dbebff6791681de7",
+      "git_url" : "https://github.com/rapidsai/librtcx.git",
+      "version" : "0.1"
     },
     "spdlog" : 
     {
@@ -108,6 +110,7 @@
       "git_shallow" : false,
       "git_tag" : "e626a72bc2321cd320e953a0ccf1584cad60f363",
       "git_url" : "https://github.com/Cyan4973/xxHash.git",
+      "source_subdir" : ".rapids-cmake-download-only/xxhash",
       "version" : "0.8.3"
     },
     "zstd" : 

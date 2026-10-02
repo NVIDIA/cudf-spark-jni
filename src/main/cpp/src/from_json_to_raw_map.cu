@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,6 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -42,6 +41,7 @@
 #include <cuda/std/functional>
 #include <cuda/std/limits>
 #include <cuda/std/utility>
+#include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/copy.h>
 #include <thrust/count.h>
@@ -69,7 +69,7 @@ OutputIterator copy_if(InputIterator begin,
                        StencilIterator stencil,
                        OutputIterator result,
                        Predicate predicate,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   auto const num_items = cuda::std::distance(begin, end);
 
@@ -85,7 +85,7 @@ OutputIterator copy_if(InputIterator begin,
                                              num_selected.data(),
                                              num_items,
                                              predicate,
-                                             stream.value()));
+                                             stream.get()));
 
   auto d_temp_storage =
     rmm::device_buffer(temp_storage_bytes, stream, cudf::get_current_device_resource_ref());
@@ -98,7 +98,7 @@ OutputIterator copy_if(InputIterator begin,
                                              num_selected.data(),
                                              num_items,
                                              predicate,
-                                             stream.value()));
+                                             stream.get()));
 
   return result + num_selected.value(stream);
 }
@@ -108,7 +108,7 @@ OutputIterator copy_if(InputIterator begin,
                        InputIterator end,
                        OutputIterator output,
                        Predicate predicate,
-                       rmm::cuda_stream_view stream)
+                       cuda::stream_ref stream)
 {
   auto const num_items = cuda::std::distance(begin, end);
 
@@ -125,7 +125,7 @@ OutputIterator copy_if(InputIterator begin,
                                       num_selected.data(),
                                       num_items,
                                       predicate,
-                                      stream.value()));
+                                      stream.get()));
 
   // Allocate temporary storage
   rmm::device_buffer d_temp_storage(
@@ -139,7 +139,7 @@ OutputIterator copy_if(InputIterator begin,
                                       num_selected.data(),
                                       num_items,
                                       predicate,
-                                      stream.value()));
+                                      stream.get()));
 
   // Copy number of selected elements back to host via pinned memory
   return output + num_selected.value(stream);
@@ -149,7 +149,7 @@ OutputIterator copy_if(InputIterator begin,
 // value-child type selects the map flavor: an empty `STRING` gives `make_empty_map`'s output, an
 // empty `List<String>` gives `make_empty_map_array`'s.
 std::unique_ptr<cudf::column> make_empty_map_from_value(std::unique_ptr<cudf::column> value_child,
-                                                        rmm::cuda_stream_view stream,
+                                                        cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(value_child->size() == 0, "value_child must be an empty column.");
@@ -157,13 +157,21 @@ std::unique_ptr<cudf::column> make_empty_map_from_value(std::unique_ptr<cudf::co
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(keys));
   out_keys_vals.emplace_back(std::move(value_child));
-  auto child =
-    cudf::make_structs_column(0, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto child   = cudf::make_structs_column(0,
+                                         std::move(out_keys_vals),
+                                         0,
+                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                         stream,
+                                         mr);
   auto offsets = cudf::make_empty_column(cudf::data_type(cudf::type_id::INT32));
-  return cudf::make_lists_column(0, std::move(offsets), std::move(child), 0, rmm::device_buffer{});
+  return cudf::make_lists_column(0,
+                                 std::move(offsets),
+                                 std::move(child),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
-std::unique_ptr<cudf::column> make_empty_map(rmm::cuda_stream_view stream,
+std::unique_ptr<cudf::column> make_empty_map(cuda::stream_ref stream,
                                              rmm::device_async_resource_ref mr)
 {
   return make_empty_map_from_value(
@@ -173,7 +181,7 @@ std::unique_ptr<cudf::column> make_empty_map(rmm::cuda_stream_view stream,
 // Concatenating all input strings into one string, for which each input string is appended by a
 // delimiter character that does not exist in the input column.
 std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_strings(
-  cudf::strings_column_view const& input, rmm::cuda_stream_view stream)
+  cudf::strings_column_view const& input, cuda::stream_ref stream)
 {
   auto const default_mr = cudf::get_current_device_resource_ref();
   auto [concatenated_buff, delimiter, should_be_nullified] =
@@ -185,14 +193,14 @@ std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_s
 
   // Append the delimiter to the end of the concatenated buffer.
   // This is to fix a bug when the last string is invalid
-  // (https://github.com/rapidsai/cudf/issues/16999).
+  // (https://github.com/nvidia/cudf/issues/16999).
   // The bug was fixed in libcudf's JSON reader by the same way like this.
   auto unified_buff = rmm::device_buffer(concatenated_buff->size() + 1, stream, default_mr);
   CUDF_CUDA_TRY(cudaMemcpyAsync(unified_buff.data(),
                                 concatenated_buff->data(),
                                 concatenated_buff->size(),
                                 cudaMemcpyDefault,
-                                stream));
+                                stream.get()));
   cudf::detail::cuda_memcpy_async(
     cudf::device_span<char>(static_cast<char*>(unified_buff.data()) + concatenated_buff->size(),
                             1u),
@@ -224,7 +232,7 @@ struct is_node {
 // This is copied from cudf's `json_tree.cu`.
 rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
                                                     cudf::device_span<PdaTokenT const> tokens,
-                                                    rmm::cuda_stream_view stream)
+                                                    cuda::stream_ref stream)
 {
   auto token_levels = rmm::device_uvector<TreeDepthT>(tokens.size(), stream);
 
@@ -256,7 +264,7 @@ rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
       [does_push, does_pop] __device__(PdaTokenT const token) -> cudf::size_type {
         return does_push(token) - does_pop(token);
       }));
-  thrust::exclusive_scan(rmm::exec_policy_nosync(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          push_pop_it,
                          push_pop_it + tokens.size(),
                          token_levels.begin());
@@ -279,7 +287,7 @@ rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
 
 // Compute the map from nodes to their indices in the list of all tokens.
 rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
-  std::size_t num_nodes, cudf::device_span<PdaTokenT const> tokens, rmm::cuda_stream_view stream)
+  std::size_t num_nodes, cudf::device_span<PdaTokenT const> tokens, cuda::stream_ref stream)
 {
   auto node_token_ids   = rmm::device_uvector<NodeIndexT>(num_nodes, stream);
   auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
@@ -301,7 +309,7 @@ rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
 // This is copied from cudf's `json_tree.cu`.
 template <typename KeyType, typename IndexType = cudf::size_type>
 std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_sorted_key_order(
-  cudf::device_span<KeyType const> keys, rmm::cuda_stream_view stream)
+  cudf::device_span<KeyType const> keys, cuda::stream_ref stream)
 {
   // Buffers used for storing intermediate results during sorting.
   rmm::device_uvector<KeyType> keys_buffer1(keys.size(), stream);
@@ -311,8 +319,13 @@ std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_s
   cub::DoubleBuffer<KeyType> keys_buffer(keys_buffer1.data(), keys_buffer2.data());
   cub::DoubleBuffer<IndexType> order_buffer(order_buffer1.data(), order_buffer2.data());
 
-  thrust::copy(rmm::exec_policy_nosync(stream), keys.begin(), keys.end(), keys_buffer1.begin());
-  thrust::sequence(rmm::exec_policy_nosync(stream), order_buffer1.begin(), order_buffer1.end());
+  thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+               keys.begin(),
+               keys.end(),
+               keys_buffer1.begin());
+  thrust::sequence(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                   order_buffer1.begin(),
+                   order_buffer1.end());
 
   size_t temp_storage_bytes = 0;
   cub::DeviceRadixSort::SortPairs(
@@ -325,7 +338,7 @@ std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_s
                                   keys.size(),
                                   0,
                                   sizeof(KeyType) * 8,
-                                  stream.value());
+                                  stream.get());
 
   return std::pair{keys_buffer.Current() == keys_buffer1.data() ? std::move(keys_buffer1)
                                                                 : std::move(keys_buffer2),
@@ -336,13 +349,13 @@ std::pair<rmm::device_uvector<KeyType>, rmm::device_uvector<IndexType>> stable_s
 // This is copied from cudf's `json_tree.cu`.
 void propagate_parent_to_siblings(cudf::device_span<TreeDepthT const> node_levels,
                                   cudf::device_span<NodeIndexT> parent_node_ids,
-                                  rmm::cuda_stream_view stream)
+                                  cuda::stream_ref stream)
 {
   auto const [sorted_node_levels, sorted_order] = stable_sorted_key_order(node_levels, stream);
 
   // Instead of gather, using permutation_iterator, which is ~17% faster.
   thrust::inclusive_scan_by_key(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     sorted_node_levels.begin(),
     sorted_node_levels.end(),
     thrust::make_permutation_iterator(parent_node_ids.begin(), sorted_order.begin()),
@@ -355,7 +368,7 @@ void propagate_parent_to_siblings(cudf::device_span<TreeDepthT const> node_level
 rmm::device_uvector<NodeIndexT> compute_parent_node_ids(
   cudf::device_span<PdaTokenT const> tokens,
   cudf::device_span<NodeIndexT const> node_token_ids,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const first_childs_parent_token_id =
     cuda::proclaim_return_type<NodeIndexT>([tokens] __device__(auto i) -> NodeIndexT {
@@ -375,7 +388,7 @@ rmm::device_uvector<NodeIndexT> compute_parent_node_ids(
   auto const num_nodes = node_token_ids.size();
   auto parent_node_ids = rmm::device_uvector<NodeIndexT>(num_nodes, stream);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     node_token_ids.begin(),
     node_token_ids.end(),
     parent_node_ids.begin(),
@@ -418,12 +431,12 @@ constexpr int32_t list_nesting_weight{1 << 8};
 
 // Check for each node if it is a key or a value field.
 rmm::device_uvector<node_kind> check_key_or_value_nodes(
-  cudf::device_span<NodeIndexT const> parent_node_ids, rmm::cuda_stream_view stream)
+  cudf::device_span<NodeIndexT const> parent_node_ids, cuda::stream_ref stream)
 {
   auto key_or_value       = rmm::device_uvector<node_kind>(parent_node_ids.size(), stream);
   auto const transform_it = thrust::counting_iterator<int>(0);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     transform_it,
     transform_it + parent_node_ids.size(),
     key_or_value.begin(),
@@ -470,7 +483,7 @@ struct tokenized_input {
 // this and diverge only after it returns.
 tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
                                       json_parse_options const& options,
-                                      rmm::cuda_stream_view stream)
+                                      cuda::stream_ref stream)
 {
   auto [concat_json_buff, delimiter, should_be_nullified] = unify_json_strings(input, stream);
   auto concat_buff_wrapper =
@@ -513,7 +526,10 @@ tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
 #endif
 
   auto const num_nodes = static_cast<cudf::size_type>(
-    thrust::count_if(rmm::exec_policy_nosync(stream), tokens.begin(), tokens.end(), is_node{}));
+    thrust::count_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                     tokens.begin(),
+                     tokens.end(),
+                     is_node{}));
 
   // Compute the map from nodes to their indices in the list of all tokens.
   auto node_token_ids = compute_node_to_token_index_map(num_nodes, tokens, stream);
@@ -667,14 +683,14 @@ rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> compute_node_
   cudf::device_span<NodeIndexT const> node_token_ids,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<node_kind const> key_or_value,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const num_nodes = node_token_ids.size();
   auto node_ranges =
     rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>(num_nodes, stream);
   auto const transform_it = thrust::counting_iterator<int>(0);
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     transform_it,
     transform_it + num_nodes,
     node_ranges.begin(),
@@ -715,7 +731,7 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
   cudf::device_span<cuda::std::pair<SymbolOffsetT, SymbolOffsetT> const> node_ranges,
   cudf::device_span<node_kind const> key_or_value,
   cudf::device_span<char const> input_json,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const is_key_or_value = cuda::proclaim_return_type<bool>(
@@ -736,8 +752,11 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
 
   auto [offsets, chars] = cudf::strings::detail::make_strings_children(
     substring_fn{input_json, extracted_ranges}, num_extract, stream, mr);
-  return cudf::make_strings_column(
-    num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
+  return cudf::make_strings_column(num_extract,
+                                   std::move(offsets),
+                                   chars.release(),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Compute the offsets for the final lists of Struct<String,String>.
@@ -745,7 +764,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
   cudf::size_type n_lists,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<node_kind const> key_or_value,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   // Count the number of children nodes for the json object nodes.
@@ -755,7 +774,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
   // For the nodes having parent_id < 0 (they are json object given by one input row), set their
   // child counts to zero. Otherwise, set child counts to a negative sentinel number.
   thrust::transform(
-    rmm::exec_policy_nosync(stream),
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     parent_node_ids.begin(),
     parent_node_ids.end(),
     node_child_counts.begin(),
@@ -770,7 +789,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
 
   // Count the number of keys for each json object using `atomicAdd`.
   auto const transform_it = thrust::counting_iterator<int>(0);
-  thrust::for_each(rmm::exec_policy_nosync(stream),
+  thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    transform_it,
                    transform_it + parent_node_ids.size(),
                    [is_key,
@@ -798,14 +817,15 @@ std::unique_ptr<cudf::column> compute_list_offsets(
   print_debug(list_offsets, "Output list sizes (except the last one)", ", ", stream);
 #endif
 
-  thrust::exclusive_scan(rmm::exec_policy_nosync(stream),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          list_offsets.begin(),
                          list_offsets.end(),
                          list_offsets.begin());
 #ifdef DEBUG_FROM_JSON
   print_debug(list_offsets, "Output list offsets", ", ", stream);
 #endif
-  return std::make_unique<cudf::column>(std::move(list_offsets), rmm::device_buffer{}, 0);
+  return std::make_unique<cudf::column>(
+    std::move(list_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
 }
 
 // If a JSON line is invalid, the tokens corresponding to that line are output as
@@ -843,7 +863,7 @@ struct is_line_begin {
   }
 };
 
-std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
+std::pair<cuda::device_buffer<std::byte>, cudf::size_type> create_null_mask(
   cudf::size_type num_rows,
   std::unique_ptr<cudf::column> const& should_be_nullified,
   cudf::device_span<PdaTokenT const> tokens,
@@ -851,7 +871,7 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
   cudf::device_span<NodeIndexT const> node_token_ids,
   cudf::device_span<NodeIndexT const> parent_node_ids,
   cudf::device_span<NodeIndexT const> precomputed_line_begin,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   auto const num_nodes = node_token_ids.size();
@@ -905,7 +925,7 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
     }
 
     // Scatter the indices of the invalid StructBegin nodes into `should_be_nullified`.
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      invalid_indices.begin(),
                      invalid_indices.begin() + num_invalid,
                      [should_be_nullified = should_be_nullified->mutable_view().begin<bool>(),
@@ -923,7 +943,9 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
   auto const valid_it          = should_be_nullified->view().begin<bool>();
   auto [null_mask, null_count] = cudf::detail::valid_if(
     valid_it, valid_it + should_be_nullified->size(), thrust::logical_not<bool>{}, stream, mr);
-  return {null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr}, null_count};
+  return {null_count > 0 ? std::move(null_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
+          null_count};
 }
 
 // Array-value path: parse `Map[String, Array[String]]` JSON into
@@ -943,7 +965,7 @@ __device__ inline bool is_json_null_literal(char const* json,
 
 // Zero-row `List<Struct<String, List<String>>>` for empty input. Sibling of `make_empty_map`;
 // the struct's value child is an empty `List<String>` instead of an empty `STRING`.
-std::unique_ptr<cudf::column> make_empty_map_array(rmm::cuda_stream_view stream,
+std::unique_ptr<cudf::column> make_empty_map_array(cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   return make_empty_map_from_value(
@@ -1009,7 +1031,7 @@ struct element_classify_fn {
 
 std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view const& input,
                                                    json_parse_options options,
-                                                   rmm::cuda_stream_view stream,
+                                                   cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1052,8 +1074,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(extracted_keys));
   out_keys_vals.emplace_back(std::move(extracted_values));
-  auto structs_col = cudf::make_structs_column(
-    num_pairs, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto structs_col =
+    cudf::make_structs_column(num_pairs,
+                              std::move(out_keys_vals),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                              stream,
+                              mr);
 
   // Do not use `cudf::make_lists_column` since we do not need to call `purge_nonempty_nulls`
   // on the children columns as they do not have non-empty nulls.
@@ -1082,7 +1109,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
 std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   cudf::strings_column_view const& input,
   json_parse_options options,
-  rmm::cuda_stream_view stream,
+  cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
@@ -1116,7 +1143,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto element_valid = rmm::device_uvector<bool>(num_nodes, stream);
   {
     auto const node_id_it = thrust::counting_iterator<cudf::size_type>(0);
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      node_id_it,
                      node_id_it + num_nodes,
                      element_classify_fn{preprocessed_input,
@@ -1170,7 +1197,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto const num_values = extracted_keys->size();
 #ifndef NDEBUG
   auto const num_value_nodes = static_cast<cudf::size_type>(
-    thrust::count_if(rmm::exec_policy_nosync(stream),
+    thrust::count_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      is_key_or_value_node.begin(),
                      is_key_or_value_node.end(),
                      cuda::proclaim_return_type<bool>(
@@ -1190,7 +1217,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                                         [] __device__(node_kind const kv) -> cudf::size_type {
                                           return is_value_node(kv) ? 1 : 0;
                                         }));
-    thrust::exclusive_scan(rmm::exec_policy_nosync(stream),
+    thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                            value_flag_it,
                            value_flag_it + num_nodes,
                            value_ordinals.begin());
@@ -1201,10 +1228,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   // list is masked null below, but the offset slot must exist).
   auto inner_offsets = rmm::device_uvector<cudf::size_type>(num_values + 1, stream, mr);
   thrust::uninitialized_fill(
-    rmm::exec_policy_nosync(stream), inner_offsets.begin(), inner_offsets.end(), 0);
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    inner_offsets.begin(),
+    inner_offsets.end(),
+    0);
   {
     auto const node_id_it = thrust::counting_iterator<cudf::size_type>(0);
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      node_id_it,
                      node_id_it + num_nodes,
                      [element_flag   = element_flag.begin(),
@@ -1218,7 +1248,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
                          counts[value_ordinals[value_node]]};
                        ref.fetch_add(1, cuda::memory_order_relaxed);
                      });
-    thrust::exclusive_scan(rmm::exec_policy_nosync(stream),
+    thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                            inner_offsets.begin(),
                            inner_offsets.end(),
                            inner_offsets.begin());
@@ -1229,7 +1259,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto inner_valid = rmm::device_uvector<bool>(num_values, stream);
   {
     auto const node_id_it = thrust::counting_iterator<cudf::size_type>(0);
-    thrust::for_each(rmm::exec_policy_nosync(stream),
+    thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      node_id_it,
                      node_id_it + num_nodes,
                      [key_or_value   = is_key_or_value_node.begin(),
@@ -1248,8 +1278,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   // its element child has no non-empty nulls.
   auto [inner_mask, inner_null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(inner_valid), stream, mr);
-  auto inner_offsets_col =
-    std::make_unique<cudf::column>(std::move(inner_offsets), rmm::device_buffer{}, 0);
+  auto inner_offsets_col = std::make_unique<cudf::column>(
+    std::move(inner_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   std::vector<std::unique_ptr<cudf::column>> inner_list_children;
   inner_list_children.emplace_back(std::move(inner_offsets_col));
   inner_list_children.emplace_back(std::move(extracted_elements));
@@ -1257,7 +1287,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
     cudf::data_type{cudf::type_id::LIST},
     num_values,
     rmm::device_buffer{},
-    inner_null_count > 0 ? std::move(*inner_mask) : rmm::device_buffer{},
+    inner_null_count > 0 ? std::move(*inner_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
     inner_null_count > 0 ? inner_null_count : 0,
     std::move(inner_list_children));
 
@@ -1265,8 +1296,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(extracted_keys));
   out_keys_vals.emplace_back(std::move(inner_list));
-  auto structs_col = cudf::make_structs_column(
-    num_values, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto structs_col =
+    cudf::make_structs_column(num_values,
+                              std::move(out_keys_vals),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                              stream,
+                              mr);
 
   // Assemble the outer list (row offsets + struct child).
   std::vector<std::unique_ptr<cudf::column>> list_children;
@@ -1296,7 +1332,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   {
     auto const node_id_it = thrust::counting_iterator<NodeIndexT>(0);
     thrust::for_each(
-      rmm::exec_policy_nosync(stream),
+      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
       node_id_it,
       node_id_it + num_nodes,
       [key_or_value       = is_key_or_value_node.begin(),

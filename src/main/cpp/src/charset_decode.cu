@@ -26,6 +26,7 @@
 #include <rmm/device_scalar.hpp>
 
 #include <cuda/atomic>
+#include <cuda/stream>
 
 #include <stdexcept>
 
@@ -202,7 +203,7 @@ struct gbk_decode_fn {
 
 decode_result decode_gbk(cudf::column_view const& input,
                          error_action action,
-                         rmm::cuda_stream_view stream,
+                         cuda::stream_ref stream,
                          rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,
@@ -223,9 +224,10 @@ decode_result decode_gbk(cudf::column_view const& input,
 
   // Only allocate a device-side flag when the caller actually wants REPORT semantics.
   std::unique_ptr<rmm::device_scalar<int32_t>> flag;
-  int32_t* flag_ptr = nullptr;
+  auto const initial_flag = int32_t{0};
+  int32_t* flag_ptr       = nullptr;
   if (action == error_action::REPORT) {
-    flag     = std::make_unique<rmm::device_scalar<int32_t>>(0, stream, mr);
+    flag     = std::make_unique<rmm::device_scalar<int32_t>>(initial_flag, stream, mr);
     flag_ptr = flag->data();
   }
 
@@ -256,7 +258,7 @@ decode_result decode_gbk(cudf::column_view const& input,
 decode_result decode_charset(cudf::column_view const& input,
                              charset_type charset,
                              error_action action,
-                             rmm::cuda_stream_view stream,
+                             cuda::stream_ref stream,
                              rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();

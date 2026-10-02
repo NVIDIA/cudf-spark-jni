@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <stack>
@@ -181,7 +182,10 @@ struct free_buffer_tracker {
   size_t buffer_size_;
 };
 
-void writer_thread_process(JavaVM* vm,
+struct subscriber_state;
+
+void writer_thread_process(subscriber_state* state,
+                           JavaVM* vm,
                            jobject j_writer,
                            size_t buffer_size,
                            size_t flush_threshold,
@@ -193,20 +197,17 @@ struct subscriber_state {
   std::thread writer_thread;
   free_buffer_tracker free_buffers;
   completed_buffer_queue completed_buffers;
-  bool has_cupti_callback_errored;
   bool is_shutdown;
 
   subscriber_state(jobject writer, size_t buffer_size)
-    : j_writer(writer),
-      free_buffers(buffer_size),
-      has_cupti_callback_errored(false),
-      is_shutdown(false)
+    : j_writer(writer), free_buffers(buffer_size), is_shutdown(false)
   {
   }
 };
 
 // Global variables
 subscriber_state* State = nullptr;
+std::mutex State_mutex;
 uint64_t Flush_period_msec;
 std::atomic_uint64_t Last_flush_time_msec;
 
@@ -317,8 +318,7 @@ void CUPTIAPI callback_handler(void*,
                                void const* callback_data_ptr)
 {
   auto rc = cuptiGetLastError();
-  if (rc != CUPTI_SUCCESS && !State->has_cupti_callback_errored) {
-    // State->has_cupti_callback_errored = true;
+  if (rc != CUPTI_SUCCESS) {
     std::cerr << "PROFILER: Error handling callback: " << get_cupti_error(rc) << std::endl;
     return;
   }
@@ -337,7 +337,8 @@ void CUPTIAPI buffer_requested_callback(uint8_t** buffer_ptr_ptr,
                                         size_t* max_num_records_ptr)
 {
   *max_num_records_ptr = 0;
-  if (!State->is_shutdown) {
+  std::lock_guard lock(State_mutex);
+  if (State && !State->is_shutdown) {
     auto buffer = State->free_buffers.get();
     buffer->release(buffer_ptr_ptr, size_ptr);
   } else {
@@ -351,7 +352,8 @@ void CUPTIAPI buffer_completed_callback(
   CUcontext, uint32_t, uint8_t* buffer, size_t buffer_size, size_t valid_size)
 {
   auto pb = std::make_unique<profile_buffer>(buffer, buffer_size, valid_size);
-  if (!State->is_shutdown) { State->completed_buffers.put(std::move(pb)); }
+  std::lock_guard lock(State_mutex);
+  if (State && !State->is_shutdown) { State->completed_buffers.put(std::move(pb)); }
 }
 
 // Setup the environment variables for NVTX library injection so we can capture NVTX events.
@@ -364,7 +366,8 @@ void setup_nvtx_env(JNIEnv* env, jstring j_lib_path)
 }
 
 // Main processing loop for the background writer thread
-void writer_thread_process(JavaVM* vm,
+void writer_thread_process(subscriber_state* state,
+                           JavaVM* vm,
                            jobject j_writer,
                            size_t buffer_size,
                            size_t flush_threshold,
@@ -374,20 +377,20 @@ void writer_thread_process(JavaVM* vm,
     JNIEnv* env = attach_to_jvm(vm);
     profiler_serializer serializer(
       env, j_writer, buffer_size, flush_threshold, async_alloc_capture);
-    auto buffer = State->completed_buffers.get();
+    auto buffer = state->completed_buffers.get();
     while (buffer) {
       serializer.process_cupti_buffer(buffer->data(), buffer->valid_size());
-      State->free_buffers.put(std::move(buffer));
-      buffer = State->completed_buffers.get();
+      state->free_buffers.put(std::move(buffer));
+      buffer = state->completed_buffers.get();
     }
     serializer.flush();
   } catch (std::exception const& e) {
     std::cerr << "PROFILER: WRITER THREAD ERROR: " << e.what() << std::endl;
     // no-op process buffers
-    auto buffer = State->completed_buffers.get();
+    auto buffer = state->completed_buffers.get();
     while (buffer) {
-      State->free_buffers.put(std::move(buffer));
-      buffer = State->completed_buffers.get();
+      state->free_buffers.put(std::move(buffer));
+      buffer = state->completed_buffers.get();
     }
   }
   vm->DetachCurrentThread();
@@ -439,46 +442,66 @@ Java_com_nvidia_spark_rapids_jni_Profiler_nativeInit(JNIEnv* env,
     // grab a global reference to the writer instance so it isn't garbage collected
     auto writer = static_cast<jobject>(env->NewGlobalRef(j_writer));
     if (!writer) { throw std::runtime_error("Unable to create a global reference to writer"); }
-    State                = new subscriber_state(writer, write_buffer_size);
-    State->writer_thread = std::thread(writer_thread_process,
-                                       get_jvm(env),
-                                       writer,
-                                       write_buffer_size,
-                                       write_buffer_size,
-                                       async_alloc_capture);
-    auto rc              = cuptiSubscribe(&State->subscriber_handle, callback_handler, nullptr);
-    check_cupti(rc, "Error initializing CUPTI");
-    rc = cuptiEnableCallback(1,
-                             State->subscriber_handle,
-                             CUPTI_CB_DOMAIN_RUNTIME_API,
-                             CUPTI_RUNTIME_TRACE_CBID_cudaDeviceReset_v3020);
-    if (flush_period_msec > 0) {
-      std::cerr << "PROFILER: Flushing activity records every " << flush_period_msec
-                << " milliseconds" << std::endl;
-      Flush_period_msec    = static_cast<uint64_t>(flush_period_msec);
-      Last_flush_time_msec = timestamp_now();
-      // CUPTI's periodic flush does not appear to work in this environment. As a workaround,
-      // register a callback for all the various ways a GPU kernel gets launched. The callback
-      // checks if the flush period has elapsed since we last flushed, and if so, forces a flush.
-      CUpti_CallbackId const driver_launch_callback_ids[] = {
-        CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,
-        CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunch,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel,
-        CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz};
-      for (CUpti_CallbackId const id : driver_launch_callback_ids) {
-        rc = cuptiEnableCallback(1, State->subscriber_handle, CUPTI_CB_DOMAIN_DRIVER_API, id);
-        check_cupti(rc, "Error registering driver launch callbacks");
+    std::unique_ptr<subscriber_state> state;
+    bool subscribed = false;
+    try {
+      state      = std::make_unique<subscriber_state>(writer, write_buffer_size);
+      auto rc    = cuptiSubscribe(&state->subscriber_handle, callback_handler, nullptr);
+      subscribed = rc == CUPTI_SUCCESS;
+      check_cupti(rc, "Error initializing CUPTI");
+      rc = cuptiEnableCallback(1,
+                               state->subscriber_handle,
+                               CUPTI_CB_DOMAIN_RUNTIME_API,
+                               CUPTI_RUNTIME_TRACE_CBID_cudaDeviceReset_v3020);
+      check_cupti(rc, "Error enabling device reset callback");
+      if (flush_period_msec > 0) {
+        std::cerr << "PROFILER: Flushing activity records every " << flush_period_msec
+                  << " milliseconds" << std::endl;
+        Flush_period_msec    = static_cast<uint64_t>(flush_period_msec);
+        Last_flush_time_msec = timestamp_now();
+        // CUPTI's periodic flush does not appear to work in this environment. As a workaround,
+        // register a callback for all the various ways a GPU kernel gets launched. The callback
+        // checks if the flush period has elapsed since we last flushed, and if so, forces a flush.
+        CUpti_CallbackId const driver_launch_callback_ids[] = {
+          CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch,
+          CUPTI_DRIVER_TRACE_CBID_cuGraphLaunch_ptsz,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunch,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel,
+          CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz};
+        for (CUpti_CallbackId const id : driver_launch_callback_ids) {
+          rc = cuptiEnableCallback(1, state->subscriber_handle, CUPTI_CB_DOMAIN_DRIVER_API, id);
+          check_cupti(rc, "Error registering driver launch callbacks");
+        }
       }
+      rc = cuptiActivityRegisterCallbacks(buffer_requested_callback, buffer_completed_callback);
+      check_cupti(rc, "Error registering activity buffer callbacks");
+      // Callbacks must not observe a session that can still fail initialization.
+      std::lock_guard lock(State_mutex);
+      // The serializer writes a header immediately, so no fallible setup may follow thread startup.
+      state->writer_thread = std::thread(writer_thread_process,
+                                         state.get(),
+                                         get_jvm(env),
+                                         writer,
+                                         write_buffer_size,
+                                         write_buffer_size,
+                                         async_alloc_capture);
+      State                = state.release();
+    } catch (...) {
+      if (subscribed) {
+        auto rc = cuptiUnsubscribe(state->subscriber_handle);
+        if (rc != CUPTI_SUCCESS) {
+          std::cerr << "PROFILER: Error rolling back CUPTI subscription: " << get_cupti_error(rc)
+                    << std::endl;
+        }
+      }
+      env->DeleteGlobalRef(writer);
+      throw;
     }
-    check_cupti(rc, "Error enabling device reset callback");
-    rc = cuptiActivityRegisterCallbacks(buffer_requested_callback, buffer_completed_callback);
-    check_cupti(rc, "Error registering activity buffer callbacks");
   }
   CATCH_STD(env, );
 }
@@ -507,7 +530,10 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_Profiler_nativeShutdown(
       auto flush_rc = cuptiActivityFlushAll(1);
       State->completed_buffers.shutdown();
       State->writer_thread.join();
-      State->is_shutdown = true;
+      {
+        std::lock_guard lock(State_mutex);
+        State->is_shutdown = true;
+      }
       env->DeleteGlobalRef(State->j_writer);
       // There can be late arrivals of CUPTI activity events and other callbacks, so it's safer
       // and simpler to _not_ delete the State object on shutdown.

@@ -56,9 +56,8 @@ public final class PageableMemoryPool implements AutoCloseable {
     @Override
     protected synchronized boolean cleanImpl(boolean logErrorIfNotClean) {
       boolean neededCleanup = false;
-      long origAddress = 0;
+      final long origAddress = address;
       if (address != -1) {
-        origAddress = address;
         try {
           PageableMemoryPool.freeInternal(address, origLength);
         } finally {
@@ -92,11 +91,14 @@ public final class PageableMemoryPool implements AutoCloseable {
         if (singleton_ == null && initFuture != null) {
           try {
             singleton_ = initFuture.get();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted waiting for pageable memory pool initialization", e);
           } catch (Exception e) {
-            throw new RuntimeException("Error initializing pageable memory pool", e);
-          } finally {
             initFuture = null;
+            throw new RuntimeException("Error initializing pageable memory pool", e);
           }
+          initFuture = null;
         }
       }
     }
@@ -164,6 +166,9 @@ public final class PageableMemoryPool implements AutoCloseable {
    *         (caller should fall back to a regular malloc'd buffer)
    */
   public static HostMemoryBuffer tryAllocate(long bytes) {
+    if (bytes <= 0) {
+      throw new IllegalArgumentException("bytes must be positive");
+    }
     PageableMemoryPool pool = getSingleton();
     if (pool != null) {
       return pool.tryAllocateInternal(bytes);
