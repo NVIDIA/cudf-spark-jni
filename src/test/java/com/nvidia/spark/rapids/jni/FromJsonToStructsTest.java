@@ -24,6 +24,7 @@ import ai.rapids.cudf.JSONOptions;
 import ai.rapids.cudf.Schema;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 
@@ -40,6 +41,46 @@ public class FromJsonToStructsTest {
         .withNonNumericNumbers(true)
         .withUnquotedControlChars(false)
         .build();
+  }
+
+  private static JSONOptions getOptionsWithoutLeadingZeros() {
+    return JSONOptions.builder()
+        .withNormalizeSingleQuotes(true)
+        .withNonNumericNumbers(true)
+        .withUnquotedControlChars(false)
+        .build();
+  }
+
+  private static void assertZeroWithExtremeExponent(DType.DTypeEnum type, int precision) {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(type, 0), "a", precision);
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":\"0E2147483647\"}",
+             "{\"a\":\"0E-2147483647\"}",
+             "{\"a\":\"0.E-2147483647\"}",
+             "{\"a\":\"0.0E2147483647\"}",
+             "{\"a\":\"0.0E-2147483646\"}",
+             "{\"a\":\"0E2147483648\"}",
+             "{\"a\":\"0E-2147483648\"}",
+             "{\"a\":\"0.E-2147483648\"}",
+             "{\"a\":\"0.0E-2147483647\"}",
+             "{\"a\":\"1E-2147483648\"}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null))) {
+      assertColumnsAreEqual(expected, actual);
+    }
   }
 
   private static Schema mixedNestedTypesSchema() {
@@ -140,6 +181,122 @@ public class FromJsonToStructsTest {
              JSONUtils.fromJSONToStructs(nullInput, schema, getOptions(), true)) {
       assertEquals(1, nullOutput.getRowCount());
       assertEquals(1, nullOutput.getNullCount());
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsParsesZeroWithExponentOverflow() {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(DType.DTypeEnum.DECIMAL64, 0), "a", 10);
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":\"00000.0E57\"}",
+             "{\"a\":\"0.0E57\"}",
+             "{\"a\":0.0E57}",
+             "{\"a\":\"-0.E+85\"}",
+             "{\"a\":00000.0E57}",
+             "{\"a\":-0.E+85}",
+             "{\"a\":\"e57\"}",
+             "{\"a\":\"0E\"}",
+             "{\"a\":\"0E+\"}",
+             "{\"a\":\"0E-\"}",
+             "{\"a\":\"0E \"}",
+             "{\"a\":\"0E+ \"}",
+             "{\"a\":\"0E- \"}",
+             "{\"a\":\"1.0E57\"}",
+             "{\"a\":null}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null),
+             new HostColumnVector.StructData((Object) null))) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsParsesUnquotedZeroOnUnchangedByteFastPath() {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(DType.DTypeEnum.DECIMAL64, 0), "a", 10);
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":0.0E57}",
+             "{\"a\":-0.0E+85}",
+             "{\"a\":1.0E57}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData(BigDecimal.ZERO),
+             new HostColumnVector.StructData((Object) null))) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsRejectsUnquotedLeadingZerosByDefault() {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(DType.DTypeEnum.DECIMAL64, 0), "a", 10);
+    Schema schema = root.build();
+
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":00000.0E57}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(
+             input, schema, getOptionsWithoutLeadingZeros(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(),
+             new HostColumnVector.StructData((Object) null))) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsParsesZeroWithExtremeExponentForAllDecimalWidths() {
+    assertZeroWithExtremeExponent(DType.DTypeEnum.DECIMAL32, 9);
+    assertZeroWithExtremeExponent(DType.DTypeEnum.DECIMAL64, 18);
+    assertZeroWithExtremeExponent(DType.DTypeEnum.DECIMAL128, 38);
+  }
+
+  @Test
+  void testFromJsonToStructsParsesZeroAcrossKernelBlocks() {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(DType.DTypeEnum.DECIMAL64, 0), "a", 10);
+    Schema schema = root.build();
+    String[] inputRows = new String[257];
+    HostColumnVector.StructData[] expectedRows = new HostColumnVector.StructData[257];
+    Arrays.fill(inputRows, "{\"a\":\"0.0E57\"}");
+    Arrays.setAll(expectedRows, i -> new HostColumnVector.StructData(BigDecimal.ZERO));
+
+    try (ColumnVector input = ColumnVector.fromStrings(inputRows);
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromStructs(schema.asHostDataType(), expectedRows)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testConvertFromStringsHandlesSlicedDecimalInput() {
+    Schema.Builder root = Schema.builder();
+    root.column(DType.create(DType.DTypeEnum.DECIMAL64, 0), "a", 10);
+    Schema schema = root.build();
+
+    try (ColumnVector full = ColumnVector.fromStrings(
+             "outside-before", "\"0E2147483647\"", "\"1E2147483647\"", "outside-after");
+         ColumnVector sliced = full.subVector(1, 3);
+         ColumnVector actual = JSONUtils.convertFromStrings(sliced, schema, true, true);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(0, 0L, null)) {
+      assertColumnsAreEqual(expected, actual);
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,11 +22,13 @@
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/span.hpp>
 
 #include <rmm/resource_ref.hpp>
 
 #include <cuda/stream>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -104,6 +106,40 @@ std::unique_ptr<cudf::column> string_to_decimal(
   bool ansi_mode,
   bool strip,
   cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Convert a string column into a decimal column with JSON-specific zero handling.
+ *
+ * @throws cudf::logic_error If precision cannot be represented by a supported decimal type, or if
+ *                           a non-empty @p json_quote_counts span has a different size than
+ *                           @p string_col.
+ * @param[in] precision Precision of input data.
+ * @param[in] scale Scale of input data.
+ * @param[in] string_col Incoming string column to convert to decimals.
+ * @param[in] ansi_mode If true, strict conversion and throws on error. If false, null invalid
+ *                      entries.
+ * @param[in] strip If true, leading and trailing white space is ignored.
+ * @param[in] json_quote_counts Number of quote characters in each original JSON value. The span
+ *                              must be empty for ordinary CAST or contain one entry per input row.
+ *                              Quoted or valid unquoted JSON zeros remain zero when their exponent
+ *                              is in the inclusive range [-Integer.MAX_VALUE, Integer.MAX_VALUE]
+ *                              and the resulting java.math.BigDecimal scale fits a signed Java int,
+ *                              including when applying the exponent would overflow the int decimal
+ *                              location. Integer.MIN_VALUE is not accepted as an exponent because
+ *                              its negation is not representable as a signed Java int.
+ * @param[in] stream Stream on which to operate.
+ * @param[in] mr Memory resource for returned column.
+ * @return std::unique_ptr<column> Decimal column that was created from string_col.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> string_to_decimal(
+  int32_t precision,
+  int32_t scale,
+  cudf::strings_column_view const& string_col,
+  bool ansi_mode,
+  bool strip,
+  cudf::device_span<int8_t const> json_quote_counts,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
