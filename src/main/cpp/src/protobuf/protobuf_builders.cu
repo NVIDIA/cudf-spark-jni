@@ -353,32 +353,26 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
   // Stream-ordered pinned deallocation keeps these staging buffers safe without a local sync.
   auto h_name_offsets =
     cudf::detail::make_pinned_vector_async<int32_t>(valid_enums.size() + 1, stream);
-  h_name_offsets[0]        = 0;
-  int64_t total_name_chars = 0;
+  h_name_offsets[0]       = 0;
+  size_t total_name_chars = 0;
   for (size_t k = 0; k < enum_name_bytes.size(); ++k) {
-    total_name_chars += static_cast<int64_t>(enum_name_bytes[k].size());
-    CUDF_EXPECTS(total_name_chars <= std::numeric_limits<int32_t>::max(),
+    CUDF_EXPECTS(enum_name_bytes[k].size() <=
+                   static_cast<size_t>(std::numeric_limits<int32_t>::max()) - total_name_chars,
                  "Enum name data exceeds 2 GB limit");
+    total_name_chars += enum_name_bytes[k].size();
     h_name_offsets[k + 1] = static_cast<int32_t>(total_name_chars);
   }
 
   auto h_name_chars = cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream);
-  int32_t cursor    = 0;
+  uint8_t* cursor   = h_name_chars.data();
   for (auto const& name : enum_name_bytes) {
-    if (!name.empty()) {
-      std::copy(name.data(), name.data() + name.size(), h_name_chars.data() + cursor);
-      cursor += static_cast<int32_t>(name.size());
-    }
+    if (name.empty()) { continue; }
+    std::copy(name.cbegin(), name.cend(), cursor);
+    cursor += name.size();
   }
 
   auto d_name_offsets = cudf::detail::make_device_uvector_async(h_name_offsets, stream, scratch_mr);
-
-  auto d_name_chars = [&]() {
-    if (total_name_chars > 0) {
-      return cudf::detail::make_device_uvector_async(h_name_chars, stream, scratch_mr);
-    }
-    return rmm::device_uvector<uint8_t>(0, stream, scratch_mr);
-  }();
+  auto d_name_chars   = cudf::detail::make_device_uvector_async(h_name_chars, stream, scratch_mr);
 
   return {std::move(d_valid_enums), std::move(d_name_offsets), std::move(d_name_chars)};
 }
@@ -524,7 +518,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
         0, cuda::proclaim_return_type<size_t>([loc_provider] __device__(int idx) -> size_t {
           auto loc = loc_provider.input_location(idx);
           if (!loc.is_present()) return 0;
-          return static_cast<size_t>(loc.length);
+          return loc.length;
         }));
 
       size_t temp_storage_bytes = 0;
@@ -618,7 +612,7 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
 
   auto fragment_lengths = thrust::make_transform_iterator(
     work.occurrences.begin(),
-    [] __device__(field_occurrence const& fragment) -> int32_t { return fragment.length; });
+    [] __device__(field_occurrence const& fragment) -> uint32_t { return fragment.length; });
   auto fragment_byte_offsets = make_list_offsets_from_counts(
     fragment_lengths, work.total_count, "Merged singular message", stream, scratch_mr, scratch_mr);
   auto const total_bytes = fragment_byte_offsets.total_count;
@@ -657,7 +651,7 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
     auto size_iter = cudf::detail::make_counting_transform_iterator(
       0, cuda::proclaim_return_type<size_t>([fragments, invalid] __device__(int idx) -> size_t {
         auto const fragment = fragments[idx];
-        return invalid[fragment.row_idx] ? 0 : static_cast<size_t>(fragment.length);
+        return invalid[fragment.row_idx] ? 0 : fragment.length;
       }));
 
     size_t temp_storage_bytes = 0;
@@ -685,15 +679,12 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
       if (invalid[row] || row_fragment_offsets[row] == row_fragment_offsets[row + 1]) {
         return field_location::missing();
       }
-      return field_location{0, row_byte_offsets[row + 1] - row_byte_offsets[row]};
+      return field_location{
+        0, static_cast<uint32_t>(row_byte_offsets[row + 1] - row_byte_offsets[row])};
     });
 
   return build_nested_struct_column(
-    {merged_data.data(),
-     static_cast<cudf::size_type>(total_bytes),
-     merged_row_offsets.data(),
-     0,
-     input.num_rows},
+    {merged_data.data(), total_bytes, merged_row_offsets.data(), 0, input.num_rows},
     {merged_parent_locations.data(), merged_parent_locations.size(), parent.top_row_indices},
     child_field_indices,
     context,

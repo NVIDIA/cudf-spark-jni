@@ -67,11 +67,12 @@ __device__ inline field_location rebase_location(field_location location,
                                                  protobuf_error* error = nullptr)
 {
   if (!location.is_present()) { return field_location::missing(); }
+  // Widen before subtraction: presence alone does not guarantee a cuDF-supported offset.
   if (base < 0 || base > int64_t{cuda::std::numeric_limits<int32_t>::max()} - location.offset) {
     if (error != nullptr) { set_error_once(error, protobuf_error::OVERFLOW); }
     return field_location::missing();
   }
-  return {static_cast<int32_t>(base) + location.offset, location.length};
+  return {static_cast<uint32_t>(base) + location.offset, location.length};
 }
 
 struct top_level_location_provider {
@@ -167,7 +168,7 @@ __device__ inline void decode_varint_value(scalar_value_input input,
 
   using varint_type = cuda::std::conditional_t<sizeof(OutputType) == 4, uint32_t, uint64_t>;
   varint_type v;
-  int n;
+  uint32_t n;
   bool decoded;
   if constexpr (sizeof(OutputType) == 4) {
     decoded = read_varint32(cur, cur_end, v, n);
@@ -204,7 +205,7 @@ __device__ inline void decode_fixed_value(scalar_value_input input,
     return;
   }
 
-  if (input.length < static_cast<int32_t>(sizeof(OutputType))) {
+  if (input.length < sizeof(OutputType)) {
     set_error_once(output.error, protobuf_error::FIXED_LEN);
     if (output.valid) output.valid[index] = false;
     return;
@@ -360,18 +361,15 @@ template <typename LocationProvider>
 CUDF_KERNEL void extract_lengths_kernel(LocationProvider loc_provider,
                                         int total_items,
                                         int32_t* out_lengths,
-                                        int32_t default_length = 0)
+                                        uint32_t default_length = 0)
 {
   auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (idx >= total_items) return;
 
   auto loc = loc_provider.input_location(idx);
-
-  if (loc.is_present()) {
-    out_lengths[idx] = loc.length;
-  } else {
-    out_lengths[idx] = default_length;
-  }
+  // Present lengths are bounded by the input buffer and defaults by the host check, both of
+  // which cuDF limits to int32_t.
+  out_lengths[idx] = static_cast<int32_t>(loc.is_present() ? loc.length : default_length);
 }
 
 template <typename LocationProvider>
@@ -381,14 +379,14 @@ CUDF_KERNEL void extract_utf8_lengths_kernel(uint8_t const* message_data,
                                              int32_t* out_lengths,
                                              protobuf_error* error,
                                              uint8_t const* default_data = nullptr,
-                                             int32_t default_length      = 0)
+                                             uint32_t default_length     = 0)
 {
   auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (idx >= total_items) return;
 
   auto const loc   = loc_provider.input_location(idx);
   auto const* data = loc.is_present() ? message_data + loc.offset : default_data;
-  auto const size  = static_cast<uint32_t>(loc.is_present() ? loc.length : default_length);
+  auto const size  = loc.is_present() ? loc.length : default_length;
   if (data == nullptr || size == 0) {
     out_lengths[idx] = 0;
     return;
@@ -410,14 +408,14 @@ CUDF_KERNEL void copy_repaired_utf8_kernel(uint8_t const* message_data,
                                            int32_t const* output_offsets,
                                            char* output,
                                            uint8_t const* default_data = nullptr,
-                                           int32_t default_length      = 0)
+                                           uint32_t default_length     = 0)
 {
   auto idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (idx >= total_items) return;
 
   auto const loc   = loc_provider.input_location(idx);
   auto const* data = loc.is_present() ? message_data + loc.offset : default_data;
-  auto const size  = static_cast<uint32_t>(loc.is_present() ? loc.length : default_length);
+  auto const size  = loc.is_present() ? loc.length : default_length;
   if (data != nullptr && size > 0) { copy_repaired_utf8(data, size, output + output_offsets[idx]); }
 }
 
@@ -601,10 +599,10 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   auto const& default_bytes = field.default_string;
   CUDF_EXPECTS(!has_default || std::in_range<int32_t>(default_bytes.size()),
                "protobuf string default exceeds supported length");
-  int32_t def_len       = has_default ? static_cast<int32_t>(default_bytes.size()) : 0;
+  auto const def_len    = has_default ? static_cast<uint32_t>(default_bytes.size()) : 0u;
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<uint8_t> d_default(0, stream, scratch_mr);
-  if (has_default && def_len > 0) {
+  if (def_len > 0) {
     d_default = cudf::detail::make_device_uvector_async(default_bytes, stream, scratch_mr);
   }
 
@@ -613,14 +611,8 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   auto const blocks  = static_cast<int>((num_rows + threads - 1u) / threads);
   if (num_rows > 0) {
     if (!as_bytes) {
-      extract_utf8_lengths_kernel<LocationProvider>
-        <<<blocks, threads, 0, stream.get()>>>(message_data,
-                                               loc_provider,
-                                               num_rows,
-                                               lengths.data(),
-                                               nullptr,
-                                               has_default ? d_default.data() : nullptr,
-                                               def_len);
+      extract_utf8_lengths_kernel<LocationProvider><<<blocks, threads, 0, stream.get()>>>(
+        message_data, loc_provider, num_rows, lengths.data(), nullptr, d_default.data(), def_len);
     } else {
       extract_lengths_kernel<LocationProvider>
         <<<blocks, threads, 0, stream.get()>>>(loc_provider, num_rows, lengths.data(), def_len);
@@ -638,25 +630,16 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto const* default_ptr  = d_default.data();
 
     if (!as_bytes) {
-      copy_repaired_utf8_kernel<LocationProvider>
-        <<<blocks, threads, 0, stream.get()>>>(message_data,
-                                               loc_provider,
-                                               num_rows,
-                                               offsets_data,
-                                               chars_ptr,
-                                               has_default ? default_ptr : nullptr,
-                                               def_len);
+      copy_repaired_utf8_kernel<LocationProvider><<<blocks, threads, 0, stream.get()>>>(
+        message_data, loc_provider, num_rows, offsets_data, chars_ptr, default_ptr, def_len);
       CUDF_CHECK_CUDA(stream.get());
     } else {
       auto src_iter = cudf::detail::make_counting_transform_iterator(
         0,
         cuda::proclaim_return_type<void const*>(
-          [message_data, loc_provider, has_default, default_ptr, def_len] __device__(
-            int idx) -> void const* {
+          [message_data, loc_provider, default_ptr] __device__(int idx) -> void const* {
             auto loc = loc_provider.input_location(idx);
-            if (!loc.is_present()) {
-              return (has_default && def_len > 0) ? static_cast<void const*>(default_ptr) : nullptr;
-            }
+            if (!loc.is_present()) { return static_cast<void const*>(default_ptr); }
             return static_cast<void const*>(message_data + loc.offset);
           }));
       auto dst_iter = cudf::detail::make_counting_transform_iterator(
@@ -666,14 +649,11 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
         }));
       auto size_iter = cudf::detail::make_counting_transform_iterator(
         0,
-        cuda::proclaim_return_type<size_t>(
-          [loc_provider, has_default, def_len] __device__(int idx) -> size_t {
-            auto loc = loc_provider.input_location(idx);
-            if (!loc.is_present()) {
-              return (has_default && def_len > 0) ? static_cast<size_t>(def_len) : 0;
-            }
-            return static_cast<size_t>(loc.length);
-          }));
+        cuda::proclaim_return_type<size_t>([loc_provider, def_len] __device__(int idx) -> size_t {
+          auto loc = loc_provider.input_location(idx);
+          if (!loc.is_present()) { return def_len; }
+          return loc.length;
+        }));
 
       size_t temp_storage_bytes = 0;
       CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(
