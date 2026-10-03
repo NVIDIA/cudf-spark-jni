@@ -82,7 +82,7 @@ ConfigureBench(BLOOM_FILTER_BENCH
   bloom_filter.cu)
 
 ConfigureBench(GET_JSON_OBJECT_BENCH
-  get_json_object.cu)
+  get_json_object.cpp)
 
 ConfigureBench(FROM_JSON_TO_STRUCTS_BENCH
   from_json_to_structs.cu)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
@@ -994,4 +995,195 @@ public class GetJsonObjectTest {
   private JSONUtils.PathInstructionJni indexPath(int index) {
     return new JSONUtils.PathInstructionJni(JSONUtils.PathInstructionType.INDEX, "", index);
   }
+
+  /**
+   * A null instruction name is rejected at construction time, so the caller that supplied it is
+   * named.
+   */
+  @Test
+  void getJsonObjectTest_NullPathNameIsRejected() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(JSONUtils.PathInstructionType.NAMED, null, -1));
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(JSONUtils.PathInstructionType.NAMED, null, -1L));
+  }
+
+  /**
+   * The native entry points marshal the raw name array themselves, so they keep their own null
+   * guard even though no {@code PathInstructionJni} can carry a null name any more.
+   */
+  @Test
+  void getJsonObjectTest_NativeNullPathNameIsRejected() {
+    byte[] typeNums = new byte[] { (byte) JSONUtils.PathInstructionType.NAMED.ordinal() };
+    String[] names = new String[] { null };
+    int[] indexes = new int[] { -1 };
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":1}")) {
+      long view = input.getNativeView();
+      assertThrows(IllegalArgumentException.class,
+          () -> JSONUtils.getJsonObject(view, typeNums, names, indexes));
+      assertThrows(IllegalArgumentException.class,
+          () -> JSONUtils.getJsonObjectMultiplePaths(view, typeNums, names, indexes,
+              new int[] { 0, 1 }, -1, -1));
+    }
+  }
+
+  /**
+   * The recovery-path native free cannot be provoked by a test, so a null handle is used to prove
+   * the symbol resolves and the guard rejects rather than dereferences.
+   */
+  @Test
+  void getJsonObjectTest_FreeColumnRejectsNullHandle() {
+    assertThrows(NullPointerException.class, () -> JSONUtils.freeColumn(0));
+  }
+
+  /**
+   * The entry-count check pins only the last offset, so both cases below keep that value correct
+   * in order to reach the ordering guard rather than the count check.
+   */
+  @Test
+  void getJsonObjectTest_MalformedPathOffsetsAreRejected() {
+    byte[] typeNums = new byte[] { (byte) JSONUtils.PathInstructionType.NAMED.ordinal(),
+        (byte) JSONUtils.PathInstructionType.NAMED.ordinal() };
+    String[] names = new String[] { "a", "b" };
+    int[] indexes = new int[] { -1, -1 };
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":{\"b\":1}}")) {
+      long view = input.getNativeView();
+      // Starts at 1, which would silently drop the leading entry.
+      assertThrows(IllegalArgumentException.class,
+          () -> JSONUtils.getJsonObjectMultiplePaths(view, typeNums, names, indexes,
+              new int[] { 1, 2 }, -1, -1));
+      // Steps backwards, which would let the middle path end past the entry-array length.
+      assertThrows(IllegalArgumentException.class,
+          () -> JSONUtils.getJsonObjectMultiplePaths(view, typeNums, names, indexes,
+              new int[] { 0, 2, 1, 2 }, -1, -1));
+    }
+  }
+
+  /**
+   * An instruction type outside the enum is a property of the path alone, so an all-null batch
+   * must reject it rather than return nulls for a query that can never run.
+   */
+  @Test
+  void getJsonObjectTest_InvalidInstructionTypeIsRejected() {
+    byte[] typeNums = new byte[] { (byte) 7 };
+    String[] names = new String[] { "k" };
+    int[] indexes = new int[] { -1 };
+    try (ColumnVector allNulls = ColumnVector.fromStrings(null, null);
+         ColumnVector empty = ColumnVector.fromStrings()) {
+      long allNullsView = allNulls.getNativeView();
+      long emptyView = empty.getNativeView();
+      assertThrows(CudfException.class,
+          () -> JSONUtils.getJsonObject(allNullsView, typeNums, names, indexes));
+      assertThrows(CudfException.class,
+          () -> JSONUtils.getJsonObject(emptyView, typeNums, names, indexes));
+    }
+  }
+
+  /**
+   * The depth limit is a property of the path, so an all-null batch must enforce it too; otherwise
+   * the same query throws or not depending on the data it meets.
+   */
+  @Test
+  void getJsonObjectTest_PathDepthCheckedOnAllNullInput() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[JSONUtils.MAX_PATH_DEPTH + 1];
+    for (int i = 0; i < query.length; ++i) {
+      query[i] = namedPath("k");
+    }
+    try (ColumnVector allNulls = ColumnVector.fromStrings(null, null)) {
+      assertThrows(CudfException.class, () -> JSONUtils.getJsonObject(allNulls, query));
+    }
+  }
+
+  /**
+   * Both ends of the int range are guarded: a value below it would otherwise be truncated into a
+   * different, valid-looking index.
+   */
+  @Test
+  void getJsonObjectTest_IndexBelowIntRangeIsRejected() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(
+            JSONUtils.PathInstructionType.INDEX, "", Integer.MIN_VALUE - 1L));
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(
+            JSONUtils.PathInstructionType.INDEX, "", Long.MIN_VALUE));
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(
+            JSONUtils.PathInstructionType.INDEX, "", Integer.MAX_VALUE + 1L));
+    // Pin both edges of the range check, so tightening either comparison fails a test. The lower
+    // edge needs a non-INDEX instruction: a negative subscript is rejected by a separate rule.
+    assertDoesNotThrow(() -> new JSONUtils.PathInstructionJni(
+        JSONUtils.PathInstructionType.INDEX, "", (long) Integer.MAX_VALUE));
+    assertDoesNotThrow(() -> new JSONUtils.PathInstructionJni(
+        JSONUtils.PathInstructionType.WILDCARD, "", (long) Integer.MIN_VALUE));
+    assertDoesNotThrow(() -> new JSONUtils.PathInstructionJni(
+        JSONUtils.PathInstructionType.INDEX, "", 0L));
+    // The -1 sentinel that every non-index instruction carries must keep working.
+    assertDoesNotThrow(() -> new JSONUtils.PathInstructionJni(
+        JSONUtils.PathInstructionType.WILDCARD, "", -1L));
+    assertDoesNotThrow(() -> new JSONUtils.PathInstructionJni(
+        JSONUtils.PathInstructionType.NAMED, "a", -1));
+  }
+
+  /**
+   * A negative subscript would step past the native walk loop and silently select element 0.
+   * Spark's path grammar accepts digits only, so no valid query produces one.
+   */
+  @Test
+  void getJsonObjectTest_NegativeSubscriptIsRejected() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(JSONUtils.PathInstructionType.INDEX, "", -1));
+    assertThrows(IllegalArgumentException.class,
+        () -> new JSONUtils.PathInstructionJni(JSONUtils.PathInstructionType.INDEX, "", -1L));
+  }
+
+  /**
+   * The depth limit must accept the largest legal path and must apply to every path of a multi-path
+   * call, not just the first, whatever data the batch happens to carry.
+   */
+  @Test
+  void getJsonObjectTest_PathDepthBoundaries() {
+    JSONUtils.PathInstructionJni[] atLimit =
+        new JSONUtils.PathInstructionJni[JSONUtils.MAX_PATH_DEPTH];
+    for (int i = 0; i < atLimit.length; ++i) {
+      atLimit[i] = namedPath("k");
+    }
+    // An all-null column returns before the kernel runs, so the deepest legal path must also be
+    // exercised against real data to prove the device side accepts it.
+    StringBuilder json = new StringBuilder();
+    for (int i = 0; i < atLimit.length; ++i) {
+      json.append("{\"k\":");
+    }
+    json.append("\"v\"");
+    for (int i = 0; i < atLimit.length; ++i) {
+      json.append('}');
+    }
+    try (ColumnVector input = ColumnVector.fromStrings(json.toString());
+         ColumnVector expected = ColumnVector.fromStrings("v");
+         ColumnVector out = JSONUtils.getJsonObject(input, atLimit)) {
+      assertColumnsAreEqual(expected, out);
+    }
+
+    try (ColumnVector allNulls = ColumnVector.fromStrings(null, null);
+         ColumnVector expected = ColumnVector.fromStrings(null, null);
+         ColumnVector out = JSONUtils.getJsonObject(allNulls, atLimit)) {
+      assertColumnsAreEqual(expected, out);
+    }
+
+    JSONUtils.PathInstructionJni[] tooDeep =
+        new JSONUtils.PathInstructionJni[JSONUtils.MAX_PATH_DEPTH + 1];
+    for (int i = 0; i < tooDeep.length; ++i) {
+      tooDeep[i] = namedPath("k");
+    }
+    try (ColumnVector empty = ColumnVector.fromStrings()) {
+      assertThrows(CudfException.class, () -> JSONUtils.getJsonObject(empty, tooDeep));
+    }
+    // The over-deep path sits second, so a check that only inspects the first path would miss it.
+    try (ColumnVector allNulls = ColumnVector.fromStrings(null, null)) {
+      assertThrows(CudfException.class,
+          () -> JSONUtils.getJsonObjectMultiplePaths(allNulls,
+              Arrays.asList(Arrays.asList(namedPath("k")), Arrays.asList(tooDeep))));
+    }
+  }
+
 }
