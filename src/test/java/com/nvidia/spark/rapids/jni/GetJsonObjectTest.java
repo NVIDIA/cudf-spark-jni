@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
@@ -980,6 +981,158 @@ public class GetJsonObjectTest {
             "[11]");
         ColumnVector output = JSONUtils.getJsonObject(input, query)) {
       assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  /** Hex string to raw bytes, so a test input can hold sequences no Java String can represent. */
+  private static byte[] hexBytes(String hex) {
+    // Truncating a trailing nibble would silently change the document under test.
+    assertEquals(0, hex.length() % 2, "hex literal needs an even number of digits: " + hex);
+    byte[] out = new byte[hex.length() / 2];
+    for (int i = 0; i < out.length; i++) {
+      out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  private static byte[][] hexRows(String... hex) {
+    byte[][] out = new byte[hex.length][];
+    for (int i = 0; i < hex.length; i++) {
+      out[i] = hexBytes(hex[i]);
+    }
+    return out;
+  }
+
+  // Hex for {"a":" and "}, wrapping every sequence below.
+  private static final String UTF8_DOC_PREFIX = "7B2261223A22";
+  private static final String UTF8_DOC_SUFFIX = "227D";
+
+  /**
+   * A field name must be quote-delimited; accepting any byte would parse documents Spark rejects.
+   */
+  @Test
+  void getJsonObjectTest_FieldNameRequiresQuoteDelimiter() {
+    try (ColumnVector input = ColumnVector.fromStrings("{xax:1}", "{aa:1}", "{ xax :1}");
+         ColumnVector expected = ColumnVector.fromStrings(null, null, null);
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("{\"a\":1,xbx:2}");
+         ColumnVector expected = ColumnVector.fromStrings((String) null);
+         ColumnVector out = JSONUtils.getJsonObject(input,
+             new JSONUtils.PathInstructionJni[] { namedPath("b") })) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * Jackson rejects a root-level scalar followed by junk, so the row is null.
+   */
+  @Test
+  void getJsonObjectTest_RootScalarWithTrailingJunkIsNull() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "truex", "trueX", "123abc", "1e5x", "nullx", "1,2", "falsex", "true_", "true0",
+             "true\u007f");
+         ColumnVector expected = ColumnVector.fromStrings(
+             null, null, null, null, null, null, null, null, null, null);
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * A row ending immediately after a separator leaves nothing to read. Without the bounds checks
+   * these rows read one byte past the row, which only a sanitizer sees.
+   */
+  @Test
+  void getJsonObjectTest_TruncatedAfterSeparatorIsNull() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"a\":", "{\"a\":1,", "[1,", "[", "{", "{\"a\"", "{\"a\":[1,", "{\"a\":{\"b\":");
+         ColumnVector expected = ColumnVector.fromStrings(
+             null, null, null, null, null, null, null, null);
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * The accepting direction: Jackson consults its identifier rule only for bytes at or above '0'
+   * other than ']' and '}', so a byte below that ends the keyword and the document stays valid.
+   */
+  @Test
+  void getJsonObjectTest_RootScalarValidTerminatorsAccepted() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "true ", "true\t", "true\n", "true\r", "123 ",
+             "true", "false", "null",
+             "true$", "true\u0001", "true\u001b", "true]", "true}");
+         ColumnVector expected = ColumnVector.fromStrings(
+             "true", "true", "true", "true", "123",
+             "true", "false", "null",
+             "true", "true", "true", "true", "true");
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * The rejecting direction has a deliberate hole: a root string is self-delimiting, so Jackson
+   * accepts trailing content after its closing quote where it rejects the same after a number or
+   * keyword. Guarding the string form too would null rows Spark returns a value for.
+   */
+  @Test
+  void getJsonObjectTest_RootStringWithTrailingContentKeepsValue() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "\"abc\"xyz", "\"abc\" xyz", "\"abc\"}", "\"abc\"");
+         ColumnVector expected = ColumnVector.fromStrings("abc", "abc", "abc", "abc");
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * A non-ASCII letter continues a Java identifier, so it keeps a root keyword going and nulls the
+   * row, as an ASCII letter does. Currency symbols count too, which is why the euro sign nulls.
+   */
+  @Test
+  void getJsonObjectTest_RootKeywordNonAsciiContinuationIsNull() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "true\u00E9", "true\u03C0", "true\u20AC", "true\u00F1",
+             "false\u00E9", "null\u00E9", "true\u00E9x");
+         ColumnVector expected = ColumnVector.fromStrings(
+             null, null, null, null, null, null, null);
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * The accepting direction for non-ASCII: an astral character is judged by its high surrogate,
+   * which never continues the keyword, and neither do punctuation or separators.
+   */
+  @Test
+  void getJsonObjectTest_RootKeywordNonAsciiTerminatorsAccepted() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "true\u3000", "true\uD83D\uDE00", "true\u00A1", "true\u2019", "true\u00B7",
+             "false\u3000", "null\uD83D\uDE00");
+         ColumnVector expected = ColumnVector.fromStrings(
+             "true", "true", "true", "true", "true",
+             "false", "null");
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
+    }
+  }
+
+  /**
+   * A malformed byte after a root keyword is one U+FFFD by the time Jackson sees it, which is not
+   * an identifier part, so the document stays valid.
+   */
+  @Test
+  void getJsonObjectTest_RootKeywordMalformedTerminatorAccepted() {
+    try (ColumnVector input = ColumnVector.fromUTF8Strings(
+             hexRows("74727565FF", "74727565C3", "66616C7365FF"));
+         ColumnVector expected = ColumnVector.fromStrings("true", "true", "false");
+         ColumnVector out = JSONUtils.getJsonObject(input, new JSONUtils.PathInstructionJni[0])) {
+      assertColumnsAreEqual(expected, out);
     }
   }
 
