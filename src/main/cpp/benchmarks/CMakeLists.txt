@@ -21,6 +21,7 @@ target_compile_options(
   spark_rapids_jni_datagen PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_FLAGS}>"
                       "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>"
 )
+spark_rapids_jni_add_strict_warning_flags(spark_rapids_jni_datagen)
 
 target_link_libraries(
   spark_rapids_jni_datagen PUBLIC cudf::cudf nvtx3::nvtx3-cpp
@@ -40,6 +41,7 @@ function(ConfigureBench CMAKE_BENCH_NAME)
     target_compile_options(${CMAKE_BENCH_NAME}
             PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_FLAGS}>"
                     "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>")
+    spark_rapids_jni_add_strict_warning_flags(${CMAKE_BENCH_NAME})
 
     target_include_directories(${CMAKE_BENCH_NAME}
             PRIVATE "$<BUILD_INTERFACE:${CUDF_DIR}/cpp>"
