@@ -163,13 +163,21 @@ class json_generator {
    * JSON parser should do unescape to remove '\' and JSON parser
    * then can not return a pointer and length pair (char *, len),
    * For number token, JSON parser can return a pair (char *, len)
+   *
+   * @return false if the token holds a lone surrogate, meaning the row must be nulled and no bytes
+   * were written
    */
-  __device__ void write_raw(json_parser& parser, char* out_begin)
+  [[nodiscard]] __device__ bool write_raw(json_parser& parser, char* out_begin)
   {
+    // Spark nulls a row whose unescaped leaf holds a lone surrogate. Reject before writing: a null
+    // row must commit zero bytes, since the column builder copies exactly `size` bytes per row.
+    if (parser.has_lone_surrogate()) { return false; }
+
     if (array_depth > 0) { is_curr_array_empty = false; }
 
-    auto copied = parser.write_unescaped_text(out_begin + offset + output_len);
+    auto const copied = parser.write_unescaped_text(out_begin + offset + output_len);
     output_len += copied;
+    return true;
   }
 
   /**
@@ -420,7 +428,7 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           ctx.style == write_style::RAW) {
         // there is no array wildcard or slice parent, emit this string without
         // quotes write current string in parser to generator
-        ctx.g.write_raw(p, out_buf);
+        if (!ctx.g.write_raw(p, out_buf)) { return {false, 0}; }
         ctx.dirty        = 1;
         ctx.task_is_done = true;
       }
