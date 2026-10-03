@@ -91,8 +91,8 @@ TEST(PageablePool, ZeroByteAllocationDoesNotConsumePool)
 TEST(PageablePool, OversizedAllocationDoesNotCorruptPool)
 {
   auto pool = make_pool();
-  EXPECT_THROW({ [[maybe_unused]] void* _ = pool.allocate_sync(SIZE_MAX); },
-               pageable_pool_exhausted);
+  EXPECT_THROW(
+    { [[maybe_unused]] void* _ = pool.allocate_sync(SIZE_MAX); }, pageable_pool_exhausted);
   void* full = pool.allocate_sync(kPoolSize);
   ASSERT_NE(full, nullptr);
   pool.deallocate_sync(full, kPoolSize);
