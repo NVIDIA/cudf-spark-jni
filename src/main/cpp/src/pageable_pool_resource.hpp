@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <exception>
 #include <mutex>
@@ -184,30 +185,43 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
  private:
   static void pretouch_parallel(void* base, std::size_t bytes, int threads)
   {
-    std::size_t const page_size = system_page_size();
-    int const n                 = std::max(1, threads);
-    std::vector<std::thread> ts;
-    ts.reserve(n);
-    std::size_t per = (bytes + n - 1) / static_cast<std::size_t>(n);
-    per             = rmm::align_up(per, page_size);
+    std::size_t const page_size  = system_page_size();
+    std::size_t const page_count = bytes / page_size + (bytes % page_size != 0);
+    if (page_count == 0) { return; }
+    std::size_t const requested_threads = static_cast<std::size_t>(std::max(1, threads));
+    std::size_t const hardware_threads  = std::thread::hardware_concurrency();
+    std::size_t const worker_count =
+      std::min({requested_threads,
+                page_count,
+                hardware_threads == 0 ? requested_threads : hardware_threads});
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    std::atomic<bool> start_workers{false};
+    auto* const pages     = static_cast<char volatile*>(base);
+    std::size_t next_page = 0;
     try {
-      for (int i = 0; i < n; ++i) {
-        std::size_t off = static_cast<std::size_t>(i) * per;
-        if (off >= bytes) break;
-        std::size_t end = std::min(off + per, bytes);
-        ts.emplace_back([base, off, end, page_size]() {
-          // volatile prevents the compiler from eliding these writes — the write's
-          // only purpose is to fault in the page.
-          auto* c = static_cast<char volatile*>(base);
-          for (std::size_t k = off; k < end; k += page_size)
-            c[k] = 0;
+      for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
+        std::size_t const worker_pages =
+          page_count / worker_count + (worker_index < page_count % worker_count ? 1 : 0);
+        std::size_t const first_page = next_page;
+        next_page += worker_pages;
+        workers.emplace_back([pages, first_page, worker_pages, page_size, &start_workers]() {
+          // Finish creating thread stacks before concurrent page faults contend for mmap_lock.
+          start_workers.wait(false);
+          for (std::size_t page = 0; page < worker_pages; ++page) {
+            pages[(first_page + page) * page_size] = 0;
+          }
         });
       }
-      for (auto& t : ts)
-        t.join();
+      start_workers.store(true);
+      start_workers.notify_all();
+      for (auto& worker : workers)
+        worker.join();
     } catch (...) {
-      for (auto& t : ts) {
-        if (t.joinable()) { t.join(); }
+      start_workers.store(true);
+      start_workers.notify_all();
+      for (auto& worker : workers) {
+        if (worker.joinable()) { worker.join(); }
       }
       throw;
     }

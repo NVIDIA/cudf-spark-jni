@@ -17,8 +17,10 @@
 #include "pageable_pool_resource.hpp"
 
 #include <gtest/gtest.h>
+#include <sys/mman.h>
 
 #include <cstdint>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -86,6 +88,21 @@ TEST(PageablePool, ZeroByteAllocationDoesNotConsumePool)
   void* full = pool.allocate_sync(kPoolSize);
   ASSERT_NE(full, nullptr);
   pool.deallocate_sync(full, kPoolSize);
+}
+
+TEST(PageablePool, PretouchCoversPartialPageWithExcessThreads)
+{
+  auto const page_size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+  auto const bytes     = page_size + rmm::CUDA_ALLOCATION_ALIGNMENT;
+  auto pool            = make_pool(bytes, std::numeric_limits<int>::max());
+  void* p              = pool.allocate_sync(bytes);
+  ASSERT_NE(p, nullptr);
+  for (std::size_t page = 0; page < 2; ++page) {
+    unsigned char resident = 0;
+    ASSERT_EQ(::mincore(static_cast<char*>(p) + page * page_size, page_size, &resident), 0);
+    EXPECT_NE(resident & 1, 0) << "page " << page << " was not pre-touched";
+  }
+  pool.deallocate_sync(p, bytes);
 }
 
 TEST(PageablePool, OversizedAllocationDoesNotCorruptPool)
