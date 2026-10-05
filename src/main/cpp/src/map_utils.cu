@@ -332,10 +332,10 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
                                                  nullptr,
                                                  0);
   auto gathered_table        = cudf::gather(cudf::table_view{{structs}},
-                                     gather_map_view,
-                                     cudf::out_of_bounds_policy::DONT_CHECK,
-                                     stream,
-                                     mr);
+                                            gather_map_view,
+                                            cudf::out_of_bounds_policy::DONT_CHECK,
+                                            stream,
+                                            mr);
   auto gathered_struct       = std::move(gathered_table->release()[0]);
 
   // 2d. Output offsets column directly from out_offsets.

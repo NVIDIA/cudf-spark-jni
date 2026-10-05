@@ -45,10 +45,10 @@ TEST_F(MapUtilsTests, ListOfNonStructThrows)
   auto offsets  = size_col{0, 2, 3}.release();
   auto children = int_col{1, 2, 3}.release();
   auto list     = cudf::make_lists_column(2,
-                                      std::move(offsets),
-                                      std::move(children),
-                                      0,
-                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
+                                          std::move(offsets),
+                                          std::move(children),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list->view(), true)),
                cudf::logic_error);
 }
@@ -60,10 +60,10 @@ TEST_F(MapUtilsTests, StructWithWrongArityThrows)
   auto structs = cudf::test::structs_column_wrapper({keys}).release();
   auto offsets = size_col{0, 2, 3}.release();
   auto list    = cudf::make_lists_column(2,
-                                      std::move(offsets),
-                                      std::move(structs),
-                                      0,
-                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
+                                         std::move(offsets),
+                                         std::move(structs),
+                                         0,
+                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   EXPECT_THROW(static_cast<void>(spark_rapids_jni::map_from_entries(list->view(), true)),
                cudf::logic_error);
 }

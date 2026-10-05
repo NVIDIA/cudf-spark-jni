@@ -37,9 +37,7 @@ __device__ bool is_not_null(cudf::bitmask_type const* mask, cudf::size_type idx)
 }
 
 __device__ bool is_null(cudf::bitmask_type const* mask, cudf::size_type idx)
-{
-  return !is_not_null(mask, idx);
-}
+{ return !is_not_null(mask, idx); }
 
 /**
  * @brief Gets if a row is invalid: input is non-null but the result is null.
@@ -50,9 +48,7 @@ struct row_invalid_unary_fn {
   cudf::bitmask_type const* result_mask;
 
   __device__ bool operator()(cudf::size_type idx) const
-  {
-    return is_not_null(input_mask, idx) && is_null(result_mask, idx);
-  }
+  { return is_not_null(input_mask, idx) && is_null(result_mask, idx); }
 };
 
 /**
@@ -182,7 +178,5 @@ void throw_row_error_if_any(cudf::scalar const& input1,
                             cudf::column_view const& input2,
                             cudf::column_view const& result,
                             cuda::stream_ref stream)
-{
-  throw_row_error_if_any(input2, input1, result, stream);
-}
+{ throw_row_error_if_any(input2, input1, result, stream); }
 }  // namespace spark_rapids_jni

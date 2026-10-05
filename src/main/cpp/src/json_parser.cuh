@@ -139,14 +139,10 @@ class char_range {
   __device__ inline char operator[](cudf::size_type pos) const { return _data[pos]; }
 
   __device__ inline cudf::string_view slice_sv(cudf::size_type pos, cudf::size_type len) const
-  {
-    return cudf::string_view(_data + pos, len);
-  }
+  { return cudf::string_view(_data + pos, len); }
 
   __device__ inline char_range slice(cudf::size_type pos, cudf::size_type len) const
-  {
-    return char_range(_data + pos, len);
-  }
+  { return char_range(_data + pos, len); }
 
  protected:
   char const* _data;
@@ -258,9 +254,7 @@ class json_parser {
    * is hex digits: 0-9, A-F, a-f
    */
   static __device__ inline bool is_hex_digit(char c)
-  {
-    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-  }
+  { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'); }
 
   /**
    * is 0 to 9 digit
@@ -271,9 +265,7 @@ class json_parser {
    * is white spaces: ' ', '\t', '\n' '\r'
    */
   static __device__ inline bool is_whitespace(char c)
-  {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-  }
+  { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
   /**
    * skips 4 characters: ' ', '\t', '\n' '\r'
@@ -336,9 +328,7 @@ class json_parser {
    * only has two contexts: object or array
    */
   __device__ inline bool is_object_context() const
-  {
-    return get_bit_value(context_stack, stack_size - 1);
-  }
+  { return get_bit_value(context_stack, stack_size - 1); }
 
   __device__ inline void pop_curr_context() { stack_size--; }
 
@@ -1382,9 +1372,7 @@ class json_parser {
 
   // TODO make this go away!!!!
   __device__ inline char_range current_range() const
-  {
-    return chars.slice(current_token_start_pos, curr_pos - current_token_start_pos);
-  }
+  { return chars.slice(current_token_start_pos, curr_pos - current_token_start_pos); }
 
   /**
    * skip children if current token is [ or {, or do nothing otherwise.

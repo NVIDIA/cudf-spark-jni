@@ -32,9 +32,7 @@
 namespace {
 
 std::string bytes_to_string(std::initializer_list<uint8_t> bytes)
-{
-  return std::string(bytes.begin(), bytes.end());
-}
+{ return std::string(bytes.begin(), bytes.end()); }
 
 }  // namespace
 

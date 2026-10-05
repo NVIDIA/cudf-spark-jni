@@ -51,9 +51,9 @@
 #if defined(_WIN32)
 static char const pathSep = '\\';
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
-static const char pathDelimiter = ';';
+static char const pathDelimiter = ';';
 #endif
-static const size_t initialPathBufSize = MAX_PATH; /* Grows if not big enough */
+static size_t const initialPathBufSize = MAX_PATH; /* Grows if not big enough */
 #define NVTXW3_DLLHANDLE  HMODULE
 #define NVTXW3_DLLOPEN(x) LoadLibraryA(x)
 #define NVTXW3_DLLFUNC    GetProcAddress
@@ -61,9 +61,9 @@ static const size_t initialPathBufSize = MAX_PATH; /* Grows if not big enough */
 #else
 static char const pathSep = '/';
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
-static const char pathDelimiter = ':';
+static char const pathDelimiter = ':';
 #endif
-static const size_t initialPathBufSize = 260; /* Grows if not big enough */
+static size_t const initialPathBufSize = 260; /* Grows if not big enough */
 #define NVTXW3_DLLHANDLE  void*
 #define NVTXW3_DLLOPEN(x) dlopen(x, RTLD_LAZY)
 #define NVTXW3_DLLFUNC    dlsym
@@ -116,7 +116,7 @@ static char* AfterLeadingSlashes(char* cur)
   return cur;
 }
 #endif
-static const char* AfterLeadingSlashesConst(const char* cur)
+static char const* AfterLeadingSlashesConst(char const* cur)
 {
   for (; *cur && *cur == pathSep; ++cur)
     ;
@@ -172,12 +172,10 @@ static char* AssignHeapStringFromRange(char* lhs, char const* rhsBegin, char con
 static char* MakeHeapString(char const* str) { return AssignHeapString(NULL, str); }
 
 static char* MakeHeapStringFromRange(char const* strBegin, char const* strEnd)
-{
-  return AssignHeapStringFromRange(NULL, strBegin, strEnd);
-}
+{ return AssignHeapStringFromRange(NULL, strBegin, strEnd); }
 
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
-static char* MakeHeapStringWithNativeSlashes(const char* str)
+static char* MakeHeapStringWithNativeSlashes(char const* str)
 {
   char* buf = AssignHeapString(NULL, str);
   ForwardSlashesToNative(buf);
@@ -273,7 +271,7 @@ static char* LoadFileIntoHeapString(char const* filename)
 }
 
 #if defined(NVTXW3_TEST_PATH_UTILITIES)
-static int HasSlashes(const char* cur)
+static int HasSlashes(char const* cur)
 {
   for (; *cur; ++cur) {
     if (*cur == pathSep) return 1;
@@ -783,7 +781,7 @@ static nvtxwResultCode_t InitConfigDirectory(char const* configDirectory,
 #endif
 
 NVTXW3_DECLSPEC nvtxwResultCode_t nvtxwInitialize(nvtxwInitMode_t mode,
-                                                  const char* modeString,
+                                                  char const* modeString,
                                                   nvtxwGetInterface_t* getInterfaceFunc,
                                                   void** moduleHandle)
 {

@@ -226,9 +226,7 @@ __device__ inline uint32_t pow5factor_32(uint32_t value)
 
 // Returns true if value is divisible by 5^p.
 __device__ inline bool multipleOfPowerOf5_32(uint32_t const value, uint32_t const p)
-{
-  return pow5factor_32(value) >= p;
-}
+{ return pow5factor_32(value) >= p; }
 
 // Returns true if value is divisible by 2^p.
 __device__ inline bool multipleOfPowerOf2_32(uint32_t const value, uint32_t const p)

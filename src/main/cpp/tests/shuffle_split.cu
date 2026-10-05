@@ -436,10 +436,10 @@ TEST_F(ShuffleSplitTests, PurgeNulls)
                                                 cudf::get_default_stream(),
                                                 rmm::mr::get_current_device_resource_ref());
   auto col             = std::make_unique<cudf::column>(cudf::data_type{cudf::type_to_id<float>()},
-                                            0,
-                                            rmm::device_buffer{},
-                                            std::move(validity_buffer),
-                                            0);
+                                                        0,
+                                                        rmm::device_buffer{},
+                                                        std::move(validity_buffer),
+                                                        0);
   CUDF_EXPECTS(col->nullable(), "Expected a nullable input column");
 
   cudf::table_view tbl{{*col}};

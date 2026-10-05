@@ -37,8 +37,8 @@ void fixed_width(nvbench::state& state)
                                                            cudf::type_id::UINT16,
                                                            cudf::type_id::UINT8,
                                                            cudf::type_id::UINT64},
-                                                      212),
-                                         row_count{n_rows});
+                                                          212),
+                                             row_count{n_rows});
 
   std::vector<cudf::data_type> schema;
   cudf::size_type bytes_per_row = 0;

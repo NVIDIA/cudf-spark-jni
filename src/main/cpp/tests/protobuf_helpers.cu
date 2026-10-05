@@ -180,9 +180,7 @@ TEST_F(ProtobufHelpersTest, NullMaskFromAllValidRowsIsEmpty)
 namespace spark_rapids_jni::protobuf::detail {
 
 std::ostream& operator<<(std::ostream& out, field_location const& location)
-{
-  return out << "{offset=" << location.offset << ", length=" << location.length << "}";
-}
+{ return out << "{offset=" << location.offset << ", length=" << location.length << "}"; }
 
 }  // namespace spark_rapids_jni::protobuf::detail
 
@@ -195,18 +193,14 @@ using protobuf_detail::field_location;
 struct input_location_accessor {
   template <typename Provider>
   __device__ field_location operator()(Provider const& provider, int row) const
-  {
-    return provider.input_location(row);
-  }
+  { return provider.input_location(row); }
 };
 
 struct row_location_accessor {
   __device__ field_location operator()(protobuf_detail::nested_location_provider const& provider,
                                        int row,
                                        protobuf_detail::protobuf_error* error) const
-  {
-    return provider.row_location(row, error);
-  }
+  { return provider.row_location(row, error); }
 };
 
 template <typename Accessor, typename Provider, typename Output, typename... Args>
