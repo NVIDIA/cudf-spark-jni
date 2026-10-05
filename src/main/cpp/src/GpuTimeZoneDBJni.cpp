@@ -17,10 +17,34 @@
 #include "cudf_jni_apis.hpp"
 #include "timezones.hpp"
 
+#include <cudf/io/orc.hpp>
+#include <cudf/timezone.hpp>
+
 #include <bit>
 #include <cstdint>
 
 extern "C" {
+
+JNIEXPORT jboolean JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_probeWriterTimezone(
+  JNIEnv* env, jclass, jstring writer_timezone)
+{
+  JNI_NULL_CHECK(env, writer_timezone, "writer timezone is null", JNI_FALSE);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    // Same public cudf resolver the ORC reader uses, so the inferred borrow frame matches the
+    // reader's by construction. A lookup failure (logic_error) means the reader's UTC fallback.
+    auto const timezone = cudf::jni::native_jstring(env, writer_timezone);
+    try {
+      // "UTC"/empty resolve as no-op (empty table, never null) — still a resolution.
+      cudf::make_timezone_transition_table(std::nullopt, timezone, cudf::get_default_stream());
+      return JNI_TRUE;
+    } catch (cudf::logic_error const& e) {
+      return JNI_FALSE;
+    }
+  }
+  JNI_CATCH(env, JNI_FALSE);
+}
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertTimestampColumnToUTC(
   JNIEnv* env, jclass, jlong input_handle, jlong timezone_info_handle, jint tz_index)
@@ -142,7 +166,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
   jint reader_tz_initial_offset,
   jint reader_tz_raw_offset,
   jintArray reader_dst_rule,
-  jboolean writer_reader_rules_differ)
+  jboolean writer_reader_rules_differ,
+  jboolean writer_borrow_applied)
 {
   JNI_NULL_CHECK(env, input_handle, "input column is null", 0);
 
@@ -168,7 +193,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
       reader,
       cudf::get_default_stream(),
       cudf::get_current_device_resource_ref(),
-      writer_reader_rules_differ));
+      writer_reader_rules_differ,
+      writer_borrow_applied));
   }
   JNI_CATCH(env, 0);
 }
@@ -213,6 +239,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
   jint reader_tz_raw_offset,
   jintArray reader_dst_rule,
   jboolean writer_reader_rules_differ,
+  jboolean writer_borrow_applied,
   jlong java_time_info_table,
   jint java_time_tz_index,
   jlong reader_historical_difference_end_utc_us,
@@ -242,7 +269,8 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_GpuTimeZoneDB_convertOr
       .reader_historical_difference_end_local_us =
         static_cast<int64_t>(reader_historical_difference_end_local_us),
       .input_kind                 = static_cast<spark_rapids_jni::orc_timestamp_kind>(input_kind),
-      .writer_reader_rules_differ = static_cast<bool>(writer_reader_rules_differ)};
+      .writer_reader_rules_differ = static_cast<bool>(writer_reader_rules_differ),
+      .writer_borrow_applied      = static_cast<bool>(writer_borrow_applied)};
     return cudf::jni::release_as_jlong(spark_rapids_jni::convert_orc_to_spark(
       *input,
       static_cast<int64_t>(writer_tz_offset_at_orc_2015_base_us),

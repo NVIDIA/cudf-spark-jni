@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -63,26 +64,48 @@ public class GpuTimeZoneDBTest {
         tz.getOffset(OrcTimezoneInfo.utcMillisForDate(2015, 1, 1)));
   }
 
-  private static long applyOrcBaseOffsetOnCPU(long decodedUs, long baseOffsetUs) {
+  private static long applyOrcBaseOffsetOnCPU(
+      long decodedUs, long baseOffsetUs, boolean writerBorrowApplied) {
+    if (writerBorrowApplied) {
+      return decodedUs - baseOffsetUs;  // borrow already folded in; plain shift is exact
+    }
+    // UTC fallback: reconstruct the Apache borrow the same way the native kernel does.
     if (baseOffsetUs == 0) {
       return decodedUs;
     }
-
-    // ORC timezone base offsets are second-aligned. For an arbitrary microsecond offset, the
-    // original nanos field cannot be reconstructed reliably, so retain the plain offset behavior.
     if (baseOffsetUs % MICROS_PER_SECOND != 0) {
       return decodedUs - baseOffsetUs;
     }
-
+    long plainAdjustedUs = decodedUs - baseOffsetUs;
+    if (decodedUs >= 0 && plainAdjustedUs >= 0) {
+      return plainAdjustedUs;
+    }
+    if (decodedUs < 0 && plainAdjustedUs < -MICROS_PER_SECOND) {
+      return plainAdjustedUs;
+    }
     long fractionalUs = Math.floorMod(decodedUs, MICROS_PER_SECOND);
     boolean hasBorrowableFraction = fractionalUs >= microsPerMillis;
     boolean cudfAppliedBorrow = decodedUs < 0 && hasBorrowableFraction;
-
     long unborrowedUs = decodedUs + (cudfAppliedBorrow ? MICROS_PER_SECOND : 0L);
     long adjustedUnborrowedUs = unborrowedUs - baseOffsetUs;
     boolean apacheAppliesBorrow = adjustedUnborrowedUs < 0 && hasBorrowableFraction;
-
     return adjustedUnborrowedUs - (apacheAppliesBorrow ? MICROS_PER_SECOND : 0L);
+  }
+
+  private static final java.util.concurrent.ConcurrentMap<String, Boolean>
+      RESOLVED_IN_READER_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** Kernel-side borrow flag, via the same native probe the production path uses. */
+  private static boolean writerTimezoneResolvesInReader(String writerTzId) {
+    return RESOLVED_IN_READER_CACHE.computeIfAbsent(
+        writerTzId, GpuTimeZoneDBTest::isWriterTimezoneResolvedNativelyForTest);
+  }
+
+  private static boolean isWriterTimezoneResolvedNativelyForTest(String writerTzId) {
+    try (GpuTimeZoneDB.OrcTimezoneContext context =
+        GpuTimeZoneDB.buildOrcTimezoneContext(writerTzId, "UTC")) {
+      return context.isWriterBorrowApplied();
+    }
   }
 
   private static long[] getFutureDstBoundaryMicros(String timezoneId) {
@@ -102,10 +125,7 @@ public class GpuTimeZoneDBTest {
   }
 
   /**
-   * Java implementation of timezone conversion to compare against the GPU
-   * results.
-   * Refer to https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/
-   * src/java/org/apache/orc/impl/SerializationUtils.java#L1440
+   * Java mirror of the GPU conversion (SerializationUtils.convertBetweenTimezones, ORC 1.9.1).
    */
   private static ColumnVector convertOrcTimezonesOnCPU(
       long[] microseconds,
@@ -115,13 +135,12 @@ public class GpuTimeZoneDBTest {
     TimeZone writeTz = getTimeZoneForOrc(writeTzId);
     TimeZone readerTz = getTimeZoneForOrc(readerTzId);
     long writer2015YearBaseOffsetUs = orc2015YearBaseOffsetUs(writeTzId);
+    boolean writerBorrowApplied = writerTimezoneResolvesInReader(writeTzId);
     for (int i = 0; i < microseconds.length; ++i) {
-      long adjustedUs = applyOrcBaseOffsetOnCPU(microseconds[i], writer2015YearBaseOffsetUs);
-      // Floor-divide µs to ms (and floor-mod for the sub-ms remainder) so reconstruction
-      // round-trips for negative timestamps with a non-zero sub-millisecond component. Truncation
-      // toward zero would round such an input up by one ms; at a DST gap transition that lands on
-      // the post-transition offset, producing a 1-hour off-by-one. Must match the GPU kernel's
-      // floor-divide in convert_timestamp_between_timezones.
+      long adjustedUs =
+          applyOrcBaseOffsetOnCPU(microseconds[i], writer2015YearBaseOffsetUs, writerBorrowApplied);
+      // Floor-divide (not truncate) to ms: truncation rounds negative sub-millisecond
+      // remainders up and can land on the wrong DST side at a gap. Match the kernel.
       long millis = Math.floorDiv(adjustedUs, microsPerMillis);
       long writerOffset = writeTz.getOffset(millis);
       long readerOffset = readerTz.getOffset(millis);
@@ -139,7 +158,8 @@ public class GpuTimeZoneDBTest {
     TimeZone writerTz = getTimeZoneForOrc(writerTzId);
     TimeZone readerTz = getTimeZoneForOrc(readerTzId);
     long adjustedUs = applyOrcBaseOffsetOnCPU(
-        microseconds, orc2015YearBaseOffsetUs(writerTzId));
+        microseconds, orc2015YearBaseOffsetUs(writerTzId),
+        writerTimezoneResolvesInReader(writerTzId));
     long millis = Math.floorDiv(adjustedUs, microsPerMillis);
     long writerOffset = writerTz.getOffset(millis);
     long readerOffset = readerTz.getOffset(millis);
@@ -300,9 +320,8 @@ public class GpuTimeZoneDBTest {
 
   @Test
   void testConvertOrcTimezonesRejectsInvalidId() {
-    // Invalid timezone IDs must surface an exception rather than silently
-    // falling back to GMT. We assert the broad RuntimeException type so this
-    // stays a regression guard even if the exact wrapping is refactored later.
+    // Invalid IDs must throw, not silently fall back to GMT; assert the broad RuntimeException
+    // type so the guard survives refactoring of the exact wrapping.
     GpuTimeZoneDB.cacheDatabase();
     try (ColumnVector input =
         ColumnVector.timestampMicroSecondsFromLongs(new long[] {0L})) {
@@ -334,12 +353,33 @@ public class GpuTimeZoneDBTest {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
 
+    // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts it back to the
+    // writer-frame wall clock Apache ORC reconstructs.
+    try (ColumnVector input =
+            ColumnVector.timestampMicroSecondsFromLongs(new long[] {21_086_883_873L});
+        ColumnVector expected =
+            ColumnVector.timestampMicroSecondsFromLongs(new long[] {-7_713_116_127L});
+        ColumnVector actual =
+            GpuTimeZoneDB.convertOrcTimezones(input, "Asia/Shanghai", "Asia/Shanghai")) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testConvertOrcTimezonesReconstructsBorrowForUnresolvedWriterTimezone() {
+    GpuTimeZoneDB.cacheDatabase();
+    GpuTimeZoneDB.verifyDatabaseCached();
+
+    // "GMT+08:00" has no TZif file, so the reader falls back to UTC and does not fold the borrow.
+    // The conversion must reconstruct it: decode 21_087_883_873 -> -7_713_116_127, not the 1s-late
+    // -7_712_116_127.
+    assertNotEquals(-1L, orc2015YearBaseOffsetUs("GMT+08:00"));
     try (ColumnVector input =
             ColumnVector.timestampMicroSecondsFromLongs(new long[] {21_087_883_873L});
         ColumnVector expected =
             ColumnVector.timestampMicroSecondsFromLongs(new long[] {-7_713_116_127L});
         ColumnVector actual =
-            GpuTimeZoneDB.convertOrcTimezones(input, "Asia/Shanghai", "Asia/Shanghai")) {
+            GpuTimeZoneDB.convertOrcTimezones(input, "GMT+08:00", "GMT+08:00")) {
       assertColumnsAreEqual(expected, actual);
     }
   }
