@@ -348,12 +348,12 @@ public class GpuTimeZoneDBTest {
   }
 
   @Test
-  void testConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow() {
+  void testConvertOrcTimezonesAppliesWriterBaseOffsetToPreEpochTimestamp() {
     GpuTimeZoneDB.cacheDatabase();
     GpuTimeZoneDB.verifyDatabaseCached();
 
-    // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts it back to the
-    // writer-frame wall clock Apache ORC reconstructs.
+    // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts the decode back
+    // to the instant Apache ORC reconstructs.
     try (ColumnVector input =
             ColumnVector.timestampMicroSecondsFromLongs(new long[] {21_086_883_873L});
         ColumnVector expected =

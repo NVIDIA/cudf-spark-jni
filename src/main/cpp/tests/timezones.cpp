@@ -468,8 +468,8 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesWriterBaseOffsetToPreEpochTimesta
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst = 0;
 
-  // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts it back to the
-  // writer-frame wall clock Apache ORC reconstructs.
+  // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts the decode back
+  // to the instant Apache ORC reconstructs.
   auto const input    = micros_col{21'086'883'873L};
   auto const expected = micros_col{-7'713'116'127L};
   auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
@@ -678,8 +678,8 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReconstructsBorrowForUnresolvedWriterTim
 // change fails here instead of silently matching the hand-wired inputs above.
 TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
 {
-  // Pre-epoch fractional writer-frame wall clock (UTC+08:00): exercises the borrow and the
-  // Unix-epoch crossing on the shift.
+  // Pre-epoch fractional instant of the writer-frame value (UTC+08:00): exercises the borrow and
+  // the Unix-epoch crossing on the shift.
   auto const wall_micros = -7'713'116'127L;
 
   cudf::test::fixed_width_column_wrapper<cudf::timestamp_us, cudf::timestamp_s::rep> wall_col{
@@ -713,7 +713,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
   CUDF_CUDA_TRY(cudaStreamSynchronize(cudf::get_default_stream().get()));
   EXPECT_EQ(decoded_us, wall_micros + 28'800'000'000L);
 
-  // The conversion must shift straight back to the Apache writer-frame wall clock.
+  // The conversion must shift straight back to the instant Apache ORC reconstructs.
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst      = 0;
   auto const expected = micros_col{wall_micros};
