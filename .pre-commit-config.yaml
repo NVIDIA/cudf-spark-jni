@@ -60,7 +60,7 @@ repos:
         types_or: [c, c++, cuda]
         files: '^src/main/cpp/'
   - repo: https://github.com/rapidsai/pre-commit-hooks
-    rev: v1.6.0
+    rev: v1.7.0
     hooks:
       - id: verify-copyright
         args: [--fix]
@@ -71,7 +71,7 @@ repos:
             ^build/
         exclude: ^thirdparty/
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v20.1.8
+    rev: v23.1.2
     hooks:
       - id: clang-format
         types_or: [c, c++, cuda]
