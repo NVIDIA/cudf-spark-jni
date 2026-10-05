@@ -759,10 +759,10 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const threads_per_warp = warp.size();
   auto const rows_per_read    = cudf::detail::size_in_bits<bitmask_type>();
 
-  auto const num_sections_x = cudf::util::div_rounding_up_unsafe(num_tile_cols, threads_per_warp);
-  auto const num_sections_y = cudf::util::div_rounding_up_unsafe(num_tile_rows, rows_per_read);
-  auto const validity_data_row_length = cuda::round_up(
-    cudf::util::div_rounding_up_unsafe(num_tile_cols, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
+  auto const num_sections_x = cuda::ceil_div<size_type, size_type>(num_tile_cols, threads_per_warp);
+  auto const num_sections_y = cuda::ceil_div<size_type, size_type>(num_tile_rows, rows_per_read);
+  auto const validity_data_row_length =
+    cuda::round_up(cuda::ceil_div(num_tile_cols, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
   auto const total_sections = num_sections_x * num_sections_y;
 
   // the tile is divided into sections. A warp operates on a section at a time.
@@ -803,7 +803,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
     output_data[tile.batch_number] + validity_offset + tile.start_col / CHAR_BIT;
 
   // each warp copies a row at a time
-  auto const row_bytes       = cudf::util::div_rounding_up_unsafe(num_tile_cols, CHAR_BIT);
+  auto const row_bytes       = cuda::ceil_div(num_tile_cols, CHAR_BIT);
   auto const row_batch_start = tile.batch_number == 0 ? 0 : batch_row_boundaries[tile.batch_number];
 
   // make sure entire tile has finished copy
@@ -1112,7 +1112,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
   }
 
   // now memcpy the shared memory out to the final destination
-  auto const col_words = cudf::util::div_rounding_up_unsafe(num_tile_rows, CHAR_BIT * 4);
+  auto const col_words = cuda::ceil_div(num_tile_rows, CHAR_BIT * 4);
 
   // make sure entire tile has finished copy
   group.sync();
@@ -1171,7 +1171,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
 
   // workaround for not being able to take a reference to a constexpr host variable
   auto const ROWS_PER_BLOCK = NUM_STRING_ROWS_PER_BLOCK_FROM_ROWS;
-  auto const tiles_per_col  = cudf::util::div_rounding_up_unsafe(num_rows, ROWS_PER_BLOCK);
+  auto const tiles_per_col  = cuda::ceil_div(num_rows, ROWS_PER_BLOCK);
   auto const starting_tile  = blockIdx.x * warp.meta_group_size() + warp.meta_group_rank();
   auto const num_tiles      = tiles_per_col * num_string_columns;
   auto const tile_stride    = warp.meta_group_size() * gridDim.x;
@@ -1439,8 +1439,8 @@ std::vector<detail::tile_info> build_validity_tile_infos(size_type const& num_co
 
   // we fit as much as we can given the column stride note that an element in the table takes just 1
   // bit, but a row with a single element still takes 8 bytes!
-  auto const bytes_per_row = cudf::util::round_up_safe(
-    cudf::util::div_rounding_up_unsafe(column_stride, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
+  auto const bytes_per_row =
+    cudf::util::round_up_safe(cuda::ceil_div(column_stride, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
   auto const row_stride =
     std::min(num_rows, cuda::round_down(shmem_limit_per_tile / bytes_per_row, 64));
   std::vector<detail::tile_info> validity_tile_infos;
@@ -1640,7 +1640,7 @@ int compute_tile_counts(device_span<size_type const> const& batch_row_boundaries
     cuda::proclaim_return_type<size_type>(
       [desired_tile_height, batch_row_boundaries = batch_row_boundaries.data()] __device__(
         auto batch_index) -> size_type {
-        return cudf::util::div_rounding_up_unsafe(
+        return cuda::ceil_div(
           batch_row_boundaries[batch_index + 1] - batch_row_boundaries[batch_index],
           desired_tile_height);
       }));
@@ -1681,7 +1681,7 @@ size_type build_tiles(
     cuda::proclaim_return_type<size_type>(
       [desired_tile_height, batch_row_boundaries = batch_row_boundaries.data()] __device__(
         auto batch_index) -> size_type {
-        return cudf::util::div_rounding_up_unsafe(
+        return cuda::ceil_div(
           batch_row_boundaries[batch_index + 1] - batch_row_boundaries[batch_index],
           desired_tile_height);
       }));
@@ -1994,8 +1994,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
       auto const batch_num_rows   = batch_info.row_batches[i].row_count;
 
       dim3 const string_blocks(std::min(
-        MAX_STRING_BLOCKS,
-        cudf::util::div_rounding_up_unsafe(batch_num_rows, NUM_STRING_ROWS_PER_BLOCK_TO_ROWS)));
+        MAX_STRING_BLOCKS, cuda::ceil_div(batch_num_rows, NUM_STRING_ROWS_PER_BLOCK_TO_ROWS)));
 
       // The kernel computes start_row as (blockIdx.x * stride + warp_rank + batch_row_offset),
       // i.e. an absolute row index. Pass the absolute end-row bound (batch_row_offset +
