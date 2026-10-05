@@ -21,6 +21,7 @@ import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.HostColumnVectorCore;
+import ai.rapids.cudf.NativeDepsLoader;
 import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,6 +53,10 @@ import java.util.concurrent.TimeUnit;
  * - Loading, shutdown, and checking APIs, etc.
  */
 public class GpuTimeZoneDB {
+  static {
+    NativeDepsLoader.loadNativeDeps();
+  }
+
   private static final Logger log = LoggerFactory.getLogger(GpuTimeZoneDB.class);
 
   /**
