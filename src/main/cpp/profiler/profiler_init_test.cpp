@@ -43,9 +43,7 @@ struct test_state {
   _jclass exception_class;
 
   CUptiResult setup_result()
-  {
-    return setup_calls++ == fail_step ? CUPTI_ERROR_UNKNOWN : CUPTI_SUCCESS;
-  }
+  { return setup_calls++ == fail_step ? CUPTI_ERROR_UNKNOWN : CUPTI_SUCCESS; }
 };
 
 test_state* Test_state;
@@ -200,9 +198,7 @@ CUptiResult CUPTIAPI cuptiEnableCallback(uint32_t,
                                          CUpti_SubscriberHandle,
                                          CUpti_CallbackDomain,
                                          CUpti_CallbackId)
-{
-  return Test_state->setup_result();
-}
+{ return Test_state->setup_result(); }
 
 CUptiResult CUPTIAPI cuptiActivityRegisterCallbacks(CUpti_BuffersCallbackRequestFunc request,
                                                     CUpti_BuffersCallbackCompleteFunc complete)

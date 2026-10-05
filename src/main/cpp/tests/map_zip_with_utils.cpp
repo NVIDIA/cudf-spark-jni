@@ -226,20 +226,20 @@ TEST_F(MapZipWithUtilsTests, StringKeysTest)
                               cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 
     auto results  = spark_rapids_jni::map_zip(cudf::lists_column_view(*list_col1),
-                                             cudf::lists_column_view(*list_col2));
+                                              cudf::lists_column_view(*list_col2));
     auto const k  = cudf::test::strings_column_wrapper{"apple",
-                                                      "banana",
-                                                      "cherry",
-                                                      "date",
-                                                      "cherry",
-                                                      "date",
-                                                      "fig",
-                                                      "grape",
-                                                      "strawberry",
-                                                      "fig",
-                                                      "grape",
-                                                      "honeydew",
-                                                      "kiwi"};
+                                                       "banana",
+                                                       "cherry",
+                                                       "date",
+                                                       "cherry",
+                                                       "date",
+                                                       "fig",
+                                                       "grape",
+                                                       "strawberry",
+                                                       "fig",
+                                                       "grape",
+                                                       "honeydew",
+                                                       "kiwi"};
     auto const v1 = cudf::test::fixed_width_column_wrapper<int32_t>{
       {100, 200, 0, 0, 300, 400, 0, 0, 500, 600, 700, 0, 0},
       {1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0}};

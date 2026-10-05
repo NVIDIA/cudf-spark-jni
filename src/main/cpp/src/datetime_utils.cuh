@@ -37,9 +37,7 @@ struct date_time_utils {
    * @brief Is the year is leap year.
    */
   __device__ static bool is_leap_year(int year)
-  {
-    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-  }
+  { return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0); }
 
   /**
    * @brief Get the number of days in a month.
@@ -205,9 +203,7 @@ struct date_time_utils {
    */
   __device__ static int64_t next_or_same_weekday(int64_t const epoch_days,
                                                  int64_t const expected_weekday)
-  {
-    return epoch_days + weekday_difference(epoch_days, expected_weekday);
-  }
+  { return epoch_days + weekday_difference(epoch_days, expected_weekday); }
 
   /**
    * @brief Move backward to get the expected weekday.
@@ -220,9 +216,7 @@ struct date_time_utils {
    */
   __device__ static int64_t previous_or_same_weekday(int64_t const epoch_days,
                                                      int64_t const expected_weekday)
-  {
-    return epoch_days - previous_weekday_difference(epoch_days, expected_weekday);
-  }
+  { return epoch_days - previous_weekday_difference(epoch_days, expected_weekday); }
 
   /**
    * @brief Get the year from epoch seconds.
@@ -253,18 +247,14 @@ struct date_segments {
   __device__ date_segments() : year(1970), month(1), day(1) {}
 
   __device__ bool is_valid_date() const
-  {
-    return date_time_utils::is_valid_date_for_date(year, month, day);
-  }
+  { return date_time_utils::is_valid_date_for_date(year, month, day); }
 
   /**
    * @brief Get days since epoch 1970-01-01.
    * Can handle all int years.
    */
   __device__ int64_t to_epoch_day() const
-  {
-    return date_time_utils::to_epoch_day(year, month, day);
-  }
+  { return date_time_utils::to_epoch_day(year, month, day); }
 
   int32_t year;
 
@@ -556,11 +546,11 @@ __device__ static timestamp_type convert_timestamp(
   //     The generic to_utc truncation mismatch remains outside this change.
   constexpr int64_t sub_seconds_per_second = duration_type::period::den;
   auto const raw_count                     = timestamp.time_since_epoch().count();
-  auto const epoch_seconds                 = !to_utc || floor_local_time
-                                               ? integer_utils::floor_div(raw_count, sub_seconds_per_second)
-                                               : static_cast<int64_t>(raw_count / sub_seconds_per_second);
-  auto const tz_transitions                = cudf::list_device_view{fixed_transitions, tz_index};
-  auto const list_size                     = tz_transitions.size();
+  auto const epoch_seconds  = !to_utc || floor_local_time
+                                ? integer_utils::floor_div(raw_count, sub_seconds_per_second)
+                                : static_cast<int64_t>(raw_count / sub_seconds_per_second);
+  auto const tz_transitions = cudf::list_device_view{fixed_transitions, tz_index};
+  auto const list_size      = tz_transitions.size();
 
   auto const transition_times = cudf::device_span<int64_t const>(
     (to_utc ? tz_instants : utc_instants).data<int64_t>() + tz_transitions.element_offset(0),

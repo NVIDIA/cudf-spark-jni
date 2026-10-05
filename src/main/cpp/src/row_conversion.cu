@@ -174,9 +174,7 @@ struct tile_info {
   // an 8-byte multiple (e.g. an odd number of INT32 columns in the first tile).
   __device__ inline size_type get_actual_row_size(size_type const* const col_offsets,
                                                   size_type const* const col_sizes) const
-  {
-    return col_offsets[end_col] + col_sizes[end_col] - col_offsets[start_col];
-  }
+  { return col_offsets[end_col] + col_sizes[end_col] - col_offsets[start_col]; }
 
   __device__ inline size_type num_cols() const { return end_col - start_col + 1; }
 
@@ -287,9 +285,7 @@ struct string_row_offset_functor {
     : d_row_offsets(d_row_offsets) {};
 
   __device__ inline size_type operator()(int row_number, int) const
-  {
-    return d_row_offsets[row_number];
-  }
+  { return d_row_offsets[row_number]; }
 
   device_span<size_type const> d_row_offsets;
 };
@@ -303,9 +299,7 @@ struct fixed_width_row_offset_functor {
     : _fixed_width_only_row_size(fixed_width_only_row_size) {};
 
   __device__ inline size_type operator()(int row_number, int tile_row_start) const
-  {
-    return (row_number - tile_row_start) * _fixed_width_only_row_size;
-  }
+  { return (row_number - tile_row_start) * _fixed_width_only_row_size; }
 
   size_type _fixed_width_only_row_size;
 };
@@ -1483,9 +1477,7 @@ struct row_size_functor {
   }
 
   __device__ inline uint64_t operator()(int i) const
-  {
-    return i >= _row_end ? 0 : _row_sizes[i + _last_row_end];
-  }
+  { return i >= _row_end ? 0 : _row_sizes[i + _last_row_end]; }
 
   size_type _row_end;
   RowSize _row_sizes;
@@ -1710,7 +1702,7 @@ size_type build_tiles(
     iter + total_tiles,
     tiles.begin(),
     cuda::proclaim_return_type<tile_info>(
-      [                     =,
+      [=,
        tile_starts          = tile_starts.data(),
        batch_row_boundaries = batch_row_boundaries.data()] __device__(size_type tile_index) {
         // what batch this tile falls in

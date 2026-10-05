@@ -66,15 +66,11 @@ __host__ __device__ constexpr bool is_whitespace(char const chr)
 
 template <typename T, std::enable_if_t<cuda::std::is_signed_v<T>>* = nullptr>
 T __device__ generic_abs(T value)
-{
-  return numeric::detail::abs(value);
-}
+{ return numeric::detail::abs(value); }
 
 template <typename T, std::enable_if_t<not cuda::std::is_signed_v<T>>* = nullptr>
 constexpr T __device__ generic_abs(T value)
-{
-  return value;
-}
+{ return value; }
 
 /**
  * @brief Determine if overflow will occur when multiplying a value by 10.
@@ -711,9 +707,7 @@ struct string_to_integer_impl {
                                      bool strip,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
-  {
-    CUDF_FAIL("Invalid integer column type");
-  }
+  { CUDF_FAIL("Invalid integer column type"); }
 };
 
 struct string_to_decimal_impl {
@@ -781,9 +775,7 @@ struct string_to_decimal_impl {
                                      bool strip,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
-  {
-    CUDF_FAIL("Invalid decimal column type");
-  }
+  { CUDF_FAIL("Invalid decimal column type"); }
 };
 
 }  // namespace detail

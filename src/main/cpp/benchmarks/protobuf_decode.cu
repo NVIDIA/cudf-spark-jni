@@ -116,9 +116,7 @@ void encode_len_field(std::vector<uint8_t>& buf, int field_number, void const* d
 }
 
 void encode_string_field(std::vector<uint8_t>& buf, int field_number, std::string const& s)
-{
-  encode_len_field(buf, field_number, s.data(), s.size());
-}
+{ encode_len_field(buf, field_number, s.data(), s.size()); }
 
 // Encode a nested message: write its content into a temporary buffer, then emit as LEN.
 template <typename Fn>
@@ -925,9 +923,7 @@ struct ManyRepeatedFieldsCase {
   int avg_elems_per_field;
 
   int num_repeated_str() const
-  {
-    return std::max(1, num_repeated_fields * string_field_percent / 100);
-  }
+  { return std::max(1, num_repeated_fields * string_field_percent / 100); }
   int num_repeated_int() const { return num_repeated_fields - num_repeated_str(); }
 
   protobuf::protobuf_decode_context build_context() const

@@ -310,9 +310,7 @@ struct dispatch_multiply {
                                            bool check_overflow,
                                            cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr) const
-  {
-    CUDF_FAIL("Unsupported type when multiply.");
-  }
+  { CUDF_FAIL("Unsupported type when multiply."); }
 };
 
 }  // anonymous namespace

@@ -132,9 +132,7 @@ struct nested_location_provider {
   }
 
   __device__ inline bool valid(int thread_idx) const
-  {
-    return row_location(thread_idx).is_present();
-  }
+  { return row_location(thread_idx).is_present(); }
 };
 
 __device__ inline scalar_value_input resolve_scalar_value(uint8_t const* message_data,
@@ -327,9 +325,7 @@ __device__ void extract_scalar_kernel_impl(uint8_t const* message_data,
 // Kernel parameters stay by value because forwarding references preserve host lvalue references.
 template <typename OutputType, auto DecodeFn, typename... Args>
 CUDF_KERNEL void extract_scalar_kernel(Args... args)
-{
-  extract_scalar_kernel_impl<OutputType, DecodeFn>(cuda::std::forward<Args>(args)...);
-}
+{ extract_scalar_kernel_impl<OutputType, DecodeFn>(cuda::std::forward<Args>(args)...); }
 
 // ============================================================================
 // Batched scalar extraction — one 2D kernel for N fields of the same type

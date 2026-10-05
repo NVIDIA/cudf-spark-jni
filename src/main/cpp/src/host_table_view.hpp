@@ -140,9 +140,7 @@ class host_column_view {
 
   template <typename T>
   T const* data() const noexcept
-  {
-    return static_cast<T const*>(_data);
-  }
+  { return static_cast<T const*>(_data); }
 
   /**
    * @brief Returns the specified child
@@ -151,9 +149,7 @@ class host_column_view {
    * @return The requested child `column_view`
    */
   [[nodiscard]] host_column_view const& child(cudf::size_type child_index) const
-  {
-    return _children.at(child_index);
-  }
+  { return _children.at(child_index); }
 
   /**
    * @brief Returns the number of child columns.
@@ -182,9 +178,7 @@ class host_column_view {
    * @note This must only be called on a strings column.
    */
   [[nodiscard]] host_column_view const& strings_offsets() const
-  {
-    return _children.at(cudf::strings_column_view::offsets_column_index);
-  }
+  { return _children.at(cudf::strings_column_view::offsets_column_index); }
 
   /**
    * @brief Returns the child column corresponding to the offsets of a lists column
@@ -192,9 +186,7 @@ class host_column_view {
    * @note This must only be called on a lists column.
    */
   [[nodiscard]] host_column_view const& lists_offsets() const
-  {
-    return _children.at(cudf::lists_column_view::offsets_column_index);
-  }
+  { return _children.at(cudf::lists_column_view::offsets_column_index); }
 
   /**
    * @brief Returns the child column containing the data of a lists column
@@ -202,9 +194,7 @@ class host_column_view {
    * @note This must only be called on a lists column.
    */
   [[nodiscard]] host_column_view const& lists_child() const
-  {
-    return _children.at(cudf::lists_column_view::child_column_index);
-  }
+  { return _children.at(cudf::lists_column_view::child_column_index); }
 };
 
 /**
@@ -298,9 +288,7 @@ class host_table_view {
    * @return A reference to the desired column
    */
   [[nodiscard]] host_column_view const& column(cudf::size_type column_index) const
-  {
-    return _columns.at(column_index);
-  }
+  { return _columns.at(column_index); }
 
   /**
    * @brief Returns the number of columns

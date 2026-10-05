@@ -45,9 +45,7 @@ namespace {
 }
 
 std::vector<std::string> nested_schema_names()
-{
-  return {"data", "c1", "c2", "element", "c3", "c4", "id"};
-}
+{ return {"data", "c1", "c2", "element", "c3", "c4", "id"}; }
 
 std::vector<int> nested_schema_num_children() { return {2, 0, 1, 2, 0, 0, 0}; }
 

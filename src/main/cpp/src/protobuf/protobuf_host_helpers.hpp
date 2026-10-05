@@ -80,14 +80,10 @@ class protobuf_schema {
   protobuf_schema& operator=(protobuf_schema&&)      = delete;
 
   [[nodiscard]] std::vector<nested_field_descriptor> const& fields() const
-  {
-    return context_.schema;
-  }
+  { return context_.schema; }
 
   [[nodiscard]] nested_field_descriptor const& operator[](int schema_idx) const
-  {
-    return context_.schema.at(static_cast<size_t>(schema_idx));
-  }
+  { return context_.schema.at(static_cast<size_t>(schema_idx)); }
 
   [[nodiscard]] size_t size() const { return context_.schema.size(); }
 
@@ -189,9 +185,7 @@ struct extract_strided_count {
   int num_fields;
 
   __device__ int32_t operator()(int row) const
-  {
-    return info[flat_index(row, num_fields, field_position)].count;
-  }
+  { return info[flat_index(row, num_fields, field_position)].count; }
 };
 
 inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_rows,
@@ -461,9 +455,7 @@ std::vector<int> find_child_field_indices(SchemaT const& schema, int parent_idx)
 
 inline std::vector<int> const& find_child_field_indices(protobuf_schema const& schema,
                                                         int parent_idx)
-{
-  return schema.children(parent_idx);
-}
+{ return schema.children(parent_idx); }
 
 // Forward declarations needed by make_empty_struct_column_with_schema
 std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,

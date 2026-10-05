@@ -105,9 +105,7 @@ struct dispatch_format_float_fn {
                                            int const,
                                            cuda::stream_ref,
                                            rmm::device_async_resource_ref) const
-  {
-    CUDF_FAIL("Values for format_float function must be a float type.");
-  }
+  { CUDF_FAIL("Values for format_float function must be a float type."); }
 };
 
 }  // namespace
@@ -117,9 +115,7 @@ std::unique_ptr<cudf::column> format_float(cudf::column_view const& floats,
                                            int const digits,
                                            cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
-{
-  return type_dispatcher(floats.type(), dispatch_format_float_fn{}, floats, digits, stream, mr);
-}
+{ return type_dispatcher(floats.type(), dispatch_format_float_fn{}, floats, digits, stream, mr); }
 
 }  // namespace detail
 

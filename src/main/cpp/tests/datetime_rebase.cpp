@@ -149,14 +149,14 @@ TEST_F(TimestampRebaseTest, RebaseMicroToJulian)
 TEST_F(TimestampRebaseTest, RebaseMicroToGregorian)
 {
   auto const ts_col   = micros_col{-62135765876345679L,
-                                 -30609781078876544L,
-                                 -12243197221876544L,
-                                 -12219379200000000L,
-                                 -12219207001448163L,
-                                 -12219292799000001L,
-                                 -45446999900L,
-                                 1L,
-                                 1584178381500000L};
+                                   -30609781078876544L,
+                                   -12243197221876544L,
+                                   -12219379200000000L,
+                                   -12219207001448163L,
+                                   -12219292799000001L,
+                                   -45446999900L,
+                                   1L,
+                                   1584178381500000L};
   auto const rebased  = spark_rapids_jni::rebase_julian_to_gregorian(ts_col);
   auto const expected = micros_col{-62135593076345679L,
                                    -30610213078876544L,

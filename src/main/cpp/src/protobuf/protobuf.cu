@@ -72,9 +72,7 @@ protobuf_decode_context::protobuf_decode_context(
     enum_names(std::move(enum_names)),
     fail_on_errors(fail_on_errors),
     output_fields(std::move(output_fields))
-{
-  detail::validate_decode_context(*this);
-}
+{ detail::validate_decode_context(*this); }
 
 protobuf_decode_context::protobuf_decode_context(std::vector<nested_field_descriptor> schema,
                                                  bool fail_on_errors,
@@ -485,10 +483,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         .repeated_info           = {.data = d_repeated_info.data(), .stride = num_repeated},
         .singular_message_info   = {.data = d_nested_occurrence_info.data(), .stride = num_nested},
         .multiple_message_fields = d_multiple_nested_fields.data(),
-        .lookup                  = {.data        = field_descs.device.data(),
-                                    .size        = static_cast<int>(field_descs.host.size()),
-                                    .direct      = h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
-                                    .direct_size = static_cast<int>(h_field_lookup.size())}},
+        .lookup = {.data        = field_descs.device.data(),
+                   .size        = static_cast<int>(field_descs.host.size()),
+                   .direct      = h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
+                   .direct_size = static_cast<int>(h_field_lookup.size())}},
       d_error.data(),
       d_deferred_enum_error.data(),
       d_row_force_null.data(),
@@ -547,10 +545,10 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
                       .repeated_info           = {.data = nullptr, .stride = 0},
                       .singular_message_info   = {.data = nullptr, .stride = 0},
                       .multiple_message_fields = nullptr,
-                      .lookup                  = {.data   = field_descs.device.data(),
-                                                  .size   = num_scalar,
-                                                  .direct = h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
-                                                  .direct_size = static_cast<int>(h_field_lookup.size())}},
+                      .lookup = {.data   = field_descs.device.data(),
+                                 .size   = num_scalar,
+                                 .direct = h_field_lookup.empty() ? nullptr : d_field_lookup.data(),
+                                 .direct_size = static_cast<int>(h_field_lookup.size())}},
       d_error.data(),
       d_deferred_enum_error.data(),
       d_row_force_null.data(),
@@ -803,13 +801,13 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         case cudf::type_id::STRUCT: {
           auto const& child_field_indices = schema_context.children(schema_idx);
           column_map[schema_idx]          = build_repeated_struct_column(binary_input,
-                                                                input,
-                                                                child_field_indices,
-                                                                recursive_context,
-                                                                std::move(w),
-                                                                is_output,
-                                                                stream,
-                                                                mr);
+                                                                         input,
+                                                                         child_field_indices,
+                                                                         recursive_context,
+                                                                         std::move(w),
+                                                                         is_output,
+                                                                         stream,
+                                                                         mr);
           break;
         }
         default:

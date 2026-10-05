@@ -36,17 +36,13 @@
 
 // Format enums for logging
 auto format_as(CUpti_CallbackDomain domain)
-{
-  return static_cast<std::underlying_type_t<CUpti_CallbackDomain>>(domain);
-}
+{ return static_cast<std::underlying_type_t<CUpti_CallbackDomain>>(domain); }
 
 template <typename T>
   requires std::is_enum_v<T> && requires(T t) { format_as(t); }
 struct std::formatter<T> : std::formatter<std::underlying_type_t<T>> {
   auto format(T v, auto& ctx) const
-  {
-    return std::formatter<std::underlying_type_t<T>>::format(format_as(v), ctx);
-  }
+  { return std::formatter<std::underlying_type_t<T>>::format(format_as(v), ctx); }
 };
 
 template <>
@@ -154,9 +150,7 @@ CUptiResult cuptiInitialize(void)
 }
 
 __global__ static void faultInjectorKernelAssert(void)
-{
-  assert(0 && "faultInjectorKernelAssert triggered");
-}
+{ assert(0 && "faultInjectorKernelAssert triggered"); }
 
 __global__ static void faultInjectorKernelTrap(void) { asm("trap;"); }
 

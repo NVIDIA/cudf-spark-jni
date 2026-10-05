@@ -303,9 +303,7 @@ __device__ static int32_t day_of_week_1_sun(int64_t epoch_days)
 }
 
 __host__ __device__ constexpr size_t align_up(size_t value, size_t alignment)
-{
-  return (value + alignment - 1) & ~(alignment - 1);
-}
+{ return (value + alignment - 1) & ~(alignment - 1); }
 
 /**
  * @brief Compute the day-of-month when a DST rule triggers for the given year and month.
@@ -484,9 +482,7 @@ struct orc_base_offset_info {
 };
 
 [[nodiscard]] orc_base_offset_info make_orc_base_offset_info(int64_t us)
-{
-  return orc_base_offset_info{us, (us % MICROS_PER_SECOND) == 0};
-}
+{ return orc_base_offset_info{us, (us % MICROS_PER_SECOND) == 0}; }
 
 struct orc_tz_side_kernel_args {
   int64_t const* __restrict__ trans;
@@ -807,14 +803,10 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
 }
 
 __device__ static int64_t wrapping_subtract(int64_t lhs, int64_t rhs)
-{
-  return static_cast<int64_t>(static_cast<uint64_t>(lhs) - static_cast<uint64_t>(rhs));
-}
+{ return static_cast<int64_t>(static_cast<uint64_t>(lhs) - static_cast<uint64_t>(rhs)); }
 
 __device__ static int64_t wrapping_add(int64_t lhs, int64_t rhs)
-{
-  return static_cast<int64_t>(static_cast<uint64_t>(lhs) + static_cast<uint64_t>(rhs));
-}
+{ return static_cast<int64_t>(static_cast<uint64_t>(lhs) + static_cast<uint64_t>(rhs)); }
 
 template <typename T>
 __device__ T convert_orc_from_utc_value(T value, tz_side_info const& reader)
@@ -1235,18 +1227,14 @@ std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input,
                                                  size_type tz_index,
                                                  cuda::stream_ref stream,
                                                  rmm::device_async_resource_ref mr)
-{
-  return convert_timestamp(input, transitions, tz_index, true, stream, mr);
-}
+{ return convert_timestamp(input, transitions, tz_index, true, stream, mr); }
 
 std::unique_ptr<column> convert_utc_timestamp_to_timezone(column_view const& input,
                                                           table_view const& transitions,
                                                           size_type tz_index,
                                                           cuda::stream_ref stream,
                                                           rmm::device_async_resource_ref mr)
-{
-  return convert_timestamp(input, transitions, tz_index, false, stream, mr);
-}
+{ return convert_timestamp(input, transitions, tz_index, false, stream, mr); }
 
 std::unique_ptr<column> convert_timestamp_to_utc(column_view const& input_seconds,
                                                  column_view const& input_microseconds,

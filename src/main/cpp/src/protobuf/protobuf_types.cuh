@@ -30,9 +30,7 @@ namespace spark_rapids_jni::protobuf::detail {
 CUDF_HOST_DEVICE inline size_t flat_index(std::integral auto row,
                                           std::integral auto width,
                                           std::integral auto col)
-{
-  return static_cast<size_t>(row) * static_cast<size_t>(width) + static_cast<size_t>(col);
-}
+{ return static_cast<size_t>(row) * static_cast<size_t>(width) + static_cast<size_t>(col); }
 
 // Protobuf varints store 7 value bits per byte, so ceil(64 / 7) = 10 bytes.
 constexpr int MAX_VARINT_BYTES = 10;
@@ -254,9 +252,7 @@ struct row_strided_view {
   int stride;
 
   __device__ T* row_start(cudf::size_type row) const
-  {
-    return stride > 0 ? data + static_cast<std::size_t>(row) * stride : nullptr;
-  }
+  { return stride > 0 ? data + static_cast<std::size_t>(row) * stride : nullptr; }
 };
 
 struct field_scan_view {

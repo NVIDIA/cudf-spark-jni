@@ -67,17 +67,13 @@ __device__ inline bool read_varint64(uint8_t const* cur,
                                      uint8_t const* end,
                                      uint64_t& out,
                                      int& bytes)
-{
-  return read_varint(cur, end, out, bytes);
-}
+{ return read_varint(cur, end, out, bytes); }
 
 __device__ inline bool read_varint32(uint8_t const* cur,
                                      uint8_t const* end,
                                      uint32_t& out,
                                      int& bytes)
-{
-  return read_varint(cur, end, out, bytes);
-}
+{ return read_varint(cur, end, out, bytes); }
 
 __device__ inline void set_error_once(protobuf_error* error_flag, protobuf_error error)
 {

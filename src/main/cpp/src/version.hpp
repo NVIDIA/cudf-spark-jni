@@ -51,9 +51,7 @@ class spark_system {
   bool is_databricks() const { return platform_type == spark_platform_type::DATABRICKS; }
 
   bool is_version_eq(int major_, int minor_, int patch_) const
-  {
-    return major == major_ && minor == minor_ && patch == patch_;
-  }
+  { return major == major_ && minor == minor_ && patch == patch_; }
 
   bool is_version_ge(int major_, int minor_, int patch_) const
   {

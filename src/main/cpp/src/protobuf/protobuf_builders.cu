@@ -194,9 +194,7 @@ std::unique_ptr<cudf::column> build_protobuf_field_values_column(
 std::unique_ptr<cudf::column> drop_unknown_repeated_enum_values(std::unique_ptr<cudf::column> input,
                                                                 cuda::stream_ref stream,
                                                                 rmm::device_async_resource_ref mr)
-{
-  return drop_unknown_repeated_enum_values_impl(std::move(input), stream, mr);
-}
+{ return drop_unknown_repeated_enum_values_impl(std::move(input), stream, mr); }
 
 std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
   int num_rows,
