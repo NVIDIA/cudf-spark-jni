@@ -989,12 +989,9 @@ public class GpuTimeZoneDB {
       boolean writerReaderRulesDiffer,
       boolean writerBorrowApplied);
 
-  /**
-   * Whether the native reader resolves this writer timezone and decides the borrow in the
-   * writer's frame (probes the reader's own transition-table lookup). False = UTC fallback.
-   * Memoized per id: the probe parses the TZif file, so contexts built repeatedly for the same
-   * writer timezone must not repeat it.
-   */
+  // Memoized probe results per writer timezone id (the native probe parses the TZif file, so
+  // repeated contexts for the same id must not repeat it). Bounded in practice by the distinct
+  // writer timezones seen in ORC footers; same lifetime convention as RUNTIME_TIMEZONE_INFOS.
   private static final ConcurrentHashMap<String, Boolean> RESOLVED_WRITER_TIMEZONES =
       new ConcurrentHashMap<>();
 

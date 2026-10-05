@@ -22,6 +22,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <optional>
 
 extern "C" {
 

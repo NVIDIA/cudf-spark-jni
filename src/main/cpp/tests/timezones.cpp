@@ -33,7 +33,6 @@
 
 #include <array>
 #include <cstdint>
-#include <filesystem>
 #include <limits>
 #include <memory>
 #include <string>
@@ -700,7 +699,8 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
                         .timestamp_type(cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS})
                         .ignore_timezone_in_stripe_footer(true)
                         .build();
-  auto const decoded = cudf::io::read_orc(read_options).tbl->get_column(0);
+  auto const read_result = cudf::io::read_orc(read_options);
+  auto const& decoded    = read_result.tbl->get_column(0);
 
   // The decode must equal the wall clock plus the writer epoch offset (UTC+08:00 = 28.8e9 us).
   EXPECT_EQ(decoded.size(), 1);

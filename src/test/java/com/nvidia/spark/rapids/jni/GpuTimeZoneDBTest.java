@@ -23,7 +23,6 @@ import org.junit.jupiter.api.Test;
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -373,7 +372,7 @@ public class GpuTimeZoneDBTest {
     // "GMT+08:00" has no TZif file, so the reader falls back to UTC and does not fold the borrow.
     // The conversion must reconstruct it: decode 21_087_883_873 -> -7_713_116_127, not the 1s-late
     // -7_712_116_127.
-    assertNotEquals(-1L, orc2015YearBaseOffsetUs("GMT+08:00"));
+    assertEquals(28_800_000_000L, orc2015YearBaseOffsetUs("GMT+08:00"));
     try (ColumnVector input =
             ColumnVector.timestampMicroSecondsFromLongs(new long[] {21_087_883_873L});
         ColumnVector expected =
