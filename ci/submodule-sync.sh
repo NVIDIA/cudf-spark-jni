@@ -82,12 +82,17 @@ redact_credentials() {
   # Filter arguments derive from the credentials: never traced.
   set +x
   local creds=()
+  local username="${ART_CREDS_USR:-}" password="${ART_CREDS_PSW:-}"
   # The encoded form subsumes the raw ones: redact it first, so a raw
   # replacement cannot corrupt the encoded match and leave readable residue.
-  if [[ -n "${ART_CREDS_USR:-}" || -n "${ART_CREDS_PSW:-}" ]]; then
-    creds+=("$(printf '%s:%s' "${ART_CREDS_USR:-}" "${ART_CREDS_PSW:-}" | base64 -w 0)")
+  if [[ -n "$username" || -n "$password" ]]; then
+    creds+=("$(printf '%s:%s' "$username" "$password" | base64 -w 0)")
   fi
-  creds+=("${ART_CREDS_USR:-}" "${ART_CREDS_PSW:-}")
+  if (( ${#password} > ${#username} )); then
+    creds+=("$password" "$username")
+  else
+    creds+=("$username" "$password")
+  fi
   for secret in "${creds[@]}"; do
     [[ -n ${secret} ]] || continue
     esc="$(printf '%s' "${secret}" | sed 's/[][\.\\*^$#]/\\&/g')"
