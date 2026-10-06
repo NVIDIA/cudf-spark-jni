@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * JNI interface to a rmm::pool_memory_resource backed by a host memory resource that
@@ -28,6 +29,10 @@ public final class PageableMemoryPool implements AutoCloseable {
   // Do NOT use singleton_ directly!  Use the getSingleton accessor instead.
   private static volatile PageableMemoryPool singleton_ = null;
   private static volatile Future<PageableMemoryPool> initFuture = null;
+  // Instance lifecycle gate: alloc/free take the READ lock (they run concurrently and
+  // the native pool serializes its own free list), close/shutdown take the WRITE lock
+  // so pool teardown waits for in-flight operations instead of racing them.
+  private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
   private long poolHandle;
   private long poolSize;
 
@@ -180,6 +185,7 @@ public final class PageableMemoryPool implements AutoCloseable {
    * @param bytes size in bytes to allocate
    * @return newly created buffer, or null if the pool is uninitialized or exhausted
    *         (caller should fall back to a regular malloc'd buffer)
+   * @throws IllegalStateException if the pool has been closed
    */
   public static HostMemoryBuffer tryAllocate(long bytes) {
     if (bytes <= 0) {
@@ -208,11 +214,20 @@ public final class PageableMemoryPool implements AutoCloseable {
     this.poolSize = poolSize;
   }
 
+  /**
+   * Release the native pool. Waits for any in-flight allocation or free (read gate)
+   * to complete first; further allocation or free throws IllegalStateException.
+   */
   @Override
-  public synchronized void close() {
-    if (this.poolHandle != -1) {
-      releasePageablePoolMemoryResource(this.poolHandle);
-      this.poolHandle = -1;
+  public void close() {
+    lifecycleLock.writeLock().lock();
+    try {
+      if (this.poolHandle != -1) {
+        releasePageablePoolMemoryResource(this.poolHandle);
+        this.poolHandle = -1;
+      }
+    } finally {
+      lifecycleLock.writeLock().unlock();
     }
   }
 
@@ -220,22 +235,32 @@ public final class PageableMemoryPool implements AutoCloseable {
    * Attempts to allocate from the pageable pool. Returns null rather than throwing if
    * the pool is exhausted, so callers can fall back gracefully.
    */
-  private synchronized HostMemoryBuffer tryAllocateInternal(long bytes) {
-    if (this.poolHandle == -1) {
-      throw new IllegalStateException("Pageable memory pool has been closed");
+  private HostMemoryBuffer tryAllocateInternal(long bytes) {
+    lifecycleLock.readLock().lock();
+    try {
+      if (this.poolHandle == -1) {
+        throw new IllegalStateException("Pageable memory pool has been closed");
+      }
+      long allocated = allocFromPageablePool(this.poolHandle, bytes);
+      if (allocated == -1) {
+        return null;
+      }
+      return new HostMemoryBuffer(allocated, bytes,
+              new PageableHostBufferCleaner(allocated, bytes));
+    } finally {
+      lifecycleLock.readLock().unlock();
     }
-    long allocated = allocFromPageablePool(this.poolHandle, bytes);
-    if (allocated == -1) {
-      return null;
-    }
-    return new HostMemoryBuffer(allocated, bytes,
-            new PageableHostBufferCleaner(allocated, bytes));
   }
 
-  private synchronized void free(long address, long size) {
-    if (this.poolHandle == -1) {
-      throw new IllegalStateException("Pageable memory pool has been closed");
+  private void free(long address, long size) {
+    lifecycleLock.readLock().lock();
+    try {
+      if (this.poolHandle == -1) {
+        throw new IllegalStateException("Pageable memory pool has been closed");
+      }
+      freeFromPageablePool(this.poolHandle, address, size);
+    } finally {
+      lifecycleLock.readLock().unlock();
     }
-    freeFromPageablePool(this.poolHandle, address, size);
   }
 }
