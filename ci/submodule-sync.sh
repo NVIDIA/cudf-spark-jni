@@ -39,6 +39,7 @@ else
   state_file=${2:?Pass the same temporary state-file path to prepare and validate}
 fi
 netrc_file=
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
 cleanup() {
   [[ -z "$netrc_file" ]] || rm -f "$netrc_file"
   if [[ $phase == all ]]; then
