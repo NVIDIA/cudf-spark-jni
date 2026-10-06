@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -364,21 +364,23 @@ std::unique_ptr<cudf::column> map_zip(
 
   // Find the indices of each key in the first map
   // This tells us where each key appears in the first map, or if it doesn't exist
-  auto map1_indices      = indices_of(search_keys_list, cudf::lists_column_view(map1_keys), stream);
-  auto map1_indices_list = make_lists_column(search_keys_list.size(),
-                                             std::make_unique<column>(search_keys_list.offsets()),
-                                             std::move(map1_indices),
-                                             0,
-                                             rmm::device_buffer{0, stream});
+  auto map1_indices = indices_of(search_keys_list, cudf::lists_column_view(map1_keys), stream);
+  auto map1_indices_list =
+    make_lists_column(search_keys_list.size(),
+                      std::make_unique<column>(search_keys_list.offsets()),
+                      std::move(map1_indices),
+                      0,
+                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream));
 
   // Find the indices of each key in the second map
   // This tells us where each key appears in the second map, or if it doesn't exist
-  auto map2_indices      = indices_of(search_keys_list, cudf::lists_column_view(map2_keys), stream);
-  auto map2_indices_list = make_lists_column(search_keys_list.size(),
-                                             std::make_unique<column>(search_keys_list.offsets()),
-                                             std::move(map2_indices),
-                                             0,
-                                             rmm::device_buffer{0, stream});
+  auto map2_indices = indices_of(search_keys_list, cudf::lists_column_view(map2_keys), stream);
+  auto map2_indices_list =
+    make_lists_column(search_keys_list.size(),
+                      std::make_unique<column>(search_keys_list.offsets()),
+                      std::move(map2_indices),
+                      0,
+                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream));
 
   // Gather the values from map1 and map2 using the calculated indices
   // This extracts the values corresponding to each key in the union
@@ -398,23 +400,25 @@ std::unique_ptr<cudf::column> map_zip(
   value_pair_children.push_back(
     std::move(std::make_unique<column>(cudf::lists_column_view(*map2_values_list_gather).child())));
 
-  auto value_pair = make_structs_column(cudf::lists_column_view(*search_keys).child().size(),
-                                        std::move(value_pair_children),
-                                        0,
-                                        rmm::device_buffer{0, stream, mr},
-                                        stream,
-                                        mr);
+  auto value_pair =
+    make_structs_column(cudf::lists_column_view(*search_keys).child().size(),
+                        std::move(value_pair_children),
+                        0,
+                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
+                        stream,
+                        mr);
   std::vector<std::unique_ptr<column>> map_structs_children;
   map_structs_children.push_back(
     std::move(std::make_unique<column>(cudf::lists_column_view(*search_keys).child())));
   map_structs_children.push_back(std::move(value_pair));
 
-  auto map_structs = make_structs_column(cudf::lists_column_view(*search_keys).child().size(),
-                                         std::move(map_structs_children),
-                                         0,
-                                         rmm::device_buffer{0, stream, mr},
-                                         stream,
-                                         mr);
+  auto map_structs =
+    make_structs_column(cudf::lists_column_view(*search_keys).child().size(),
+                        std::move(map_structs_children),
+                        0,
+                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
+                        stream,
+                        mr);
   auto [result_mask, null_count] =
     cudf::bitmask_and(cudf::table_view({col1.parent(), col2.parent()}), stream, mr);
   return make_lists_column(search_keys_list.size(),

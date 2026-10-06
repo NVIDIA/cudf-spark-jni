@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -170,19 +170,24 @@ std::unique_ptr<cudf::column> make_binary_column(std::vector<std::vector<uint8_t
   rmm::device_buffer d_offsets(h_offsets.data(), h_offsets.size() * sizeof(int32_t), stream, mr);
   stream.sync();
 
-  auto child_col = std::make_unique<cudf::column>(
-    cudf::data_type{cudf::type_id::UINT8}, total_bytes, std::move(d_data), rmm::device_buffer{}, 0);
-  auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                    static_cast<cudf::size_type>(h_offsets.size()),
-                                                    std::move(d_offsets),
-                                                    rmm::device_buffer{},
-                                                    0);
+  auto child_col =
+    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
+                                   total_bytes,
+                                   std::move(d_data),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
+  auto offsets_col =
+    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                   static_cast<cudf::size_type>(h_offsets.size()),
+                                   std::move(d_offsets),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
 
   return cudf::make_lists_column(static_cast<cudf::size_type>(messages.size()),
                                  std::move(offsets_col),
                                  std::move(child_col),
                                  0,
-                                 rmm::device_buffer{});
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,13 +1418,18 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
                                                                   valid,
                                                                   stream,
                                                                   mr);
-      auto offsets_column = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                           num_rows + 1,
-                                                           list_offsets.release(),
-                                                           rmm::device_buffer{},
-                                                           0);
-      results.push_back(cudf::make_lists_column(
-        num_rows, std::move(offsets_column), std::move(child_values), 0, rmm::device_buffer{}));
+      auto offsets_column =
+        std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                       num_rows + 1,
+                                       list_offsets.release(),
+                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                       0);
+      results.push_back(
+        cudf::make_lists_column(num_rows,
+                                std::move(offsets_column),
+                                std::move(child_values),
+                                0,
+                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)));
     }
   });
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -464,11 +464,12 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
     std::vector<int64_t*>(host_results_pointer_iter, host_results_pointer_iter + children.size());
   auto d_results = cudf::detail::make_device_uvector(host_results_pointers, stream, default_mr);
 
-  auto result = cudf::make_structs_column(num_groups,
-                                          std::move(children),
-                                          0,                     // null count
-                                          rmm::device_buffer{},  // null mask
-                                          stream);
+  auto result = cudf::make_structs_column(
+    num_groups,
+    std::move(children),
+    0,                                                         // null count
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),  // null mask
+    stream);
 
   // 5. compact sketches
   auto num_phase3_threads = num_groups * num_long_cols;
@@ -663,7 +664,8 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
   compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.get()>>>(
     num_groups, num_registers_per_sketch, d_sketches_output, registers_output_cache);
 
-  return make_structs_column(num_groups, std::move(results), 0, rmm::device_buffer{});
+  return make_structs_column(
+    num_groups, std::move(results), 0, cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 /**

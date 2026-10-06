@@ -4,9 +4,9 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/b98d4bd6ff0715be42b7cfc78dfa9c4e212c5c5a.tar.gz",
-      "url_hash" : "SHA256=b773791cf6bdafb4cb3d68c80b7cc2707471f3dd8e9a1e40c8b47fce5dcf466a",
-      "version" : "3.5.0"
+      "url" : "https://github.com/NVIDIA/cccl/archive/cb9bee55d3f52b06b839c0895edd2d58655c4391.tar.gz",
+      "url_hash" : "SHA256=e44f9f1375516150234e3657396c9d0372d1a9094450c8a7da17d4a37f84c581",
+      "version" : "3.6.0"
     },
     "GTest" : 
     {
@@ -51,7 +51,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "5e67adc516ff478a8795d764883024e093e831e5",
+      "git_tag" : "257d08b41ef4e566cba6f5f64cb365e681961a3b",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.12"
@@ -83,7 +83,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "7e68b573a86c728ef1c4d4e1231bcf4ef2a0b682",
+      "git_tag" : "2d645925a1aea7ce8809aa57e6d78e32bdb0e36b",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
       "version" : "26.12"
@@ -92,7 +92,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "a9f63f8cdd4b0b41a2d88a9f705576a61b4222ec",
+      "git_tag" : "da8150f0a83e22953e598844dbebff6791681de7",
       "git_url" : "https://github.com/rapidsai/librtcx.git",
       "version" : "0.1"
     },

@@ -209,12 +209,13 @@ TEST_F(SparkMurmurHash3Test, NonCanonicalBool)
   // canonicalizes its inputs, so construct this column from raw bytes instead.
   auto const stream = cudf::get_default_stream();
   std::vector<uint8_t> const raw{0, 1, 2, 255};
-  auto data      = rmm::device_buffer{raw.data(), raw.size(), stream};
-  auto const col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::BOOL8},
-                                                  static_cast<cudf::size_type>(raw.size()),
-                                                  std::move(data),
-                                                  rmm::device_buffer{},
-                                                  0);
+  auto data = rmm::device_buffer{raw.data(), raw.size(), stream};
+  auto const col =
+    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::BOOL8},
+                                   static_cast<cudf::size_type>(raw.size()),
+                                   std::move(data),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
 
   auto const output = spark_rapids_jni::murmur_hash3_32(cudf::table_view({col->view()}), 42);
 

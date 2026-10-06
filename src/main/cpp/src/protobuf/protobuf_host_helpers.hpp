@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,10 @@
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
+#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/span.hpp>
 
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
@@ -118,8 +120,22 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
 // Nested decode view bundles
 // ============================================================================
 
+inline rmm::device_buffer make_zeroed_atomic_flag_buffer(std::size_t num_rows,
+                                                         cuda::stream_ref stream,
+                                                         rmm::device_async_resource_ref mr)
+{
+  static_assert(sizeof(bool) == 1);
+  // Subword atomics access the containing 32-bit word, including the allocation tail.
+  auto const padded_size = cudf::util::round_up_safe(num_rows, sizeof(uint32_t));
+  rmm::device_buffer flags(padded_size, alignof(uint32_t), stream, mr);
+  if (padded_size != 0) {
+    CUDF_CUDA_TRY(cudaMemsetAsync(flags.data(), 0, padded_size, stream.get()));
+  }
+  return flags;
+}
+
 struct protobuf_decode_runtime_context {
-  rmm::device_uvector<bool>* row_force_null;
+  cudf::device_span<bool> row_force_null;
   rmm::device_uvector<protobuf_error>* error;
 };
 
@@ -186,7 +202,7 @@ inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_row
   return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                         num_rows + 1,
                                         offsets.release(),
-                                        rmm::device_buffer{},
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                         0);
 }
 
@@ -494,7 +510,12 @@ std::unique_ptr<cudf::column> make_empty_struct_column_from_children(
     children.push_back(std::move(child_col));
   }
 
-  return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
+  return cudf::make_structs_column(0,
+                                   std::move(children),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   stream,
+                                   mr);
 }
 
 template <typename SchemaT>

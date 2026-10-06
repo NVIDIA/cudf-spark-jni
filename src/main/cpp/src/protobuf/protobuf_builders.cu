@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,11 +95,11 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
 
 namespace {
 
-inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent_locations(
-  field_location const* parent_locs,
-  int num_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+inline std::pair<cuda::device_buffer<std::byte>, cudf::size_type>
+make_null_mask_from_parent_locations(field_location const* parent_locs,
+                                     int num_rows,
+                                     cuda::stream_ref stream,
+                                     rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(num_rows >= 0, std::string{__func__} + ": row count must be non-negative");
   auto [mask, null_count] = cudf::detail::valid_if(
@@ -108,7 +108,7 @@ inline std::pair<rmm::device_buffer, cudf::size_type> make_null_mask_from_parent
     [parent_locs] __device__(cudf::size_type row) { return parent_locs[row].is_present(); },
     stream,
     mr);
-  if (null_count == 0) { mask = rmm::device_buffer{}; }
+  if (null_count == 0) { mask = cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED); }
   return {std::move(mask), null_count};
 }
 
@@ -132,14 +132,12 @@ inline void validate_protobuf_decode_context(
   std::source_location const& location = std::source_location::current())
 {
   auto const caller = location.function_name();
-  CUDF_EXPECTS(context.row_force_null != nullptr,
-               std::string{caller} + ": row-force-null buffer must be non-null");
   CUDF_EXPECTS(context.error != nullptr, std::string{caller} + ": error buffer must be non-null");
   CUDF_EXPECTS(context.error->size() == 1,
                std::string{caller} + ": error buffer must contain exactly one element");
   CUDF_EXPECTS(
-    context.row_force_null->is_empty() || parent.top_row_indices != nullptr ||
-      context.row_force_null->size() == static_cast<size_t>(input.num_rows),
+    context.row_force_null.empty() || parent.top_row_indices != nullptr ||
+      context.row_force_null.size() == static_cast<size_t>(input.num_rows),
     std::string{caller} + ": row-force-null buffer must be empty, row-sized, or remapped");
 }
 
@@ -170,8 +168,12 @@ std::unique_ptr<cudf::column> drop_unknown_repeated_enum_values_impl(
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto keep_values      = cudf::is_valid(child, stream, scratch_mr);
   auto keep_offsets     = std::make_unique<cudf::column>(input_view.offsets(), stream, scratch_mr);
-  auto keep_lists       = cudf::make_lists_column(
-    input_view.size(), std::move(keep_offsets), std::move(keep_values), 0, rmm::device_buffer{});
+  auto keep_lists =
+    cudf::make_lists_column(input_view.size(),
+                            std::move(keep_offsets),
+                            std::move(keep_values),
+                            0,
+                            cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   return cudf::lists::apply_retention_mask(
     input_view, cudf::lists_column_view{keep_lists->view()}, stream, mr);
 }
@@ -212,8 +214,11 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
                                    input_null_count,
                                    cudf::copy_bitmask(binary_input, stream, mr));
   }
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
+  return cudf::make_lists_column(num_rows,
+                                 std::move(offsets_col),
+                                 std::move(child_col),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
@@ -267,19 +272,30 @@ std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
         std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                        1,
                                        rmm::device_buffer(sizeof(int32_t), stream, mr),
-                                       rmm::device_buffer{},
+                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                        0);
       CUDF_CUDA_TRY(cudaMemsetAsync(
         offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
-      auto child_col = std::make_unique<cudf::column>(
-        cudf::data_type{cudf::type_id::UINT8}, 0, rmm::device_buffer{}, rmm::device_buffer{}, 0);
-      return cudf::make_lists_column(
-        0, std::move(offsets_col), std::move(child_col), 0, rmm::device_buffer{});
+      auto child_col =
+        std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
+                                       0,
+                                       rmm::device_buffer{},
+                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                       0);
+      return cudf::make_lists_column(0,
+                                     std::move(offsets_col),
+                                     std::move(child_col),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     }
     case cudf::type_id::STRUCT: {
       std::vector<std::unique_ptr<cudf::column>> empty_children;
-      return cudf::make_structs_column(
-        0, std::move(empty_children), 0, rmm::device_buffer{}, stream, mr);
+      return cudf::make_structs_column(0,
+                                       std::move(empty_children),
+                                       0,
+                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                       stream,
+                                       mr);
     }
     default: return cudf::make_empty_column(dtype);
   }
@@ -303,15 +319,19 @@ std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::colum
                                                      cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
-  auto offsets_col = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                                    1,
-                                                    rmm::device_buffer(sizeof(int32_t), stream, mr),
-                                                    rmm::device_buffer{},
-                                                    0);
+  auto offsets_col =
+    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
+                                   1,
+                                   rmm::device_buffer(sizeof(int32_t), stream, mr),
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                   0);
   CUDF_CUDA_TRY(
     cudaMemsetAsync(offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
-  return cudf::make_lists_column(
-    0, std::move(offsets_col), std::move(element_col), 0, rmm::device_buffer{});
+  return cudf::make_lists_column(0,
+                                 std::move(offsets_col),
+                                 std::move(element_col),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // ============================================================================
@@ -525,13 +545,23 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   if (is_bytes) {
     // Transfer ownership of the chars buffer instead of copying — the strings path below uses
     // `chars.release()` for the same reason.
-    auto bytes_child = std::make_unique<cudf::column>(
-      cudf::data_type{cudf::type_id::UINT8}, total_chars, chars.release(), rmm::device_buffer{}, 0);
-    child_col = cudf::make_lists_column(
-      total_count, std::move(str_offsets_col), std::move(bytes_child), 0, rmm::device_buffer{});
+    auto bytes_child =
+      std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
+                                     total_chars,
+                                     chars.release(),
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     0);
+    child_col = cudf::make_lists_column(total_count,
+                                        std::move(str_offsets_col),
+                                        std::move(bytes_child),
+                                        0,
+                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   } else {
-    child_col = cudf::make_strings_column(
-      total_count, std::move(str_offsets_col), chars.release(), 0, rmm::device_buffer{});
+    child_col = cudf::make_strings_column(total_count,
+                                          std::move(str_offsets_col),
+                                          chars.release(),
+                                          0,
+                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }
 
   auto offsets_col = make_offsets_column(input.num_rows, std::move(work.offsets));
@@ -569,8 +599,9 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
     validation_fields.host.data(), static_cast<int>(validation_fields.host.size()), stream);
   auto d_field_lookup = cudf::detail::make_device_uvector_async(h_field_lookup, stream, scratch_mr);
 
-  auto invalid_rows =
-    cudf::detail::make_zeroed_device_uvector_async<bool>(input.num_rows, stream, scratch_mr);
+  auto invalid_rows_storage = make_zeroed_atomic_flag_buffer(input.num_rows, stream, scratch_mr);
+  auto const invalid_rows = cudf::device_span<bool>{static_cast<bool*>(invalid_rows_storage.data()),
+                                                    static_cast<std::size_t>(input.num_rows)};
   field_occurrence_location_provider fragment_locations{input, parent, work.occurrences.data()};
   launch_validate_message_fragments(
     fragment_locations,
@@ -580,7 +611,7 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
       static_cast<int>(d_field_lookup.size())}},
     work.total_count,
     invalid_rows.data(),
-    context.runtime.row_force_null->is_empty() ? nullptr : context.runtime.row_force_null->data(),
+    context.runtime.row_force_null.empty() ? nullptr : context.runtime.row_force_null.data(),
     context.runtime.error->data(),
     depth + 1,
     stream);
@@ -755,7 +786,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                   .direct      = nullptr,
                                   .direct_size = 0}},
     decode_ctx.error->data(),
-    !decode_ctx.row_force_null->is_empty() ? decode_ctx.row_force_null->data() : nullptr,
+    !decode_ctx.row_force_null.empty() ? decode_ctx.row_force_null.data() : nullptr,
     depth + 1,
     stream);
 

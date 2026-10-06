@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -581,6 +581,7 @@ __device__ bool scan_all_field_occurrences_in_message(uint8_t const* msg_base,
   return true;
 }
 
+template <wire_type_mismatch_policy MismatchPolicy>
 CUDF_KERNEL void scan_all_field_occurrences_kernel(cudf::column_device_view const d_in,
                                                    field_occurrence_scan_view fields,
                                                    protobuf_error* error_flag)
@@ -599,7 +600,7 @@ CUDF_KERNEL void scan_all_field_occurrences_kernel(cudf::column_device_view cons
   if (!check_message_bounds(start, end, child.size(), error_flag)) return;
 
   [[maybe_unused]] auto const scan_succeeded =
-    scan_all_field_occurrences_in_message<wire_type_mismatch_policy::report_error_and_abort>(
+    scan_all_field_occurrences_in_message<MismatchPolicy>(
       bytes + start, bytes + end, fields, error_flag, row, PROTOBUF_JAVA_RECURSION_LIMIT);
 }
 
@@ -969,8 +970,8 @@ void launch_scan_all_field_occurrences(cudf::column_device_view const& d_in,
   auto const num_rows = d_in.size();
   if (num_rows == 0) return;
   auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
-  scan_all_field_occurrences_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.get()>>>(
-    d_in, fields, error_flag);
+  scan_all_field_occurrences_kernel<wire_type_mismatch_policy::report_error_and_abort>
+    <<<blocks, THREADS_PER_BLOCK, 0, stream.get()>>>(d_in, fields, error_flag);
   CUDF_CHECK_CUDA(stream.get());
 }
 
@@ -982,8 +983,9 @@ void launch_scan_singular_message_occurrences(cudf::column_device_view const& d_
   auto const num_rows = d_in.size();
   if (num_rows == 0) return;
   auto const blocks = static_cast<int>((num_rows + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
-  scan_all_field_occurrences_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.get()>>>(
-    d_in, fields, error_flag);
+  // Match the singular-message count pass so every counted fragment is initialized.
+  scan_all_field_occurrences_kernel<wire_type_mismatch_policy::report_error_and_continue>
+    <<<blocks, THREADS_PER_BLOCK, 0, stream.get()>>>(d_in, fields, error_flag);
   CUDF_CHECK_CUDA(stream.get());
 }
 
@@ -1175,9 +1177,7 @@ void maybe_check_required_fields(required_field_input_view input,
   auto const blocks =
     static_cast<int>((input.values.size + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
   auto* row_force_null =
-    decode_ctx.row_force_null != nullptr && !decode_ctx.row_force_null->is_empty()
-      ? decode_ctx.row_force_null->data()
-      : nullptr;
+    !decode_ctx.row_force_null.empty() ? decode_ctx.row_force_null.data() : nullptr;
   check_required_fields_kernel<<<blocks, THREADS_PER_BLOCK, 0, stream.get()>>>(
     input,
     d_is_required.data(),

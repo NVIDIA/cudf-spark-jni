@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 
 #include "protobuf/protobuf.hpp"
+#include "protobuf/protobuf_host_helpers.hpp"
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf_test/base_fixture.hpp>
@@ -32,6 +33,7 @@
 #include <cuda_runtime_api.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <numeric>
@@ -81,6 +83,31 @@ TEST_F(ProtobufHelpersTest, NumericEnumDefaultMustFitInt32)
 {
   EXPECT_NO_THROW(make_numeric_enum_context(2));
   EXPECT_THROW(make_numeric_enum_context(int64_t{1} << 42), std::invalid_argument);
+}
+
+TEST_F(ProtobufHelpersTest, AtomicFlagBufferIsPaddedAndZeroed)
+{
+  auto const stream = cudf::get_default_stream();
+  for (std::size_t num_rows : {0, 1, 2, 3, 4, 5, 7, 8, 9}) {
+    SCOPED_TRACE(num_rows);
+    auto flags = protobuf::detail::make_zeroed_atomic_flag_buffer(
+      num_rows, stream, cudf::get_current_device_resource_ref());
+    EXPECT_EQ(num_rows == 0, flags.is_empty());
+    EXPECT_GE(flags.alignment(), alignof(uint32_t));
+    EXPECT_EQ(0u, flags.size() % sizeof(uint32_t));
+    EXPECT_GE(flags.size(), num_rows);
+    EXPECT_LT(flags.size() - num_rows, sizeof(uint32_t));
+    if (num_rows == 0) {
+      EXPECT_EQ(nullptr, flags.data());
+      continue;
+    }
+    EXPECT_EQ(0u, reinterpret_cast<std::uintptr_t>(flags.data()) % alignof(uint32_t));
+    std::vector<uint8_t> bytes(flags.size());
+    CUDF_CUDA_TRY(
+      cudaMemcpyAsync(bytes.data(), flags.data(), bytes.size(), cudaMemcpyDefault, stream.get()));
+    stream.sync();
+    EXPECT_EQ(std::vector<uint8_t>(bytes.size(), 0), bytes);
+  }
 }
 
 TEST_F(ProtobufHelpersTest, NullMaskFromPaddedValidUsesZeroLogicalRows)

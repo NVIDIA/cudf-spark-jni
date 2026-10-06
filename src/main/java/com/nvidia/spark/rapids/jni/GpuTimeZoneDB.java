@@ -20,6 +20,8 @@ import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
+import ai.rapids.cudf.HostColumnVectorCore;
+import ai.rapids.cudf.NativeDepsLoader;
 import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +40,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -50,6 +53,10 @@ import java.util.concurrent.TimeUnit;
  * - Loading, shutdown, and checking APIs, etc.
  */
 public class GpuTimeZoneDB {
+  static {
+    NativeDepsLoader.loadNativeDeps();
+  }
+
   private static final Logger log = LoggerFactory.getLogger(GpuTimeZoneDB.class);
 
   /**
@@ -239,12 +246,18 @@ public class GpuTimeZoneDB {
    * E.g.: Give transition date "2000-01-02", and transition time diff in seconds
    * "-3600",
    * then the actual transition datetime is "2000-01-01 23:00:00"
+   * <p>
+   * A midnight-at-end-of-day rule is represented as 86400 seconds so the
+   * transition occurs at midnight on the following day.
+   * This method is visible for testing.
    *
    * @param rule transition rule
    * @return the time diff in seconds compared to the midnight
    */
-  private static int getTransitionRuleTimeDiffComparedToMidnight(ZoneOffsetTransitionRule rule) {
-    int localTimeInSeconds = rule.getLocalTime().toSecondOfDay();
+  static int getTransitionRuleTimeDiffComparedToMidnight(ZoneOffsetTransitionRule rule) {
+    int localTimeInSeconds = rule.isMidnightEndOfDay()
+        ? 24 * 3_600
+        : rule.getLocalTime().toSecondOfDay();
     ZoneOffsetTransitionRule.TimeDefinition timeDef = rule.getTimeDefinition();
     if (ZoneOffsetTransitionRule.TimeDefinition.UTC == timeDef) {
       // UTC mode
@@ -348,12 +361,6 @@ public class GpuTimeZoneDB {
             }
 
             dstTransitionRules.forEach(dstRule -> {
-              if (dstRule.isMidnightEndOfDay()) {
-                // Checked all the timezones, there is no midnight end of day for DST rules.
-                // This is a protection in case JVM adds new timezones in the future.
-                throw new IllegalStateException("Unsupported midnight end of day for DST rules.");
-              }
-
               DayOfWeek dow = dstRule.getDayOfWeek();
               int dayOfWeek = dow != null ? dow.getValue() - 1 : -1;
               dstData.add(dstRule.getMonth().getValue()); // from 1 (January) to 12 (December)
@@ -378,18 +385,21 @@ public class GpuTimeZoneDB {
         zoneIdToTable.put(nonNormalizedTz, zoneIdToTable.get(normalizedTz));
       } // end of for
 
-      HostColumnVector.DataType childType = new HostColumnVector.StructType(false,
-          new HostColumnVector.BasicType(false, DType.INT64),
-          new HostColumnVector.BasicType(false, DType.INT64),
-          new HostColumnVector.BasicType(false, DType.INT32));
-      HostColumnVector.DataType transitionType = new HostColumnVector.ListType(false, childType);
-      fixedTransitions = HostColumnVector.fromLists(transitionType,
+      fixedTransitions = HostColumnVector.fromLists(getFixedTransitionDataType(),
           masterTransitions.toArray(new List[0]));
       dstRules = HostColumnVector.fromLists(getDstDataType(), masterDsts.toArray(new List[0]));
       tzNameToIndexMap = getTzNameToIndexMap(sortedTimeZones, zoneIdToTable);
     } catch (Exception e) {
       throw new IllegalStateException("load timezone DB cache failed!", e);
     }
+  }
+
+  private static HostColumnVector.DataType getFixedTransitionDataType() {
+    return new HostColumnVector.ListType(false,
+        new HostColumnVector.StructType(false,
+            new HostColumnVector.BasicType(false, DType.INT64),
+            new HostColumnVector.BasicType(false, DType.INT64),
+            new HostColumnVector.BasicType(false, DType.INT32)));
   }
 
   private static HostColumnVector.DataType getDstDataType() {
@@ -411,6 +421,36 @@ public class GpuTimeZoneDB {
     try (ColumnVector fixedInfo = fixedTransitions.copyToDevice();
         ColumnVector dstInfo = dstRules.copyToDevice()) {
       return new Table(fixedInfo, dstInfo);
+    }
+  }
+
+  private static Table getTimezoneInfo(int tzIndex) {
+    try (HostColumnVector.ColumnBuilder fixedRow =
+            new HostColumnVector.ColumnBuilder(getFixedTransitionDataType(), 1);
+        HostColumnVector.ColumnBuilder dstRow =
+            new HostColumnVector.ColumnBuilder(getDstDataType(), 1)) {
+      HostColumnVectorCore transitions = fixedTransitions.getChildColumnView(0);
+      HostColumnVector.ColumnBuilder transition = fixedRow.getChild(0);
+      long transitionEnd = fixedTransitions.getEndListOffset(tzIndex);
+      for (long i = fixedTransitions.getStartListOffset(tzIndex); i < transitionEnd; i++) {
+        transition.getChild(0).append(transitions.getChildColumnView(0).getLong(i));
+        transition.getChild(1).append(transitions.getChildColumnView(1).getLong(i));
+        transition.getChild(2).append(transitions.getChildColumnView(2).getInt(i));
+        transition.endStruct();
+      }
+      fixedRow.endList();
+
+      HostColumnVectorCore rules = dstRules.getChildColumnView(0);
+      long ruleEnd = dstRules.getEndListOffset(tzIndex);
+      for (long i = dstRules.getStartListOffset(tzIndex); i < ruleEnd; i++) {
+        dstRow.getChild(0).append(rules.getInt(i));
+      }
+      dstRow.endList();
+
+      try (ColumnVector fixedInfo = fixedRow.buildAndPutOnDevice();
+          ColumnVector dstInfo = dstRow.buildAndPutOnDevice()) {
+        return new Table(fixedInfo, dstInfo);
+      }
     }
   }
 
@@ -520,8 +560,8 @@ public class GpuTimeZoneDB {
 
   /**
    * ORC stores timestamp seconds as a diff from 2015-01-01 00:00:00 in the writer timezone.
-   * Use the writer offset at that base timestamp so native code can reconstruct the same
-   * timestamp frame before applying ORC's negative nanos borrow and timezone conversion.
+   * Use the writer offset at that base timestamp so native code can shift the cuDF-decoded
+   * instant back into that writer frame before the timezone conversion.
    */
   private static int getOrc2015YearBaseOffsetMillis(String timezoneId, OrcTimezoneInfo info) {
     if (info.transitions == null && info.dstRule == null) {
@@ -595,7 +635,11 @@ public class GpuTimeZoneDB {
   public static final class OrcTimezoneContext implements AutoCloseable {
     private Table writerTzInfoTable;
     private Table readerTzInfoTable;
+    private Table readerJavaTimeTzInfoTable;
     private final long writerTzOffsetAtOrc2015BaseUs;
+    // Whether the native reader resolved the writer timezone (and decided the borrow there).
+    // False means its UTC fallback; native then reconstructs the Apache borrow.
+    private final boolean writerBorrowApplied;
     private final int writerInitialOffset;
     private final int writerRawOffset;
     private final int[] writerDstRule;
@@ -603,6 +647,10 @@ public class GpuTimeZoneDB {
     private final int readerRawOffset;
     private final int[] readerDstRule;
     private final long readerFirstTransitionUs;
+    private final long readerHistoricalDifferenceEndUtcUs;
+    private final long readerHistoricalDifferenceEndLocalUs;
+    private final String readerJavaTimeZoneId;
+    private int readerJavaTimeTzIndex = -1;
     private final boolean writerReaderRulesDiffer;
     private boolean closed;
 
@@ -613,6 +661,7 @@ public class GpuTimeZoneDB {
       this.readerTzInfoTable = readerTzInfoTable;
       this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
           getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
+      this.writerBorrowApplied = isWriterTimezoneResolvedNatively(writerTimezone);
       this.writerInitialOffset = writerTzInfo.initialOffset;
       this.writerRawOffset = writerTzInfo.rawOffset;
       this.writerDstRule = dstRuleToArray(writerTzInfo.dstRule);
@@ -624,6 +673,17 @@ public class GpuTimeZoneDB {
               ? Long.MIN_VALUE
               : TimeUnit.MILLISECONDS.toMicros(
                   readerTzInfo.transitions[0] + readerTzInfo.rawOffset);
+      this.readerHistoricalDifferenceEndUtcUs = readerTzInfo.historicalDifferenceEndUtcMillis
+          == Long.MIN_VALUE
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.historicalDifferenceEndUtcMillis);
+      this.readerHistoricalDifferenceEndLocalUs = readerTzInfo.historicalDifferenceEndLocalMillis
+          == Long.MIN_VALUE
+              ? Long.MIN_VALUE
+              : TimeUnit.MILLISECONDS.toMicros(
+                  readerTzInfo.historicalDifferenceEndLocalMillis);
+      this.readerJavaTimeZoneId = getZoneId(readerTimezone).normalized().toString();
       TimeZone writerTz = TimeZone.getTimeZone(getZoneId(writerTimezone));
       TimeZone readerTz = TimeZone.getTimeZone(getZoneId(readerTimezone));
       this.writerReaderRulesDiffer = !writerTz.hasSameRules(readerTz);
@@ -631,6 +691,7 @@ public class GpuTimeZoneDB {
 
     /**
      * Returns the reader timezone's first transition in the local ORC timestamp frame.
+     * This method is retained for compatibility with existing callers.
      *
      * @return the first transition in microseconds, or {@link Long#MIN_VALUE} if the reader
      *         timezone has no transitions
@@ -641,10 +702,44 @@ public class GpuTimeZoneDB {
       return readerFirstTransitionUs;
     }
 
+    boolean isWriterBorrowApplied() {
+      return writerBorrowApplied;
+    }
+
+    long getReaderHistoricalDifferenceEndUtcUs() {
+      ensureOpen();
+      return readerHistoricalDifferenceEndUtcUs;
+    }
+
+    long getReaderHistoricalDifferenceEndLocalUs() {
+      ensureOpen();
+      return readerHistoricalDifferenceEndLocalUs;
+    }
+
     private void ensureOpen() {
       if (closed) {
         throw new IllegalStateException("ORC timezone context is closed");
       }
+    }
+
+    private void ensureJavaTimeInfo() {
+      ensureOpen();
+      if ((readerHistoricalDifferenceEndUtcUs == Long.MIN_VALUE
+          && readerHistoricalDifferenceEndLocalUs == Long.MIN_VALUE)
+          || readerJavaTimeTzInfoTable != null) {
+        return;
+      }
+
+      verifyDatabaseCached();
+      Integer tzIndex = zoneIdToTable.get(readerJavaTimeZoneId);
+      if (tzIndex == null) {
+        throw new IllegalStateException(
+            "java.time timezone is not present in the GPU timezone database: "
+                + readerJavaTimeZoneId);
+      }
+      // Copy only the reader row, rather than retaining the full database for each context.
+      readerJavaTimeTzInfoTable = getTimezoneInfo(tzIndex);
+      readerJavaTimeTzIndex = 0;
     }
 
     @Override
@@ -655,9 +750,11 @@ public class GpuTimeZoneDB {
       closed = true;
       Table writerTable = writerTzInfoTable;
       Table readerTable = readerTzInfoTable;
+      Table readerJavaTimeTable = readerJavaTimeTzInfoTable;
       writerTzInfoTable = null;
       readerTzInfoTable = null;
-      Arms.closeAll(writerTable, readerTable);
+      readerJavaTimeTzInfoTable = null;
+      Arms.closeAll(writerTable, readerTable, readerJavaTimeTable);
     }
   }
 
@@ -714,12 +811,15 @@ public class GpuTimeZoneDB {
         context.readerInitialOffset,
         context.readerRawOffset,
         context.readerDstRule,
-        context.writerReaderRulesDiffer));
+        context.writerReaderRulesDiffer,
+        context.writerBorrowApplied));
   }
 
   /**
    * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics using a pre-built
-   * ORC timezone context. The input must be TIMESTAMP_MICROSECONDS.
+   * ORC timezone context. The input must be TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS.
+   * Millisecond input supports floating-point schema evolution without overflowing a preliminary
+   * conversion to microseconds.
    *
    * @param input values to convert
    * @param context timezone metadata whose reader side identifies the target timezone
@@ -737,9 +837,84 @@ public class GpuTimeZoneDB {
   }
 
   /**
+   * Convert a physical ORC timestamp to Spark's timestamp representation.
+   *
+   * <p>This fuses Apache ORC's {@link TimeZone} writer/reader conversion with the historical
+   * {@link ZoneId} rebase performed when Spark materializes a {@code java.sql.Timestamp}.</p>
+   *
+   * @param input physical ORC timestamps read as TIMESTAMP_MICROSECONDS
+   * @param context writer/reader timezone metadata
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector convertOrcTimestampToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_PHYSICAL_TIMESTAMP);
+  }
+
+  /**
+   * Convert integer-derived local timestamps produced by ORC schema evolution to Spark timestamps.
+   *
+   * <p>This preserves the offset selected by ORC's {@link TimeZone}-based conversion when Spark's
+   * historical rebase encounters an ambiguous local time.</p>
+   *
+   * @param input local TIMESTAMP_MICROSECONDS values
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector convertOrcIntegerTimestampToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_LOCAL_TIMESTAMP);
+  }
+
+  /**
+   * Apply Spark's historical rebase to an instant already converted by Apache ORC.
+   *
+   * <p>Floating-point schema evolution must apply the legacy timezone offset before rounding to
+   * milliseconds, then rebase that rounded instant. Rounding can cross a historical transition,
+   * so this operation cannot be combined with the earlier offset lookup.</p>
+   *
+   * @param input already converted and rounded TIMESTAMP_MICROSECONDS values
+   * @param context timezone metadata whose reader side identifies the target timezone
+   * @return Spark-compatible timestamps in microseconds
+   */
+  public static ColumnVector rebaseOrcInstantToSpark(
+      ColumnView input, OrcTimezoneContext context) {
+    return convertOrcToSpark(input, context, ORC_INSTANT);
+  }
+
+  // Keep these values synchronized with orc_timestamp_kind in timezones.hpp.
+  private static final int ORC_PHYSICAL_TIMESTAMP = 0;
+  private static final int ORC_LOCAL_TIMESTAMP = 1;
+  private static final int ORC_INSTANT = 2;
+
+  private static ColumnVector convertOrcToSpark(
+      ColumnView input, OrcTimezoneContext context, int inputKind) {
+    context.ensureJavaTimeInfo();
+    return new ColumnVector(convertOrcToSparkWithRules(
+        input.getNativeView(),
+        inputKind,
+        context.writerTzOffsetAtOrc2015BaseUs,
+        context.writerTzInfoTable != null ? context.writerTzInfoTable.getNativeView() : 0L,
+        context.writerInitialOffset,
+        context.writerRawOffset,
+        context.writerDstRule,
+        context.readerTzInfoTable != null ? context.readerTzInfoTable.getNativeView() : 0L,
+        context.readerInitialOffset,
+        context.readerRawOffset,
+        context.readerDstRule,
+        context.writerReaderRulesDiffer,
+        context.writerBorrowApplied,
+        context.readerJavaTimeTzInfoTable != null
+            ? context.readerJavaTimeTzInfoTable.getNativeView() : 0L,
+        context.readerJavaTimeTzIndex,
+        context.readerHistoricalDifferenceEndUtcUs,
+        context.readerHistoricalDifferenceEndLocalUs));
+  }
+
+  /**
    * Apply Apache ORC's {@code SerializationUtils.convertFromUtc} semantics.
    *
-   * @param input TIMESTAMP_MICROSECONDS values
+   * @param input TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS values
    * @param readerTimezone target timezone
    * @return converted values with the same type as {@code input}
    */
@@ -775,19 +950,16 @@ public class GpuTimeZoneDB {
 
   /**
    * Convert timestamps between writer/reader timezones for ORC reading.
-   * Similar to Apache ORC, this first reconstructs the timestamp from ORC's
-   * writer-timezone 2015 base instant and applies the negative nanos borrow,
-   * then applies the offset from
-   * `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`.
-   * For more details, refer to:
-   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/TreeReaderFactory.java#L1284-L1286">borrow logic</a>
-   * and
-   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/SerializationUtils.java#L1440">timezone conversion logic</a>
+   * Shifts the decoded instant back into the writer-timezone 2015 base frame, then applies the
+   * offset from `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`. The reader
+   * decides the negative nanos borrow in the writer's frame when it resolves that timezone
+   * (matching Apache ORC); on its UTC fallback the borrow is reconstructed before the shift.
+   * See Apache ORC 1.9.1 TreeReaderFactory (borrow logic) and SerializationUtils
+   * (timezone conversion).
    *
    * @param input          input timestamp column in microseconds.
-   * @param writerTimezone writer timezone, it's from ORC stripe metadata.
-   * @param readerTimezone reader timezone, it's from current JVM default
-   *                       timezone.
+   * @param writerTimezone writer timezone from ORC stripe metadata.
+   * @param readerTimezone reader timezone from the current JVM default timezone.
    * @return timestamp column in microseconds after converting between timezones
    */
   public static ColumnVector convertOrcTimezones(
@@ -819,7 +991,21 @@ public class GpuTimeZoneDB {
       int readerTzInitialOffset,
       int readerTzRawOffset,
       int[] readerDstRule,
-      boolean writerReaderRulesDiffer);
+      boolean writerReaderRulesDiffer,
+      boolean writerBorrowApplied);
+
+  // Memoized probe results per writer timezone id (the native probe parses the TZif file, so
+  // repeated contexts for the same id must not repeat it). Bounded in practice by the distinct
+  // writer timezones seen in ORC footers; same lifetime convention as RUNTIME_TIMEZONE_INFOS.
+  private static final ConcurrentHashMap<String, Boolean> RESOLVED_WRITER_TIMEZONES =
+      new ConcurrentHashMap<>();
+
+  private static boolean isWriterTimezoneResolvedNatively(String writerTimezone) {
+    return RESOLVED_WRITER_TIMEZONES.computeIfAbsent(
+        writerTimezone, GpuTimeZoneDB::probeWriterTimezone);
+  }
+
+  private static native boolean probeWriterTimezone(String writerTimezone);
 
   private static native long convertOrcFromUtcWithRules(
       long input,
@@ -827,4 +1013,23 @@ public class GpuTimeZoneDB {
       int readerTzInitialOffset,
       int readerTzRawOffset,
       int[] readerDstRule);
+
+  private static native long convertOrcToSparkWithRules(
+      long input,
+      int inputKind,
+      long writerTzOffsetAtOrc2015BaseUs,
+      long writerTzInfoTable,
+      int writerTzInitialOffset,
+      int writerTzRawOffset,
+      int[] writerDstRule,
+      long readerTzInfoTable,
+      int readerTzInitialOffset,
+      int readerTzRawOffset,
+      int[] readerDstRule,
+      boolean writerReaderRulesDiffer,
+      boolean writerBorrowApplied,
+      long javaTimeInfoTable,
+      int javaTimeTzIndex,
+      long readerHistoricalDifferenceEndUtcUs,
+      long readerHistoricalDifferenceEndLocalUs);
 }

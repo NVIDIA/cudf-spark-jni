@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -396,12 +396,13 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   }
 
   auto const d_input = cudf::column_device_view::create(input.parent(), stream, temp_mr);
-  auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
-                                            num_rows,
-                                            rmm::device_buffer{},
-                                            0,
-                                            stream,
-                                            mr);
+  auto result =
+    cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
+                                num_rows,
+                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                0,
+                                stream,
+                                mr);
   // Every code path in parse_with_format_fn::operator() writes validity[idx], so leaving the
   // buffer uninitialized is safe.
   auto validity = rmm::device_uvector<bool>(num_rows, stream, temp_mr);

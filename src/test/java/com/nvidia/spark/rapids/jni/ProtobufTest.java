@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -3749,46 +3749,66 @@ public class ProtobufTest {
     }
   }
 
-  @Test
-  void testWrongWireBeforeDuplicateSingularMessageOccurrences_Permissive() {
+  private static Byte[][] duplicateSingularMessageRowsWithWrongWire(int wrongWirePosition) {
     Byte[] firstFragment = concat(box(tag(1, WT_VARINT)), box(encodeVarint(1)));
     Byte[] secondFragment = concat(box(tag(1, WT_VARINT)), box(encodeVarint(2)));
-    Byte[] row = concat(
-        box(tag(1, WT_VARINT)), box(encodeVarint(7)),
-        box(tag(1, WT_LEN)), encodeMessage(firstFragment),
-        box(tag(1, WT_LEN)), encodeMessage(secondFragment));
+    Byte[] wrongWire = concat(box(tag(1, WT_VARINT)), box(encodeVarint(7)));
+    Byte[] first = concat(box(tag(1, WT_LEN)), encodeMessage(firstFragment));
+    Byte[] second = concat(box(tag(1, WT_LEN)), encodeMessage(secondFragment));
+    Byte[] malformed;
+    switch (wrongWirePosition) {
+      case 0:
+        malformed = concat(wrongWire, first, second);
+        break;
+      case 1:
+        malformed = concat(first, wrongWire, second);
+        break;
+      case 2:
+        malformed = concat(first, second, wrongWire);
+        break;
+      default:
+        throw new IllegalArgumentException("Invalid wrong-wire position: " + wrongWirePosition);
+    }
+    Byte[] valid = concat(first, second);
+    return new Byte[][]{valid, malformed, valid};
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, 1, 2})
+  void testWrongWireAroundDuplicateSingularMessageOccurrences_Permissive(int wrongWirePosition) {
+    Byte[][] rows = duplicateSingularMessageRowsWithWrongWire(wrongWirePosition);
     ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
         .addField(1, DType.STRUCT).down()
             .addField(1, DType.INT32)
         .up()
         .build();
 
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+    try (Table input = new Table.TestBuilder()
+             .column(rows).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true, new BasicType(true, DType.INT32))),
+             struct(struct(2)), null, struct(struct(2)));
          ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
-      assertSingleNullStructRow(
-          actual, "Wrong top-level wire type should null the struct row");
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
-  @Test
-  void testWrongWireBeforeDuplicateSingularMessageOccurrences_Failfast() {
-    Byte[] firstFragment = concat(box(tag(1, WT_VARINT)), box(encodeVarint(1)));
-    Byte[] secondFragment = concat(box(tag(1, WT_VARINT)), box(encodeVarint(2)));
-    Byte[] row = concat(
-        box(tag(1, WT_VARINT)), box(encodeVarint(7)),
-        box(tag(1, WT_LEN)), encodeMessage(firstFragment),
-        box(tag(1, WT_LEN)), encodeMessage(secondFragment));
+  @ParameterizedTest
+  @ValueSource(ints = {0, 1, 2})
+  void testWrongWireAroundDuplicateSingularMessageOccurrences_Failfast(int wrongWirePosition) {
+    Byte[][] rows = duplicateSingularMessageRowsWithWrongWire(wrongWirePosition);
     ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
         .addField(1, DType.STRUCT).down()
             .addField(1, DType.INT32)
         .up()
         .build();
 
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
-      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+    try (Table input = new Table.TestBuilder().column(rows).build()) {
+      ai.rapids.cudf.CudfException error = assertThrows(ai.rapids.cudf.CudfException.class, () -> {
         try (ColumnVector ignored = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
         }
       });
+      assertTrue(error.getMessage().contains("unexpected wire type"));
     }
   }
 
@@ -4358,8 +4378,9 @@ public class ProtobufTest {
     }
   }
 
-  @Test
-  void testRequiredFieldInsideNestedMessageMissing_Permissive() {
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2, 3, 4, 5})
+  void testRequiredFieldInsideNestedMessageMissing_Permissive(int numRows) {
     // message Outer { Inner inner = 1; string name = 2; }
     // message Inner { required int32 id = 1; optional string note = 2; }
     Byte[] inner = concat(box(tag(2, WT_LEN)), encodeString("oops"));
@@ -4367,7 +4388,24 @@ public class ProtobufTest {
         box(tag(1, WT_LEN)), encodeMessage(inner),
         box(tag(2, WT_LEN)), encodeString("outside"));
 
-    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+    Byte[] validInner = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)), inner);
+    Byte[] validRow = concat(
+        box(tag(1, WT_LEN)), encodeMessage(validInner),
+        box(tag(2, WT_LEN)), encodeString("outside"));
+    Byte[][] rows = new Byte[numRows][];
+    Arrays.fill(rows, validRow);
+    // Exercise the allocation tail under memcheck without nulling neighboring valid rows.
+    rows[numRows - 1] = row;
+    StructData[] expectedRows = new StructData[numRows];
+    Arrays.fill(expectedRows, struct(struct(42, "oops"), "outside"));
+    expectedRows[numRows - 1] = null;
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new StructType(true,
+                     new BasicType(true, DType.INT32), new BasicType(true, DType.STRING)),
+                 new BasicType(true, DType.STRING)), expectedRows);
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0),
              new ProtobufSchemaDescriptorBuilder()
@@ -4378,8 +4416,36 @@ public class ProtobufTest {
                  .addField(2, DType.STRING)
                  .build(),
              false)) {
-      assertSingleNullStructRow(actual,
-          "Missing nested required field should null the outer row in PERMISSIVE mode");
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 2, 3, 4, 5})
+  void testMalformedDuplicateMessageFragments_Permissive(int numRows) {
+    Byte[] validInner = concat(box(tag(1, WT_VARINT)), box(encodeVarint(42)));
+    Byte[] validRow = concat(box(tag(1, WT_LEN)), encodeMessage(validInner));
+    Byte[] malformedInner = concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+    Byte[] fragment = concat(box(tag(1, WT_LEN)), encodeMessage(malformedInner));
+    Byte[][] rows = new Byte[numRows][];
+    Arrays.fill(rows, validRow);
+    // Both fragments mark the same parent and root row through atomic updates.
+    rows[numRows - 1] = concat(fragment, fragment);
+    StructData[] expectedRows = new StructData[numRows];
+    Arrays.fill(expectedRows, struct(struct(42)));
+    expectedRows[numRows - 1] = null;
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(rows).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new StructType(true, new BasicType(true, DType.INT32))), expectedRows);
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 

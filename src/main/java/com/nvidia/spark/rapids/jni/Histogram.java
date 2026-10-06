@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,30 @@ import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.NativeDepsLoader;
 
 public class Histogram {
+  /**
+   * Algorithms for interpolating between adjacent percentile values.
+   * <p>
+   * The native IDs must remain aligned with {@code percentile_interpolation} in
+   * {@code src/main/cpp/src/histogram.hpp}.
+   */
+  public enum PercentileInterpolation {
+    /**
+     * Compute {@code (1 - fraction) * lower + fraction * higher}.
+     */
+    WEIGHTED_ENDPOINTS(0),
+
+    /**
+     * Compute {@code lower + fraction * (higher - lower)}.
+     */
+    ENDPOINT_DELTA(1);
+
+    private final int nativeId;
+
+    PercentileInterpolation(int nativeId) {
+      this.nativeId = nativeId;
+    }
+  }
+
   static {
     NativeDepsLoader.loadNativeDeps();
   }
@@ -51,7 +75,8 @@ public class Histogram {
   }
 
   /**
-   * Compute percentiles from the given histograms and percentage values.
+   * Compute percentiles from the given histograms and percentage values using
+   * {@link PercentileInterpolation#WEIGHTED_ENDPOINTS} interpolation.
    * <p>
    * The input histograms must be given in the format `LIST<STRUCT<ElementType, long>>`.
    *
@@ -67,10 +92,33 @@ public class Histogram {
         outputAsLists));
   }
 
+  /**
+   * Compute percentiles from the given histograms and percentage values using the specified
+   * interpolation algorithm.
+   * <p>
+   * The input histograms must be given in the format `LIST<STRUCT<ElementType, long>>`.
+   *
+   * @param input         The lists of input histograms.
+   * @param percentages   The input percentage values.
+   * @param outputAsLists Specify whether the output percentiles will be wrapped into a list.
+   * @param interpolation The interpolation algorithm to use between adjacent values.
+   * @return A lists column, each list stores the output percentile(s) computed for the
+   * corresponding row in the input column.
+   */
+  public static ColumnVector percentileFromHistogram(ColumnView input, double[] percentages,
+                                                     boolean outputAsLists,
+                                                     PercentileInterpolation interpolation) {
+    return new ColumnVector(percentileFromHistogramWithInterpolation(input.getNativeView(),
+        percentages, outputAsLists, interpolation.nativeId));
+  }
+
 
   private static native long createHistogramIfValid(long valuesHandle, long frequenciesHandle,
                                                     boolean outputAsLists);
 
   private static native long percentileFromHistogram(long inputHandle, double[] percentages,
                                                      boolean outputAsLists);
+
+  private static native long percentileFromHistogramWithInterpolation(long inputHandle,
+      double[] percentages, boolean outputAsLists, int interpolation);
 }

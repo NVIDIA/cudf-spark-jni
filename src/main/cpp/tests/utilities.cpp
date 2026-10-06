@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,9 +46,12 @@ TEST_F(UtilitiesTest, BitwiseOr)
     CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
                  "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
-    cudaMemcpy(result.data(), d_result->data(), d_result->size(), cudaMemcpyDefault);
+    cudaMemcpy(result.data(),
+               d_result->data(),
+               result.size() * sizeof(cudf::bitmask_type),
+               cudaMemcpyDefault);
     CUDF_EXPECTS(std::equal(result.begin(), result.end(), expect.begin()),
-                 "Unexpected output size");
+                 "Results do not match expected");
   }
 
   // 4 buffers
@@ -75,7 +78,10 @@ TEST_F(UtilitiesTest, BitwiseOr)
     CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
                  "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
-    cudaMemcpy(result.data(), d_result->data(), d_result->size(), cudaMemcpyDefault);
+    cudaMemcpy(result.data(),
+               d_result->data(),
+               result.size() * sizeof(cudf::bitmask_type),
+               cudaMemcpyDefault);
     CUDF_EXPECTS(std::equal(result.begin(), result.end(), expect.begin()),
                  "Results do not match expected");
   }

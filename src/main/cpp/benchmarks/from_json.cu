@@ -346,9 +346,13 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
                      row_count,
                      fn);
 
-  auto offsets_col = std::make_unique<cudf::column>(std::move(offsets), rmm::device_buffer{}, 0);
-  return cudf::make_strings_column(
-    row_count, std::move(offsets_col), chars.release(), 0, rmm::device_buffer{});
+  auto offsets_col = std::make_unique<cudf::column>(
+    std::move(offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
+  return cudf::make_strings_column(row_count,
+                                   std::move(offsets_col),
+                                   chars.release(),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 }  // namespace

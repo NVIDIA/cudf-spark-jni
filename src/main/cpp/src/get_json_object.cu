@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1081,7 +1081,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   }
   // From here, we had out-of-bound write. Although this is very rare, it may still happen.
 
-  std::vector<std::pair<rmm::device_buffer, cudf::size_type>> out_null_masks_and_null_counts;
+  std::vector<std::pair<cuda::device_buffer<std::byte>, cudf::size_type>>
+    out_null_masks_and_null_counts;
   std::vector<std::pair<std::unique_ptr<cudf::column>, int64_t>> out_offsets_and_sizes;
   std::vector<rmm::device_uvector<char>> out_char_buffers;
   std::vector<std::size_t> oob_indices;
