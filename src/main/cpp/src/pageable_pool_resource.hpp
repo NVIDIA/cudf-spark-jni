@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "numa_placement.hpp"
+
 #include <rmm/aligned.hpp>
 #include <rmm/detail/error.hpp>
 #include <rmm/mr/detail/coalescing_free_list.hpp>
@@ -105,6 +107,9 @@ static_assert(
 // list — same behavior as rmm::pool_memory_resource. Unlike the pinned pool, this
 // pool is not growable; supporting growth would require multiple backing buffers
 // plus per-buffer lifetime, pretouch, and coalescing-boundary bookkeeping.
+//
+// Thread safety: allocate_sync/deallocate_sync are thread-safe (internally
+// mutex-guarded). The constructor performs internal multi-threaded pre-touch.
 // ---------------------------------------------------------------------------
 class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_pool_resource> {
  public:
@@ -116,17 +121,24 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
    * @param upstream       Host-accessible upstream resource for the backing buffer.
    * @param size           Total pool size in bytes.
    * @param pretouch_threads Number of threads used to fault in backing pages.
+   * @param numa_node      NUMA node to place the backing buffer on (-1 disables
+   *                       binding; binding is best-effort and silently skipped on
+   *                       failure). The intended value is the GPU-local node so
+   *                       DtoH copies avoid cross-socket traffic.
    * @throws rmm::out_of_memory if the backing allocation fails.
    */
   pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible> upstream,
                          std::size_t size,
-                         int pretouch_threads)
+                         int pretouch_threads,
+                         int numa_node = -1)
     : upstream_(std::move(upstream)),
       pool_size_(size),
       base_(upstream_.allocate_sync(size, system_page_size()))
   {
     try {
-      pretouch_parallel(base_, pool_size_, pretouch_threads);
+      // Bind BEFORE the pre-touch faults the pages in, so placement follows the policy.
+      if (numa_node >= 0) { detail::bind_memory_to_numa_node(base_, pool_size_, numa_node); }
+      pretouch_parallel(base_, pool_size_, pretouch_threads, numa_node);
       // is_head=false: all sub-blocks live within one contiguous upstream
       // allocation and may coalesce freely across their boundaries.
       free_list_.insert(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
@@ -191,7 +203,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   std::size_t pool_size() const noexcept { return pool_size_; }
 
  private:
-  static void pretouch_parallel(void* base, std::size_t bytes, int threads)
+  static void pretouch_parallel(void* base, std::size_t bytes, int threads, int numa_node)
   {
     std::size_t const page_size  = system_page_size();
     std::size_t const page_count = cuda::ceil_div(bytes, page_size);
@@ -201,6 +213,10 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
     std::size_t const hardware_cap =
       hardware_threads == 0 ? std::numeric_limits<std::size_t>::max() : hardware_threads;
     std::size_t const worker_count = std::min({requested_threads, page_count, hardware_cap});
+    bool bind_cpus = false;
+    cpu_set_t cpus{};
+    if (numa_node >= 0) { bind_cpus = detail::node_cpu_set(numa_node, &cpus); }
+
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
     std::atomic<bool> all_workers_started{false};
@@ -209,13 +225,15 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
       for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
         std::size_t const first_page = worker_index * page_count / worker_count;
         std::size_t const last_page  = (worker_index + 1) * page_count / worker_count;
-        workers.emplace_back([pages, first_page, last_page, page_size, &all_workers_started]() {
+        workers.emplace_back([pages, first_page, last_page, page_size, &all_workers_started, bind_cpus, cpus]() {
+          if (bind_cpus) { ::sched_setaffinity(0, sizeof(cpu_set_t), &cpus); }
           // Finish creating thread stacks before concurrent page faults contend for mmap_lock.
           all_workers_started.wait(false);
           for (std::size_t page = first_page; page < last_page; ++page) {
             pages[page * page_size] = 0;
           }
         });
+
       }
       all_workers_started.store(true);
       all_workers_started.notify_all();

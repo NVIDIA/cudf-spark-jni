@@ -35,7 +35,8 @@ public final class PageableMemoryPool implements AutoCloseable {
     NativeDepsLoader.loadNativeDeps();
   }
 
-  private static native long newPageablePoolMemoryResource(long poolSize, int pretouchThreads);
+  private static native long newPageablePoolMemoryResource(long poolSize, int pretouchThreads,
+      boolean numaBind);
 
   private static native void releasePageablePoolMemoryResource(long poolPtr);
 
@@ -124,11 +125,28 @@ public final class PageableMemoryPool implements AutoCloseable {
    * @param pretouchThreads number of worker threads to use for the parallel pre-touch
    */
   public static synchronized void initialize(long poolSize, int pretouchThreads) {
+    initialize(poolSize, pretouchThreads, false);
+  }
+
+  /**
+   * Initialize the pool. The backing buffer is allocated and pre-touched (each system page
+   * written to force the kernel to map physical pages) using the given thread count.
+   * Pre-touching parallelizes the page-fault work so it amortizes to a few hundred ms
+   * for multi-GB pools instead of several seconds serially.
+   *
+   * @param poolSize        size of the pool in bytes
+   * @param pretouchThreads number of worker threads to use for the parallel pre-touch
+   * @param numaBind        when true, request the backing buffer to be placed on the NUMA
+   *                        node local to the GPU (and pre-touch workers bound to that node's
+   *                        CPUs). Binding is best-effort: it is silently skipped when the
+   *                        node cannot be resolved or restricted by the environment.
+   */
+  public static synchronized void initialize(long poolSize, int pretouchThreads, boolean numaBind) {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
     FutureTask<PageableMemoryPool> task =
-        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads));
+        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads, numaBind));
     Thread initThread = new Thread(task, "pageable pool init");
     initThread.setDaemon(true);
     initThread.start();
@@ -185,8 +203,8 @@ public final class PageableMemoryPool implements AutoCloseable {
     return 0;
   }
 
-  private PageableMemoryPool(long poolSize, int pretouchThreads) {
-    this.poolHandle = newPageablePoolMemoryResource(poolSize, pretouchThreads);
+  private PageableMemoryPool(long poolSize, int pretouchThreads, boolean numaBind) {
+    this.poolHandle = newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind);
     this.poolSize = poolSize;
   }
 

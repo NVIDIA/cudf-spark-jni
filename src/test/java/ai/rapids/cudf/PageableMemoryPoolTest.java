@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,17 @@ public class PageableMemoryPoolTest {
     try (HostMemoryBuffer buffer = PageableMemoryPool.tryAllocate(1024)) {
       assertNotNull(buffer);
       assertNull(PageableMemoryPool.tryAllocate(2 * 1024 * 1024));
+    }
+  }
+
+  @Test
+  public void numaBindInitialization() {
+    // Exercises the numaBind=true JNI path end to end; binding is best-effort, so no
+    // multi-node host is required — pool construction and allocation must just succeed.
+    PageableMemoryPool.initialize(1024 * 1024, 2, true);
+    assertTrue(PageableMemoryPool.isInitialized());
+    try (HostMemoryBuffer buffer = PageableMemoryPool.tryAllocate(1024)) {
+      assertNotNull(buffer);
     }
   }
 

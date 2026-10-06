@@ -34,16 +34,20 @@
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(
-  JNIEnv* env, jclass, jlong pool_size, jint pretouch_threads)
+  JNIEnv* env, jclass, jlong pool_size, jint pretouch_threads, jboolean numa_bind)
 {
   JNI_TRY
   {
+    cudf::jni::auto_set_device(env);
+    int const numa_node = (numa_bind != JNI_FALSE) ? spark_rapids_jni::detail::gpu_numa_node() : -1;
     auto pool = std::make_unique<spark_rapids_jni::pageable_pool_resource>(
       cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
         spark_rapids_jni::pageable_memory_resource{}),
       static_cast<std::size_t>(pool_size),
-      static_cast<int>(pretouch_threads));
+      static_cast<int>(pretouch_threads),
+      numa_node);
     return reinterpret_cast<jlong>(pool.release());
+
   }
   JNI_CATCH(env, 0);
 }

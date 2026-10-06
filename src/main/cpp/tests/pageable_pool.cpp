@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,19 @@
 
 #include "pageable_pool_resource.hpp"
 
+#include <cuda_runtime_api.h>
+
 #include <gtest/gtest.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <limits>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -30,14 +38,17 @@ namespace {
 
 constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
-pageable_pool_resource make_pool(std::size_t size = kPoolSize, int threads = 1)
+[[nodiscard]] pageable_pool_resource make_pool(std::size_t size = kPoolSize,
+                                               int threads      = 1,
+                                               int numa_node    = -1)
 {
   // Explicit any_resource construction is required because the converting constructor
   // of any_resource is not implicit in this CCCL version.
   return pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
     size,
-    threads);
+    threads,
+    numa_node);
 }
 
 testing::AssertionResult all_eq(unsigned char const* data,
@@ -125,6 +136,89 @@ TEST(PageablePool, PointerIsAligned)
   void* p                     = pool.allocate_sync(1);
   EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p) % align, 0u);
   pool.deallocate_sync(p, 1);
+}
+
+// ---------------------------------------------------------------------------
+// NUMA: binding the backing buffer places pool pages on the requested node
+// ---------------------------------------------------------------------------
+TEST(PageablePool, NumaBindPlacesPagesOnRequestedNode)
+{
+  // The binding is only observable on hosts with more than one NUMA node.
+  if (::access("/sys/devices/system/node/node1/cpulist", F_OK) != 0) {
+    GTEST_SKIP() << "host has no second NUMA node";
+  }
+  // Probe that mbind is permitted here (containers may restrict memory policy).
+  void* probe = nullptr;
+  ASSERT_EQ(::posix_memalign(&probe, 4'096, 4'096), 0);
+  bool const can_bind = detail::bind_memory_to_numa_node(probe, 4'096, 0);
+  ::free(probe);
+  if (!can_bind) { GTEST_SKIP() << "mbind unavailable or restricted"; }
+
+  // Bind to a node DIFFERENT from the current thread's node, so a green test proves
+  // the pages moved because of the policy, not because of where the process runs.
+  void* current_probe = nullptr;
+  ASSERT_EQ(::posix_memalign(&current_probe, 4'096, 4'096), 0);
+  std::memset(current_probe, 0, 4'096);  // first-touch
+  int const current_node = detail::numa_node_of(current_probe);
+  ::free(current_probe);
+  ASSERT_GE(current_node, 0) << "could not resolve current NUMA node";
+  int const target_node = (current_node == 0) ? 1 : 0;
+
+  auto pool = make_pool(kPoolSize, 1, target_node);
+  // Check pages spread across the pool: first, middle, last.
+  void* p = pool.allocate_sync(kPoolSize);
+  ASSERT_NE(p, nullptr);
+  auto* base = static_cast<unsigned char*>(p);
+  EXPECT_EQ(detail::numa_node_of(base), target_node);
+  EXPECT_EQ(detail::numa_node_of(base + kPoolSize / 2), target_node);
+  EXPECT_EQ(detail::numa_node_of(base + kPoolSize - 4'096), target_node);
+  pool.deallocate_sync(p, kPoolSize);
+}
+
+TEST(PageablePool, NumaHelperArgumentGuards)
+{
+  auto pool = make_pool();
+  void* p   = pool.allocate_sync(1024);
+  ASSERT_NE(p, nullptr);
+  EXPECT_FALSE(detail::bind_memory_to_numa_node(nullptr, 4'096, 0));  // null base
+  EXPECT_FALSE(detail::bind_memory_to_numa_node(p, 0, 0));            // zero bytes
+  EXPECT_FALSE(detail::bind_memory_to_numa_node(p, 1024, -1));        // negative node
+  EXPECT_FALSE(detail::bind_memory_to_numa_node(p, 1024, 64));        // out of nodemask range
+  pool.deallocate_sync(p, 1024);
+
+  cpu_set_t cpus{};
+  EXPECT_FALSE(detail::node_cpu_set(-1, &cpus));
+}
+
+TEST(PageablePool, GpuNumaNodeDegradesCleanly)
+{
+  // Whatever the environment (GPU-less sandbox, container without sysfs), the
+  // helper must return -1 (unknown) instead of throwing or leaving a pending CUDA error.
+  int const node = detail::gpu_numa_node();
+  if (node == -1) { EXPECT_EQ(cudaGetLastError(), cudaSuccess); }
+}
+
+TEST(PageablePool, ParseCpuList)
+{
+  char const* tmpdir     = std::getenv("TMPDIR");
+  std::string const tmp  = (tmpdir != nullptr && tmpdir[0] != '\0') ? tmpdir : "/tmp";
+  std::string const path = tmp + "/pageable_pool_cpulist_test.txt";
+  {
+    std::ofstream out(path);
+    out << "0-3,8\n9\nfoo\n1048\n";  // ranges, single, malformed, above CPU_SETSIZE
+  }
+  cpu_set_t cpus{};
+  ASSERT_TRUE(detail::parse_cpu_list(path.c_str(), &cpus));
+  EXPECT_TRUE(CPU_ISSET(0, &cpus));
+  EXPECT_TRUE(CPU_ISSET(3, &cpus));
+  EXPECT_TRUE(CPU_ISSET(8, &cpus));
+  EXPECT_TRUE(CPU_ISSET(9, &cpus));
+  EXPECT_FALSE(CPU_ISSET(4, &cpus));
+  EXPECT_FALSE(CPU_ISSET(1048, &cpus));
+  std::remove(path.c_str());
+
+  cpu_set_t none{};
+  EXPECT_FALSE(detail::parse_cpu_list("/nonexistent/cpulist", &none));
 }
 
 // ---------------------------------------------------------------------------
