@@ -678,13 +678,12 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesReconstructsBorrowForUnresolvedWriterTim
 // change fails here instead of silently matching the hand-wired inputs above.
 TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
 {
-  // Pre-epoch fractional instant of the writer-frame value (UTC+08:00): exercises the borrow and
-  // the Unix-epoch crossing on the shift.
-  auto const wall_micros = -7'713'116'127L;
+  // Pre-epoch fractional UTC instant of a UTC+08:00 writer: exercises the borrow and the
+  // Unix-epoch crossing on the shift.
+  auto const instant_us = -7'713'116'127L;
 
-  cudf::test::fixed_width_column_wrapper<cudf::timestamp_us, cudf::timestamp_s::rep> wall_col{
-    wall_micros};
-  auto const table_view_in = cudf::table_view({wall_col});
+  micros_col const instant_col{instant_us};
+  auto const table_view_in = cudf::table_view({instant_col});
 
   auto const filename =
     timezones_temp_env->get_temp_filepath("ConvertOrcTimezonesEndToEndDecoderBorrow.orc");
@@ -702,7 +701,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
   auto const read_result = cudf::io::read_orc(read_options);
   auto const& decoded    = read_result.tbl->get_column(0);
 
-  // The decode must equal the wall clock plus the writer epoch offset (UTC+08:00 = 28.8e9 us).
+  // The decode must equal the written instant plus the writer epoch offset (UTC+08:00 = 28.8e9 us).
   EXPECT_EQ(decoded.size(), 1);
   int64_t decoded_us = 0;
   CUDF_CUDA_TRY(cudaMemcpyAsync(&decoded_us,
@@ -711,12 +710,12 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
                                 cudaMemcpyDefault,
                                 cudf::get_default_stream().get()));
   CUDF_CUDA_TRY(cudaStreamSynchronize(cudf::get_default_stream().get()));
-  EXPECT_EQ(decoded_us, wall_micros + 28'800'000'000L);
+  EXPECT_EQ(decoded_us, instant_us + 28'800'000'000L);
 
   // The conversion must shift straight back to the instant Apache ORC reconstructs.
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst      = 0;
-  auto const expected = micros_col{wall_micros};
+  auto const expected = micros_col{instant_us};
   auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
     decoded.view(),
     /*writer_2015_year_base_offset_us=*/int64_t{28'800'000'000},
