@@ -298,9 +298,9 @@ class pageable_pool_resource_t
                            bool thp_deny            = false)
     : upstream_(std::move(upstream)),
       pool_size_(size),
-      use_remainder_cache_(use_remainder_cache),
       base_(detail::prepare_backing_region(
-        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny))
+        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny)),
+      use_remainder_cache_(use_remainder_cache)
   {
     try {
       // is_head=false: all sub-blocks live within one contiguous upstream

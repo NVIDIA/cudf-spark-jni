@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -73,13 +74,14 @@ class pageable_arena_pool_resource_t
       }
       arenas_.reserve(arena_count_);
       for (std::size_t i = 0; i < arena_count_; ++i) {
-        arenas_.emplace_back();
+        arenas_.emplace_back(std::make_unique<arena>());
+        auto& arena_ref         = *arenas_.back();
         char* const arena_begin = static_cast<char*>(base_) + i * arena_capacity_;
         std::size_t const cap =
           (i == arena_count_ - 1) ? (pool_size_ - i * arena_capacity_) : arena_capacity_;
         // is_head on every arena start (except the pool head) blocks coalescing
         // across the boundary — block::is_contiguous_before refuses head blocks.
-        arenas_[i].list.insert(rmm::mr::detail::block{arena_begin, cap, /*is_head=*/i > 0});
+        arena_ref.list.insert(rmm::mr::detail::block{arena_begin, cap, /*is_head=*/i > 0});
       }
     } catch (...) {
       detail::release_backing_region(upstream_, base_, pool_size_);
@@ -109,7 +111,7 @@ class pageable_arena_pool_resource_t
     std::size_t const start = next_arena_.fetch_add(1) % arena_count_;
     for (std::size_t k = 0; k < arena_count_; ++k) {
       auto const idx = (start + k) % arena_count_;
-      auto& arena    = arenas_[idx];
+      auto& arena    = *arenas_[idx];
       std::lock_guard<std::mutex> lock(arena.mtx);
       auto blk = arena.list.get_block(bytes);
       if (!blk.is_valid()) { continue; }
@@ -133,8 +135,8 @@ class pageable_arena_pool_resource_t
     // arena's head: is_head prevents coalescing into the previous arena.
     bool const is_boundary_head =
       (idx > 0) && (static_cast<char*>(ptr) == static_cast<char*>(base_) + idx * arena_capacity_);
-    std::lock_guard<std::mutex> lock(arenas_[idx].mtx);
-    arenas_[idx].list.insert(rmm::mr::detail::block{
+    std::lock_guard<std::mutex> lock(arenas_[idx]->mtx);
+    arenas_[idx]->list.insert(rmm::mr::detail::block{
       static_cast<char*>(ptr), detail::pool_align_up(bytes), is_boundary_head});
   }
 
@@ -162,7 +164,7 @@ class pageable_arena_pool_resource_t
   std::atomic<std::uint64_t> next_arena_{0};
   std::size_t arena_count_{1};
   std::size_t arena_capacity_{0};
-  std::vector<arena> arenas_;
+  std::vector<std::unique_ptr<arena>> arenas_;
 };
 
 static_assert(cuda::mr::synchronous_resource_with<

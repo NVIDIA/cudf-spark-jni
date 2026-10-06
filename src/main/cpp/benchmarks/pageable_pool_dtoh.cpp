@@ -60,14 +60,14 @@ void pool_init(nvbench::state& state)
 
   state.exec(nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
     timer.start();
-    auto pool =
-      pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                               spark_rapids_jni::pageable_memory_resource{}),
-                             size,
-                             pretouch_threads,
-                             /*numa_node=*/-1,
-                             /*use_remainder_cache=*/false,
-                             populate);
+    auto pool = spark_rapids_jni::pageable_pool_resource(
+      cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+        spark_rapids_jni::pageable_memory_resource{}),
+      size,
+      pretouch_threads,
+      /*numa_node=*/-1,
+      /*use_remainder_cache=*/false,
+      populate);
     timer.stop();
   });
 }
@@ -78,14 +78,15 @@ void dtoh_pool(nvbench::state& state)
   auto const size     = static_cast<std::size_t>(state.get_int64("size"));
   bool const thp_deny = state.get_string("thp") == "deny";
 
-  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                       spark_rapids_jni::pageable_memory_resource{}),
-                                     size,
-                                     /*pretouch_threads=*/8,
-                                     /*numa_node=*/-1,
-                                     /*use_remainder_cache=*/false,
-                                     /*populate_write=*/true,
-                                     thp_deny);
+  auto pool = spark_rapids_jni::pageable_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    size,
+    /*pretouch_threads=*/8,
+    /*numa_node=*/-1,
+    /*use_remainder_cache=*/false,
+    /*populate_write=*/true,
+    thp_deny);
   void* dst = pool.allocate_sync(size);
 
   void* src = checked_cuda_malloc(size);
@@ -179,10 +180,11 @@ void dtoh_pool_chunked(nvbench::state& state)
   auto const size   = static_cast<std::size_t>(state.get_int64("size"));
   auto const chunks = static_cast<int>(state.get_int64("chunks"));
 
-  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                       spark_rapids_jni::pageable_memory_resource{}),
-                                     size,
-                                     /*pretouch_threads=*/8);
+  auto pool = spark_rapids_jni::pageable_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    size,
+    /*pretouch_threads=*/8);
   void* dst = pool.allocate_sync(size);
 
   void* src = checked_cuda_malloc(size);
@@ -288,27 +290,7 @@ void alloc_free_impl(nvbench::state& state, Resource& pool)
 
 void alloc_free_list(nvbench::state& state)
 {
-  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                       spark_rapids_jni::pageable_memory_resource{}),
-                                     4 * kGiB,
-                                     /*pretouch_threads=*/8);
-  alloc_free_impl(state, pool);
-}
-
-void alloc_free_list_cache(nvbench::state& state)
-{
-  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                       spark_rapids_jni::pageable_memory_resource{}),
-                                     4 * kGiB,
-                                     /*pretouch_threads=*/8,
-                                     /*numa_node=*/-1,
-                                     /*use_remainder_cache=*/true);
-  alloc_free_impl(state, pool);
-}
-
-void alloc_free_indexed(nvbench::state& state)
-{
-  auto pool = pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
+  auto pool = spark_rapids_jni::pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
       spark_rapids_jni::pageable_memory_resource{}),
     4 * kGiB,
@@ -316,17 +298,40 @@ void alloc_free_indexed(nvbench::state& state)
   alloc_free_impl(state, pool);
 }
 
-void alloc_free_arena(nvbench::state& state)
+void alloc_free_list_cache(nvbench::state& state)
+{
+  auto pool = spark_rapids_jni::pageable_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kGiB,
+    /*pretouch_threads=*/8,
+    /*numa_node=*/-1,
+    /*use_remainder_cache=*/true);
+  alloc_free_impl(state, pool);
+}
+
+void alloc_free_indexed(nvbench::state& state)
 {
   auto pool =
-    pageable_arena_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                   spark_rapids_jni::pageable_memory_resource{}),
-                                 4 * kGiB,
-                                 /*pretouch_threads=*/8,
-                                 /*numa_node=*/-1,
-                                 /*populate_write=*/true,
-                                 /*thp_deny=*/false,
-                                 /*arena_count=*/16);
+    spark_rapids_jni::pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
+      cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+        spark_rapids_jni::pageable_memory_resource{}),
+      4 * kGiB,
+      /*pretouch_threads=*/8);
+  alloc_free_impl(state, pool);
+}
+
+void alloc_free_arena(nvbench::state& state)
+{
+  auto pool = spark_rapids_jni::pageable_arena_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kGiB,
+    /*pretouch_threads=*/8,
+    /*numa_node=*/-1,
+    /*populate_write=*/true,
+    /*thp_deny=*/false,
+    /*arena_count=*/16);
   alloc_free_impl(state, pool);
 }
 
@@ -340,15 +345,20 @@ void fragmented_alloc_impl(nvbench::state& state, Resource& pool)
   // all F entries) and frees it back, so the hole set stays stable.
   constexpr std::size_t kHole  = kMiB;
   constexpr std::size_t kBytes = 4 * kGiB;
-  std::vector<std::pair<void*, std::size_t>> held;
+  std::vector<std::pair<void*, std::size_t>> all;
   for (std::size_t off = 0; off + kHole <= kBytes; off += kHole) {
     void* p = pool.allocate_sync(kHole);
     if (p == nullptr) { throw std::runtime_error{"fragment fill alloc failed"}; }
-    if ((off / kHole) % 2 == 0) {
-      held.emplace_back(p, kHole);  // keep: fences the hole after it
-    } else {
-      pool.deallocate_sync(p, kHole);  // becomes a hole
-    }
+    all.emplace_back(p, kHole);
+  }
+  // Free the even blocks AFTER the fill: they become ~2048 non-adjacent holes fenced
+  // by the odd (held) blocks, so they never coalesce and F stays stable.
+  std::vector<std::pair<void*, std::size_t>> held;
+  for (std::size_t i = 0; i < all.size(); i += 2) {
+    pool.deallocate_sync(all[i].first, all[i].second);
+  }
+  for (std::size_t i = 1; i < all.size(); i += 2) {
+    held.push_back(all[i]);
   }
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     for (int i = 0; i < 8; ++i) {
@@ -363,20 +373,22 @@ void fragmented_alloc_impl(nvbench::state& state, Resource& pool)
 
 void fragment_list(nvbench::state& state)
 {
-  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-                                       spark_rapids_jni::pageable_memory_resource{}),
-                                     4 * kGiB,
-                                     /*pretouch_threads=*/8);
+  auto pool = spark_rapids_jni::pageable_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kGiB,
+    /*pretouch_threads=*/8);
   fragmented_alloc_impl(state, pool);
 }
 
 void fragment_indexed(nvbench::state& state)
 {
-  auto pool = pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
-    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-      spark_rapids_jni::pageable_memory_resource{}),
-    4 * kGiB,
-    /*pretouch_threads=*/8);
+  auto pool =
+    spark_rapids_jni::pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
+      cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+        spark_rapids_jni::pageable_memory_resource{}),
+      4 * kGiB,
+      /*pretouch_threads=*/8);
   fragmented_alloc_impl(state, pool);
 }
 
