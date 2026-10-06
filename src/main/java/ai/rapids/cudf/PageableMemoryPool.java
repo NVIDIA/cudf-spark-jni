@@ -1,6 +1,6 @@
 /*
  *
- *  SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ *  SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *  SPDX-License-Identifier: Apache-2.0
  *
  */
@@ -133,8 +133,11 @@ public final class PageableMemoryPool implements AutoCloseable {
       t.setDaemon(true);
       return t;
     });
-    initFuture = initService.submit(() -> new PageableMemoryPool(poolSize, pretouchThreads));
-    initService.shutdown();
+    try {
+      initFuture = initService.submit(() -> new PageableMemoryPool(poolSize, pretouchThreads));
+    } finally {
+      initService.shutdown();
+    }
   }
 
   /**
