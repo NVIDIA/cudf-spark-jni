@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "pageable_arena_pool_resource.hpp"
 #include "pageable_pool_resource.hpp"
 
 #include <cuda_runtime_api.h>
@@ -379,6 +380,75 @@ TEST(PageablePool, ThpDenyKeepsBasePages)
   }
   EXPECT_TRUE(found) << "mapping not found in smaps";
   pool.deallocate_sync(p, 4096);
+}
+
+// ---------------------------------------------------------------------------
+// Arena pool: round-robin placement, boundary isolation, per-arena capacity
+// ---------------------------------------------------------------------------
+TEST(PageableArenaPool, RoundRobinAndBoundaryIsolation)
+{
+  auto pool = pageable_arena_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
+    kPoolSize,
+    1,
+    -1,
+    true,
+    false,
+    /*arena_count=*/4);
+  // 4 arenas of 1 MiB; round-robin fills them in order.
+  std::vector<void*> ptrs;
+  for (int i = 0; i < 4; ++i) {
+    void* p = pool.allocate_sync(1024 * 1024);
+    ASSERT_NE(p, nullptr);
+    ptrs.push_back(p);
+  }
+  EXPECT_EQ(static_cast<char*>(ptrs[1]), static_cast<char*>(ptrs[0]) + 1024 * 1024);
+  EXPECT_EQ(static_cast<char*>(ptrs[2]), static_cast<char*>(ptrs[0]) + 2 * 1024 * 1024);
+  EXPECT_EQ(static_cast<char*>(ptrs[3]), static_cast<char*>(ptrs[0]) + 3 * 1024 * 1024);
+  for (void* p : ptrs) {
+    pool.deallocate_sync(p, 1024 * 1024);
+  }
+  // All arenas fully free, but coalescing never crosses arena boundaries: a request
+  // larger than one arena's capacity fails (the policy change under test).
+  EXPECT_THROW(
+    { [[maybe_unused]] void* _ = pool.allocate_sync(2 * 1024 * 1024); }, pageable_pool_exhausted);
+  void* full_arena = pool.allocate_sync(1024 * 1024);
+  ASSERT_NE(full_arena, nullptr);
+  pool.deallocate_sync(full_arena, 1024 * 1024);
+}
+
+TEST(PageableArenaPool, ConcurrentContentionRecovers)
+{
+  auto pool = pageable_arena_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
+    16 * 1024 * 1024,
+    4,
+    -1,
+    true,
+    false,
+    /*arena_count=*/8);
+  constexpr int kThreads = 8;
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&pool]() {
+      for (int i = 0; i < 200; ++i) {
+        try {
+          void* p = pool.allocate_sync(4096);
+          pool.deallocate_sync(p, 4096);
+        } catch (pageable_pool_exhausted const&) {
+          // arena transiently full — ok under contention
+        }
+      }
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  // Every arena must have fully recovered (2 MiB = arena capacity here).
+  void* arena_full = pool.allocate_sync(2 * 1024 * 1024);
+  ASSERT_NE(arena_full, nullptr);
+  pool.deallocate_sync(arena_full, 2 * 1024 * 1024);
 }
 
 // ---------------------------------------------------------------------------
