@@ -14,8 +14,15 @@
  * limitations under the License.
  */
 
-// Host-only benchmark: CUDA runtime API calls + nvbench, no device code.
+// Host-only benchmarks for the pageable pool family: CUDA runtime API calls +
+// nvbench, no device code. Each optimization technique gets its own axis:
+//   - init bench:    pretouch method (MADV_POPULATE_WRITE vs manual loop)
+//   - dtoh bench:    THP policy (default vs MADV_NOHUGEPAGE)
+//   - alloc bench:   free-list/allocator variant (list, list+cache, indexed, arena)
+//   - fragment bench: O(F) list vs O(log F) indexed under heavy fragmentation
+//   - chunked bench: K-way split DtoH copies across private streams
 
+#include "pageable_arena_pool_resource.hpp"
 #include "pageable_pool_resource.hpp"
 
 #include <cuda_runtime_api.h>
@@ -34,18 +41,6 @@ namespace {
 constexpr std::size_t kMiB = 1'024ULL * 1'024ULL;
 constexpr std::size_t kGiB = 1'024ULL * kMiB;
 
-[[nodiscard]] spark_rapids_jni::pageable_pool_resource make_pool(std::size_t size,
-                                                                 int pretouch_threads,
-                                                                 int numa_node)
-{
-  return spark_rapids_jni::pageable_pool_resource(
-    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-      spark_rapids_jni::pageable_memory_resource{}),
-    size,
-    pretouch_threads,
-    numa_node);
-}
-
 [[nodiscard]] void* checked_cuda_malloc(std::size_t size)
 {
   void* ptr = nullptr;
@@ -56,18 +51,41 @@ constexpr std::size_t kGiB = 1'024ULL * kMiB;
   return ptr;
 }
 
-// DtoH copy bandwidth into pool-allocated (pre-touched, optionally NUMA-bound)
-// memory. NOTE: the numa=on axis silently degrades to unbound placement when
-// the GPU node cannot be resolved (e.g. no sysfs in a container) — cross-check
-// with the init bench.
-void dtoh_pool(nvbench::state& state)
+// --- pre-touch init: method axis -------------------------------------------
+void pool_init(nvbench::state& state)
 {
   auto const size             = static_cast<std::size_t>(state.get_int64("size"));
-  bool const bind_numa        = state.get_string("numa") == "on";
   auto const pretouch_threads = static_cast<int>(state.get_int64("pretouch_threads"));
+  bool const populate         = state.get_string("method") == "populate";
 
-  auto pool =
-    make_pool(size, pretouch_threads, bind_numa ? spark_rapids_jni::detail::gpu_numa_node() : -1);
+  state.exec(nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
+    timer.start();
+    auto pool =
+      pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                               spark_rapids_jni::pageable_memory_resource{}),
+                             size,
+                             pretouch_threads,
+                             /*numa_node=*/-1,
+                             /*use_remainder_cache=*/false,
+                             populate);
+    timer.stop();
+  });
+}
+
+// --- DtoH bandwidth: THP axis ----------------------------------------------
+void dtoh_pool(nvbench::state& state)
+{
+  auto const size     = static_cast<std::size_t>(state.get_int64("size"));
+  bool const thp_deny = state.get_string("thp") == "deny";
+
+  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                       spark_rapids_jni::pageable_memory_resource{}),
+                                     size,
+                                     /*pretouch_threads=*/8,
+                                     /*numa_node=*/-1,
+                                     /*use_remainder_cache=*/false,
+                                     /*populate_write=*/true,
+                                     thp_deny);
   void* dst = pool.allocate_sync(size);
 
   void* src = checked_cuda_malloc(size);
@@ -96,7 +114,7 @@ void dtoh_pool(nvbench::state& state)
   pool.deallocate_sync(dst, size);
 }
 
-// Reference DtoH bandwidth into freshly malloc'd pageable and pinned memory.
+// --- DtoH references: fresh malloc + pinned --------------------------------
 void dtoh_reference(nvbench::state& state)
 {
   auto const size     = static_cast<std::size_t>(state.get_int64("size"));
@@ -118,13 +136,11 @@ void dtoh_reference(nvbench::state& state)
   state.add_global_memory_writes(size);
 
   if (dst_type == "fresh_malloc") {
-    // Fresh pageable: a new allocation per iteration, like the real fallback
-    // path — the DtoH copy pays first-touch page faults every time.
+    // Fresh pageable: a new allocation per iteration, like the real fallback path —
+    // the DtoH copy pays first-touch page faults every time.
     state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
       void* dst = nullptr;
       if (::posix_memalign(&dst, 4'096, size) != 0) {
-        // Allocation failure here is a real bench-host problem, not a skippable
-        // config.
         throw std::runtime_error{"posix_memalign failed"};
       }
       if (cudaMemcpy(dst, src, size, cudaMemcpyDefault) != cudaSuccess) {
@@ -157,33 +173,77 @@ void dtoh_reference(nvbench::state& state)
   cudaFree(src);
 }
 
-// Pool construction time = backing allocation + parallel pre-touch. The manual
-// timer excludes pool destruction (upstream free), which follows timer.stop().
-void pool_init(nvbench::state& state)
+// --- chunked DtoH: K private streams ---------------------------------------
+void dtoh_pool_chunked(nvbench::state& state)
 {
-  auto const size             = static_cast<std::size_t>(state.get_int64("size"));
-  auto const pretouch_threads = static_cast<int>(state.get_int64("pretouch_threads"));
-  bool const bind_numa        = state.get_string("numa") == "on";
-  int const numa_node         = bind_numa ? spark_rapids_jni::detail::gpu_numa_node() : -1;
+  auto const size   = static_cast<std::size_t>(state.get_int64("size"));
+  auto const chunks = static_cast<int>(state.get_int64("chunks"));
 
-  state.exec(nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-    timer.start();
-    auto pool = make_pool(size, pretouch_threads, numa_node);
-    timer.stop();
+  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                       spark_rapids_jni::pageable_memory_resource{}),
+                                     size,
+                                     /*pretouch_threads=*/8);
+  void* dst = pool.allocate_sync(size);
+
+  void* src = checked_cuda_malloc(size);
+  if (src == nullptr) {
+    state.skip("cudaMalloc failed");
+    return;
+  }
+  if (cudaMemset(src, 0xAB, size) != cudaSuccess) {
+    cudaGetLastError();
+    state.skip("cudaMemset failed");
+    cudaFree(src);
+    return;
+  }
+
+  std::vector<cudaStream_t> streams(static_cast<std::size_t>(chunks));
+  for (auto& stream : streams) {
+    if (cudaStreamCreate(&stream) != cudaSuccess) {
+      cudaGetLastError();
+      state.skip("cudaStreamCreate failed");
+      cudaFree(src);
+      return;
+    }
+  }
+
+  state.add_global_memory_reads(size);
+  state.add_global_memory_writes(size);
+  std::size_t const chunk = size / static_cast<std::size_t>(chunks);
+  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
+    for (int k = 0; k < chunks; ++k) {
+      if (cudaMemcpyAsync(static_cast<char*>(dst) + k * chunk,
+                          static_cast<char*>(src) + k * chunk,
+                          chunk,
+                          cudaMemcpyDefault,
+                          streams[static_cast<std::size_t>(k)]) != cudaSuccess) {
+        cudaGetLastError();
+        throw std::runtime_error{"cudaMemcpyAsync DtoH failed"};
+      }
+    }
+    for (auto& stream : streams) {
+      if (cudaStreamSynchronize(stream) != cudaSuccess) {
+        cudaGetLastError();
+        throw std::runtime_error{"cudaStreamSynchronize failed"};
+      }
+    }
   });
+
+  for (auto& stream : streams) {
+    cudaStreamDestroy(stream);
+  }
+  cudaFree(src);
+  pool.deallocate_sync(dst, size);
 }
 
-// Allocation/deallocation latency, including contention across Spark tasks.
-// Workers are spawned once OUTSIDE the timed region and synchronized per sample
-// by generation counter, so per-sample thread spawn/join does not pollute the
-// measurement and no worker can run an uncounted extra round.
-void alloc_free_latency(nvbench::state& state)
+// --- alloc/free latency + contention: allocator variant axis ----------------
+template <typename Resource>
+void alloc_free_impl(nvbench::state& state, Resource& pool)
 {
   auto const chunk            = static_cast<std::size_t>(state.get_int64("chunk"));
   auto const threads          = static_cast<int>(state.get_int64("threads"));
   constexpr int kOpsPerThread = 64;
 
-  auto pool = make_pool(4 * kGiB, 8, -1);
   std::atomic<std::uint64_t> round{0};
   std::atomic<int> finished{0};
   std::atomic<bool> stop{false};
@@ -201,7 +261,7 @@ void alloc_free_latency(nvbench::state& state)
             void* p = pool.allocate_sync(chunk);
             pool.deallocate_sync(p, chunk);
           } catch (spark_rapids_jni::pageable_pool_exhausted const&) {
-            // Transiently full under contention — not a latency signal.
+            // transiently full under contention — not a latency signal
           }
         }
         finished.fetch_add(1);
@@ -226,26 +286,142 @@ void alloc_free_latency(nvbench::state& state)
   }
 }
 
+void alloc_free_list(nvbench::state& state)
+{
+  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                       spark_rapids_jni::pageable_memory_resource{}),
+                                     4 * kGiB,
+                                     /*pretouch_threads=*/8);
+  alloc_free_impl(state, pool);
+}
+
+void alloc_free_list_cache(nvbench::state& state)
+{
+  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                       spark_rapids_jni::pageable_memory_resource{}),
+                                     4 * kGiB,
+                                     /*pretouch_threads=*/8,
+                                     /*numa_node=*/-1,
+                                     /*use_remainder_cache=*/true);
+  alloc_free_impl(state, pool);
+}
+
+void alloc_free_indexed(nvbench::state& state)
+{
+  auto pool = pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kGiB,
+    /*pretouch_threads=*/8);
+  alloc_free_impl(state, pool);
+}
+
+void alloc_free_arena(nvbench::state& state)
+{
+  auto pool =
+    pageable_arena_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                   spark_rapids_jni::pageable_memory_resource{}),
+                                 4 * kGiB,
+                                 /*pretouch_threads=*/8,
+                                 /*numa_node=*/-1,
+                                 /*populate_write=*/true,
+                                 /*thp_deny=*/false,
+                                 /*arena_count=*/16);
+  alloc_free_impl(state, pool);
+}
+
+// --- fragmentation: O(F) list vs O(log F) indexed ---------------------------
+template <typename Resource>
+void fragmented_alloc_impl(nvbench::state& state, Resource& pool)
+{
+  // Fill a 4 GiB pool with 1 MiB blocks and free every OTHER one: ~2048 non-adjacent
+  // 1 MiB holes (never coalescible — each hole is fenced by held blocks). The timed
+  // loop repeatedly best-fit-allocates 256 KiB (fits any hole; every iteration scans
+  // all F entries) and frees it back, so the hole set stays stable.
+  constexpr std::size_t kHole  = kMiB;
+  constexpr std::size_t kBytes = 4 * kGiB;
+  std::vector<std::pair<void*, std::size_t>> held;
+  for (std::size_t off = 0; off + kHole <= kBytes; off += kHole) {
+    void* p = pool.allocate_sync(kHole);
+    if (p == nullptr) { throw std::runtime_error{"fragment fill alloc failed"}; }
+    if ((off / kHole) % 2 == 0) {
+      held.emplace_back(p, kHole);  // keep: fences the hole after it
+    } else {
+      pool.deallocate_sync(p, kHole);  // becomes a hole
+    }
+  }
+  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
+    for (int i = 0; i < 8; ++i) {
+      void* p = pool.allocate_sync(256 * 1'024);
+      pool.deallocate_sync(p, 256 * 1'024);
+    }
+  });
+  for (auto& [ptr, sz] : held) {
+    pool.deallocate_sync(ptr, sz);
+  }
+}
+
+void fragment_list(nvbench::state& state)
+{
+  auto pool = pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+                                       spark_rapids_jni::pageable_memory_resource{}),
+                                     4 * kGiB,
+                                     /*pretouch_threads=*/8);
+  fragmented_alloc_impl(state, pool);
+}
+
+void fragment_indexed(nvbench::state& state)
+{
+  auto pool = pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kGiB,
+    /*pretouch_threads=*/8);
+  fragmented_alloc_impl(state, pool);
+}
+
 }  // namespace
+
+NVBENCH_BENCH(pool_init)
+  .set_name("PageablePool Init")
+  .add_int64_axis("size", {kGiB, 4 * kGiB})
+  .add_int64_axis("pretouch_threads", {1, 8, 16})
+  .add_string_axis("method", {"populate", "manual"});
 
 NVBENCH_BENCH(dtoh_pool)
   .set_name("PageablePool DtoH Copy")
   .add_int64_axis("size", {64 * kMiB, 256 * kMiB, kGiB, 4 * kGiB})
-  .add_string_axis("numa", {"off", "on"})
-  .add_int64_axis("pretouch_threads", {8});
+  .add_string_axis("thp", {"default", "deny"});
 
 NVBENCH_BENCH(dtoh_reference)
   .set_name("PageablePool DtoH Reference")
   .add_int64_axis("size", {64 * kMiB, 256 * kMiB, kGiB})
   .add_string_axis("dst", {"fresh_malloc", "pinned"});
 
-NVBENCH_BENCH(pool_init)
-  .set_name("PageablePool Init")
-  .add_int64_axis("size", {kGiB, 4 * kGiB})
-  .add_int64_axis("pretouch_threads", {1, 4, 8, 16})
-  .add_string_axis("numa", {"off", "on"});
+NVBENCH_BENCH(dtoh_pool_chunked)
+  .set_name("PageablePool DtoH Chunked")
+  .add_int64_axis("size", {kGiB})
+  .add_int64_axis("chunks", {1, 2, 4, 8});
 
-NVBENCH_BENCH(alloc_free_latency)
-  .set_name("PageablePool AllocFree")
-  .add_int64_axis("chunk", {64 * 1'024, 4 * kMiB, 64 * kMiB})
+NVBENCH_BENCH(alloc_free_list)
+  .set_name("PageablePool AllocFree List")
+  .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
   .add_int64_axis("threads", {1, 4, 16, 32});
+
+NVBENCH_BENCH(alloc_free_list_cache)
+  .set_name("PageablePool AllocFree ListCache")
+  .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
+  .add_int64_axis("threads", {1, 4, 16, 32});
+
+NVBENCH_BENCH(alloc_free_indexed)
+  .set_name("PageablePool AllocFree Indexed")
+  .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
+  .add_int64_axis("threads", {1, 4, 16, 32});
+
+NVBENCH_BENCH(alloc_free_arena)
+  .set_name("PageablePool AllocFree Arena")
+  .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
+  .add_int64_axis("threads", {1, 4, 16, 32});
+
+NVBENCH_BENCH(fragment_list).set_name("PageablePool Fragmented List");
+NVBENCH_BENCH(fragment_indexed).set_name("PageablePool Fragmented Indexed");
