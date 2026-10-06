@@ -262,6 +262,26 @@ TEST(PageablePool, RemainderCacheServesNextAlloc)
   pool.deallocate_sync(full, kPoolSize);
 }
 
+TEST(PageablePool, RemainderCacheExactFitServesClean)
+{
+  // An exact-fit serve must leave NOTHING cached (no zero-size block may reach the
+  // free list through the flush path) and the pool must still fully recover.
+  auto pool = make_pool(kPoolSize, 1, -1, /*cache=*/true);
+  void* a   = pool.allocate_sync(1024 * 1024);
+  ASSERT_NE(a, nullptr);
+  void* b = pool.allocate_sync(1024 * 1024);
+  ASSERT_NE(b, nullptr);
+  void* c = pool.allocate_sync(2 * 1024 * 1024);  // exactly consumes the cached tail
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(static_cast<char*>(c), static_cast<char*>(b) + 1024 * 1024);
+  pool.deallocate_sync(c, 2 * 1024 * 1024);
+  pool.deallocate_sync(b, 1024 * 1024);
+  pool.deallocate_sync(a, 1024 * 1024);
+  void* full = pool.allocate_sync(kPoolSize);
+  ASSERT_NE(full, nullptr);
+  pool.deallocate_sync(full, kPoolSize);
+}
+
 // ---------------------------------------------------------------------------
 // Policy parity: the indexed free list must make IDENTICAL allocation decisions
 // ---------------------------------------------------------------------------

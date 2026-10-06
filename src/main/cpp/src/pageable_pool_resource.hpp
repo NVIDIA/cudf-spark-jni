@@ -341,12 +341,15 @@ class pageable_pool_resource_t
       // directly skips the O(F) best-fit scan. Flush it back to the free list when it
       // cannot serve the request so best-fit still sees it.
       if (cached_remainder_.pointer() != nullptr && cached_remainder_.size() >= bytes) {
-        void* cached      = cached_remainder_.pointer();
-        cached_remainder_ = rmm::mr::detail::block{
-          static_cast<char*>(cached) + bytes, cached_remainder_.size() - bytes, false};
+        void* cached = cached_remainder_.pointer();
+        // An exact-fit serve leaves nothing cached — never store a zero-size block.
+        auto const leftover = cached_remainder_.size() - bytes;
+        cached_remainder_ =
+          leftover > 0 ? rmm::mr::detail::block{static_cast<char*>(cached) + bytes, leftover, false}
+                       : rmm::mr::detail::block{};
         return cached;
       }
-      if (cached_remainder_.pointer() != nullptr) {
+      if (cached_remainder_.pointer() != nullptr && cached_remainder_.size() > 0) {
         free_list_.insert(cached_remainder_);
         cached_remainder_ = rmm::mr::detail::block{};
       }
