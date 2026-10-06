@@ -40,8 +40,8 @@ public final class PageableMemoryPool implements AutoCloseable {
     NativeDepsLoader.loadNativeDeps();
   }
 
-  private static native long newPageablePoolMemoryResource(long poolSize, int pretouchThreads,
-      boolean numaBind);
+  private static native long newPageablePoolMemoryResource(
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny);
 
   private static native void releasePageablePoolMemoryResource(long poolPtr);
 
@@ -150,8 +150,9 @@ public final class PageableMemoryPool implements AutoCloseable {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
+    boolean thpDeny = "deny".equals(System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP"));
     FutureTask<PageableMemoryPool> task =
-        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads, numaBind));
+        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads, numaBind, thpDeny));
     Thread initThread = new Thread(task, "pageable pool init");
     initThread.setDaemon(true);
     initThread.start();
@@ -209,8 +210,10 @@ public final class PageableMemoryPool implements AutoCloseable {
     return 0;
   }
 
-  private PageableMemoryPool(long poolSize, int pretouchThreads, boolean numaBind) {
-    this.poolHandle = newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind);
+  private PageableMemoryPool(
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny) {
+    this.poolHandle =
+        newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind, thpDeny);
     this.poolSize = poolSize;
   }
 

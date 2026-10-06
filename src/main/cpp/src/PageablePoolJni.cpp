@@ -33,8 +33,13 @@
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(
-  JNIEnv* env, jclass, jlong pool_size, jint pretouch_threads, jboolean numa_bind)
+JNIEXPORT jlong JNICALL
+Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(JNIEnv* env,
+                                                                     jclass,
+                                                                     jlong pool_size,
+                                                                     jint pretouch_threads,
+                                                                     jboolean numa_bind,
+                                                                     jboolean thp_deny)
 {
   JNI_TRY
   {
@@ -45,9 +50,11 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMe
         spark_rapids_jni::pageable_memory_resource{}),
       static_cast<std::size_t>(pool_size),
       static_cast<int>(pretouch_threads),
-      numa_node);
+      numa_node,
+      /*use_remainder_cache=*/false,
+      /*populate_write=*/true,
+      /*thp_deny=*/(thp_deny != JNI_FALSE));
     return reinterpret_cast<jlong>(pool.release());
-
   }
   JNI_CATCH(env, 0);
 }

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,7 +41,10 @@ constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
 [[nodiscard]] pageable_pool_resource make_pool(std::size_t size = kPoolSize,
                                                int threads      = 1,
-                                               int numa_node    = -1)
+                                               int numa_node    = -1,
+                                               bool cache       = false,
+                                               bool populate    = true,
+                                               bool thp_deny    = false)
 {
   // Explicit any_resource construction is required because the converting constructor
   // of any_resource is not implicit in this CCCL version.
@@ -48,7 +52,19 @@ constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
     size,
     threads,
-    numa_node);
+    numa_node,
+    cache,
+    populate,
+    thp_deny);
+}
+
+[[nodiscard]] pageable_pool_resource_t<detail::indexed_free_list> make_indexed_pool(
+  std::size_t size = kPoolSize, int threads = 1)
+{
+  return pageable_pool_resource_t<detail::indexed_free_list>(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
+    size,
+    threads);
 }
 
 testing::AssertionResult all_eq(unsigned char const* data,
@@ -219,6 +235,150 @@ TEST(PageablePool, ParseCpuList)
 
   cpu_set_t none{};
   EXPECT_FALSE(detail::parse_cpu_list("/nonexistent/cpulist", &none));
+}
+
+// ---------------------------------------------------------------------------
+// Remainder cache: the split tail serves the next allocation directly
+// ---------------------------------------------------------------------------
+TEST(PageablePool, RemainderCacheServesNextAlloc)
+{
+  auto pool = make_pool(kPoolSize, 1, -1, /*cache=*/true);
+  void* a   = pool.allocate_sync(1024 * 1024);
+  ASSERT_NE(a, nullptr);
+  void* b = pool.allocate_sync(512 * 1024);
+  ASSERT_NE(b, nullptr);
+  // b must come from the cached tail of a's split, i.e. immediately after a.
+  EXPECT_EQ(static_cast<char*>(b), static_cast<char*>(a) + 1024 * 1024);
+  void* c = pool.allocate_sync(256 * 1024);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(static_cast<char*>(c), static_cast<char*>(b) + 512 * 1024);
+
+  // Freeing everything (which flushes the cache) must recover the full pool.
+  pool.deallocate_sync(c, 256 * 1024);
+  pool.deallocate_sync(b, 512 * 1024);
+  pool.deallocate_sync(a, 1024 * 1024);
+  void* full = pool.allocate_sync(kPoolSize);
+  ASSERT_NE(full, nullptr);
+  pool.deallocate_sync(full, kPoolSize);
+}
+
+// ---------------------------------------------------------------------------
+// Policy parity: the indexed free list must make IDENTICAL allocation decisions
+// ---------------------------------------------------------------------------
+TEST(PageablePool, DecisionParityListVsIndexed)
+{
+  auto list_pool    = make_pool(kPoolSize);
+  auto indexed_pool = make_indexed_pool(kPoolSize);
+
+  // Capture each pool's base so decisions can be compared as pool-relative offsets —
+  // the two pools live at different addresses.
+  void* const list_base = list_pool.allocate_sync(kPoolSize);
+  void* const idx_base  = indexed_pool.allocate_sync(kPoolSize);
+  ASSERT_NE(list_base, nullptr);
+  ASSERT_NE(idx_base, nullptr);
+  list_pool.deallocate_sync(list_base, kPoolSize);
+  indexed_pool.deallocate_sync(idx_base, kPoolSize);
+  auto list_off = [&](void* p) { return static_cast<char*>(p) - static_cast<char*>(list_base); };
+  auto idx_off  = [&](void* p) { return static_cast<char*>(p) - static_cast<char*>(idx_base); };
+
+  std::vector<std::size_t> const sizes = {1 << 10, 64 << 10, 1 << 20, 256 << 10, 1 << 10};
+  std::vector<void*> list_ptrs;
+  std::vector<void*> indexed_ptrs;
+  for (auto size : sizes) {
+    list_ptrs.push_back(list_pool.allocate_sync(size));
+    indexed_ptrs.push_back(indexed_pool.allocate_sync(size));
+    ASSERT_NE(list_ptrs.back(), nullptr);
+    ASSERT_NE(indexed_ptrs.back(), nullptr);
+    EXPECT_EQ(list_off(list_ptrs.back()), idx_off(indexed_ptrs.back()));
+  }
+  // Interleaved partial frees create holes; best-fit must pick the same holes.
+  list_pool.deallocate_sync(list_ptrs[2], sizes[2]);
+  indexed_pool.deallocate_sync(indexed_ptrs[2], sizes[2]);
+  list_pool.deallocate_sync(list_ptrs[0], sizes[0]);
+  indexed_pool.deallocate_sync(indexed_ptrs[0], sizes[0]);
+
+  std::vector<std::size_t> const refill = {256 << 10, 32 << 10, 1 << 20};
+  for (auto size : refill) {
+    void* lp = list_pool.allocate_sync(size);
+    void* ip = indexed_pool.allocate_sync(size);
+    ASSERT_NE(lp, nullptr);
+    ASSERT_NE(ip, nullptr);
+    EXPECT_EQ(list_off(lp), idx_off(ip)) << "best-fit decision diverged for size " << size;
+    list_ptrs.push_back(lp);
+    indexed_ptrs.push_back(ip);
+  }
+  // Full teardown must recover the entire pool on both.
+  for (std::size_t i = 0; i < list_ptrs.size(); ++i) {
+    std::size_t const sz = (i < sizes.size()) ? sizes[i] : refill[i - sizes.size()];
+    list_pool.deallocate_sync(list_ptrs[i], sz);
+    indexed_pool.deallocate_sync(indexed_ptrs[i], sz);
+  }
+  void* list_full = list_pool.allocate_sync(kPoolSize);
+  void* idx_full  = indexed_pool.allocate_sync(kPoolSize);
+  ASSERT_NE(list_full, nullptr);
+  ASSERT_NE(idx_full, nullptr);
+  EXPECT_EQ(list_off(list_full), idx_off(idx_full));
+  list_pool.deallocate_sync(list_full, kPoolSize);
+  indexed_pool.deallocate_sync(idx_full, kPoolSize);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-touch manual path (populate_write=false) still covers every page
+// ---------------------------------------------------------------------------
+TEST(PageablePool, ManualPretouchCoversPages)
+{
+  auto const page_size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+  auto const bytes     = page_size + rmm::CUDA_ALLOCATION_ALIGNMENT;
+  auto pool            = make_pool(bytes, 1, -1, /*cache=*/false, /*populate=*/false);
+  void* p              = pool.allocate_sync(bytes);
+  ASSERT_NE(p, nullptr);
+  for (std::size_t page = 0; page < 2; ++page) {
+    unsigned char resident = 0;
+    ASSERT_EQ(::mincore(static_cast<char*>(p) + page * page_size, page_size, &resident), 0);
+    EXPECT_NE(resident & 1, 0) << "page " << page << " was not pre-touched";
+  }
+  pool.deallocate_sync(p, bytes);
+}
+
+// ---------------------------------------------------------------------------
+// THP deny: the backing buffer must not be promoted to transparent huge pages
+// ---------------------------------------------------------------------------
+TEST(PageablePool, ThpDenyKeepsBasePages)
+{
+  std::ifstream thp_enabled("/sys/kernel/mm/transparent_hugepage/enabled");
+  std::string line;
+  bool thp_possible = false;
+  if (std::getline(thp_enabled, line)) { thp_possible = line.find("[never]") == std::string::npos; }
+  if (!thp_possible) { GTEST_SKIP() << "transparent huge pages disabled on host"; }
+
+  auto const page_size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+  auto pool            = make_pool(64 * page_size, 1, -1, false, true, /*thp_deny=*/true);
+  void* p              = pool.allocate_sync(4096);
+  ASSERT_NE(p, nullptr);
+  std::memset(p, 0, 4096);
+
+  // The mapping containing p must report zero anonymous huge pages.
+  std::uintptr_t const addr = reinterpret_cast<std::uintptr_t>(p);
+  std::ifstream smaps("/proc/self/smaps");
+  bool in_mapping = false;
+  bool found      = false;
+  std::string sm_line;
+  while (std::getline(smaps, sm_line)) {
+    if (sm_line.find('-') != std::string::npos && sm_line.find(':') == std::string::npos) {
+      std::uintptr_t lo = 0, hi = 0;
+      std::istringstream ss(sm_line);
+      ss >> std::hex >> lo;
+      std::string dash;
+      ss >> dash >> std::hex >> hi;
+      in_mapping = (lo <= addr && addr < hi);
+      if (in_mapping) { found = true; }
+    } else if (in_mapping && sm_line.find("AnonHugePages:") != std::string::npos) {
+      EXPECT_NE(sm_line.find("0 kB"), std::string::npos) << sm_line;
+      break;
+    }
+  }
+  EXPECT_TRUE(found) << "mapping not found in smaps";
+  pool.deallocate_sync(p, 4096);
 }
 
 // ---------------------------------------------------------------------------
