@@ -29,7 +29,6 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -293,10 +292,17 @@ TEST(PageablePool, DecisionParityListVsIndexed)
     EXPECT_EQ(list_off(list_ptrs.back()), idx_off(indexed_ptrs.back()));
   }
   // Interleaved partial frees create holes; best-fit must pick the same holes.
+  // Track LIVE blocks: freeing [2] and [0] lets the refills reuse their memory.
   list_pool.deallocate_sync(list_ptrs[2], sizes[2]);
   indexed_pool.deallocate_sync(indexed_ptrs[2], sizes[2]);
   list_pool.deallocate_sync(list_ptrs[0], sizes[0]);
   indexed_pool.deallocate_sync(indexed_ptrs[0], sizes[0]);
+  std::vector<std::pair<void*, std::size_t>> list_live;
+  std::vector<std::pair<void*, std::size_t>> idx_live;
+  for (std::size_t i : {std::size_t{1}, std::size_t{3}, std::size_t{4}}) {
+    list_live.emplace_back(list_ptrs[i], sizes[i]);
+    idx_live.emplace_back(indexed_ptrs[i], sizes[i]);
+  }
 
   std::vector<std::size_t> const refill = {256 << 10, 32 << 10, 1 << 20};
   for (auto size : refill) {
@@ -305,14 +311,13 @@ TEST(PageablePool, DecisionParityListVsIndexed)
     ASSERT_NE(lp, nullptr);
     ASSERT_NE(ip, nullptr);
     EXPECT_EQ(list_off(lp), idx_off(ip)) << "best-fit decision diverged for size " << size;
-    list_ptrs.push_back(lp);
-    indexed_ptrs.push_back(ip);
+    list_live.emplace_back(lp, size);
+    idx_live.emplace_back(ip, size);
   }
   // Full teardown must recover the entire pool on both.
-  for (std::size_t i = 0; i < list_ptrs.size(); ++i) {
-    std::size_t const sz = (i < sizes.size()) ? sizes[i] : refill[i - sizes.size()];
-    list_pool.deallocate_sync(list_ptrs[i], sz);
-    indexed_pool.deallocate_sync(indexed_ptrs[i], sz);
+  for (std::size_t i = 0; i < list_live.size(); ++i) {
+    list_pool.deallocate_sync(list_live[i].first, list_live[i].second);
+    indexed_pool.deallocate_sync(idx_live[i].first, idx_live[i].second);
   }
   void* list_full = list_pool.allocate_sync(kPoolSize);
   void* idx_full  = indexed_pool.allocate_sync(kPoolSize);
@@ -365,12 +370,11 @@ TEST(PageablePool, ThpDenyKeepsBasePages)
   bool found      = false;
   std::string sm_line;
   while (std::getline(smaps, sm_line)) {
-    if (sm_line.find('-') != std::string::npos && sm_line.find(':') == std::string::npos) {
-      std::uintptr_t lo = 0, hi = 0;
-      std::istringstream ss(sm_line);
-      ss >> std::hex >> lo;
-      std::string dash;
-      ss >> dash >> std::hex >> hi;
+    // Mapping headers parse as "lo-hi ..."; other lines (including VmFlags etc.)
+    // do not start with two hex fields.
+    std::uintptr_t lo = 0, hi = 0;
+    bool const is_header = std::sscanf(sm_line.c_str(), "%lx-%lx", &lo, &hi) == 2;
+    if (is_header) {
       in_mapping = (lo <= addr && addr < hi);
       if (in_mapping) { found = true; }
     } else if (in_mapping && sm_line.find("AnonHugePages:") != std::string::npos) {
