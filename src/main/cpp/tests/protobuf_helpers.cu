@@ -47,6 +47,10 @@
 
 class ProtobufHelpersTest : public cudf::test::BaseFixture {};
 
+using ::testing::Each;
+using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
+
 namespace {
 
 namespace protobuf = spark_rapids_jni::protobuf;
@@ -192,9 +196,6 @@ namespace {
 
 namespace protobuf_detail = spark_rapids_jni::protobuf::detail;
 using protobuf_detail::field_location;
-using ::testing::Each;
-using ::testing::ElementsAre;
-using ::testing::ElementsAreArray;
 
 // Named accessors avoid member-pointer template arguments in NVCC's generated host stubs.
 struct input_location_accessor {
