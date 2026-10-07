@@ -333,9 +333,10 @@ TEST_F(ProtobufHelpersTest, NestedInputLocationsRebaseSlices)
     {offsets.data(), 90, parents.data() + 1, children.data(), 0, 2},
     {offsets.data(), 101, parents.data(), children.data(), 0, 2},
     {offsets.data(), 99, parents.data(), children.data(), 1, 2}};
-  EXPECT_THAT(invoke_provider<input_location_accessor>(probes, 0),
-              ElementsAreArray<field_location>(
-                {{17, 3}, field_location::missing(), field_location::missing(), field_location::missing()}));
+  EXPECT_THAT(
+    invoke_provider<input_location_accessor>(probes, 0),
+    ElementsAreArray<field_location>(
+      {{17, 3}, field_location::missing(), field_location::missing(), field_location::missing()}));
 }
 
 TEST_F(ProtobufHelpersTest, OccurrenceInputLocationsRebaseRowsAndParents)
