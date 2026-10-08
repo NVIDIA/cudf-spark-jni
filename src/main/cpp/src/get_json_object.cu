@@ -374,16 +374,17 @@ struct context {
  * @param out_buf Buffer user to store the string resulted from the query
  * @param max_path_depth_exceeded A marker to record if the maximum path depth has been reached
  *        during parsing the input string
- * @return A pair containing the result code and the output size
+ * @return A tuple of the result code, the committed output size, and the maximum write
+ *         footprint (bytes touched, including discarded child writes)
  */
-__device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
+__device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_path(
   json_parser& p,
   cudf::device_span<path_instruction const> path_commands,
   char* out_buf,
   int8_t* max_path_depth_exceeded)
 {
   p.next_token();
-  if (json_token::ERROR == p.get_current_token()) { return {false, 0}; }
+  if (json_token::ERROR == p.get_current_token()) { return {false, 0, 0}; }
 
   // Define stack; plus 1 indicates root context task needs an extra memory.
   context stack[MAX_JSON_PATH_DEPTH + 1];
@@ -437,7 +438,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         if (json_token::END_ARRAY != p.next_token()) {
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
           // push back task
           // add child task
@@ -456,7 +459,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         // general case: just copy the child tree verbatim
         if (!(ctx.g.copy_current_structure(p, out_buf))) {
           // JSON validation check
-          return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+          return {false,
+                  ctx.g.get_offset() + ctx.g.get_output_len(),
+                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
         }
         ctx.dirty        = 1;
         ctx.task_is_done = true;
@@ -472,20 +477,26 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
             while (json_token::END_OBJECT != p.next_token()) {
               // JSON validation check
               if (json_token::ERROR == p.get_current_token()) {
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
 
               // skip FIELD_NAME token
               p.next_token();
               // JSON validation check
               if (json_token::ERROR == p.get_current_token()) {
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
 
               // skip value of FIELD_NAME
               if (!p.try_skip_children()) {
                 // JSON validation check
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
             }
           }
@@ -503,7 +514,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 
             // JSON validation check
             if (json_token::ERROR == p.get_current_token()) {
-              return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+              return {false,
+                      ctx.g.get_offset() + ctx.g.get_output_len(),
+                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
             }
 
             // current token is FIELD_NAME
@@ -512,12 +525,16 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
               p.next_token();
               // JSON validation check
               if (json_token::ERROR == p.get_current_token()) {
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
 
               // meets null token, it's not expected, return false
               if (json_token::VALUE_NULL == p.get_current_token()) {
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
               // push sub task; sub task will update the result of path 4
               push_context(evaluation_case_path::START_OBJECT___MATCHED_NAME_PATH,
@@ -531,13 +548,17 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
               p.next_token();
               // JSON validation check
               if (json_token::ERROR == p.get_current_token()) {
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
 
               // current child is not expected, skip current child
               if (!p.try_skip_children()) {
                 // JSON validation check
-                return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+                return {false,
+                        ctx.g.get_offset() + ctx.g.get_output_len(),
+                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
               }
             }
           }
@@ -563,7 +584,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         if (p.next_token() != json_token::END_ARRAY) {
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
           push_context(evaluation_case_path::START_ARRAY___MATCHED_DOUBLE_WILDCARD,
                        ctx.g,
@@ -606,9 +629,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           if (json_token::ERROR == p.get_current_token()) {
             // The child generator may have written past this context's extent; report the
             // larger of the two so the out-of-bound check sees the real overrun.
-            return {false,
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(),
-                                   child_g.get_offset() + child_g.get_output_len())};
+            auto const extent = cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(),
+                                               child_g.get_offset() + child_g.get_output_len());
+            return {false, extent, cuda::std::max(extent, max_footprint)};
           }
           // track the number of array elements and only emit an outer array if
           // we've written more than one element, this matches Hive's behavior
@@ -644,7 +667,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         if (p.next_token() != json_token::END_ARRAY) {
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           // wildcards can have multiple matches, continually update the dirty
@@ -667,7 +692,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         p.next_token();
         // JSON validation check
         if (json_token::ERROR == p.get_current_token()) {
-          return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+          return {false,
+                  ctx.g.get_offset() + ctx.g.get_output_len(),
+                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
         }
         ctx.is_first_enter = false;
 
@@ -675,17 +702,23 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         while (i > 0) {
           if (p.get_current_token() == json_token::END_ARRAY) {
             // terminate, nothing has been written
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           if (!p.try_skip_children()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           p.next_token();
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           --i;
@@ -706,24 +739,32 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
         p.next_token();
         // JSON validation check
         if (json_token::ERROR == p.get_current_token()) {
-          return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+          return {false,
+                  ctx.g.get_offset() + ctx.g.get_output_len(),
+                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
         }
 
         int i = idx;
         while (i > 0) {
           if (p.get_current_token() == json_token::END_ARRAY) {
             // terminate, nothing has been written
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           if (!p.try_skip_children()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           p.next_token();
           // JSON validation check
           if (json_token::ERROR == p.get_current_token()) {
-            return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+            return {false,
+                    ctx.g.get_offset() + ctx.g.get_output_len(),
+                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
           }
 
           --i;
@@ -738,7 +779,11 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
       // case _ =>
       // case path 12
       else {
-        if (!p.try_skip_children()) { return {false, ctx.g.get_offset() + ctx.g.get_output_len()}; }
+        if (!p.try_skip_children()) {
+          return {false,
+                  ctx.g.get_offset() + ctx.g.get_output_len(),
+                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+        }
         // default case path, return false for this task
         ctx.dirty        = 0;
         ctx.task_is_done = true;
@@ -807,11 +852,15 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           while (p.next_token() != json_token::END_ARRAY) {
             // JSON validation check
             if (json_token::ERROR == p.get_current_token()) {
-              return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+              return {false,
+                      ctx.g.get_offset() + ctx.g.get_output_len(),
+                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
             }
             // advance the token stream to the end of the array
             if (!p.try_skip_children()) {
-              return {false, ctx.g.get_offset() + ctx.g.get_output_len()};
+              return {false,
+                      ctx.g.get_offset() + ctx.g.get_output_len(),
+                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
             }
           }
           // task is done
@@ -829,10 +878,11 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 
   auto const success = stack[0].dirty > 0;
 
-  // Report the bytes actually written, even for an invalid row, so the out-of-bound check
-  // below sees a malformed row's overrun.
-  return {success,
-          cuda::std::max(max_footprint, stack[0].g.get_offset() + stack[0].g.get_output_len())};
+  auto const root_extent     = stack[0].g.get_offset() + stack[0].g.get_output_len();
+  auto const write_footprint = cuda::std::max(max_footprint, root_extent);
+  // A valid row's length is its committed output; discarded child bytes (a no-match
+  // wildcard step) must not leak into it, they only matter for the out-of-bound check.
+  return {success, success ? root_extent : write_footprint, write_footprint};
 }
 
 /**
@@ -892,7 +942,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   auto const str = input.element<cudf::string_view>(row_idx);
   if (str.size_bytes() > 0) {
     json_parser p{char_range{str}};
-    cuda::std::tie(is_valid, out_size) =
+    cudf::size_type write_footprint = 0;
+    cuda::std::tie(is_valid, out_size, write_footprint) =
       evaluate_path(p, path.path_commands, dst, max_path_depth_exceeded);
 
     // We did not terminate the `evaluate_path` function early to reduce complexity of the code.
@@ -904,7 +955,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
     }
 
     auto const max_size = path.offsets[row_idx + 1] - path.offsets[row_idx];
-    if (out_size > max_size) { *(path.has_out_of_bound) = 1; }
+    // The footprint covers discarded child writes too; it is always >= the output length.
+    if (write_footprint > max_size) { *(path.has_out_of_bound) = 1; }
   }
 
   // Write out `nullptr` in the output string_view to indicate that the output is a null.
