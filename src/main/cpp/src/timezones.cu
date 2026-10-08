@@ -478,16 +478,6 @@ struct tz_side_info {
   bool is_fixed;
 };
 
-struct orc_base_offset_info {
-  int64_t us;
-  bool is_second_aligned;
-};
-
-[[nodiscard]] orc_base_offset_info make_orc_base_offset_info(int64_t us)
-{
-  return orc_base_offset_info{us, (us % MICROS_PER_SECOND) == 0};
-}
-
 struct orc_tz_side_kernel_args {
   int64_t const* __restrict__ trans;
   int32_t const* __restrict__ offsets;
@@ -538,42 +528,29 @@ __device__ static int32_t get_transition_index(int64_t time_ms, tz_side_info con
 }
 
 /**
- * @brief Apply the ORC 2015 writer base offset while preserving Apache's negative timestamp borrow.
+ * @brief Apply the ORC 2015 writer base offset to a cuDF-decoded ORC timestamp.
  *
- * ORC stores a timestamp as seconds relative to 2015-01-01 in the writer timezone plus a
- * non-negative nanos field. For a pre-epoch timestamp with a fractional part, the Apache writer
- * truncates the seconds toward zero. On read, Apache reconstructs the writer-specific 2015 epoch,
- * then borrows one second when the resulting seconds are negative and the encoded nanos contribute
- * at least one millisecond.
- *
- * With `ignoreTimezoneInStripeFooter=true`, cuDF instead uses the UTC 2015 epoch when deciding
- * whether to borrow. The later writer 2015 base-offset adjustment can move the timestamp across
- * the Unix epoch, making cuDF's earlier borrow decision incorrect. This function first reconstructs
- * the value before cuDF's borrow, applies the writer-specific 2015 base offset, and then makes the
- * borrow decision in the same frame as Apache. It can therefore both add a missing borrow and undo
- * one that cuDF applied before the sign changed.
- *
- * For example, the Asia/Shanghai reproducer from nvidia/cudf#21993 has:
+ * With `writer_borrow_applied = true` (normal path) the reader already folded Apache's negative
+ * nanos borrow into `decoded_us`, so this is a plain frame shift. With `false` (the reader's
+ * UTC-epoch fallback for unresolvable writer timezones) the borrow is reconstructed to match
+ * Apache ORC: one second when the shift crosses the Unix epoch on a borrowable fraction (>= 1 ms).
  *
  * @code{.pseudo}
- *   decoded_us     =  21'087'883'873  // cuDF used the UTC 2015 epoch; no borrow
- *   writer_2015_year_base_offset_us =  28'800'000'000  // Shanghai is UTC+08:00 at the ORC epoch
- *   unborrowed_us  =  -7'712'116'127  // negative after using the writer-specific epoch
- *   result_us      =  -7'713'116'127  // Apache-compatible one-second borrow
+ *   // true:  decoded 21'086'883'873 - 28'800'000'000 = -7'713'116'127 (Shanghai, borrow folded in)
+ *   // false: decoded 21'087'883'873 (UTC-fallback decode, no borrow) -> -7'713'116'127
  * @endcode
- *
- * The one-millisecond threshold matches cuDF's ORC decoder and the Apache writer's nanos encoding.
  */
 __device__ static int64_t apply_orc_base_offset(int64_t decoded_us,
-                                                orc_base_offset_info base_offset)
+                                                int64_t base_offset_us,
+                                                bool writer_borrow_applied)
 {
-  if (base_offset.us == 0) { return decoded_us; }
+  if (writer_borrow_applied) { return decoded_us - base_offset_us; }
+  if (base_offset_us == 0) { return decoded_us; }
 
-  // ORC timezone base offsets are second-aligned. For an arbitrary microsecond offset, the
-  // original nanos field cannot be reconstructed reliably, so retain the plain offset behavior.
-  if (!base_offset.is_second_aligned) { return decoded_us - base_offset.us; }
+  // Sub-second base offsets cannot be reconstructed reliably; keep the plain shift.
+  if (base_offset_us % MICROS_PER_SECOND != 0) { return decoded_us - base_offset_us; }
 
-  auto const plain_adjusted_us = decoded_us - base_offset.us;
+  auto const plain_adjusted_us = decoded_us - base_offset_us;
   if (decoded_us >= 0 && plain_adjusted_us >= 0) { return plain_adjusted_us; }
   if (decoded_us < 0 && plain_adjusted_us < -MICROS_PER_SECOND) { return plain_adjusted_us; }
 
@@ -584,7 +561,7 @@ __device__ static int64_t apply_orc_base_offset(int64_t decoded_us,
   bool const cudf_applied_borrow     = decoded_us < 0 && has_borrowable_fraction;
 
   auto const unborrowed_us = decoded_us + (cudf_applied_borrow ? MICROS_PER_SECOND : int64_t{0});
-  auto const adjusted_unborrowed_us = unborrowed_us - base_offset.us;
+  auto const adjusted_unborrowed_us = unborrowed_us - base_offset_us;
   bool const apache_applies_borrow  = adjusted_unborrowed_us < 0 && has_borrowable_fraction;
 
   return adjusted_unborrowed_us - (apache_applies_borrow ? MICROS_PER_SECOND : int64_t{0});
@@ -593,11 +570,10 @@ __device__ static int64_t apply_orc_base_offset(int64_t decoded_us,
 /**
  * @brief Convert a timestamp between ORC writer and reader timezones.
  *
- * Matches Apache ORC's read order: first reconstruct the timestamp using the writer timezone's
- * 2015 base instant and apply Apache's negative nanos borrow, then run the equivalent of
- * org.apache.orc.impl.SerializationUtils.convertBetweenTimezones. The first step is required for
- * fixed, transition-table, and DST writers because ORC's 2015 base offset can include historical
- * or DST-specific offset state.
+ * Matches Apache ORC's read order: shift the cuDF-decoded instant back into the writer
+ * timezone's 2015 base frame, then apply the equivalent of
+ * org.apache.orc.impl.SerializationUtils.convertBetweenTimezones. The shift covers fixed,
+ * transition-table, and DST writers because the 2015 base offset can include DST state.
  *
  * Optimized for common cases:
  * - Fixed-offset reader (e.g. UTC): skip all reader lookups, use constant offset.
@@ -605,14 +581,16 @@ __device__ static int64_t apply_orc_base_offset(int64_t decoded_us,
  */
 __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
   cudf::timestamp_us ts,
-  orc_base_offset_info writer_2015_year_base_offset,
+  int64_t writer_2015_year_base_offset_us,
+  bool writer_borrow_applied,
   tz_side_info const& writer,
   tz_side_info const& reader,
   bool writer_reader_rules_differ)
 {
   int64_t const decoded_us = static_cast<int64_t>(
     cuda::std::chrono::duration_cast<cudf::duration_us>(ts.time_since_epoch()).count());
-  int64_t const adjusted_us = apply_orc_base_offset(decoded_us, writer_2015_year_base_offset);
+  int64_t const adjusted_us =
+    apply_orc_base_offset(decoded_us, writer_2015_year_base_offset_us, writer_borrow_applied);
   if (!writer_reader_rules_differ) { return cudf::timestamp_us{cudf::duration_us{adjusted_us}}; }
 
   // Floor-divide to get epoch millis (handles negative timestamps correctly)
@@ -634,9 +612,7 @@ __device__ static cudf::timestamp_us convert_timestamp_between_timezones(
   return cudf::timestamp_us{cudf::duration_us{final_result}};
 }
 
-// Max transition entries per timezone that can be loaded into shared memory.
-// Each entry = 8 bytes (transition) + 4 bytes (offset) = 12 bytes.
-// With writer + reader at max: 2 * 512 * 12 = 12KB, well within 48KB limit.
+// Per-side staged transitions cap at 512 entries (12 KB both sides); well within the 48 KB smem.
 constexpr int32_t MAX_SMEM_TRANSITIONS  = 512;
 constexpr int32_t CONVERT_TZ_BLOCK_SIZE = 256;
 
@@ -698,7 +674,8 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                            cudf::timestamp_us* __restrict__ output,
                            cudf::size_type num_rows,
                            cudf::size_type input_offset,
-                           orc_base_offset_info writer_2015_year_base_offset,
+                           int64_t writer_2015_year_base_offset_us,
+                           bool writer_borrow_applied,
                            orc_tz_side_kernel_args writer_args,
                            orc_tz_side_kernel_args reader_args,
                            bool writer_reader_rules_differ)
@@ -744,8 +721,12 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               reader_args.raw_offset,
                               reader_args.dst,
                               reader_args.is_fixed};
-    output[idx] = convert_timestamp_between_timezones(
-      input[idx], writer_2015_year_base_offset, writer, reader, writer_reader_rules_differ);
+    output[idx] = convert_timestamp_between_timezones(input[idx],
+                                                      writer_2015_year_base_offset_us,
+                                                      writer_borrow_applied,
+                                                      writer,
+                                                      reader,
+                                                      writer_reader_rules_differ);
   }
 }
 
@@ -755,7 +736,8 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                                           spark_rapids_jni::orc_tz_side reader,
                                           cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr,
-                                          bool writer_reader_rules_differ)
+                                          bool writer_reader_rules_differ,
+                                          bool writer_borrow_applied)
 {
   SRJ_FUNC_RANGE();
 
@@ -783,8 +765,6 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
   }
 
   int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
-  auto const writer_2015_year_base_offset =
-    make_orc_base_offset_info(writer_2015_year_base_offset_us);
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
@@ -797,7 +777,8 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
                results->mutable_view().begin<cudf::timestamp_us>(),
                input.size(),
                input.offset(),
-               writer_2015_year_base_offset,
+               writer_2015_year_base_offset_us,
+               writer_borrow_applied,
                writer_args,
                reader_args,
                writer_reader_rules_differ);
@@ -1040,7 +1021,8 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
                               cudf::timestamp_us* __restrict__ output,
                               cudf::size_type num_rows,
                               cudf::size_type input_offset,
-                              orc_base_offset_info writer_2015_year_base_offset,
+                              int64_t writer_2015_year_base_offset_us,
+                              bool writer_borrow_applied,
                               orc_tz_side_kernel_args writer_args,
                               orc_tz_side_kernel_args reader_args,
                               bool writer_reader_rules_differ,
@@ -1100,8 +1082,12 @@ CUDF_KERNEL void __launch_bounds__(CONVERT_TZ_BLOCK_SIZE)
   if constexpr (input_kind != orc_timestamp_kind::LOCAL) {
     auto orc_timestamp = input[idx];
     if constexpr (input_kind == orc_timestamp_kind::PHYSICAL) {
-      orc_timestamp = convert_timestamp_between_timezones(
-        orc_timestamp, writer_2015_year_base_offset, writer, reader, writer_reader_rules_differ);
+      orc_timestamp = convert_timestamp_between_timezones(orc_timestamp,
+                                                          writer_2015_year_base_offset_us,
+                                                          writer_borrow_applied,
+                                                          writer,
+                                                          reader,
+                                                          writer_reader_rules_differ);
     }
     if (orc_timestamp.time_since_epoch().count() < reader_historical_difference_end_utc_us) {
       output[idx] = convert_historical_orc_instant_to_spark(orc_timestamp,
@@ -1139,6 +1125,7 @@ std::unique_ptr<column> convert_orc_to_spark_typed(
   int64_t reader_historical_difference_end_utc_us,
   int64_t reader_historical_difference_end_local_us,
   bool writer_reader_rules_differ,
+  bool writer_borrow_applied,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
@@ -1182,7 +1169,8 @@ std::unique_ptr<column> convert_orc_to_spark_typed(
                results->mutable_view().begin<cudf::timestamp_us>(),
                input.size(),
                input.offset(),
-               make_orc_base_offset_info(writer_2015_year_base_offset_us),
+               writer_2015_year_base_offset_us,
+               writer_borrow_applied,
                writer_args,
                reader_args,
                writer_reader_rules_differ,
@@ -1276,10 +1264,17 @@ std::unique_ptr<cudf::column> convert_orc_writer_reader_timezones(
   orc_tz_side reader,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
-  bool writer_reader_rules_differ)
+  bool writer_reader_rules_differ,
+  bool writer_borrow_applied)
 {
-  return convert_timezones(
-    input, writer_2015_year_base_offset_us, writer, reader, stream, mr, writer_reader_rules_differ);
+  return convert_timezones(input,
+                           writer_2015_year_base_offset_us,
+                           writer,
+                           reader,
+                           stream,
+                           mr,
+                           writer_reader_rules_differ,
+                           writer_borrow_applied);
 }
 
 std::unique_ptr<cudf::column> convert_orc_from_utc(cudf::column_view const& input,
@@ -1326,7 +1321,8 @@ std::unique_ptr<cudf::column> convert_orc_to_spark(cudf::column_view const& inpu
                                  reader,
                                  stream,
                                  mr,
-                                 options.writer_reader_rules_differ);
+                                 options.writer_reader_rules_differ,
+                                 options.writer_borrow_applied);
       } else if constexpr (kind == orc_timestamp_kind::LOCAL) {
         return convert_orc_from_utc_typed<cudf::timestamp_us>(input, reader, stream, mr);
       } else {
@@ -1344,6 +1340,7 @@ std::unique_ptr<cudf::column> convert_orc_to_spark(cudf::column_view const& inpu
                                             options.reader_historical_difference_end_utc_us,
                                             options.reader_historical_difference_end_local_us,
                                             options.writer_reader_rules_differ,
+                                            options.writer_borrow_applied,
                                             stream,
                                             mr);
   };

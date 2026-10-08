@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include "cudf_jni_apis.hpp"
 #include "host_table_view.hpp"
+#include "jni_utils.hpp"
 
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
@@ -233,7 +234,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_freeDeviceColu
   JNIEnv* env, jclass, jlong dev_column_view_handle)
 {
   JNI_NULL_CHECK(env, dev_column_view_handle, "view is null", );
-  JNI_TRY { delete std::bit_cast<cudf::column_view*>(dev_column_view_handle); }
+  JNI_TRY { cudf::jni::safe_delete<cudf::column_view>(dev_column_view_handle); }
   JNI_CATCH(env, );
 }
 
@@ -242,7 +243,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_freeHostTable(
                                                                                 jlong table_handle)
 {
   JNI_NULL_CHECK(env, table_handle, "table is null", );
-  JNI_TRY { delete std::bit_cast<host_table_view*>(table_handle); }
+  JNI_TRY { cudf::jni::safe_delete<host_table_view>(table_handle); }
   JNI_CATCH(env, );
 }
 

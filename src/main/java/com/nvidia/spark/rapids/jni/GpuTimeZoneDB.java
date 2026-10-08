@@ -21,6 +21,7 @@ import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.HostColumnVectorCore;
+import ai.rapids.cudf.NativeDepsLoader;
 import ai.rapids.cudf.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +40,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -51,6 +53,10 @@ import java.util.concurrent.TimeUnit;
  * - Loading, shutdown, and checking APIs, etc.
  */
 public class GpuTimeZoneDB {
+  static {
+    NativeDepsLoader.loadNativeDeps();
+  }
+
   private static final Logger log = LoggerFactory.getLogger(GpuTimeZoneDB.class);
 
   /**
@@ -554,8 +560,8 @@ public class GpuTimeZoneDB {
 
   /**
    * ORC stores timestamp seconds as a diff from 2015-01-01 00:00:00 in the writer timezone.
-   * Use the writer offset at that base timestamp so native code can reconstruct the same
-   * timestamp frame before applying ORC's negative nanos borrow and timezone conversion.
+   * Use the writer offset at that base timestamp so native code can shift the cuDF-decoded
+   * instant back into that writer frame before the timezone conversion.
    */
   private static int getOrc2015YearBaseOffsetMillis(String timezoneId, OrcTimezoneInfo info) {
     if (info.transitions == null && info.dstRule == null) {
@@ -631,6 +637,9 @@ public class GpuTimeZoneDB {
     private Table readerTzInfoTable;
     private Table readerJavaTimeTzInfoTable;
     private final long writerTzOffsetAtOrc2015BaseUs;
+    // Whether the native reader resolved the writer timezone (and decided the borrow there).
+    // False means its UTC fallback; native then reconstructs the Apache borrow.
+    private final boolean writerBorrowApplied;
     private final int writerInitialOffset;
     private final int writerRawOffset;
     private final int[] writerDstRule;
@@ -652,6 +661,7 @@ public class GpuTimeZoneDB {
       this.readerTzInfoTable = readerTzInfoTable;
       this.writerTzOffsetAtOrc2015BaseUs = TimeUnit.MILLISECONDS.toMicros(
           getOrc2015YearBaseOffsetMillis(writerTimezone, writerTzInfo));
+      this.writerBorrowApplied = isWriterTimezoneResolvedNatively(writerTimezone);
       this.writerInitialOffset = writerTzInfo.initialOffset;
       this.writerRawOffset = writerTzInfo.rawOffset;
       this.writerDstRule = dstRuleToArray(writerTzInfo.dstRule);
@@ -690,6 +700,10 @@ public class GpuTimeZoneDB {
     public long getReaderFirstTransitionUs() {
       ensureOpen();
       return readerFirstTransitionUs;
+    }
+
+    boolean isWriterBorrowApplied() {
+      return writerBorrowApplied;
     }
 
     long getReaderHistoricalDifferenceEndUtcUs() {
@@ -797,7 +811,8 @@ public class GpuTimeZoneDB {
         context.readerInitialOffset,
         context.readerRawOffset,
         context.readerDstRule,
-        context.writerReaderRulesDiffer));
+        context.writerReaderRulesDiffer,
+        context.writerBorrowApplied));
   }
 
   /**
@@ -888,6 +903,7 @@ public class GpuTimeZoneDB {
         context.readerRawOffset,
         context.readerDstRule,
         context.writerReaderRulesDiffer,
+        context.writerBorrowApplied,
         context.readerJavaTimeTzInfoTable != null
             ? context.readerJavaTimeTzInfoTable.getNativeView() : 0L,
         context.readerJavaTimeTzIndex,
@@ -934,19 +950,16 @@ public class GpuTimeZoneDB {
 
   /**
    * Convert timestamps between writer/reader timezones for ORC reading.
-   * Similar to Apache ORC, this first reconstructs the timestamp from ORC's
-   * writer-timezone 2015 base instant and applies the negative nanos borrow,
-   * then applies the offset from
-   * `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`.
-   * For more details, refer to:
-   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/TreeReaderFactory.java#L1284-L1286">borrow logic</a>
-   * and
-   * <a href="https://github.com/apache/orc/blob/rel/release-1.9.1/java/core/src/java/org/apache/orc/impl/SerializationUtils.java#L1440">timezone conversion logic</a>
+   * Shifts the decoded instant back into the writer-timezone 2015 base frame, then applies the
+   * offset from `org.apache.orc.impl.SerializationUtils.convertBetweenTimezones`. The reader
+   * decides the negative nanos borrow in the writer's frame when it resolves that timezone
+   * (matching Apache ORC); on its UTC fallback the borrow is reconstructed before the shift.
+   * See Apache ORC 1.9.1 TreeReaderFactory (borrow logic) and SerializationUtils
+   * (timezone conversion).
    *
    * @param input          input timestamp column in microseconds.
-   * @param writerTimezone writer timezone, it's from ORC stripe metadata.
-   * @param readerTimezone reader timezone, it's from current JVM default
-   *                       timezone.
+   * @param writerTimezone writer timezone from ORC stripe metadata.
+   * @param readerTimezone reader timezone from the current JVM default timezone.
    * @return timestamp column in microseconds after converting between timezones
    */
   public static ColumnVector convertOrcTimezones(
@@ -978,7 +991,21 @@ public class GpuTimeZoneDB {
       int readerTzInitialOffset,
       int readerTzRawOffset,
       int[] readerDstRule,
-      boolean writerReaderRulesDiffer);
+      boolean writerReaderRulesDiffer,
+      boolean writerBorrowApplied);
+
+  // Memoized probe results per writer timezone id (the native probe parses the TZif file, so
+  // repeated contexts for the same id must not repeat it). Bounded in practice by the distinct
+  // writer timezones seen in ORC footers; same lifetime convention as RUNTIME_TIMEZONE_INFOS.
+  private static final ConcurrentHashMap<String, Boolean> RESOLVED_WRITER_TIMEZONES =
+      new ConcurrentHashMap<>();
+
+  private static boolean isWriterTimezoneResolvedNatively(String writerTimezone) {
+    return RESOLVED_WRITER_TIMEZONES.computeIfAbsent(
+        writerTimezone, GpuTimeZoneDB::probeWriterTimezone);
+  }
+
+  private static native boolean probeWriterTimezone(String writerTimezone);
 
   private static native long convertOrcFromUtcWithRules(
       long input,
@@ -1000,6 +1027,7 @@ public class GpuTimeZoneDB {
       int readerTzRawOffset,
       int[] readerDstRule,
       boolean writerReaderRulesDiffer,
+      boolean writerBorrowApplied,
       long javaTimeInfoTable,
       int javaTimeTzIndex,
       long readerHistoricalDifferenceEndUtcUs,
