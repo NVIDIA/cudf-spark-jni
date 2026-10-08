@@ -25,7 +25,6 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
-#include <cudf/detail/valid_if.cuh>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/string_view.cuh>
@@ -893,6 +892,7 @@ struct json_path_processing_data {
   cudf::device_span<path_instruction const> path_commands;
   cudf::detail::input_offsetalator offsets;
   cuda::std::pair<char const*, cudf::size_type>* out_stringviews;
+  cudf::size_type* out_footprints;
   char* out_buf;
   int8_t* has_out_of_bound;
 };
@@ -935,14 +935,14 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   // the previous launch; its write would alias the next row's buffer.
   if (!path.out_stringviews && path.offsets[row_idx] == path.offsets[row_idx + 1]) { return; }
 
-  char* const dst          = path.out_buf + path.offsets[row_idx];
-  bool is_valid            = false;
-  cudf::size_type out_size = 0;
+  char* const dst                 = path.out_buf + path.offsets[row_idx];
+  bool is_valid                   = false;
+  cudf::size_type out_size        = 0;
+  cudf::size_type write_footprint = 0;
 
   auto const str = input.element<cudf::string_view>(row_idx);
   if (str.size_bytes() > 0) {
     json_parser p{char_range{str}};
-    cudf::size_type write_footprint = 0;
     cuda::std::tie(is_valid, out_size, write_footprint) =
       evaluate_path(p, path.path_commands, dst, max_path_depth_exceeded);
 
@@ -966,6 +966,7 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
     path.out_stringviews[row_idx] =
       is_valid ? cuda::std::pair{dst, out_size} : cuda::std::pair{nullptr, 0};
   }
+  if (path.out_footprints) { path.out_footprints[row_idx] = write_footprint; }
 }
 
 /**
@@ -1138,9 +1139,11 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
   std::vector<rmm::device_uvector<char>> scratch_buffers;
   std::vector<rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>> out_stringviews;
+  std::vector<rmm::device_uvector<cudf::size_type>> out_footprints;
   std::vector<json_path_processing_data> h_path_data;
   scratch_buffers.reserve(json_paths.size());
   out_stringviews.reserve(json_paths.size());
+  out_footprints.reserve(json_paths.size());
   h_path_data.reserve(json_paths.size());
 
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
@@ -1152,10 +1155,13 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
     out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
       static_cast<std::size_t>(input.size()), stream});
+    out_footprints.emplace_back(
+      rmm::device_uvector<cudf::size_type>{static_cast<std::size_t>(input.size()), stream});
 
     h_path_data.emplace_back(json_path_processing_data{d_json_paths[idx],
                                                        in_offsets,
                                                        out_stringviews.back().data(),
+                                                       out_footprints.back().data(),
                                                        scratch_buffers.back().data(),
                                                        d_error_check.data() + idx});
   }
@@ -1185,36 +1191,26 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   }
   // From here, we had out-of-bound write. Although this is very rare, it may still happen.
 
-  std::vector<std::pair<rmm::device_buffer, cudf::size_type>> out_null_masks_and_null_counts;
   std::vector<std::pair<std::unique_ptr<cudf::column>, int64_t>> out_offsets_and_sizes;
   std::vector<rmm::device_uvector<char>> out_char_buffers;
   std::vector<std::size_t> oob_indices;
   std::vector<std::size_t> no_oob_indices;
 
-  // Check validity from the stored char pointers.
-  auto const validator = [] __device__(cuda::std::pair<char const*, cudf::size_type> const item) {
-    return item.first != nullptr;
-  };
-
-  // Rebuild the data only for paths that had out of bound write.
+  // Rebuild the data only for paths that had out of bound write. The retry slots are sized
+  // by max(length, footprint) so a row's discarded child writes stay inside its slot; the
+  // final column is built from the retry launch's own length pairs.
   h_path_data.clear();
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
-    auto const& out_sview = out_stringviews[idx];
+    auto& out_sview = out_stringviews[idx];
 
     if (h_error_check[idx]) {
       oob_indices.emplace_back(idx);
 
-      out_null_masks_and_null_counts.emplace_back(
-        cudf::detail::valid_if(out_sview.begin(), out_sview.end(), validator, stream, mr));
-
-      // The string sizes computed in the previous kernel call will be used to allocate a new char
-      // buffer to store the output.
       auto const size_it = spark_rapids_jni::util::make_counting_transform_iterator(
         0,
         cuda::proclaim_return_type<cudf::size_type>(
-          [string_pairs = out_sview.data()] __device__(auto const idx) {
-            return string_pairs[idx].second;
-          }));
+          [string_pairs = out_sview.data(), footprints = out_footprints[idx].data()] __device__(
+            auto const idx) { return cuda::std::max(string_pairs[idx].second, footprints[idx]); }));
       out_offsets_and_sizes.emplace_back(cudf::strings::detail::make_offsets_child_column(
         size_it, size_it + input.size(), stream, mr));
       out_char_buffers.emplace_back(
@@ -1224,7 +1220,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
         json_path_processing_data{d_json_paths[idx],
                                   cudf::detail::offsetalator_factory::make_input_iterator(
                                     out_offsets_and_sizes.back().first->view()),
-                                  nullptr /*out_stringviews*/,
+                                  out_sview.data(),
+                                  out_footprints[idx].data(),
                                   out_char_buffers.back().data(),
                                   d_error_check.data() + idx});
     } else {
@@ -1239,10 +1236,6 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     auto const out_idx = no_oob_indices[idx];
     output[out_idx]    = std::move(no_oob_output[idx]);
   }
-
-  // These buffers are no longer needed.
-  scratch_buffers.clear();
-  out_stringviews.clear();
 
   // Push data to the GPU and launch the kernel again.
   d_path_data = cudf::detail::make_device_uvector_async(
@@ -1260,14 +1253,17 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   // If OOB is still detected, there must be something wrong happened.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
+  // Build the rebuilt-path columns from the retry launch's length pairs: the retry records
+  // the committed output length per row, compacted, so discarded bytes never leak in.
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> oob_spans;
+  oob_spans.reserve(oob_indices.size());
+  for (auto const out_idx : oob_indices) {
+    oob_spans.emplace_back(cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>{
+      out_stringviews[out_idx].data(), static_cast<std::size_t>(input.size())});
+  }
+  auto oob_output = cudf::make_strings_column_batch(oob_spans, stream, mr);
   for (std::size_t idx = 0; idx < oob_indices.size(); ++idx) {
-    auto const out_idx = oob_indices[idx];
-    output[out_idx] =
-      cudf::make_strings_column(input.size(),
-                                std::move(out_offsets_and_sizes[idx].first),
-                                out_char_buffers[idx].release(),
-                                out_null_masks_and_null_counts[idx].second,
-                                std::move(out_null_masks_and_null_counts[idx].first));
+    output[oob_indices[idx]] = std::move(oob_output[idx]);
   }
   return output;
 }

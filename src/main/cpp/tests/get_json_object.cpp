@@ -175,3 +175,21 @@ TEST_F(GetJsonObjectTest, RetryCorruption_WildcardArrayOverrun)
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
   }
 }
+
+// Discarded child bytes from a no-match wildcard step must not leak into a valid row's
+// output length.
+TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "k", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "z", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "t", 0}};
+  auto const result   = run({R"([{"k":[{"z":[{"t":1}]}]},{"k":[{"z":[{}]},{"z":[{}]}]}])"}, path);
+  auto const expected = cudf::test::strings_column_wrapper({R"([[1]])"});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
