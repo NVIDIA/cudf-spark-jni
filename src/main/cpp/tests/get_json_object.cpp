@@ -133,3 +133,36 @@ TEST_F(GetJsonObjectTest, MalformedRow_NullsOnlyItself)
   auto const expected = expected_column({"v1", "", "v2"}, {true, false, true});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
+
+// A malformed row whose partial output overruns its own pass-1 slot (control characters expand
+// six-fold while copying, and the parse error only surfaces at the trailing garbage) must not
+// corrupt the valid rows around it: the overrun raises the out-of-bound flag, forcing the
+// retry launch that regenerates every row into a tight buffer.
+TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
+  // The trailing bare `x` after the closing quote makes the row malformed, but only after
+  // the whole control-character run was copied and expanded.
+  auto const overrun = R"({"k":")" + std::string(64, '\x01') + R"("x})";
+  for (int rep = 0; rep < 128; ++rep) {
+    auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
+    auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
+// Same overrun shape, but the parse error surfaces INSIDE the structure copy (unclosed string
+// at end of input): the bytes copied before the error must still count toward the output
+// length, or the out-of-bound flag is missed and the copied bytes pollute the next row.
+TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStringOverrun)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
+  auto const overrun = R"({"k":")" + std::string(64, '\x01');
+  for (int rep = 0; rep < 128; ++rep) {
+    auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
+    auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}

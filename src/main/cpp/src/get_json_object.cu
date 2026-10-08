@@ -782,10 +782,9 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 
   auto const success = stack[0].dirty > 0;
 
-  // generator may contain trash output, e.g.: generator writes some output,
-  // then JSON format is invalid, the previous output becomes trash.
-  // We need to return output size as zero.
-  return {success, success ? stack[0].g.get_output_len() : 0};
+  // The output length is the number of bytes actually written, even for an invalid row: the
+  // out-of-bound check below must see the overrun of a malformed row's partial write.
+  return {success, stack[0].g.get_output_len()};
 }
 
 /**
@@ -864,7 +863,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   // The situation `out_stringviews == nullptr` should only happen if the kernel is launched a
   // second time due to out-of-bound write in the first launch.
   if (path.out_stringviews) {
-    path.out_stringviews[row_idx] = {is_valid ? dst : nullptr, out_size};
+    path.out_stringviews[row_idx] =
+      is_valid ? cuda::std::pair{dst, out_size} : cuda::std::pair{nullptr, 0};
   }
 }
 
