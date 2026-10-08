@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
-#include <cudf/hashing/detail/hash_functions.cuh>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
@@ -38,6 +37,7 @@
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/bit>
 #include <cuda/stream>
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -653,28 +653,24 @@ __global__ void pack_per_partition_metadata_kernel(uint8_t* out_buffer,
 
   // first thread in each partition stores constant stuff
   if (col_index == 0) {
-    pheader->magic_number = cudf::hashing::detail::swap_endian(magic);
+    pheader->magic_number = cuda::std::byteswap(magic);
 
-    pheader->row_index =
-      cudf::hashing::detail::swap_endian(static_cast<uint32_t>(split_indices[partition_index]));
+    pheader->row_index = cuda::std::byteswap(static_cast<uint32_t>(split_indices[partition_index]));
 
     // it is possible to get in here with no columns -or- no rows.
     auto const partition_num_rows =
       col_index < columns_per_partition
         ? split_indices[partition_index + 1] - split_indices[partition_index]
         : 0;
-    pheader->num_rows =
-      cudf::hashing::detail::swap_endian(static_cast<uint32_t>(partition_num_rows));
+    pheader->num_rows = cuda::std::byteswap(static_cast<uint32_t>(partition_num_rows));
 
-    auto const& psize = partition_sizes[partition_index];
-    pheader->validity_size =
-      cudf::hashing::detail::swap_endian(static_cast<uint32_t>(psize.validity_size));
-    pheader->offset_size =
-      cudf::hashing::detail::swap_endian(static_cast<uint32_t>(psize.offset_size));
-    pheader->total_size = cudf::hashing::detail::swap_endian(
+    auto const& psize      = partition_sizes[partition_index];
+    pheader->validity_size = cuda::std::byteswap(static_cast<uint32_t>(psize.validity_size));
+    pheader->offset_size   = cuda::std::byteswap(static_cast<uint32_t>(psize.offset_size));
+    pheader->total_size    = cuda::std::byteswap(
       static_cast<uint32_t>(psize.validity_size + psize.offset_size + psize.data_size));
     pheader->num_flattened_columns =
-      cudf::hashing::detail::swap_endian(static_cast<uint32_t>(columns_per_partition));
+      cuda::std::byteswap(static_cast<uint32_t>(columns_per_partition));
   }
 
   bitmask_type* has_validity =

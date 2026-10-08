@@ -26,7 +26,6 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
-#include <cudf/hashing/detail/hash_functions.cuh>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
@@ -220,13 +219,13 @@ __global__ void compute_offset_child_row_counts(
   partition_header const* const pheader = reinterpret_cast<partition_header const*>(
     partitions.data() + partition_offsets[partition_index]);
   size_t const offsets_begin = partition_offsets[partition_index] + per_partition_metadata_size +
-                               cudf::hashing::detail::swap_endian(pheader->validity_size);
+                               cuda::std::byteswap(pheader->validity_size);
   size_type const* offsets = reinterpret_cast<size_type const*>(partitions.data() + offsets_begin);
 
   // walk all of the offset-based columns and their children for this partition and apply offsets to
   // shift row counts and src row index.
-  auto const base_num_rows      = cudf::hashing::detail::swap_endian(pheader->num_rows);
-  auto const base_src_row_index = cudf::hashing::detail::swap_endian(pheader->row_index);
+  auto const base_num_rows      = cuda::std::byteswap(pheader->num_rows);
+  auto const base_src_row_index = cuda::std::byteswap(pheader->row_index);
   auto const base_col_index     = column_metadata.size() * partition_index;
   for (auto idx = 0; idx < offset_columns.size(); idx++) {
     auto& offset_info = offset_columns[idx];
@@ -404,8 +403,8 @@ assemble_build_column_info(shuffle_split_metadata const& h_global_metadata,
 
       // note that these will be incorrect for any columns that are children of offset columns.
       // those values will be fixed up below.
-      cinstance_info.num_rows      = cudf::hashing::detail::swap_endian(pheader->num_rows);
-      cinstance_info.src_row_index = cudf::hashing::detail::swap_endian(pheader->row_index);
+      cinstance_info.num_rows      = cuda::std::byteswap(pheader->num_rows);
+      cinstance_info.src_row_index = cuda::std::byteswap(pheader->row_index);
     });
 
   // reconstruct row counts for columns and columns instances  ------------------------------
@@ -1100,8 +1099,8 @@ std::pair<shuffle_assemble_result, rmm::device_uvector<assemble_batch>> assemble
         auto const validity_section_begin = partition_offset + per_partition_metadata_size;
         src_offsets[validity_buf_index] += validity_section_begin;
 
-        auto const validity_size = cudf::hashing::detail::swap_endian(pheader->validity_size);
-        auto const offset_size   = cudf::hashing::detail::swap_endian(pheader->offset_size);
+        auto const validity_size = cuda::std::byteswap(pheader->validity_size);
+        auto const offset_size   = cuda::std::byteswap(pheader->offset_size);
 
         auto const offset_section_begin = validity_section_begin + validity_size;
         src_offsets[offset_buf_index] += offset_section_begin;
@@ -1968,7 +1967,7 @@ shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
       [partitions, _partition_offsets] __device__(size_t pindex) -> size_t {
         partition_header const* const pheader =
           reinterpret_cast<partition_header const*>(partitions.data() + _partition_offsets[pindex]);
-        return cudf::hashing::detail::swap_endian(pheader->num_rows) > 0 ? pindex + 1 : 0;
+        return cuda::std::byteswap(pheader->num_rows) > 0 ? pindex + 1 : 0;
       }));
   size_t const num_partitions_raw = thrust::reduce(rmm::exec_policy_nosync(stream, temp_mr),
                                                    iter,

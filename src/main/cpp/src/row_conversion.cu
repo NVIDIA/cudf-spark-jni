@@ -270,9 +270,8 @@ build_string_row_offsets(table_view const& tbl,
                     d_row_sizes.end(),
                     d_row_sizes.begin(),
                     cuda::proclaim_return_type<size_type>(
-                      [fixed_width_and_validity_size] __device__(auto row_size) {
-                        return cuda::round_up(fixed_width_and_validity_size + row_size,
-                                              JCUDF_ROW_ALIGNMENT);
+                      [fixed_size = fixed_width_and_validity_size] __device__(auto row_size) {
+                        return cuda::round_up(fixed_size + row_size, JCUDF_ROW_ALIGNMENT);
                       }));
 
   return {std::move(d_row_sizes), std::move(d_offsets_iterators)};
@@ -756,11 +755,11 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const num_tile_cols = tile.num_cols();
   auto const num_tile_rows = tile.num_rows();
 
-  auto const threads_per_warp = warp.size();
-  auto const rows_per_read    = cudf::detail::size_in_bits<bitmask_type>();
+  auto const threads_per_warp = static_cast<size_type>(warp.size());
+  auto const rows_per_read    = static_cast<size_type>(cudf::detail::size_in_bits<bitmask_type>());
 
-  auto const num_sections_x = cuda::ceil_div<size_type, size_type>(num_tile_cols, threads_per_warp);
-  auto const num_sections_y = cuda::ceil_div<size_type, size_type>(num_tile_rows, rows_per_read);
+  auto const num_sections_x = cuda::ceil_div(num_tile_cols, threads_per_warp);
+  auto const num_sections_y = cuda::ceil_div(num_tile_rows, rows_per_read);
   auto const validity_data_row_length =
     cuda::round_up(cuda::ceil_div(num_tile_cols, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
   auto const total_sections = num_sections_x * num_sections_y;
