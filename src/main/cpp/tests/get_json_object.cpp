@@ -176,9 +176,8 @@ TEST_F(GetJsonObjectTest, RetryCorruption_WildcardArrayOverrun)
   }
 }
 
-// Discarded child bytes from a no-match wildcard step must not leak into a valid row's
-// output length. The expanding second row forces the retry launch, so the first row is
-// re-evaluated under retry-sized slots and must still come out clean.
+// A no-match wildcard step must not leak discarded child bytes into a valid row's output.
+// The expanding second row forces the retry launch.
 TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
 {
   auto const path =

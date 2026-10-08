@@ -954,15 +954,11 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
       return;
     }
 
-    // The footprint covers discarded child writes too; it is always >= the output length.
+    // The footprint also covers discarded child writes.
     if (write_footprint > max_size) { *(path.has_out_of_bound) = 1; }
   }
 
-  // Out-of-bound rows (footprint exceeds the row's input-size slot) carry their write
-  // footprint as the stored size: the retry sizes their slots by max(stored, input size)
-  // so their discarded writes stay in-row. All other rows carry the final result (or zero
-  // for null) — their footprint fits inside the input-size slot, which the retry sizing
-  // floors with, so a re-evaluation can never spill.
+  // OOB rows carry the write footprint for retry sizing; others carry the result.
   if (path.out_stringviews) {
     path.out_stringviews[row_idx] =
       cuda::std::pair{is_valid ? dst : nullptr,
@@ -1192,9 +1188,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<std::size_t> oob_indices;
   std::vector<std::size_t> no_oob_indices;
 
-  // Rebuild the data only for paths that had out of bound write. The retry slots are sized
-  // by max(length, footprint) so a row's discarded child writes stay inside its slot; the
-  // final column is built from the retry launch's own length pairs.
+  // Rebuild only paths that had out-of-bound writes; retry slots are sized
+  // max(stored size, input row size).
   h_path_data.clear();
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
     auto& out_sview = out_stringviews[idx];
@@ -1202,9 +1197,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     if (h_error_check[idx]) {
       oob_indices.emplace_back(idx);
 
-      // OOB rows store their write footprint; all other rows store their final result
-      // (or zero). The input row size floors every slot: a non-OOB row's discarded
-      // writes never exceed its input size, so its re-evaluation always fits.
+      // Non-OOB rows' discarded writes never exceed their input row size.
       auto const size_it = spark_rapids_jni::util::make_counting_transform_iterator(
         0,
         cuda::proclaim_return_type<cudf::size_type>(
@@ -1253,8 +1246,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   // If OOB is still detected, there must be something wrong happened.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
-  // Build the rebuilt-path columns from the retry launch's length pairs: the retry records
-  // the committed output length per row, compacted, so discarded bytes never leak in.
+  // Rebuilt columns come from the retry's own length pairs (compacted).
   std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> oob_spans;
   oob_spans.reserve(oob_indices.size());
   for (auto const out_idx : oob_indices) {
