@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
@@ -798,6 +799,9 @@ struct json_path_processing_data {
   cuda::std::pair<char const*, cudf::size_type>* out_stringviews;
   char* out_buf;
   int8_t* has_out_of_bound;
+  // Null in the first launch; in the retry launch, rows that were invalid in the previous
+  // launch must not write output: their zero-width offset intervals alias the next row's buffer.
+  cudf::bitmask_type const* retry_valid_mask;
 };
 
 /**
@@ -833,7 +837,10 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   auto const path_idx = tidx % num_threads_per_row;
   if (path_idx >= path_data.size()) { return; }
 
-  auto const& path         = path_data[path_idx];
+  auto const& path = path_data[path_idx];
+  // Rows that were invalid in the previous launch must not write: their zero-width interval
+  // aliases the next row's buffer.
+  if (!cudf::bit_value_or(path.retry_valid_mask, row_idx, true)) { return; }
   char* const dst          = path.out_buf + path.offsets[row_idx];
   bool is_valid            = false;
   cudf::size_type out_size = 0;
@@ -1053,7 +1060,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                                        in_offsets,
                                                        out_stringviews.back().data(),
                                                        scratch_buffers.back().data(),
-                                                       d_error_check.data() + idx});
+                                                       d_error_check.data() + idx,
+                                                       nullptr /*retry_valid_mask*/});
   }
   auto d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, rmm::mr::get_current_device_resource_ref());
@@ -1122,7 +1130,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                     out_offsets_and_sizes.back().first->view()),
                                   nullptr /*out_stringviews*/,
                                   out_char_buffers.back().data(),
-                                  d_error_check.data() + idx});
+                                  d_error_check.data() + idx,
+                                  // The mask stays alive in the pair until after the retry launch.
+                                  reinterpret_cast<cudf::bitmask_type const*>(
+                                    out_null_masks_and_null_counts.back().first.data())});
     } else {
       no_oob_indices.emplace_back(idx);
       batch_stringviews.emplace_back(out_sview);
