@@ -19,11 +19,19 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
 
 namespace {
+
+// cudf-free file-local replacement for a bare delete, mirroring cudf::jni::safe_delete.
+template <typename Target, typename Source>
+void safe_delete(Source ptr)
+{
+  [[maybe_unused]] std::unique_ptr<Target> deleter(reinterpret_cast<Target*>(ptr));
+}
 
 struct test_state {
   int fail_step         = -1;
@@ -98,7 +106,7 @@ class ProfilerInitTest : public ::testing::TestWithParam<std::tuple<int, int>> {
     if (State) {
       State->completed_buffers.shutdown();
       if (State->writer_thread.joinable()) { State->writer_thread.join(); }
-      delete State;
+      safe_delete<subscriber_state>(State);
       State = nullptr;
     }
     Test_state = nullptr;
