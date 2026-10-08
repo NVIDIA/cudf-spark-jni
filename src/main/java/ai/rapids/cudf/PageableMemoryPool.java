@@ -11,9 +11,8 @@ package ai.rapids.cudf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 
 /**
  * JNI interface to a rmm::pool_memory_resource backed by a host memory resource that
@@ -128,16 +127,12 @@ public final class PageableMemoryPool implements AutoCloseable {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
-    ExecutorService initService = Executors.newSingleThreadExecutor(runnable -> {
-      Thread t = new Thread(runnable, "pageable pool init");
-      t.setDaemon(true);
-      return t;
-    });
-    try {
-      initFuture = initService.submit(() -> new PageableMemoryPool(poolSize, pretouchThreads));
-    } finally {
-      initService.shutdown();
-    }
+    FutureTask<PageableMemoryPool> task =
+        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads));
+    Thread initThread = new Thread(task, "pageable pool init");
+    initThread.setDaemon(true);
+    initThread.start();
+    initFuture = task;
   }
 
   /**
