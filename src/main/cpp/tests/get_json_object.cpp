@@ -155,3 +155,22 @@ TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStringOverrun)
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
   }
 }
+
+// Same overrun through a wildcard path: the first array element's structure copy re-escapes
+// its control run past the row's slot, and the parse error surfaces only when the parent
+// re-enters the array loop at the malformed second element — after the child generator has
+// already written past this context's extent.
+TEST_F(GetJsonObjectTest, RetryCorruption_WildcardArrayOverrun)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0}};
+  auto const expand_row = R"({"k":[{"a":")" + std::string(64, '\x01') + R"("},x]})";
+  auto const victim_row = R"({"k":[{"a":"c"}]})";
+  for (int rep = 0; rep < 128; ++rep) {
+    auto const result   = run({R"({"k":[{"a":"b"}]})", expand_row, victim_row, victim_row}, path);
+    auto const expected = expected_column({R"({"a":"b"})", "", R"({"a":"c"})", R"({"a":"c"})"},
+                                          {true, false, true, true});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
