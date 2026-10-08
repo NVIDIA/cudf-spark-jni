@@ -202,3 +202,35 @@ TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
   auto const expected = cudf::test::strings_column_wrapper({R"([[1]])", row_b_out});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
+
+// Expansion and abandoned wildcard shells in the SAME row, followed by victims: pins the
+// write-footprint tracking in the case-6 unwind.
+TEST_F(GetJsonObjectTest, RetryCorruption_SameRowExpandAndAbandon)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "k", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "z", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
+                             {spark_rapids_jni::path_instruction_type::NAMED, "t", 0}};
+  auto const expand_row =
+    R"([{"k":[{"z":[{"t":")" + std::string(64, '\x01') + R"("}]}]},{"k":[{"z":[{}]},{"z":[{}]}]}])";
+  std::string expand_out = "[[\"";
+  for (int i = 0; i < 64; ++i) {
+    expand_out += "\\u0001";
+  }
+  expand_out += "\"]]";
+  auto const victim_row = R"([{"k":[{"z":[{"t":"vvvv"}]}]}])";
+  auto const victim_out = "[[\"vvvv\"]]";
+  auto const result     = run({expand_row, victim_row, victim_row}, path);
+  auto const expected   = cudf::test::strings_column_wrapper({expand_out, victim_out, victim_out});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+
+  // The abandon row alone never retries: its stored size is the committed length.
+  auto const result2   = run({expand_row}, path);
+  auto const expected2 = cudf::test::strings_column_wrapper({expand_out});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result2->view(), expected2);
+}

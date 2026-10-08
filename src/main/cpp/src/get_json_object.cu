@@ -930,9 +930,6 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   if (path_idx >= path_data.size()) { return; }
 
   auto const& path = path_data[path_idx];
-  // In the retry launch, a zero-width offset interval marks a row that produced no output in
-  // the previous launch; its write would alias the next row's buffer.
-  if (!path.out_stringviews && path.offsets[row_idx] == path.offsets[row_idx + 1]) { return; }
 
   char* const dst                 = path.out_buf + path.offsets[row_idx];
   auto const max_size             = path.offsets[row_idx + 1] - path.offsets[row_idx];
@@ -1229,6 +1226,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     auto const out_idx = no_oob_indices[idx];
     output[out_idx]    = std::move(no_oob_output[idx]);
   }
+
+  // The first-pass scratch buffers are unreferenced by the retry descriptors.
+  scratch_buffers.clear();
 
   // Push data to the GPU and launch the kernel again.
   d_path_data = cudf::detail::make_device_uvector_async(
