@@ -892,7 +892,6 @@ struct json_path_processing_data {
   cudf::device_span<path_instruction const> path_commands;
   cudf::detail::input_offsetalator offsets;
   cuda::std::pair<char const*, cudf::size_type>* out_stringviews;
-  cudf::size_type* out_footprints;
   char* out_buf;
   int8_t* has_out_of_bound;
 };
@@ -936,6 +935,7 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   if (!path.out_stringviews && path.offsets[row_idx] == path.offsets[row_idx + 1]) { return; }
 
   char* const dst                 = path.out_buf + path.offsets[row_idx];
+  auto const max_size             = path.offsets[row_idx + 1] - path.offsets[row_idx];
   bool is_valid                   = false;
   cudf::size_type out_size        = 0;
   cudf::size_type write_footprint = 0;
@@ -954,19 +954,20 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
       return;
     }
 
-    auto const max_size = path.offsets[row_idx + 1] - path.offsets[row_idx];
     // The footprint covers discarded child writes too; it is always >= the output length.
     if (write_footprint > max_size) { *(path.has_out_of_bound) = 1; }
   }
 
-  // Write out `nullptr` in the output string_view to indicate that the output is a null.
-  // The situation `out_stringviews == nullptr` should only happen if the kernel is launched a
-  // second time due to out-of-bound write in the first launch.
+  // Out-of-bound rows (footprint exceeds the row's input-size slot) carry their write
+  // footprint as the stored size: the retry sizes their slots by max(stored, input size)
+  // so their discarded writes stay in-row. All other rows carry the final result (or zero
+  // for null) — their footprint fits inside the input-size slot, which the retry sizing
+  // floors with, so a re-evaluation can never spill.
   if (path.out_stringviews) {
     path.out_stringviews[row_idx] =
-      is_valid ? cuda::std::pair{dst, out_size} : cuda::std::pair{nullptr, 0};
+      cuda::std::pair{is_valid ? dst : nullptr,
+                      write_footprint > max_size ? write_footprint : (is_valid ? out_size : 0)};
   }
-  if (path.out_footprints) { path.out_footprints[row_idx] = write_footprint; }
 }
 
 /**
@@ -1139,11 +1140,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
   std::vector<rmm::device_uvector<char>> scratch_buffers;
   std::vector<rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>> out_stringviews;
-  std::vector<rmm::device_uvector<cudf::size_type>> out_footprints;
   std::vector<json_path_processing_data> h_path_data;
   scratch_buffers.reserve(json_paths.size());
   out_stringviews.reserve(json_paths.size());
-  out_footprints.reserve(json_paths.size());
   h_path_data.reserve(json_paths.size());
 
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
@@ -1155,13 +1154,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
     out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
       static_cast<std::size_t>(input.size()), stream});
-    out_footprints.emplace_back(
-      rmm::device_uvector<cudf::size_type>{static_cast<std::size_t>(input.size()), stream});
 
     h_path_data.emplace_back(json_path_processing_data{d_json_paths[idx],
                                                        in_offsets,
                                                        out_stringviews.back().data(),
-                                                       out_footprints.back().data(),
                                                        scratch_buffers.back().data(),
                                                        d_error_check.data() + idx});
   }
@@ -1206,11 +1202,16 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     if (h_error_check[idx]) {
       oob_indices.emplace_back(idx);
 
+      // OOB rows store their write footprint; all other rows store their final result
+      // (or zero). The input row size floors every slot: a non-OOB row's discarded
+      // writes never exceed its input size, so its re-evaluation always fits.
       auto const size_it = spark_rapids_jni::util::make_counting_transform_iterator(
         0,
         cuda::proclaim_return_type<cudf::size_type>(
-          [string_pairs = out_sview.data(), footprints = out_footprints[idx].data()] __device__(
-            auto const idx) { return cuda::std::max(string_pairs[idx].second, footprints[idx]); }));
+          [string_pairs = out_sview.data(), in_offsets] __device__(auto const idx) {
+            auto const in_size = in_offsets[idx + 1] - in_offsets[idx];
+            return cuda::std::max(string_pairs[idx].second, static_cast<cudf::size_type>(in_size));
+          }));
       out_offsets_and_sizes.emplace_back(cudf::strings::detail::make_offsets_child_column(
         size_it, size_it + input.size(), stream, mr));
       out_char_buffers.emplace_back(
@@ -1221,7 +1222,6 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                   cudf::detail::offsetalator_factory::make_input_iterator(
                                     out_offsets_and_sizes.back().first->view()),
                                   out_sview.data(),
-                                  out_footprints[idx].data(),
                                   out_char_buffers.back().data(),
                                   d_error_check.data() + idx});
     } else {
