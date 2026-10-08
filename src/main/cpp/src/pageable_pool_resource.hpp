@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,7 +76,10 @@ struct pageable_memory_resource : cuda::mr::memory_resource_base<pageable_memory
 
   bool operator==(pageable_memory_resource const&) const noexcept { return true; }
 
-  friend void get_property(pageable_memory_resource const&, cuda::mr::host_accessible) noexcept {}
+  friend void get_property(pageable_memory_resource const&, cuda::mr::host_accessible) noexcept
+  {
+    // The presence of this tag-only function declares host accessibility; there is no work to do.
+  }
 };
 
 static_assert(
@@ -178,7 +181,10 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
 
   bool operator==(pageable_pool_resource const& other) const noexcept { return this == &other; }
 
-  friend void get_property(pageable_pool_resource const&, cuda::mr::host_accessible) noexcept {}
+  friend void get_property(pageable_pool_resource const&, cuda::mr::host_accessible) noexcept
+  {
+    // The presence of this tag-only function declares host accessibility; there is no work to do.
+  }
 
   std::size_t pool_size() const noexcept { return pool_size_; }
 
