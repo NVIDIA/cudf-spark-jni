@@ -39,6 +39,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/algorithm>
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 #include <cuda/stream>
