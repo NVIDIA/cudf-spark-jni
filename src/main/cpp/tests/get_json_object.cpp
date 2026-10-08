@@ -229,8 +229,9 @@ TEST_F(GetJsonObjectTest, RetryCorruption_SameRowExpandAndAbandon)
   auto const expected   = cudf::test::strings_column_wrapper({expand_out, victim_out, victim_out});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 
-  // The abandon row alone never retries: its stored size is the committed length.
-  auto const result2   = run({expand_row}, path);
-  auto const expected2 = cudf::test::strings_column_wrapper({expand_out});
+  // The abandon row alone never retries: its footprint fits inside its input-size slot.
+  auto const no_retry_row = R"([{"k":[{"z":[{"t":1}]}]},{"k":[{"z":[{}]},{"z":[{}]}]}])";
+  auto const result2      = run({no_retry_row}, path);
+  auto const expected2    = cudf::test::strings_column_wrapper({R"([[1]])"});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result2->view(), expected2);
 }
