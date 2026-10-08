@@ -177,7 +177,8 @@ TEST_F(GetJsonObjectTest, RetryCorruption_WildcardArrayOverrun)
 }
 
 // Discarded child bytes from a no-match wildcard step must not leak into a valid row's
-// output length.
+// output length. The expanding second row forces the retry launch, so the first row is
+// re-evaluated under retry-sized slots and must still come out clean.
 TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
 {
   auto const path =
@@ -189,7 +190,16 @@ TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
                              {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
                              {spark_rapids_jni::path_instruction_type::WILDCARD, "", 0},
                              {spark_rapids_jni::path_instruction_type::NAMED, "t", 0}};
-  auto const result   = run({R"([{"k":[{"z":[{"t":1}]}]},{"k":[{"z":[{}]},{"z":[{}]}]}])"}, path);
-  auto const expected = cudf::test::strings_column_wrapper({R"([[1]])"});
+  auto const expanding = R"([{"k":[{"z":[{"t":")" + std::string(200, '\x01') + R"("}]}]}])";
+  auto const result =
+    run({R"([{"k":[{"z":[{"t":1}]}]},{"k":[{"z":[{}]},{"z":[{}]}]}])", expanding}, path);
+  // the expanding row's output is its t value wrapped in two array levels
+  std::string row_b_out = "[[\"";
+  for (int i = 0; i < 200; ++i) {
+    row_b_out += "\\u0001";
+  }
+  row_b_out += "\"]]";
+
+  auto const expected = cudf::test::strings_column_wrapper({R"([[1]])", row_b_out});
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
