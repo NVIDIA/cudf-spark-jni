@@ -389,6 +389,10 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
   context stack[MAX_JSON_PATH_DEPTH + 1];
   int stack_size = 0;
 
+  // Bytes written by any generator in this row; covers child bytes abandoned by a
+  // no-match wildcard step.
+  int max_footprint = 0;
+
   auto const push_context = [&](evaluation_case_path _case_path,
                                 json_generator _g,
                                 write_style _style,
@@ -784,6 +788,8 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
           p_ctx.dirty += ctx.dirty;
           // update child generator for parent task
           p_ctx.child_g = ctx.g;
+          max_footprint =
+            cuda::std::max(max_footprint, ctx.g.get_offset() + ctx.g.get_output_len());
 
           break;
         }
@@ -825,7 +831,8 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 
   // Report the bytes actually written, even for an invalid row, so the out-of-bound check
   // below sees a malformed row's overrun.
-  return {success, stack[0].g.get_offset() + stack[0].g.get_output_len()};
+  return {success,
+          cuda::std::max(max_footprint, stack[0].g.get_offset() + stack[0].g.get_output_len())};
 }
 
 /**
