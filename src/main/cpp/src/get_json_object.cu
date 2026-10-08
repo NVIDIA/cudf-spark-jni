@@ -782,8 +782,8 @@ __device__ cuda::std::pair<bool, cudf::size_type> evaluate_path(
 
   auto const success = stack[0].dirty > 0;
 
-  // The output length is the number of bytes actually written, even for an invalid row: the
-  // out-of-bound check below must see the overrun of a malformed row's partial write.
+  // Report the bytes actually written, even for an invalid row, so the out-of-bound check
+  // below sees a malformed row's overrun.
   return {success, stack[0].g.get_output_len()};
 }
 
@@ -833,8 +833,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   if (path_idx >= path_data.size()) { return; }
 
   auto const& path = path_data[path_idx];
-  // In the retry launch, offsets are the pass-1 sizes: a zero-width interval marks a row that
-  // produced no output before, and its partial write would alias the next row's buffer.
+  // In the retry launch, a zero-width offset interval marks a row that produced no output in
+  // the previous launch; its write would alias the next row's buffer.
   if (!path.out_stringviews && path.offsets[row_idx] == path.offsets[row_idx + 1]) { return; }
 
   char* const dst          = path.out_buf + path.offsets[row_idx];

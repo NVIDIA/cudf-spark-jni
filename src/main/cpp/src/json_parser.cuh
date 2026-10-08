@@ -1649,8 +1649,7 @@ class json_parser {
 
           // check the JSON format
           if (current_token == json_token::ERROR) {
-            // The bytes copied before the error are real: report them so the caller can count
-            // the partial write (the output length must reflect the buffer's true contents).
+            // The bytes copied before the error are real; report them.
             return {false, sum_copy_len};
           }
 

@@ -33,7 +33,6 @@ namespace {
 
 using instruction = std::tuple<spark_rapids_jni::path_instruction_type, std::string, int32_t>;
 
-// Runs `get_json_object` over the given rows with the given path instructions.
 std::unique_ptr<cudf::column> run(std::vector<std::string> const& rows,
                                   std::vector<instruction> const& path)
 {
@@ -41,7 +40,6 @@ std::unique_ptr<cudf::column> run(std::vector<std::string> const& rows,
   return spark_rapids_jni::get_json_object(cudf::strings_column_view{input}, path);
 }
 
-// Expected output column from (values, validity) pairs.
 cudf::test::strings_column_wrapper expected_column(std::vector<std::string> const& values,
                                                    std::vector<bool> const& valid)
 {
@@ -51,23 +49,23 @@ cudf::test::strings_column_wrapper expected_column(std::vector<std::string> cons
 // A malformed row must null only itself.
 constexpr char malformed[] = R"({"a":"b"c"})";
 
+// 0x01 re-escapes to the six-byte \u0001 when copied.
+auto control_chars(int n) { return R"({"k":")" + std::string(n, '\x01'); }
+
 }  // namespace
 
-// A control character expands six-fold when re-escaped (0x01 -> \u0001), engaging the
-// out-of-bound retry launch. A malformed row then has a zero-width retry interval aliasing
-// the next row's buffer; its partial write raced that row. Interleaved pairs spread the race
-// across warps and blocks.
+// Row 0's output expands past its input interval and engages the retry launch; each malformed
+// row then races the following victim row. Interleaved pairs spread the race across warps.
 TEST_F(GetJsonObjectTest, RetryCorruption_InterleavedPairs)
 {
-  auto const path = std::vector<instruction>{};
-  auto const expand =
-    R"({"a":")" + std::string(32, '\x01') + R"("})";  // output escapes each byte to \u0001
-  std::string escapes;
+  auto const path        = std::vector<instruction>{};
+  auto const expand      = R"({"a":")" + std::string(32, '\x01') + R"("})";
+  std::string expand_out = R"({"a":")";
   for (int i = 0; i < 32; ++i) {
-    escapes += "\\u0001";
+    expand_out += "\\u0001";
   }
-  auto const expand_out = R"({"a":")" + escapes + R"("})";
-  auto const victim     = R"({"big":")" + std::string(64, 'v') + R"("})";
+  expand_out += R"("})";
+  auto const victim = R"({"big":")" + std::string(64, 'v') + R"("})";
 
   std::vector<std::string> rows{expand};
   std::vector<std::string> values{expand_out};
@@ -88,16 +86,13 @@ TEST_F(GetJsonObjectTest, RetryCorruption_InterleavedPairs)
   }
 }
 
-// Same race on a named path: every row carries the path's field so the retry engages and
-// the malformed row still writes partial output before failing. The expansion uses an object
-// value holding literal newlines: copying the structure re-escapes each to two bytes, so the
-// row's output exceeds its input interval. Interleaved pairs spread the race across warps.
+// Same race on a named path: the expanding row's value is an object, whose structure copy
+// re-escapes each literal newline to two bytes.
 TEST_F(GetJsonObjectTest, RetryCorruption_NamedPathValue)
 {
   auto const path =
     std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "big", 0}};
-  auto const expand = R"({"big":{"k":")" + std::string(64, '\n') + R"("}})";
-  // Each literal newline re-escapes to a two-byte escape inside the copied structure.
+  auto const expand      = R"({"big":{"k":")" + std::string(64, '\n') + R"("}})";
   std::string expand_out = R"({"k":")";
   for (int i = 0; i < 64; ++i) {
     expand_out += "\\n";
@@ -134,17 +129,14 @@ TEST_F(GetJsonObjectTest, MalformedRow_NullsOnlyItself)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
-// A malformed row whose partial output overruns its own pass-1 slot (control characters expand
-// six-fold while copying, and the parse error only surfaces at the trailing garbage) must not
-// corrupt the valid rows around it: the overrun raises the out-of-bound flag, forcing the
-// retry launch that regenerates every row into a tight buffer.
+// The malformed row's partial output overruns its own slot (control characters expand while
+// copying, and the error only surfaces at the trailing `x`); the overrun must raise the
+// out-of-bound flag instead of polluting the neighboring rows.
 TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
 {
   auto const path =
     std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
-  // The trailing bare `x` after the closing quote makes the row malformed, but only after
-  // the whole control-character run was copied and expanded.
-  auto const overrun = R"({"k":")" + std::string(64, '\x01') + R"("x})";
+  auto const overrun = control_chars(64) + R"("x})";
   for (int rep = 0; rep < 128; ++rep) {
     auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
     auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
@@ -152,14 +144,13 @@ TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
   }
 }
 
-// Same overrun shape, but the parse error surfaces INSIDE the structure copy (unclosed string
-// at end of input): the bytes copied before the error must still count toward the output
-// length, or the out-of-bound flag is missed and the copied bytes pollute the next row.
+// Same overrun, with the error inside the structure copy (unclosed string at end of input):
+// the bytes copied before the error must still count toward the output length.
 TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStringOverrun)
 {
   auto const path =
     std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
-  auto const overrun = R"({"k":")" + std::string(64, '\x01');
+  auto const overrun = control_chars(64);
   for (int rep = 0; rep < 128; ++rep) {
     auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
     auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
