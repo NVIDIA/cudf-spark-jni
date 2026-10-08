@@ -46,9 +46,7 @@ cudf::test::strings_column_wrapper expected_column(std::vector<std::string> cons
   return cudf::test::strings_column_wrapper(values.begin(), values.end(), valid.begin());
 }
 
-// A malformed row must null only itself. With an out-of-bound retry, its zero-width retry
-// interval aliases the next row's buffer and its partial output raced that row before the
-// write-suppression fix (NVIDIA/cudf-spark-jni#5079).
+// A malformed row must null only itself.
 constexpr char malformed[] = R"({"a":"b"c"})";
 
 }  // namespace
