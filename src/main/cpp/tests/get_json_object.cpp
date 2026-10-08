@@ -49,9 +49,6 @@ cudf::test::strings_column_wrapper expected_column(std::vector<std::string> cons
 // A malformed row must null only itself.
 constexpr char malformed[] = R"({"a":"b"c"})";
 
-// 0x01 re-escapes to the six-byte \u0001 when copied.
-auto control_chars(int n) { return R"({"k":")" + std::string(n, '\x01'); }
-
 }  // namespace
 
 // Row 0's output expands past its input interval and engages the retry launch; each malformed
@@ -129,14 +126,15 @@ TEST_F(GetJsonObjectTest, MalformedRow_NullsOnlyItself)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
-// The malformed row's partial output overruns its own slot (control characters expand while
-// copying, and the error only surfaces at the trailing `x`); the overrun must raise the
-// out-of-bound flag instead of polluting the neighboring rows.
+// The malformed row's partial output overruns its own slot: selecting the object re-escapes
+// the control run to six bytes per input byte, and the error only surfaces at the trailing
+// `x` after that copy completed. The overrun must raise the out-of-bound flag instead of
+// polluting the neighboring rows.
 TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
 {
   auto const path =
     std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
-  auto const overrun = control_chars(64) + R"("x})";
+  auto const overrun = R"({"k":{"j":")" + std::string(64, '\x01') + R"("}x})";
   for (int rep = 0; rep < 128; ++rep) {
     auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
     auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
@@ -145,15 +143,15 @@ TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
 }
 
 // Same overrun, with the error inside the structure copy (unclosed string at end of input):
-// the bytes copied before the error must still count toward the output length.
+// the escaped bytes copied before the error must still count toward the output length.
 TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStringOverrun)
 {
-  auto const path =
-    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
-  auto const overrun = control_chars(64);
+  auto const path    = std::vector<instruction>{};  // root path: the object copy expands
+  auto const overrun = R"({"k":")" + std::string(64, '\x01');
   for (int rep = 0; rep < 128; ++rep) {
     auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
-    auto const expected = expected_column({"v1", "", "v2", "v3"}, {true, false, true, true});
+    auto const expected = expected_column({R"({"k":"v1"})", "", R"({"k":"v2"})", R"({"k":"v3"})"},
+                                          {true, false, true, true});
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
   }
 }
