@@ -142,12 +142,13 @@ TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
   }
 }
 
-// Same overrun, with the error inside the structure copy (unclosed string at end of input):
-// the escaped bytes copied before the error must still count toward the output length.
-TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStringOverrun)
+// Same overrun, with the error inside the structure copy: the string closes, the object does
+// not — the copy loop hits end of input after the escaped run was fully copied, and those
+// bytes must count toward the output length.
+TEST_F(GetJsonObjectTest, RetryCorruption_UnclosedStructureOverrun)
 {
-  auto const path    = std::vector<instruction>{};  // root path: the object copy expands
-  auto const overrun = R"({"k":")" + std::string(64, '\x01');
+  auto const path    = std::vector<instruction>{};
+  auto const overrun = R"({"k":")" + std::string(64, '\x01') + R"(")";
   for (int rep = 0; rep < 128; ++rep) {
     auto const result   = run({R"({"k":"v1"})", overrun, R"({"k":"v2"})", R"({"k":"v3"})"}, path);
     auto const expected = expected_column({R"({"k":"v1"})", "", R"({"k":"v2"})", R"({"k":"v3"})"},
