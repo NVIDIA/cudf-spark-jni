@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,21 +18,34 @@ package com.nvidia.spark.rapids.jni;
 import java.nio.charset.StandardCharsets;
 
 /**
- * CastException is an exception thrown by the JNI in the even of a casting error.
+ * CastException is an exception thrown by the JNI in the event of a casting error.
  */
 public class CastException extends RuntimeException {
   private final int rowWithError;
   private final String stringWithError;
+  private final boolean timeParserPolicyDisagreement;
 
   CastException(byte[] utf8StringWithError, int rowWithError) {
-    this(new String(utf8StringWithError, StandardCharsets.UTF_8), rowWithError);
+    this(utf8StringWithError, rowWithError, false);
+  }
+
+  CastException(byte[] utf8StringWithError, int rowWithError,
+      boolean timeParserPolicyDisagreement) {
+    this(new String(utf8StringWithError, StandardCharsets.UTF_8), rowWithError,
+        timeParserPolicyDisagreement);
   }
 
   CastException(String stringWithError, int rowWithError) {
+    this(stringWithError, rowWithError, false);
+  }
+
+  CastException(String stringWithError, int rowWithError,
+      boolean timeParserPolicyDisagreement) {
     super("Error casting data on row " + String.valueOf(rowWithError) + ": " + stringWithError);
 
     this.rowWithError = rowWithError;
     this.stringWithError = stringWithError;
+    this.timeParserPolicyDisagreement = timeParserPolicyDisagreement;
   }
 
   public int getRowWithError() {
@@ -41,5 +54,12 @@ public class CastException extends RuntimeException {
 
   public String getStringWithError() {
     return stringWithError;
+  }
+
+  /**
+   * Whether the cast failed because CORRECTED rejected the input while LEGACY accepted it.
+   */
+  public boolean isTimeParserPolicyDisagreement() {
+    return timeParserPolicyDisagreement;
   }
 }
