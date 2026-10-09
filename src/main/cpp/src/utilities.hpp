@@ -27,6 +27,9 @@
 
 #include <cuda/buffer>
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
+
+#include <cstdint>
 
 namespace spark_rapids_jni {
 
@@ -52,5 +55,24 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+
+/**
+ * @brief Queue copies of host buffers into a device buffer, packed back to back in order
+ *
+ * Buffers adjacent in host memory move in a single copy. The host buffers and `destination` must
+ * stay valid until the returned event completes.
+ *
+ * @param buffers The host buffers to copy
+ * @param destination The device buffer to copy into, at least as large as the host buffers combined
+ * @param on_side_stream Whether to queue the copies on a stream forked from `stream`, so they can
+ *        overlap work queued on `stream` afterwards
+ * @param stream CUDA stream the copies are queued on or forked from
+ * @return The event recorded after the copies, which the caller must destroy
+ */
+cudaEvent_t copy_host_buffers_to_device_async(
+  cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
+  cudf::device_span<uint8_t> destination,
+  bool on_side_stream,
+  cuda::stream_ref stream = cudf::get_default_stream());
 
 }  // namespace spark_rapids_jni
