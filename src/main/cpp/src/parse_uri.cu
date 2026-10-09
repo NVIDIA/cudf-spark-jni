@@ -34,6 +34,7 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/std/optional>
 #include <cuda/std/utility>
@@ -896,7 +897,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   constexpr size_type num_warps_per_threadblock = 4;
   constexpr size_type threadblock_size = num_warps_per_threadblock * cudf::detail::warp_size;
   auto const num_threadblocks =
-    std::min(65536, cudf::util::div_rounding_up_unsafe(strings_count, num_warps_per_threadblock));
+    std::min(65536, cuda::ceil_div(strings_count, num_warps_per_threadblock));
 
   auto offset_count    = strings_count + 1;
   auto const d_strings = column_device_view::create(input.parent(), stream);

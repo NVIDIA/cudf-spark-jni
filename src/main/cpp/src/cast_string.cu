@@ -28,6 +28,7 @@
 
 #include <cooperative_groups.h>
 #include <cub/warp/warp_reduce.cuh>
+#include <cuda/cmath>
 #include <cuda/std/algorithm>
 #include <cuda/std/optional>
 #include <cuda/std/tuple>
@@ -675,7 +676,7 @@ struct string_to_integer_impl {
     auto null_mask =
       cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
-    dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
+    dim3 const blocks(cuda::ceil_div(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
     detail::string_to_integer_kernel<<<blocks, threads, 0, stream.get()>>>(
@@ -745,7 +746,7 @@ struct string_to_decimal_impl {
     auto null_mask =
       cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
-    dim3 const blocks(util::div_rounding_up_unsafe(string_col.size(), detail::NUM_THREADS));
+    dim3 const blocks(cuda::ceil_div(string_col.size(), detail::NUM_THREADS));
     dim3 const threads{detail::NUM_THREADS};
 
     detail::string_to_decimal_kernel<<<blocks, threads, 0, stream.get()>>>(
