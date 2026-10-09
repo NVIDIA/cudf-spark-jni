@@ -40,18 +40,41 @@ public class JSONUtils {
     private final int index;
 
     public PathInstructionJni(PathInstructionType type, String name, long index) {
-      this.type = (byte) type.ordinal();
-      this.name = name;
-      if (index > Integer.MAX_VALUE) {
-        throw new IllegalArgumentException("index is too large " + index);
-      }
-      this.index = (int) index;
+      this(type, name, toIntIndex(index));
     }
 
     public PathInstructionJni(PathInstructionType type, String name, int index) {
       this.type = (byte) type.ordinal();
-      this.name = name;
+      this.name = checkName(name);
       this.index = index;
+      checkSubscriptIndex(type, index);
+    }
+
+    // The native side stores the index as an int, so an out-of-range value would be truncated
+    // into a different, valid-looking index.
+    private static int toIntIndex(long index) {
+      if (index > Integer.MAX_VALUE || index < Integer.MIN_VALUE) {
+        throw new IllegalArgumentException("index is out of int range " + index);
+      }
+      return (int) index;
+    }
+
+    // Rejecting here names the offending argument at the call site that built it, rather than at
+    // the JNI boundary where the native guard catches it.
+    private static String checkName(String name) {
+      if (name == null) {
+        throw new IllegalArgumentException("path instruction name is null");
+      }
+      return name;
+    }
+
+    // The native walker steps forward only while the count is positive, so a negative subscript
+    // silently selects element 0. Only INDEX is checked: every other kind carries -1 as an unused
+    // placeholder.
+    private static void checkSubscriptIndex(PathInstructionType type, int index) {
+      if (type == PathInstructionType.INDEX && index < 0) {
+        throw new IllegalArgumentException("index must be non-negative " + index);
+      }
     }
   }
 
@@ -130,11 +153,46 @@ public class JSONUtils {
     }
     long[] ptrs = getJsonObjectMultiplePaths(input.getNativeView(), typeNums,
         names, indexes, pathOffsets, memoryBudgetBytes, parallelOverride);
-    ColumnVector[] ret = new ColumnVector[ptrs.length];
-    for (int i = 0; i < ptrs.length; i++) {
-      ret[i] = new ColumnVector(ptrs[i]);
+    // The allocation itself can fail under memory pressure, so it sits inside the try that frees
+    // the handles.
+    ColumnVector[] ret = null;
+    try {
+      ret = new ColumnVector[ptrs.length];
+      for (int i = 0; i < ptrs.length; i++) {
+        long handle = ptrs[i];
+        // The constructor may free the handle, so clear the slot first to stop the recovery loop
+        // below from freeing it twice.
+        ptrs[i] = 0;
+        ret[i] = new ColumnVector(handle);
+      }
+      return ret;
+    } catch (Throwable t) {
+      // Wrapping transfers ownership, so nothing else can free these columns once this method
+      // escapes. The failure is normally OutOfMemoryError, so the remaining handles are freed
+      // natively rather than through another wrapper that would fail too.
+      if (ret != null) {
+        for (ColumnVector wrapped : ret) {
+          if (wrapped == null) { continue; }
+          try {
+            wrapped.close();
+          } catch (Throwable suppressed) {
+            // The JVM may hand back the same OutOfMemoryError it already threw, and
+            // self-suppression throws IllegalArgumentException, abandoning the loop.
+            if (suppressed != t) { t.addSuppressed(suppressed); }
+          }
+        }
+      }
+      for (long handle : ptrs) {
+        if (handle == 0) { continue; }
+        try {
+          freeColumn(handle);
+        } catch (Throwable suppressed) {
+          // Same self-suppression hazard as above.
+          if (suppressed != t) { t.addSuppressed(suppressed); }
+        }
+      }
+      throw t;
     }
-    return ret;
   }
 
 
@@ -315,18 +373,24 @@ public class JSONUtils {
 
   private static native int getMaxJSONPathDepth();
 
-  private static native long getJsonObject(long input,
-                                           byte[] typeNums,
-                                           String[] names,
-                                           int[] indexes);
+  // Package-private rather than private so tests can reach the JNI argument guards, which the
+  // public wrappers either reject earlier or only touch while recovering from a failure.
 
-  private static native long[] getJsonObjectMultiplePaths(long input,
-                                                          byte[] typeNums,
-                                                          String[] names,
-                                                          int[] indexes,
-                                                          int[] pathOffsets,
-                                                          long memoryBudgetBytes,
-                                                          int parallelOverride);
+  /** Deletes a native column that no {@link ColumnVector} took ownership of. */
+  static native void freeColumn(long columnHandle);
+
+  static native long getJsonObject(long input,
+                                   byte[] typeNums,
+                                   String[] names,
+                                   int[] indexes);
+
+  static native long[] getJsonObjectMultiplePaths(long input,
+                                                  byte[] typeNums,
+                                                  String[] names,
+                                                  int[] indexes,
+                                                  int[] pathOffsets,
+                                                  long memoryBudgetBytes,
+                                                  int parallelOverride);
 
   private static native long extractRawMapFromJsonString(long input,
                                                          boolean normalizeSingleQuotes,
