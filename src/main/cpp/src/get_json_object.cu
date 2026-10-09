@@ -382,9 +382,6 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
   char* out_buf,
   int8_t* max_path_depth_exceeded)
 {
-  p.next_token();
-  if (json_token::ERROR == p.get_current_token()) { return {false, 0, 0}; }
-
   // Define stack; plus 1 indicates root context task needs an extra memory.
   context stack[MAX_JSON_PATH_DEPTH + 1];
   int stack_size = 0;
@@ -406,6 +403,9 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
                                        child_g.get_offset() + child_g.get_output_len());
     return cuda::std::tuple{false, extent, cuda::std::max(extent, max_footprint)};
   };
+
+  p.next_token();
+  if (json_token::ERROR == p.get_current_token()) { return parse_failure(json_generator{}); }
 
   auto const push_context = [&](evaluation_case_path _case_path,
                                 json_generator _g,
