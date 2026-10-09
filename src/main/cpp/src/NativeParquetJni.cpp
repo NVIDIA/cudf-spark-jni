@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -821,11 +821,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_ParquetFooter_close(JNIE
                                                                             jclass,
                                                                             jlong handle)
 {
-  JNI_TRY
-  {
-    auto* ptr = std::bit_cast<rapids::jni::parquet_footer_with_row_group_offsets*>(handle);
-    delete ptr;
-  }
+  JNI_TRY { cudf::jni::safe_delete<rapids::jni::parquet_footer_with_row_group_offsets>(handle); }
   JNI_CATCH(env, );
 }
 
