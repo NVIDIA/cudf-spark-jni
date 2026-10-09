@@ -21,6 +21,7 @@
 #include <rmm/mr/detail/coalescing_free_list.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/cmath>
 #include <cuda/memory_resource>
 
 #include <unistd.h>
@@ -29,6 +30,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -154,7 +156,6 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
                                     std::size_t = cuda::mr::default_cuda_malloc_host_alignment)
   {
     if (bytes == 0) { return nullptr; }
-    if (bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     bytes = align_up(bytes);
     if (bytes == 0 || bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     std::lock_guard<std::mutex> lock(mtx_);
@@ -192,40 +193,36 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   static void pretouch_parallel(void* base, std::size_t bytes, int threads)
   {
     std::size_t const page_size  = system_page_size();
-    std::size_t const page_count = bytes / page_size + (bytes % page_size != 0);
+    std::size_t const page_count = cuda::ceil_div(bytes, page_size);
     if (page_count == 0) { return; }
     std::size_t const requested_threads = static_cast<std::size_t>(std::max(1, threads));
     std::size_t const hardware_threads  = std::thread::hardware_concurrency();
-    std::size_t const worker_count =
-      std::min({requested_threads,
-                page_count,
-                hardware_threads == 0 ? requested_threads : hardware_threads});
+    std::size_t const hardware_cap =
+      hardware_threads == 0 ? std::numeric_limits<std::size_t>::max() : hardware_threads;
+    std::size_t const worker_count = std::min({requested_threads, page_count, hardware_cap});
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
-    std::atomic<bool> start_workers{false};
-    auto* const pages     = static_cast<char volatile*>(base);
-    std::size_t next_page = 0;
+    std::atomic<bool> all_workers_started{false};
+    auto* const pages = static_cast<char volatile*>(base);
     try {
       for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
-        std::size_t const worker_pages =
-          page_count / worker_count + (worker_index < page_count % worker_count ? 1 : 0);
-        std::size_t const first_page = next_page;
-        next_page += worker_pages;
-        workers.emplace_back([pages, first_page, worker_pages, page_size, &start_workers]() {
+        std::size_t const first_page = worker_index * page_count / worker_count;
+        std::size_t const last_page  = (worker_index + 1) * page_count / worker_count;
+        workers.emplace_back([pages, first_page, last_page, page_size, &all_workers_started]() {
           // Finish creating thread stacks before concurrent page faults contend for mmap_lock.
-          start_workers.wait(false);
-          for (std::size_t page = 0; page < worker_pages; ++page) {
-            pages[(first_page + page) * page_size] = 0;
+          all_workers_started.wait(false);
+          for (std::size_t page = first_page; page < last_page; ++page) {
+            pages[page * page_size] = 0;
           }
         });
       }
-      start_workers.store(true);
-      start_workers.notify_all();
+      all_workers_started.store(true);
+      all_workers_started.notify_all();
       for (auto& worker : workers)
         worker.join();
     } catch (...) {
-      start_workers.store(true);
-      start_workers.notify_all();
+      all_workers_started.store(true);
+      all_workers_started.notify_all();
       for (auto& worker : workers) {
         if (worker.joinable()) { worker.join(); }
       }
