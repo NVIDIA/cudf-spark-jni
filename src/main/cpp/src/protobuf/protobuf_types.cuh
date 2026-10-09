@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <concepts>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <type_traits>
 
@@ -100,17 +101,17 @@ inline std::string error_message(protobuf_error error)
  * coordinates. The missing marker is outside the supported input-offset range.
  */
 struct field_location {
-  static constexpr int32_t INVALID_OFFSET = -1;
+  static constexpr uint32_t INVALID_OFFSET = std::numeric_limits<uint32_t>::max();
 
-  int32_t offset;  // Byte offset relative to the owning coordinate base
-  int32_t length;  // Length of field data in bytes
+  uint32_t offset;  // Byte offset relative to the owning coordinate base
+  uint32_t length;  // Length of field data in bytes
 
   CUDF_HOST_DEVICE static constexpr field_location missing() { return {INVALID_OFFSET, 0}; }
-  CUDF_HOST_DEVICE constexpr bool is_present() const { return offset >= 0; }
+  CUDF_HOST_DEVICE constexpr bool is_present() const { return offset != INVALID_OFFSET; }
   CUDF_HOST_DEVICE constexpr bool operator==(field_location const&) const = default;
 };
 
-static_assert(sizeof(field_location) == 2 * sizeof(int32_t));
+static_assert(sizeof(field_location) == 2 * sizeof(uint32_t));
 
 /**
  * Field descriptor passed to the scanning kernel.
@@ -137,8 +138,8 @@ struct field_occurrence_count {
  */
 struct field_occurrence {
   int32_t row_idx;  // Which row this occurrence belongs to
-  int32_t offset;   // Offset within the message
-  int32_t length;   // Length of the field data
+  uint32_t offset;  // Offset within the message
+  uint32_t length;  // Length of the field data
 };
 
 /**
@@ -196,7 +197,7 @@ struct required_field_input_view {
 
 struct scalar_value_input {
   uint8_t const* data;
-  int32_t length;
+  uint32_t length;
   bool present;
 };
 

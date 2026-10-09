@@ -797,9 +797,9 @@ void encode_string_field_record(std::vector<uint8_t>& buf,
   encode_varint(buf, value.size());
   CUDF_EXPECTS(std::in_range<int32_t>(buf.size()) && std::in_range<int32_t>(value.size()),
                "protobuf benchmark field exceeds supported range");
-  auto const data_offset = static_cast<int32_t>(buf.size());
+  auto const data_offset = static_cast<uint32_t>(buf.size());
   buf.insert(buf.end(), value.begin(), value.end());
-  occurrences.push_back({row_idx, data_offset, static_cast<int32_t>(value.size())});
+  occurrences.push_back({row_idx, data_offset, static_cast<uint32_t>(value.size())});
 }
 
 // Generates one nested-parent payload per input row. The parent locations, counts, and
@@ -852,7 +852,7 @@ struct RepeatedChildStringOnlyCase {
       }
       CUDF_EXPECTS(std::in_range<int32_t>(message.size()),
                    "protobuf benchmark parent exceeds supported length");
-      result.parent_locations[row] = {0, static_cast<int32_t>(message.size())};
+      result.parent_locations[row] = {0, static_cast<uint32_t>(message.size())};
     }
     return result;
   }
