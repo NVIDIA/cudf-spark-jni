@@ -406,6 +406,7 @@ void update_activity_enable(bool enable)
                                              CUPTI_ACTIVITY_KIND_MEMSET,
                                              CUPTI_ACTIVITY_KIND_NAME,
                                              CUPTI_ACTIVITY_KIND_MARKER,
+                                             CUPTI_ACTIVITY_KIND_MARKER_DATA,
                                              CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL,
                                              CUPTI_ACTIVITY_KIND_OVERHEAD};
   if (enable) {
