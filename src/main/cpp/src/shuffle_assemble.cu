@@ -37,6 +37,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_memcpy.cuh>
+#include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/std/bit>
 #include <cuda/std/type_traits>
@@ -801,8 +802,7 @@ constexpr std::size_t desired_assemble_batch_size = 1 * 1024 * 1024;
  */
 __host__ __device__ constexpr size_t size_to_batch_count(size_t bytes)
 {
-  return cudf::util::round_up_unsafe(bytes, desired_assemble_batch_size) /
-         desired_assemble_batch_size;
+  return cuda::round_up(bytes, desired_assemble_batch_size) / desired_assemble_batch_size;
 }
 
 /**
