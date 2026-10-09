@@ -25,6 +25,7 @@ add_library(spark_rapids_jni_test_common OBJECT)
 target_compile_options(spark_rapids_jni_test_common
                 PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_FLAGS}>"
                         "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>")
+spark_rapids_jni_add_strict_warning_flags(spark_rapids_jni_test_common)
 target_link_libraries(
     spark_rapids_jni_test_common
     PUBLIC cudf::cudftestutil GTest::gmock GTest::gmock_main GTest::gtest GTest::gtest_main
@@ -36,6 +37,7 @@ function(ConfigureTest CMAKE_TEST_NAME)
     target_compile_options(${CMAKE_TEST_NAME}
                 PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_FLAGS}>"
                         "$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_FLAGS}>")
+    spark_rapids_jni_add_strict_warning_flags(${CMAKE_TEST_NAME})
     target_include_directories(${CMAKE_TEST_NAME}
                 PRIVATE "$<BUILD_INTERFACE:${SPARK_RAPIDS_JNI_SOURCE_DIR}>"
                         "$<BUILD_INTERFACE:${SPARK_RAPIDS_JNI_SOURCE_DIR}/src>")
