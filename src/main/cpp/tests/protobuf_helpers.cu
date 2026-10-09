@@ -32,6 +32,8 @@
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
 
+#include <gmock/gmock.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +46,10 @@
 #include <vector>
 
 class ProtobufHelpersTest : public cudf::test::BaseFixture {};
+
+using ::testing::Each;
+using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
 
 namespace {
 
@@ -106,7 +112,7 @@ TEST_F(ProtobufHelpersTest, AtomicFlagBufferIsPaddedAndZeroed)
     CUDF_CUDA_TRY(
       cudaMemcpyAsync(bytes.data(), flags.data(), bytes.size(), cudaMemcpyDefault, stream.get()));
     stream.sync();
-    EXPECT_EQ(std::vector<uint8_t>(bytes.size(), 0), bytes);
+    EXPECT_THAT(bytes, Each(0));
   }
 }
 
@@ -251,16 +257,6 @@ CUDF_KERNEL void rebase_locations_kernel(rebase_probe const* probes,
   output[idx]       = protobuf_detail::rebase_location(probe.location, probe.base, probe.error);
 }
 
-template <typename Actual, typename Expected>
-void expect_locations(Actual const& actual, Expected const& expected)
-{
-  ASSERT_EQ(actual.size(), expected.size());
-  for (size_t i = 0; i < expected.size(); ++i) {
-    SCOPED_TRACE(i);
-    EXPECT_EQ(actual[i], expected[i]);
-  }
-}
-
 }  // namespace
 
 TEST_F(ProtobufHelpersTest, FieldLocationPresence)
@@ -289,12 +285,12 @@ TEST_F(ProtobufHelpersTest, TopLevelInputLocationsRebaseSlices)
     {offsets.data(), 100, locations.data(), 2, 4},
     {offsets.data(), 101, locations.data(), 0, 4},
     {offsets.data(), 99, locations.data(), 3, 4}};
-  auto const expected = std::to_array<field_location>({{2, 3},
-                                                       {4, 0},
-                                                       field_location::missing(),
-                                                       field_location::missing(),
-                                                       field_location::missing()});
-  expect_locations(invoke_provider<input_location_accessor>(probes, 0), expected);
+  EXPECT_THAT(invoke_provider<input_location_accessor>(probes, 0),
+              ElementsAreArray<field_location>({{2, 3},
+                                                {4, 0},
+                                                field_location::missing(),
+                                                field_location::missing(),
+                                                field_location::missing()}));
 }
 
 TEST_F(ProtobufHelpersTest, NestedRowLocationsPreservePresenceAndCheckOverflow)
@@ -314,12 +310,12 @@ TEST_F(ProtobufHelpersTest, NestedRowLocationsPreservePresenceAndCheckOverflow)
     {nullptr, 0, parents.data(), children.data(), 2, 3},
     {nullptr, 0, parents.data() + 1, children.data(), 0, 3},
     {nullptr, 0, parents.data() + 2, children.data(), 0, 3}};
-  auto const expected = std::to_array<field_location>({{7, 3},
-                                                       {9, 0},
-                                                       field_location::missing(),
-                                                       field_location::missing(),
-                                                       field_location::missing()});
-  expect_locations(invoke_provider<row_location_accessor>(probes, 0, nullptr), expected);
+  EXPECT_THAT(invoke_provider<row_location_accessor>(probes, 0, nullptr),
+              ElementsAreArray<field_location>({{7, 3},
+                                                {9, 0},
+                                                field_location::missing(),
+                                                field_location::missing(),
+                                                field_location::missing()}));
 }
 
 TEST_F(ProtobufHelpersTest, NestedInputLocationsRebaseSlices)
@@ -337,9 +333,10 @@ TEST_F(ProtobufHelpersTest, NestedInputLocationsRebaseSlices)
     {offsets.data(), 90, parents.data() + 1, children.data(), 0, 2},
     {offsets.data(), 101, parents.data(), children.data(), 0, 2},
     {offsets.data(), 99, parents.data(), children.data(), 1, 2}};
-  auto const expected = std::to_array<field_location>(
-    {{17, 3}, field_location::missing(), field_location::missing(), field_location::missing()});
-  expect_locations(invoke_provider<input_location_accessor>(probes, 0), expected);
+  EXPECT_THAT(
+    invoke_provider<input_location_accessor>(probes, 0),
+    ElementsAreArray<field_location>(
+      {{17, 3}, field_location::missing(), field_location::missing(), field_location::missing()}));
 }
 
 TEST_F(ProtobufHelpersTest, OccurrenceInputLocationsRebaseRowsAndParents)
@@ -368,13 +365,13 @@ TEST_F(ProtobufHelpersTest, OccurrenceInputLocationsRebaseRowsAndParents)
     {input, {parents.data() + 2, 1, nullptr}, occurrences.data()},
     {negative_base, {parents.data(), 1, nullptr}, occurrences.data()},
     {input, {nullptr, 0, nullptr}, occurrences.data() + 1}};
-  auto const expected = std::to_array<field_location>({{17, 3},
-                                                       {12, 3},
-                                                       field_location::missing(),
-                                                       field_location::missing(),
-                                                       field_location::missing(),
-                                                       field_location::missing()});
-  expect_locations(invoke_provider<input_location_accessor>(probes, 0), expected);
+  EXPECT_THAT(invoke_provider<input_location_accessor>(probes, 0),
+              ElementsAreArray<field_location>({{17, 3},
+                                                {12, 3},
+                                                field_location::missing(),
+                                                field_location::missing(),
+                                                field_location::missing(),
+                                                field_location::missing()}));
 }
 
 TEST_F(ProtobufHelpersTest, OccurrenceInputLocationsUseOwningRow)
@@ -391,10 +388,10 @@ TEST_F(ProtobufHelpersTest, OccurrenceInputLocationsUseOwningRow)
   std::vector<protobuf_detail::field_occurrence_location_provider> const probes{
     {input, {parents.data(), 2, nullptr}, occurrences.data()},
     {input, {nullptr, 0, nullptr}, occurrences.data()}};
-  expect_locations(invoke_provider<input_location_accessor>(probes, 0),
-                   std::to_array<field_location>({{29, 3}, {22, 3}}));
-  expect_locations(invoke_provider<input_location_accessor>(probes, 1),
-                   std::to_array<field_location>({{9, 2}, {4, 2}}));
+  EXPECT_THAT(invoke_provider<input_location_accessor>(probes, 0),
+              ElementsAreArray<field_location>({{29, 3}, {22, 3}}));
+  EXPECT_THAT(invoke_provider<input_location_accessor>(probes, 1),
+              ElementsAreArray<field_location>({{9, 2}, {4, 2}}));
 }
 
 TEST_F(ProtobufHelpersTest, RebaseLocationChecksBoundsAndReportsOverflow)
@@ -422,13 +419,13 @@ TEST_F(ProtobufHelpersTest, RebaseLocationChecksBoundsAndReportsOverflow)
   rebase_locations_kernel<<<1, num_probes, 0, stream.get()>>>(
     d_probes.data(), num_probes, output.data());
   CUDF_CHECK_CUDA(stream.get());
-  expect_locations(cudf::detail::make_std_vector(output, stream), expected);
+  EXPECT_THAT(cudf::detail::make_std_vector(output, stream), ElementsAreArray(expected));
   std::vector<protobuf_error> const expected_errors{protobuf_error::NONE,
                                                     protobuf_error::OVERFLOW,
                                                     protobuf_error::OVERFLOW,
                                                     protobuf_error::OVERFLOW,
                                                     protobuf_error::NONE};
-  EXPECT_EQ(cudf::detail::make_std_vector(errors, stream), expected_errors);
+  EXPECT_THAT(cudf::detail::make_std_vector(errors, stream), ElementsAreArray(expected_errors));
 }
 
 TEST_F(ProtobufHelpersTest, ByteLengthsUseDefaultOnlyForMissingFields)
@@ -444,9 +441,9 @@ TEST_F(ProtobufHelpersTest, ByteLengthsUseDefaultOnlyForMissingFields)
   rmm::device_uvector<int32_t> lengths(3, stream, mr);
   protobuf_detail::extract_lengths_kernel<<<1, 3, 0, stream.get()>>>(provider, 3, lengths.data());
   CUDF_CHECK_CUDA(stream.get());
-  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<int32_t>{3, 0, 0}));
+  EXPECT_THAT(cudf::detail::make_std_vector(lengths, stream), ElementsAre(3, 0, 0));
   protobuf_detail::extract_lengths_kernel<<<1, 3, 0, stream.get()>>>(
     provider, 3, lengths.data(), 7);
   CUDF_CHECK_CUDA(stream.get());
-  EXPECT_EQ(cudf::detail::make_std_vector(lengths, stream), (std::vector<int32_t>{3, 7, 0}));
+  EXPECT_THAT(cudf::detail::make_std_vector(lengths, stream), ElementsAre(3, 7, 0));
 }
