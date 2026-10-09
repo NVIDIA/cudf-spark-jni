@@ -21,7 +21,6 @@
 
 #include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
-#include <cudf/types.hpp>
 
 #include <string>
 #include <tuple>
@@ -33,8 +32,8 @@ namespace {
 
 using instruction = std::tuple<spark_rapids_jni::path_instruction_type, std::string, int32_t>;
 
-std::unique_ptr<cudf::column> run(std::vector<std::string> const& rows,
-                                  std::vector<instruction> const& path)
+[[nodiscard]] std::unique_ptr<cudf::column> run(std::vector<std::string> const& rows,
+                                                std::vector<instruction> const& path)
 {
   auto input = cudf::test::strings_column_wrapper(rows.begin(), rows.end());
   return spark_rapids_jni::get_json_object(cudf::strings_column_view{input}, path);
@@ -142,6 +141,32 @@ TEST_F(GetJsonObjectTest, RetryCorruption_OverrunningMalformedRow)
   }
 }
 
+// Trailing garbage after the selected index element must not escape its slot.
+TEST_F(GetJsonObjectTest, RetryCorruption_TrailingGarbageAfterIndex)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::INDEX, "", 1}};
+  auto const malformed = R"([0,{"a":")" + std::string(64, '\x01') + R"("}x,2])";
+  for (int rep = 0; rep < 128; ++rep) {
+    auto const result   = run({R"([0,1])", malformed, R"([0,2])"}, path);
+    auto const expected = expected_column({"1", "", "2"}, {true, false, true});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
+// A malformed field after the matched one must not corrupt the valid rows.
+TEST_F(GetJsonObjectTest, RetryCorruption_MalformedTrailingField)
+{
+  auto const path =
+    std::vector<instruction>{{spark_rapids_jni::path_instruction_type::NAMED, "k", 0}};
+  auto const malformed_tail = R"({"k":{"j":")" + std::string(64, '\x01') + R"("},"m":x})";
+  for (int rep = 0; rep < 128; ++rep) {
+    auto const result   = run({R"({"k":"v1"})", malformed_tail, R"({"k":"v2"})"}, path);
+    auto const expected = expected_column({"v1", "", "v2"}, {true, false, true});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
 // Same overrun, with the error inside the structure copy: the string closes, the object does
 // not — the copy loop hits end of input after the escaped run was fully copied, and those
 // bytes must count toward the output length.
@@ -176,8 +201,7 @@ TEST_F(GetJsonObjectTest, RetryCorruption_WildcardArrayOverrun)
   }
 }
 
-// A no-match wildcard step must not leak discarded child bytes into a valid row's output.
-// The expanding second row forces the retry launch.
+// Discarded wildcard child bytes must not leak into the output.
 TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
 {
   auto const path =
@@ -203,8 +227,7 @@ TEST_F(GetJsonObjectTest, RetryCorruption_DiscardedWildcardBytes)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
-// Expansion and abandoned wildcard shells in the SAME row, followed by victims: pins the
-// write-footprint tracking in the case-6 unwind.
+// Same-row expansion and abandoned shells must not corrupt the victims.
 TEST_F(GetJsonObjectTest, RetryCorruption_SameRowExpandAndAbandon)
 {
   auto const path =

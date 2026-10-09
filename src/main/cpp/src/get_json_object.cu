@@ -393,6 +393,20 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
   // no-match wildcard step.
   int max_footprint = 0;
 
+  // Returns a failed parse result carrying the write extent (bytes written so far).
+  auto const parse_failure = [&](json_generator const& g) {
+    auto const extent = g.get_offset() + g.get_output_len();
+    return cuda::std::tuple{false, extent, cuda::std::max(extent, max_footprint)};
+  };
+  // Variant for the wildcard step: the extent is the larger of the parent and child
+  // generators' writes.
+  auto const parse_failure_with_child = [&](json_generator const& g,
+                                            json_generator const& child_g) {
+    auto const extent = cuda::std::max(g.get_offset() + g.get_output_len(),
+                                       child_g.get_offset() + child_g.get_output_len());
+    return cuda::std::tuple{false, extent, cuda::std::max(extent, max_footprint)};
+  };
+
   auto const push_context = [&](evaluation_case_path _case_path,
                                 json_generator _g,
                                 write_style _style,
@@ -436,11 +450,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
         // flatten this array into the parent
         if (json_token::END_ARRAY != p.next_token()) {
           // JSON validation check
-          if (json_token::ERROR == p.get_current_token()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
           // push back task
           // add child task
           push_context(evaluation_case_path::START_ARRAY___EMPTY_PATH___FLATTEN_STYLE,
@@ -458,9 +468,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
         // general case: just copy the child tree verbatim
         if (!(ctx.g.copy_current_structure(p, out_buf))) {
           // JSON validation check
-          return {false,
-                  ctx.g.get_offset() + ctx.g.get_output_len(),
-                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+          return parse_failure(ctx.g);
         }
         ctx.dirty        = 1;
         ctx.task_is_done = true;
@@ -475,27 +483,17 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
           if (ctx.dirty > 0) {
             while (json_token::END_OBJECT != p.next_token()) {
               // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) {
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-              }
+              if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
               // skip FIELD_NAME token
               p.next_token();
               // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) {
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-              }
+              if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
               // skip value of FIELD_NAME
               if (!p.try_skip_children()) {
                 // JSON validation check
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+                return parse_failure(ctx.g);
               }
             }
           }
@@ -512,29 +510,17 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
             if (json_token::END_OBJECT == p.get_current_token()) { break; }
 
             // JSON validation check
-            if (json_token::ERROR == p.get_current_token()) {
-              return {false,
-                      ctx.g.get_offset() + ctx.g.get_output_len(),
-                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-            }
+            if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
             // current token is FIELD_NAME
             if (is_name_matched) {
               // skip FIELD_NAME token
               p.next_token();
               // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) {
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-              }
+              if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
               // meets null token, it's not expected, return false
-              if (json_token::VALUE_NULL == p.get_current_token()) {
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-              }
+              if (json_token::VALUE_NULL == p.get_current_token()) { return parse_failure(ctx.g); }
               // push sub task; sub task will update the result of path 4
               push_context(evaluation_case_path::START_OBJECT___MATCHED_NAME_PATH,
                            ctx.g,
@@ -546,18 +532,12 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
               // skip FIELD_NAME token
               p.next_token();
               // JSON validation check
-              if (json_token::ERROR == p.get_current_token()) {
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-              }
+              if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
               // current child is not expected, skip current child
               if (!p.try_skip_children()) {
                 // JSON validation check
-                return {false,
-                        ctx.g.get_offset() + ctx.g.get_output_len(),
-                        cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+                return parse_failure(ctx.g);
               }
             }
           }
@@ -582,11 +562,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
 
         if (p.next_token() != json_token::END_ARRAY) {
           // JSON validation check
-          if (json_token::ERROR == p.get_current_token()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
           push_context(evaluation_case_path::START_ARRAY___MATCHED_DOUBLE_WILDCARD,
                        ctx.g,
                        write_style::FLATTEN,
@@ -628,9 +604,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
           if (json_token::ERROR == p.get_current_token()) {
             // The child generator may have written past this context's extent; report the
             // larger of the two so the out-of-bound check sees the real overrun.
-            auto const extent = cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(),
-                                               child_g.get_offset() + child_g.get_output_len());
-            return {false, extent, cuda::std::max(extent, max_footprint)};
+            return parse_failure_with_child(ctx.g, child_g);
           }
           // track the number of array elements and only emit an outer array if
           // we've written more than one element, this matches Hive's behavior
@@ -665,11 +639,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
         }
         if (p.next_token() != json_token::END_ARRAY) {
           // JSON validation check
-          if (json_token::ERROR == p.get_current_token()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
           // wildcards can have multiple matches, continually update the dirty
           // count
@@ -690,35 +660,21 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
 
         p.next_token();
         // JSON validation check
-        if (json_token::ERROR == p.get_current_token()) {
-          return {false,
-                  ctx.g.get_offset() + ctx.g.get_output_len(),
-                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-        }
+        if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
         ctx.is_first_enter = false;
 
         int i = idx;
         while (i > 0) {
           if (p.get_current_token() == json_token::END_ARRAY) {
             // terminate, nothing has been written
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+            return parse_failure(ctx.g);
           }
 
-          if (!p.try_skip_children()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (!p.try_skip_children()) { return parse_failure(ctx.g); }
 
           p.next_token();
           // JSON validation check
-          if (json_token::ERROR == p.get_current_token()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
           --i;
         }
@@ -737,34 +693,20 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
 
         p.next_token();
         // JSON validation check
-        if (json_token::ERROR == p.get_current_token()) {
-          return {false,
-                  ctx.g.get_offset() + ctx.g.get_output_len(),
-                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-        }
+        if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
         int i = idx;
         while (i > 0) {
           if (p.get_current_token() == json_token::END_ARRAY) {
             // terminate, nothing has been written
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
+            return parse_failure(ctx.g);
           }
 
-          if (!p.try_skip_children()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (!p.try_skip_children()) { return parse_failure(ctx.g); }
 
           p.next_token();
           // JSON validation check
-          if (json_token::ERROR == p.get_current_token()) {
-            return {false,
-                    ctx.g.get_offset() + ctx.g.get_output_len(),
-                    cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-          }
+          if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
 
           --i;
         }
@@ -778,11 +720,7 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
       // case _ =>
       // case path 12
       else {
-        if (!p.try_skip_children()) {
-          return {false,
-                  ctx.g.get_offset() + ctx.g.get_output_len(),
-                  cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-        }
+        if (!p.try_skip_children()) { return parse_failure(ctx.g); }
         // default case path, return false for this task
         ctx.dirty        = 0;
         ctx.task_is_done = true;
@@ -850,17 +788,9 @@ __device__ cuda::std::tuple<bool, cudf::size_type, cudf::size_type> evaluate_pat
           // post logic:
           while (p.next_token() != json_token::END_ARRAY) {
             // JSON validation check
-            if (json_token::ERROR == p.get_current_token()) {
-              return {false,
-                      ctx.g.get_offset() + ctx.g.get_output_len(),
-                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-            }
+            if (json_token::ERROR == p.get_current_token()) { return parse_failure(ctx.g); }
             // advance the token stream to the end of the array
-            if (!p.try_skip_children()) {
-              return {false,
-                      ctx.g.get_offset() + ctx.g.get_output_len(),
-                      cuda::std::max(ctx.g.get_offset() + ctx.g.get_output_len(), max_footprint)};
-            }
+            if (!p.try_skip_children()) { return parse_failure(ctx.g); }
           }
           // task is done
           p_ctx.task_is_done = true;
@@ -1132,6 +1062,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   auto const d_max_path_depth_exceeded = d_error_check.data() + num_outputs;
 
   std::vector<rmm::device_uvector<char>> scratch_buffers;
+  // `second` = write footprint for OOB rows, else committed result length.
   std::vector<rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>> out_stringviews;
   std::vector<json_path_processing_data> h_path_data;
   scratch_buffers.reserve(json_paths.size());
