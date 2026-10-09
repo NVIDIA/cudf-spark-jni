@@ -363,6 +363,7 @@ target_link_libraries(
     nvtx3::nvtx3-cpp
   -Wl,--no-whole-archive
     cuco::cuco
+    CUDA::cuda_driver
     spdlog::spdlog_header_only
     ${ARROW_LIB}
     ${PARQUET_LIB}

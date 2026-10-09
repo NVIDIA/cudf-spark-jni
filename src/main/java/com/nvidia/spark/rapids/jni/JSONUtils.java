@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,20 @@ public class JSONUtils {
   }
 
   public static final int MAX_PATH_DEPTH = getMaxJSONPathDepth();
+
+  // BigDecimal parses UTF-16 code units using the active JVM's digit table. Unicode versions
+  // differ across Java releases, so the native decimal conversion must use this same table.
+  private static final byte[] DECIMAL_DIGIT_VALUES = createDecimalDigitValues();
+
+  private static byte[] createDecimalDigitValues() {
+    byte[] values = new byte[Character.MAX_VALUE + 1];
+    for (int codeUnit = Character.MIN_VALUE; codeUnit <= Character.MAX_VALUE; ++codeUnit) {
+      char character = (char) codeUnit;
+      values[codeUnit] = (byte) (Character.isDigit(character)
+          ? Character.digit(character, 10) : -1);
+    }
+    return values;
+  }
 
   public enum PathInstructionType {
     WILDCARD,
@@ -271,7 +285,8 @@ public class JSONUtils {
         opts.leadingZerosAllowed(),
         opts.nonNumericNumbersAllowed(),
         opts.unquotedControlChars(),
-        isUSLocale));
+        isUSLocale,
+        DECIMAL_DIGIT_VALUES));
   }
 
   /**
@@ -295,7 +310,8 @@ public class JSONUtils {
         schema.getFlattenedTypeScales(),
         schema.getFlattenedDecimalPrecisions(),
         allowedNonNumericNumbers,
-        isUSLocale));
+        isUSLocale,
+        DECIMAL_DIGIT_VALUES));
   }
 
   /**
@@ -350,7 +366,8 @@ public class JSONUtils {
                                                boolean leadingZerosAllowed,
                                                boolean nonNumericNumbersAllowed,
                                                boolean unquotedControlChars,
-                                               boolean isUSLocale);
+                                               boolean isUSLocale,
+                                               byte[] decimalDigitValues);
 
   private static native long convertFromStrings(long input,
                                                 int[] numChildren,
@@ -358,7 +375,8 @@ public class JSONUtils {
                                                 int[] typeScales,
                                                 int[] typePrecision,
                                                 boolean nonNumericNumbersAllowed,
-                                                boolean isUSLocale);
+                                                boolean isUSLocale,
+                                                byte[] decimalDigitValues);
 
   private static native long removeQuotes(long input, boolean nullifyIfNotQuoted);
 }

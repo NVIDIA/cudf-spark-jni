@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,29 @@
 #include "json_utils.hpp"
 
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/types.hpp>
+#include <cudf/utilities/traits.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <vector>
 
 using path_instruction_type = spark_rapids_jni::path_instruction_type;
+
+namespace {
+
+std::vector<jbyte> decimal_digit_values_for_schema(JNIEnv* env,
+                                                   jbyteArray j_decimal_digit_values,
+                                                   std::vector<int> const& types)
+{
+  auto const has_decimal = std::any_of(types.begin(), types.end(), [](auto const type) {
+    return cudf::is_fixed_point(cudf::data_type{static_cast<cudf::type_id>(type)});
+  });
+  return has_decimal ? cudf::jni::native_jbyteArray(env, j_decimal_digit_values).to_vector()
+                     : std::vector<jbyte>{};
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -216,7 +234,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
                                                              jboolean allow_leading_zeros,
                                                              jboolean allow_nonnumeric_numbers,
                                                              jboolean allow_unquoted_control,
-                                                             jboolean is_us_locale)
+                                                             jboolean is_us_locale,
+                                                             jbyteArray j_decimal_digit_values)
 {
   JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
   JNI_NULL_CHECK(env, j_col_names, "j_col_names is null", 0);
@@ -224,6 +243,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
   JNI_NULL_CHECK(env, j_types, "j_types is null", 0);
   JNI_NULL_CHECK(env, j_scales, "j_scales is null", 0);
   JNI_NULL_CHECK(env, j_precisions, "j_precisions is null", 0);
+  JNI_NULL_CHECK(env, j_decimal_digit_values, "j_decimal_digit_values is null", 0);
 
   JNI_TRY
   {
@@ -235,6 +255,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
     auto const scales       = cudf::jni::native_jintArray(env, j_scales).to_vector();
     auto const precisions   = cudf::jni::native_jintArray(env, j_precisions).to_vector();
+    auto const decimal_digit_values =
+      decimal_digit_values_for_schema(env, j_decimal_digit_values, types);
 
     CUDF_EXPECTS(col_names.size() > 0, "Invalid schema data: col_names.");
     CUDF_EXPECTS(col_names.size() == num_children.size(), "Invalid schema data: num_children.");
@@ -253,7 +275,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
                                              allow_leading_zeros,
                                              allow_nonnumeric_numbers,
                                              allow_unquoted_control,
-                                             is_us_locale)
+                                             is_us_locale,
+                                             decimal_digit_values)
         .release());
   }
   JNI_CATCH(env, 0);
@@ -268,13 +291,15 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
                                                               jintArray j_scales,
                                                               jintArray j_precisions,
                                                               jboolean allow_nonnumeric_numbers,
-                                                              jboolean is_us_locale)
+                                                              jboolean is_us_locale,
+                                                              jbyteArray j_decimal_digit_values)
 {
   JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
   JNI_NULL_CHECK(env, j_num_children, "j_num_children is null", 0);
   JNI_NULL_CHECK(env, j_types, "j_types is null", 0);
   JNI_NULL_CHECK(env, j_scales, "j_scales is null", 0);
   JNI_NULL_CHECK(env, j_precisions, "j_precisions is null", 0);
+  JNI_NULL_CHECK(env, j_decimal_digit_values, "j_decimal_digit_values is null", 0);
 
   JNI_TRY
   {
@@ -285,6 +310,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
     auto const scales       = cudf::jni::native_jintArray(env, j_scales).to_vector();
     auto const precisions   = cudf::jni::native_jintArray(env, j_precisions).to_vector();
+    auto const decimal_digit_values =
+      decimal_digit_values_for_schema(env, j_decimal_digit_values, types);
 
     CUDF_EXPECTS(num_children.size() > 0, "Invalid schema data: num_children.");
     CUDF_EXPECTS(num_children.size() == types.size(), "Invalid schema data: types.");
@@ -298,7 +325,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
                                              scales,
                                              precisions,
                                              allow_nonnumeric_numbers,
-                                             is_us_locale)
+                                             is_us_locale,
+                                             decimal_digit_values)
         .release());
   }
   JNI_CATCH(env, 0);
