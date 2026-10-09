@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,6 +39,7 @@ ${MVN} verify ${MVN_MIRROR} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON \
+  -DUSE_SANITIZER=ON \
   -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest,!PackagedJarOriginCheck \
   -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
