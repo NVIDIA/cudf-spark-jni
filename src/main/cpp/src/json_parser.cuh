@@ -21,6 +21,8 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/types.hpp>
 
+#include <cuda/std/algorithm>
+#include <cuda/std/cassert>
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 
@@ -169,6 +171,14 @@ class char_range_reader : public char_range {
   {
     _data++;
     _len--;
+  }
+
+  // Skips a whole multi-byte sequence at once, where `next()` would step one byte.
+  __device__ inline void advance(cudf::size_type n)
+  {
+    assert(n >= 0 && n <= _len);
+    _data += n;
+    _len -= n;
   }
 
   // Warning: this does not check for out-of-bound access.
@@ -485,6 +495,181 @@ class json_parser {
     }
   }
 
+  /**
+   * @brief One UTF-8 sequence as the JDK decoder classifies it
+   */
+  struct utf8_sequence {
+    cudf::size_type length;  // input bytes consumed
+    bool malformed;          // decoder emits one U+FFFD instead of a code point
+  };
+
+  // Shared by the write path and the field-name match path so the two cannot compare against
+  // different bytes.
+  static constexpr char replacement_bytes[3] = {
+    static_cast<char>(0xEF), static_cast<char>(0xBF), static_cast<char>(0xBD)};
+
+  static __device__ inline bool is_utf8_continuation(unsigned char byte)
+  {
+    return (byte & 0xC0) == 0x80;
+  }
+
+  /**
+   * @brief Whether `str` starts on a 2-byte sequence the decoder accepts unchanged
+   *
+   * Shared with `classify_utf8_sequence`, which must decide this case identically.
+   */
+  static __device__ inline bool is_plain_two_byte(char_range const& str, unsigned char lead)
+  {
+    return lead >= 0xC2 && lead <= 0xDF && str.size() >= 2 &&
+           is_utf8_continuation(static_cast<unsigned char>(str[1]));
+  }
+
+  /**
+   * @brief Whether `str` starts on a 3-byte sequence the decoder accepts unchanged
+   *
+   * 0xE0 and 0xED are excluded because they still need the overlong and surrogate checks.
+   */
+  static __device__ inline bool is_plain_three_byte(char_range const& str, unsigned char lead)
+  {
+    return lead >= 0xE1 && lead <= 0xEF && lead != 0xED && str.size() >= 3 &&
+           is_utf8_continuation(static_cast<unsigned char>(str[1])) &&
+           is_utf8_continuation(static_cast<unsigned char>(str[2]));
+  }
+
+  /**
+   * @brief Bytes the JDK decoder consumes for a malformed sequence led by 0xF0..0xF4
+   */
+  static __device__ inline cudf::size_type malformed_four_byte_length(char_range const& str,
+                                                                      unsigned char lead)
+  {
+    if (str.size() < 2) { return 1; }
+    auto const b2 = static_cast<unsigned char>(str[1]);
+    // An overlong 0xF0 or out-of-range 0xF4 is rejected together with its lead, so only one byte
+    // is consumed.
+    if ((lead == 0xF0 && (b2 < 0x90 || b2 > 0xBF)) || (lead == 0xF4 && (b2 & 0xF0) != 0x80) ||
+        !is_utf8_continuation(b2)) {
+      return 1;
+    }
+    if (str.size() < 3 || !is_utf8_continuation(static_cast<unsigned char>(str[2]))) { return 2; }
+    return 3;
+  }
+
+  /**
+   * @brief Classify the sequence starting at `str`, which must not be empty, as the JDK decoder
+   * does
+   *
+   * Spark decodes the document before Jackson tokenizes it, so a malformed run has already
+   * collapsed to one U+FFFD, and matching the decoder's run lengths is what keeps the output
+   * identical: `ED A0 80` fails only the surrogate check, so all three bytes become one U+FFFD,
+   * while the overlong `E0 80 80` fails after the lead and yields three. The size of `str` bounds
+   * the lookahead.
+   */
+  static __device__ inline utf8_sequence classify_utf8_sequence(char_range const& str)
+  {
+    auto const remaining = str.size();
+    auto const lead      = static_cast<unsigned char>(str[0]);
+
+    if (lead <= 0x7F) { return {1, false}; }
+
+    // Bare continuation byte, an overlong 2-byte lead, or a lead beyond the Unicode range.
+    if (lead <= 0xBF || lead == 0xC0 || lead == 0xC1 || lead >= 0xF5) { return {1, true}; }
+
+    if (lead <= 0xDF) {
+      if (is_plain_two_byte(str, lead)) { return {2, false}; }
+      if (remaining < 2) { return {remaining, true}; }
+      return {1, true};
+    }
+
+    if (lead <= 0xEF) {
+      if (is_plain_three_byte(str, lead)) { return {3, false}; }
+      if (remaining < 2) { return {remaining, true}; }
+      auto const b2 = static_cast<unsigned char>(str[1]);
+      // A 0xE0 lead with a 0x80..0x9F second byte is overlong; the decoder drops the lead alone.
+      if ((lead == 0xE0 && (b2 & 0xE0) == 0x80) || !is_utf8_continuation(b2)) { return {1, true}; }
+      if (remaining < 3) { return {remaining, true}; }
+      if (!is_utf8_continuation(static_cast<unsigned char>(str[2]))) { return {2, true}; }
+      // A 0xED lead with a second byte at or above 0xA0 encodes a surrogate, which is structurally
+      // valid, so the whole 3-byte run is replaced.
+      if (lead == 0xED && b2 >= 0xA0) { return {3, true}; }
+      return {3, false};
+    }
+
+    // Length 3 means the first three bytes satisfy the four-byte rules, which already exclude the
+    // overlong 0xF0 and out-of-range 0xF4 forms, so a fourth continuation byte completes the point.
+    auto const bad_length = malformed_four_byte_length(str, lead);
+    if (remaining < 4) { return {cuda::std::min(bad_length, remaining), true}; }
+    if (bad_length != 3 || !is_utf8_continuation(static_cast<unsigned char>(str[3]))) {
+      return {bad_length, true};
+    }
+    return {4, false};
+  }
+
+  /**
+   * @brief Write the sequence `str` starts on, advancing both `str` and `copy_destination`
+   *
+   * `str` must not be empty. A null `copy_destination` sizes without writing, so the sizing and
+   * writing passes return the same count.
+   */
+  static __device__ inline int write_utf8_sequence(char_range_reader& str, char*& copy_destination)
+  {
+    auto const lead = static_cast<unsigned char>(str.current_char());
+
+    // A sequence the decoder accepts unchanged copies through under both write styles.
+    if (is_plain_two_byte(str, lead)) {
+      if (copy_destination != nullptr) {
+        copy_destination[0] = str[0];
+        copy_destination[1] = str[1];
+        copy_destination += 2;
+      }
+      str.advance(2);
+      return 2;
+    }
+    if (is_plain_three_byte(str, lead)) {
+      if (copy_destination != nullptr) {
+        copy_destination[0] = str[0];
+        copy_destination[1] = str[1];
+        copy_destination[2] = str[2];
+        copy_destination += 3;
+      }
+      str.advance(3);
+      return 3;
+    }
+
+    // Every other lead needs the full classification.
+    auto const sequence = classify_utf8_sequence(str);
+    int written         = 0;
+    if (sequence.malformed) {
+      // Jackson leaves U+FFFD unescaped, so both styles emit its raw bytes. One input byte can
+      // become three, and the size check happens after writing, so the growth must fit the
+      // scratch buffer's padding.
+      if (copy_destination != nullptr) {
+        copy_destination[0] = replacement_bytes[0];
+        copy_destination[1] = replacement_bytes[1];
+        copy_destination[2] = replacement_bytes[2];
+        copy_destination += 3;
+      }
+      written = 3;
+    } else {
+      if (copy_destination != nullptr) {
+        for (cudf::size_type i = 0; i < sequence.length; ++i) {
+          copy_destination[i] = str[i];
+        }
+        copy_destination += sequence.length;
+      }
+      written = sequence.length;
+    }
+
+    // Advance unconditionally so the sizing and writing passes stay in lock step.
+    str.advance(sequence.length);
+    return written;
+  }
+
+  /**
+   * @brief Write the string token `str` starts on, returning the byte count either way
+   *
+   * `str` must be positioned on the token's delimiting quote; whatever byte it starts on becomes
+   * the delimiter without validation, so the caller must reject a non-quote itself.
+   */
   static __device__ inline int write_string(char_range_reader& str,
                                             char* copy_destination,
                                             escape_style w_style)
@@ -505,8 +690,16 @@ class json_parser {
 
     // scan string content
     while (!str.is_empty()) {
-      char const c = str.current_char();
-      int const v  = static_cast<int>(c);
+      char const c        = str.current_char();
+      bool const is_ascii = static_cast<unsigned char>(c) < 0x80;
+      // Test ASCII first so the common byte never reaches the classification below.
+      if (static_cast<unsigned char>(c) >= 32 && is_ascii && c != quote_char && '\\' != c &&
+          !(escape_style::ESCAPED == w_style && '"' == c)) {
+        if (copy_destination != nullptr) { *copy_destination++ = c; }
+        str.next();
+        output_size_bytes++;
+        continue;
+      }
       if (c == quote_char) {
         // path 1: match closing quote char
         str.next();
@@ -518,7 +711,7 @@ class json_parser {
         }
 
         return output_size_bytes;
-      } else if (v >= 0 && v < 32) {
+      } else if (is_ascii && c < 32) {
         // path 2: unescaped control char
 
         // copy if enabled, unescape mode, write 1 char
@@ -544,22 +737,138 @@ class json_parser {
         }
       } else {
         // path 4: safe code point
+        if (is_ascii) {
+          // handle single unescaped " char; happens when string is quoted by char '
+          // e.g.:  'A"' string, escape to "A\\"" (5 chars: " A \ " ")
+          if ('\"' == c && escape_style::ESCAPED == w_style) {
+            if (copy_destination != nullptr) { *copy_destination++ = '\\'; }
+            output_size_bytes++;
+          }
 
-        // handle single unescaped " char; happens when string is quoted by char '
-        // e.g.:  'A"' string, escape to "A\\"" (5 chars: " A \ " ")
-        if ('\"' == c && escape_style::ESCAPED == w_style) {
-          if (copy_destination != nullptr) { *copy_destination++ = '\\'; }
+          if (copy_destination != nullptr) { *copy_destination++ = c; }
+          str.next();
           output_size_bytes++;
+          continue;
         }
 
-        if (copy_destination != nullptr) { *copy_destination++ = c; }
-        str.next();
-        output_size_bytes++;
+        output_size_bytes += write_utf8_sequence(str, copy_destination);
       }
     }
 
     // technically this is an error state, but we will do our best from here...
     return output_size_bytes;
+  }
+
+  /**
+   * @brief The body of `try_parse_string`, instantiated twice from this one definition
+   *
+   * `WithUtf8Classification` selects what a byte at or above 0x80 does. It is a template
+   * parameter because the classification measurably slows the byte loop even on ASCII input that
+   * never reaches it, so the hot instantiation must not contain it at all: that one leaves the
+   * loop as soon as a field name needs classifying and hands the string to the out-of-line
+   * `try_parse_string_slow`.
+   */
+  template <bool WithUtf8Classification>
+  static __device__ __forceinline__ cuda::std::tuple<bool, bool, char const*> try_parse_string_impl(
+    char_range_reader str, char_range_reader to_match)
+  {
+    if (str.is_empty()) { return cuda::std::make_tuple(false, false, nullptr); }
+    char const quote_char   = str.current_char();
+    bool matched_field_name = !to_match.is_null();
+
+    // The bailing instantiation restarts the parse rather than resuming it, so both readers are
+    // saved as they were before the opening quote was skipped.
+    [[maybe_unused]] char_range_reader const str_start      = str;
+    [[maybe_unused]] char_range_reader const to_match_start = to_match;
+
+    // skip left quote char
+    // We don't need to actually verify what it is, because we just read it.
+    str.next();
+
+    [[maybe_unused]] bool needs_classification = false;
+
+    // scan string content
+    while (!str.is_empty()) {
+      char c = str.current_char();
+      int v  = static_cast<int>(c);
+      if (c == quote_char) {  // path 1: match closing quote char
+        str.next();
+        matched_field_name = matched_field_name && (to_match.is_null() || to_match.is_empty());
+        return cuda::std::make_tuple(true, matched_field_name, str.data());
+      } else if (v >= 0 && v < 32) {  // path 2: unescaped control char
+        matched_field_name = matched_field_name && try_match_char(to_match, c);
+        str.next();
+        continue;
+      } else if ('\\' == c) {  // path 3: escape path
+        str.next();
+
+        char* copy_dest_nullptr = nullptr;  // unused
+        int output_size_bytes   = 0;        // unused
+        if (!try_skip_escape_part(str,
+                                  to_match,
+                                  copy_dest_nullptr,
+                                  escape_style::UNESCAPED,
+                                  output_size_bytes,
+                                  matched_field_name)) {
+          return cuda::std::make_tuple(false, false, nullptr);
+        }
+      } else if constexpr (WithUtf8Classification) {  // path 4: safe code point
+        // Test ASCII first so the common byte never reaches the classification below.
+        if (static_cast<unsigned char>(c) < 0x80) {
+          if (!try_skip_safe_code_point(str, c)) {
+            return cuda::std::make_tuple(false, false, nullptr);
+          }
+          matched_field_name = matched_field_name && try_match_char(to_match, c);
+        } else {
+          // Spark decodes the whole document before Jackson tokenizes it, so a malformed run inside
+          // a name has already collapsed to one U+FFFD by the time a path is compared against it.
+          // Comparing the raw bytes instead would leave such a name unreachable from any path.
+          auto const sequence = classify_utf8_sequence(str);
+          if (sequence.malformed) {
+            matched_field_name = matched_field_name &&
+                                 try_match_char(to_match, replacement_bytes[0]) &&
+                                 try_match_char(to_match, replacement_bytes[1]) &&
+                                 try_match_char(to_match, replacement_bytes[2]);
+          } else {
+            for (cudf::size_type i = 0; i < sequence.length; ++i) {
+              matched_field_name = matched_field_name && try_match_char(to_match, str[i]);
+            }
+          }
+          str.advance(sequence.length);
+        }
+      } else {  // path 4: safe code point, bailing out instead of classifying
+        // Classification only matters while matching a field name, where a malformed run must
+        // collapse to one U+FFFD. With no name to match, consuming byte by byte accepts the same
+        // input: every byte of a sequence has its high bit set and the delimiter is ASCII, so
+        // none of them can close the string.
+        if (static_cast<unsigned char>(c) >= 0x80 && !to_match.is_null()) {
+          needs_classification = true;
+          break;
+        }
+        if (!try_skip_safe_code_point(str, c)) {
+          return cuda::std::make_tuple(false, false, nullptr);
+        }
+        matched_field_name = matched_field_name && try_match_char(to_match, c);
+      }
+    }
+
+    // Replaying the consumed prefix is what keeps the classification out of the loop; the saved
+    // readers are copies, so the replay sees the same input.
+    if constexpr (!WithUtf8Classification) {
+      if (needs_classification) { return try_parse_string_slow(str_start, to_match_start); }
+    }
+
+    return cuda::std::make_tuple(false, false, nullptr);
+  }
+
+  /**
+   * @brief `try_parse_string_impl<true>` kept out of line, so the classification never lands in
+   * the byte loop of the instantiation that runs on every string
+   */
+  static __device__ __noinline__ cuda::std::tuple<bool, bool, char const*> try_parse_string_slow(
+    char_range_reader str, char_range_reader to_match)
+  {
+    return try_parse_string_impl<true>(str, to_match);
   }
 
   /**
@@ -608,48 +917,7 @@ class json_parser {
   static __device__ inline cuda::std::tuple<bool, bool, char const*> try_parse_string(
     char_range_reader str, char_range_reader to_match = char_range_reader(char_range::null()))
   {
-    if (str.is_empty()) { return cuda::std::make_tuple(false, false, nullptr); }
-    char const quote_char   = str.current_char();
-    bool matched_field_name = !to_match.is_null();
-
-    // skip left quote char
-    // We don't need to actually verify what it is, because we just read it.
-    str.next();
-
-    // scan string content
-    while (!str.is_empty()) {
-      char c = str.current_char();
-      int v  = static_cast<int>(c);
-      if (c == quote_char) {  // path 1: match closing quote char
-        str.next();
-        matched_field_name = matched_field_name && (to_match.is_null() || to_match.is_empty());
-        return cuda::std::make_tuple(true, matched_field_name, str.data());
-      } else if (v >= 0 && v < 32) {  // path 2: unescaped control char
-        matched_field_name = matched_field_name && try_match_char(to_match, c);
-        str.next();
-        continue;
-      } else if ('\\' == c) {  // path 3: escape path
-        str.next();
-
-        char* copy_dest_nullptr = nullptr;  // unused
-        int output_size_bytes   = 0;        // unused
-        if (!try_skip_escape_part(str,
-                                  to_match,
-                                  copy_dest_nullptr,
-                                  escape_style::UNESCAPED,
-                                  output_size_bytes,
-                                  matched_field_name)) {
-          return cuda::std::make_tuple(false, false, nullptr);
-        }
-      } else {  // path 4: safe code point
-        if (!try_skip_safe_code_point(str, c)) {
-          return cuda::std::make_tuple(false, false, nullptr);
-        }
-        matched_field_name = matched_field_name && try_match_char(to_match, c);
-      }
-    }
-
-    return cuda::std::make_tuple(false, false, nullptr);
+    return try_parse_string_impl<false>(str, to_match);
   }
 
   static __device__ inline bool try_match_char(char_range_reader& reader, char c)
@@ -1367,7 +1635,8 @@ class json_parser {
     // parse next token
     bool has_comma_before_token;  // no-initialization because of do not care here
     bool has_colon_before_token;  // no-initialization because of do not care here
-    bool matched_field_name;
+    // Initialized because this one is returned; only the field-name paths assign it.
+    bool matched_field_name = false;
     parse_next_token_and_set_current(has_comma_before_token,
                                      has_colon_before_token,
                                      matched_field_name,
