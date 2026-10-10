@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package com.nvidia.spark.rapids.jni;
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.CudfException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -676,6 +678,29 @@ public class GetJsonObjectTest {
       } finally {
         actual[0].close();
       }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {
+      "{\"k\":", "{\"k\": \t\r\n",
+      "{\"k\":[1,", "{\"k\":[1, \t\r\n", "{\"k\":[[1,"
+  })
+  void getJsonObjectTruncatedValueDoesNotReadAdjacentRowsTest(String truncated) {
+    JSONUtils.PathInstructionJni[] path = {namedPath("k")};
+    List<List<JSONUtils.PathInstructionJni>> paths =
+        Collections.singletonList(Arrays.asList(path));
+    // Exercise both a row boundary within the chars allocation and the end of the allocation.
+    try (ColumnVector input = ColumnVector.fromStrings(
+        truncated, "true}", "{\"k\":\"neighbor\"}", truncated);
+         ColumnVector expected = ColumnVector.fromStrings(null, null, "neighbor", null);
+         ColumnVector actual = JSONUtils.getJsonObject(input, path);
+         ColumnVector actualMultiple = JSONUtils.getJsonObjectMultiplePaths(input, paths)[0];
+         ColumnVector actualLast = JSONUtils.getJsonObjectMultiplePaths(
+             input, paths, JSONUtils.NamedFieldMatchPolicy.LAST_NON_NULL)[0]) {
+      assertColumnsAreEqual(expected, actual);
+      assertColumnsAreEqual(expected, actualMultiple);
+      assertColumnsAreEqual(expected, actualLast);
     }
   }
 
