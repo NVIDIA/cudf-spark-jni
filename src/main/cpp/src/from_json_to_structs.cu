@@ -33,6 +33,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/span.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/device_buffer.hpp>
@@ -551,7 +552,6 @@ std::unique_ptr<cudf::column> cast_strings_to_floats(cudf::column_view const& in
     output_type, cudf::strings_column_view{input}, /*ansi_mode*/ false, stream, mr);
 }
 
-// TODO there is a bug here around 0 https://github.com/NVIDIA/cudf-spark/issues/10898
 std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& input,
                                                        cudf::data_type output_type,
                                                        int precision,
@@ -568,7 +568,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 
   auto const input_sv = cudf::strings_column_view{input};
   auto const in_offsets =
-    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets()) + input_sv.offset();
 
   // Count the number of characters `"`.
   rmm::device_uvector<int8_t> quote_counts(string_count, stream);
@@ -636,13 +636,15 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
   auto [offsets_column, bytes] = cudf::strings::detail::make_offsets_child_column(
     out_size_it, out_size_it + string_count, stream, mr);
 
-  // If the output strings column does not change in its total bytes, we can use the input directly.
-  if (bytes == input_sv.chars_size(stream)) {
+  // Direct conversion requires a zero-offset view; sliced inputs are copied below even if their
+  // total byte count is unchanged.
+  if (input_sv.offset() == 0 && bytes == input_sv.chars_size(stream)) {
     return spark_rapids_jni::string_to_decimal(precision,
                                                output_type.scale(),
                                                input_sv,
                                                /*ansi_mode*/ false,
                                                /*strip*/ false,
+                                               cudf::device_span<int8_t const>{quote_counts},
                                                stream,
                                                mr);
   }
@@ -696,6 +698,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                              cudf::strings_column_view{unquoted_strings->view()},
                                              /*ansi_mode*/ false,
                                              /*strip*/ false,
+                                             cudf::device_span<int8_t const>{quote_counts},
                                              stream,
                                              mr);
 }
