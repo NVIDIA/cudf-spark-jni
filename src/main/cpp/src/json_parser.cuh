@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1648,7 +1648,10 @@ class json_parser {
             has_comma_before_token, has_colon_before_token, matched_field_name);
 
           // check the JSON format
-          if (current_token == json_token::ERROR) { return {false, 0}; }
+          if (current_token == json_token::ERROR) {
+            // The bytes copied before the error are real; report them.
+            return {false, sum_copy_len};
+          }
 
           // write out the token
           if (nullptr != copy_to) {
