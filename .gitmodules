@@ -1,4 +1,4 @@
 [submodule "thirdparty/cudf"]
 	path = thirdparty/cudf
 	url = https://github.com/NVIDIA/cudf.git
-	branch = release/26.10
+	branch = main
