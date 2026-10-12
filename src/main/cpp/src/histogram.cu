@@ -351,7 +351,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
      frequencies_offset     = frequencies.offset(),
      check_invalid          = check_invalid_and_sanitize.begin(),
      check_sanitize         = check_invalid_and_sanitize.begin() + 1,
-     check_frequency_usable = check_frequency_usable.begin()] __device__(auto const idx) {
+     check_frequency_usable = check_frequency_usable.begin()] __device__(auto const idx) -> void {
       auto const value_is_valid =
         values_null_mask == nullptr || cudf::bit_is_set(values_null_mask, values_offset + idx);
       auto const frequency_is_valid =
