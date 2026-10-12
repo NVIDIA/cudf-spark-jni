@@ -93,12 +93,12 @@ public class HistogramTest {
   @Test
   void testNullInputsAreSkippedForStructHistograms() {
     try (ColumnVector values = ColumnVector.fromBoxedInts(5, 10, null, 30);
-         ColumnVector freqs = ColumnVector.fromBoxedLongs(1L, null, -1L, 0L);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(7L, null, -1L, 0L);
          ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, false);
          ColumnView histogramValues = histogram.getChildColumnView(0);
          ColumnView histogramFreqs = histogram.getChildColumnView(1);
          ColumnVector expectedValues = ColumnVector.fromBoxedInts(5, null, null, null);
-         ColumnVector expectedFreqs = ColumnVector.fromLongs(1, 1, 1, 1)) {
+         ColumnVector expectedFreqs = ColumnVector.fromLongs(7, 1, 1, 1)) {
       AssertUtils.assertColumnsAreEqual(expectedValues, histogramValues);
       AssertUtils.assertColumnsAreEqual(expectedFreqs, histogramFreqs);
     }
