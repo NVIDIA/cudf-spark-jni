@@ -40,9 +40,11 @@ enum class percentile_interpolation : int32_t { WEIGHTED_ENDPOINTS = 0, ENDPOINT
  *
  * Validity of the input columns are defined as following:
  *  - Values and frequencies columns must have the same size.
- *  - Frequencies column must be of type INT64, must not have nulls, and must not contain
- *    negative numbers.
+ *  - Frequencies column must be of type INT64.
+ *  - A negative frequency is invalid only when its corresponding value and frequency are
+ *    non-null.
  *
+ * Rows with a null value, null frequency, or zero frequency are excluded from the histogram.
  * If the input columns are valid, a histogram will be created from them. Otherwise, an exception
  * will be thrown.
  *
