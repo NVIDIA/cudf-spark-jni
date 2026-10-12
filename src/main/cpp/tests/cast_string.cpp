@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,8 +53,9 @@ TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
   auto const strings = test::strings_column_wrapper{"2024-05-06"};
   strings_column_view scv{strings};
 
-  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
-               std::invalid_argument);
+  EXPECT_THROW(
+    spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true, false),
+    std::invalid_argument);
 }
 
 TYPED_TEST(StringToIntegerTests, Simple)

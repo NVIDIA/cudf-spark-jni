@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -374,9 +374,12 @@ public class CastStrings {
    * this kernel does not implement text forms. Unsupported letters, including lowercase
    * {@code h} for 12-hour clock, {@code S} for fractional seconds, and timezone pattern
    * letters, are rejected. Space matches exactly one space; quoted literals ({@code 'T'}) are
-   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year
-   * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
-   * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
+   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, a field
+   * immediately followed by another numeric field uses a raw input window of its pattern width,
+   * including any skipped space or tab. Other fields skip space or tab and accept one or more
+   * digits, including arbitrary leading zeroes when the numeric value fits in an integer. One- and
+   * two-letter LEGACY year patterns are rejected because their moving 80-year interpretation is
+   * not implemented. The trailing tail accepts EOF or any non-digit.
    * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
    *
    * <p>This compatibility overload is retained for existing callers. New callers should use
@@ -407,12 +410,31 @@ public class CastStrings {
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
       int timeParserPolicy) {
+    return parseTimestampWithFormat(input, format, timeParserPolicy, false);
+  }
+
+  /**
+   * Parse a string column using the selected time parser policy and invalid-input behavior.
+   *
+   * @param input the input string column.
+   * @param format Spark format pattern (e.g. {@code "yyyy-MM-dd HH:mm:ss"}).
+   * @param timeParserPolicy one of {@link #TIME_PARSER_POLICY_CORRECTED},
+   *                         {@link #TIME_PARSER_POLICY_LEGACY}, or
+   *                         {@link #TIME_PARSER_POLICY_EXCEPTION}.
+   * @param failOnError whether a non-null input that cannot be parsed should throw.
+   * @throws CastException for invalid non-null input when {@code failOnError} is true, or when
+   *                       CORRECTED rejects a row that LEGACY accepts under EXCEPTION policy.
+   * @throws IllegalArgumentException if {@code timeParserPolicy} is invalid.
+   * @return a timestamp_us column where invalid rows have nulls when {@code failOnError} is false.
+   */
+  public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
+      int timeParserPolicy, boolean failOnError) {
     if (timeParserPolicy < TIME_PARSER_POLICY_CORRECTED ||
         timeParserPolicy > TIME_PARSER_POLICY_EXCEPTION) {
       throw new IllegalArgumentException("Invalid time parser policy: " + timeParserPolicy);
     }
     return new ColumnVector(
-        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy));
+        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy, failOnError));
   }
 
   private static native long toInteger(long nativeColumnView, boolean ansi_enabled, boolean strip,
@@ -437,6 +459,6 @@ public class CastStrings {
   private static native long parseDateStringsToDate(long input);
 
   private static native long parseTimestampWithFormat(
-      long input, String format, int timeParserPolicy);
+      long input, String format, int timeParserPolicy, boolean failOnError);
 
 }
