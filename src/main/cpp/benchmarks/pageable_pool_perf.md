@@ -63,7 +63,7 @@ pinned memory.
 
 Host: two AMD EPYC 9354 CPUs, two NUMA nodes, Linux 6.5, NVIDIA driver
 580.173.02. The H100 is on NUMA node 1. THP is set to `[madvise]`. The exact
-benchmark executable and `libcudf.so` built from commit `b3a1124c` were
+benchmark executable and `libcudf.so` matching source commit `4c169504` were
 copied from the local worktree;
 `CUDA_VISIBLE_DEVICES=1` selected the H100. The host's CUDA toolkit is 12.6;
 the copied binary was built with CUDA 12.9. Each configuration ran three times,
@@ -83,3 +83,22 @@ reported times. Raw results are in
 
 The GPU-local NUMA and THP comparisons were much smaller than the observed
 run-to-run variation and do not establish a benefit.
+
+## EC2 g6.4xlarge check: L4, October 13, 2026
+
+Host: 16 vCPUs on AMD EPYC 7R13, one NUMA node, Ubuntu 22.04, Linux 6.8,
+NVIDIA driver 595.91.07, one NVIDIA L4. THP is set to `[madvise]`. The same
+benchmark executable and `libcudf.so` matching source commit `4c169504` were used
+for the H100 check and this check. Each configuration ran three times, with 15
+NVBench samples per run; the table reports the median of the three reported
+times. Raw results are in [the L4 CSV](pageable_pool_l4_g6_2026-10-13.csv).
+GPU-local NUMA placement was omitted because this instance has one NUMA node.
+
+| Comparison | Median time | Observation |
+| --- | --- | --- |
+| 1 GiB init, 8 workers: populate / manual / memset | 58.9 / 73.4 / 471.8 ms CPU | Populate is 20% faster than manual; memset is 8.0x slower than populate. |
+| 64 KiB alloc/free, 16 workers: list / indexed / arena | 410 / 1019 / 123 µs CPU per 64 operations per worker | Arena is 3.3x faster than list; indexed loses without fragmentation. |
+| Fragmented list / indexed | 33.5 / 14.9 µs CPU per allocation/free | Indexed is 2.2x faster with separated holes. |
+| Remainder cache burst: off / on | 14.5 / 14.2 µs CPU per burst | No convincing gain. |
+| 256 MiB DtoH: default / THP deny | 20.697 / 20.696 ms GPU | Effectively identical. |
+| 256 MiB DtoH: pool / fresh malloc / pinned | 20.697 / 155.882 / 20.319 ms GPU | Pre-touched pool is much faster than fresh pageable memory. |
