@@ -52,24 +52,20 @@ inline std::string random_string(std::mt19937_64& rng, std::size_t len)
 }
 
 /**
- * @brief Pad a JSON row to the requested byte length with structure-aware filler.
+ * @brief Pad a JSON row to the requested byte length.
  *
- * Object rows (closing `}`) absorb filler as a trailing string member; array rows (closing
- * `]`) absorb filler as a trailing string element. Every scenario builds its
- * registry-mandated structure first, so each padded row lands on the requested size and the
- * reported total bytes stays accurate. The filler is seed-derived and unique per row. Rows
- * that end in neither bracket (scalar/malformed roots in roots-invalid) are returned
- * unpadded: row_bytes is a target there, not a contract.
+ * Object rows absorb filler as a trailing string member, array rows as a
+ * trailing string element; filler is seed-derived and unique per row, so
+ * padded rows hit the requested size and reported bytes stay accurate.
+ * Scalar/malformed rows (no closing bracket) are returned unpadded.
  */
 inline std::string pad_row_to(std::mt19937_64& rng, std::string content, std::size_t row_bytes)
 {
   if (content.size() >= row_bytes) { return content; }
   char const closer = content.back();
   if (closer != '}' && closer != ']') { return content; }
-  // (size-1) + prefix + filler + suffix == row_bytes, so the fixed cost is
-  // 10 for an object member (`,\"fill\":\"`+`\"}` after popping `}`) and 3
-  // for an array element. Below that the original row stands: row_bytes is a
-  // target, not a contract, for scalar/malformed roots.
+  // Fixed framing cost: `,\"fill\":\"` + `\"}` after popping `}` = 10 for an
+  // object member; `,\"` + `\"]` = 3 for an array element.
   std::size_t const fixed = closer == '}' ? 10 : 3;
   std::size_t const gap   = row_bytes - content.size();
   if (gap < fixed) { return content; }
@@ -83,24 +79,21 @@ inline std::string pad_row_to(std::mt19937_64& rng, std::string content, std::si
 // ---------------------------------------------------------------------------
 // Large nested scenarios.
 
-// Modeled after a real workload: the query plan issues SEVERAL fused
-// get_json_object calls, never one wide single call. This pair models the
-// two fused calls of that workload:
-//   - NESTED_135: 135 distinct paths (the largest fused call), the wide
-//     extraction fan-out over a deeply nested event column.
-//   - NESTED_33: 33 distinct paths, the narrower per-branch extraction
-//     in the explode-fed output projections.
-// Paths read by other kernels on the same column (from_json single-value
-// reads and second-stage single-path calls) are NOT benched here — they are
-// not get_json_object multi-path work.
-// Depth histogram of NESTED_135: 35x1, 85x2, 13x3, 2x5 among the 135
-// QUERIED paths (three unqueried prefix entries are not paths; dotted keys
-// are genuine multi-segment paths). No wildcards, no indices.
+// Modeled after a real workload whose query plan issues several FUSED
+// get_json_object calls, not one wide call:
+//   - NESTED_135: 135 paths — the largest fused call, wide extraction over
+//     a deeply nested event column.
+//   - NESTED_33: 33 paths — the narrower per-branch extraction in the
+//     explode-fed output projections.
+// Paths read by other kernels (from_json, single-path calls) are not benched
+// here — they are not multi-path work.
+// NESTED_135 depth histogram over the queried paths: 35x1, 85x2, 13x3, 2x5
+// (three table entries are unqueried prefixes; dotted keys are real
+// multi-segment paths). No wildcards, no indices.
 
-// Prefix-entry node kind: internal (has children; the row carries the
-// subtree and a queried internal path returns the serialized object),
-// json (leaf whose value is a nested JSON string), scalar
-// (leaf, ~128B semantic string).
+// Prefix-entry node kind: internal = has children (a queried internal path
+// returns the serialized subtree); json = leaf holding a nested JSON string;
+// scalar = leaf holding a ~128B string.
 enum class nested_node_kind : int { internal, json, scalar };
 
 struct nested_prefix_entry {
@@ -128,15 +121,13 @@ inline multi_paths nested_build_paths(std::vector<nested_prefix_entry> const& ta
 }
 
 /**
- * @brief Rows for the large nested scenarios: prefix-closed nested object
- * tree over the scenario's prefix table. The table is sorted lexicographic-
- * ally, which is depth-first contiguous: children immediately follow their
- * parent, so each member key opens exactly once (no duplicate keys). Leaf
- * members carry the semantic_string shape truncated at 128;
- * internal nodes open nested objects (queried internal paths return the
- * serialized subtree); 10% of scalar leaves absent
- * (scalar_non_null_per_1000 = 900). pad_row_to absorbs the remaining row
- * budget.
+ * @brief Rows for the large nested scenarios: a prefix-closed nested object
+ * tree built in table order.
+ *
+ * The table is lexicographically sorted, so children follow their parent and
+ * each key opens exactly once. Leaf scalars use the ~128B shape (10% absent,
+ * deterministic per row/leaf); internal nodes open nested objects; `pad_row_to`
+ * absorbs the remaining row budget.
  */
 inline std::vector<std::string> nested_build_rows(std::mt19937_64& rng,
                                                   std::vector<nested_prefix_entry> const& prefixes,
@@ -157,9 +148,8 @@ inline std::vector<std::string> nested_build_rows(std::mt19937_64& rng,
     std::string row;
     row.reserve(row_bytes + 64);
     row += '{';
-    // Per-level comma state: need_comma[d] == object at nesting depth d has
-    // already emitted a member. Level 0 is the root object. A fresh '{'
-    // pushes false so its first member carries no comma; closing pops.
+    // need_comma[d] tracks whether the object at depth d already emitted a
+    // member; '{' pushes false (first member gets no comma), '}' pops.
     std::vector<bool> need_comma(1, false);
     std::size_t depth = 0;  // == need_comma.size() - 1
     std::vector<char const*> prev;
@@ -187,7 +177,7 @@ inline std::vector<std::string> nested_build_rows(std::mt19937_64& rng,
           ++depth;
           need_comma.push_back(false);
         } else if (e.kind == nested_node_kind::json) {
-          // Nested JSON string member (json_target_characters 640 shape).
+          // Nested JSON string member, sized to the json shape (~640 chars).
           row += "\"{\\\"sourceRole\\\":\\\"";
           row += segs[d];
           row += "\\\",\\\"eventIdentity\\\":\\\"";
@@ -240,9 +230,8 @@ inline std::vector<std::string> nested_build_rows(std::mt19937_64& rng,
 }
 
 /**
- * @brief The 135-path table, defined ONCE and shared by the paths
- * and rows builders. Table order is depth-first lexicographic (children
- * immediately follow their parent) — both consumers depend on it.
+ * @brief The 135-path table, defined once and shared by the paths and rows
+ * builders; both depend on its depth-first lexicographic order.
  */
 // Keys are obfuscated rank-derived labels preserving each segment's byte length.
 inline std::vector<nested_prefix_entry> const& nested_table_135()
@@ -401,8 +390,8 @@ inline std::vector<nested_prefix_entry> const& nested_table_135()
 }
 
 /**
- * @brief The 33-path table, defined ONCE and shared by the paths
- * and rows builders.
+ * @brief The 33-path table, defined once and shared by the paths and rows
+ * builders (same ordering contract as the 135 table).
  */
 inline std::vector<nested_prefix_entry> const& nested_table_33()
 {
