@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <exception>
 #include <limits>
@@ -167,7 +168,8 @@ inline void* prepare_backing_region(
   int pretouch_threads,
   int numa_node,
   bool populate_write,
-  bool thp_deny)
+  bool thp_deny,
+  bool memset_pretouch)
 {
   void* const base = upstream.allocate_sync(size, system_page_size());
   try {
@@ -175,7 +177,12 @@ inline void* prepare_backing_region(
     if (thp_deny) { ::madvise(base, size, MADV_NOHUGEPAGE); }
     // Bind BEFORE the pre-touch faults the pages in, so placement follows the policy.
     if (numa_node >= 0) { bind_memory_to_numa_node(base, size, numa_node); }
-    pretouch_parallel(base, size, pretouch_threads, numa_node, populate_write);
+    if (memset_pretouch) {
+      // Compare a single contiguous write with the page-at-a-time strategies.
+      std::memset(base, 0, size);
+    } else {
+      pretouch_parallel(base, size, pretouch_threads, numa_node, populate_write);
+    }
   } catch (...) {
     upstream.deallocate_sync(base, size, system_page_size());
     throw;
@@ -295,11 +302,12 @@ class pageable_pool_resource_t
                            int numa_node            = -1,
                            bool use_remainder_cache = false,
                            bool populate_write      = true,
-                           bool thp_deny            = false)
+                           bool thp_deny            = false,
+                           bool memset_pretouch     = false)
     : upstream_(std::move(upstream)),
       pool_size_(size),
       base_(detail::prepare_backing_region(
-        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny)),
+        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny, memset_pretouch)),
       use_remainder_cache_(use_remainder_cache)
   {
     try {

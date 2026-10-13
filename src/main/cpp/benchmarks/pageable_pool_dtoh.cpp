@@ -16,7 +16,7 @@
 
 // Host-only benchmarks for the pageable pool family: CUDA runtime API calls +
 // nvbench, no device code. Each optimization technique gets its own axis:
-//   - init bench:    pretouch method (MADV_POPULATE_WRITE vs manual loop)
+//   - init bench:    pretouch method (MADV_POPULATE_WRITE, manual loop, memset)
 //   - dtoh bench:    THP policy (default vs MADV_NOHUGEPAGE)
 //   - alloc bench:   free-list/allocator variant (list, list+cache, indexed, arena)
 //   - fragment bench: O(F) list vs O(log F) indexed under heavy fragmentation
@@ -56,7 +56,8 @@ void pool_init(nvbench::state& state)
 {
   auto const size             = static_cast<std::size_t>(state.get_int64("size"));
   auto const pretouch_threads = static_cast<int>(state.get_int64("pretouch_threads"));
-  bool const populate         = state.get_string("method") == "populate";
+  auto const method           = state.get_string("method");
+  bool const populate         = method == "populate";
 
   state.exec(nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
     timer.start();
@@ -67,7 +68,9 @@ void pool_init(nvbench::state& state)
       pretouch_threads,
       /*numa_node=*/-1,
       /*use_remainder_cache=*/false,
-      populate);
+      populate,
+      /*thp_deny=*/false,
+      /*memset_pretouch=*/method == "memset");
     timer.stop();
   });
 }
@@ -398,7 +401,7 @@ NVBENCH_BENCH(pool_init)
   .set_name("PageablePool Init")
   .add_int64_axis("size", {kGiB, 4 * kGiB})
   .add_int64_axis("pretouch_threads", {1, 8, 16})
-  .add_string_axis("method", {"populate", "manual"});
+  .add_string_axis("method", {"populate", "manual", "memset"});
 
 NVBENCH_BENCH(dtoh_pool)
   .set_name("PageablePool DtoH Copy")
