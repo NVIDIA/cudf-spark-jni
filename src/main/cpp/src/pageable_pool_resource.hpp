@@ -294,6 +294,8 @@ class pageable_pool_resource_t
    * @param thp_deny       When true, madvise(MADV_NOHUGEPAGE) the backing buffer so
    *                       transparent huge pages are not promoted during the pool's
    *                       lifetime (THP promotion was observed to slow repeated DtoH).
+   * @param memset_pretouch When true, pre-touch with one memset of the full backing
+   *                       buffer instead of the parallel page-at-a-time methods.
    * @throws rmm::out_of_memory if the backing allocation fails.
    */
   pageable_pool_resource_t(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible> upstream,
