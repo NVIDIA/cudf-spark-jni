@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -249,24 +249,24 @@ struct dispatch_multiply {
       auto const right_cdv = cudf::column_device_view::create(
         *right_cv, stream, cudf::get_current_device_resource_ref());
       if (left_cv->has_nulls()) {
-        auto const left_accessor = cudf::detail::make_pair_iterator<T, true>(*left_cdv);
+        auto const left_accessor = left_cdv->pair_begin<T, true>();
         if (right_cv->has_nulls()) {
-          auto const right_accessor = cudf::detail::make_pair_iterator<T, true>(*right_cdv);
+          auto const right_accessor = right_cdv->pair_begin<T, true>();
           return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
             type, num_rows, left_accessor, right_accessor, check_overflow, false, stream, mr);
         } else {
-          auto const right_accessor = cudf::detail::make_pair_iterator<T, false>(*right_cdv);
+          auto const right_accessor = right_cdv->pair_begin<T, false>();
           return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
             type, num_rows, left_accessor, right_accessor, check_overflow, false, stream, mr);
         }
       } else {
-        auto const left_accessor = cudf::detail::make_pair_iterator<T, false>(*left_cdv);
+        auto const left_accessor = left_cdv->pair_begin<T, false>();
         if (right_cv->has_nulls()) {
-          auto const right_accessor = cudf::detail::make_pair_iterator<T, true>(*right_cdv);
+          auto const right_accessor = right_cdv->pair_begin<T, true>();
           return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
             type, num_rows, left_accessor, right_accessor, check_overflow, false, stream, mr);
         } else {
-          auto const right_accessor = cudf::detail::make_pair_iterator<T, false>(*right_cdv);
+          auto const right_accessor = right_cdv->pair_begin<T, false>();
           return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
             type, num_rows, left_accessor, right_accessor, check_overflow, true, stream, mr);
         }
@@ -277,11 +277,11 @@ struct dispatch_multiply {
         cudf::column_device_view::create(*left_cv, stream, cudf::get_current_device_resource_ref());
       bool const both_valid = !left_cv->has_nulls() && right_scalar->is_valid();
       if (left_cv->has_nulls()) {
-        auto const left_accessor = cudf::detail::make_pair_iterator<T, true>(*left_cdv);
+        auto const left_accessor = left_cdv->pair_begin<T, true>();
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
           type, num_rows, left_accessor, right_accessor, check_overflow, false, stream, mr);
       } else {
-        auto const left_accessor = cudf::detail::make_pair_iterator<T, false>(*left_cdv);
+        auto const left_accessor = left_cdv->pair_begin<T, false>();
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
           type, num_rows, left_accessor, right_accessor, check_overflow, both_valid, stream, mr);
       }
@@ -291,11 +291,11 @@ struct dispatch_multiply {
         *right_cv, stream, cudf::get_current_device_resource_ref());
       bool const both_valid = left_scalar->is_valid() && !right_cv->has_nulls();
       if (right_cv->has_nulls()) {
-        auto const right_accessor = cudf::detail::make_pair_iterator<T, true>(*right_cdv);
+        auto const right_accessor = right_cdv->pair_begin<T, true>();
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
           type, num_rows, left_accessor, right_accessor, check_overflow, false, stream, mr);
       } else {
-        auto const right_accessor = cudf::detail::make_pair_iterator<T, false>(*right_cdv);
+        auto const right_accessor = right_cdv->pair_begin<T, false>();
         return multiply_impl<T, decltype(left_accessor), decltype(right_accessor)>(
           type, num_rows, left_accessor, right_accessor, check_overflow, both_valid, stream, mr);
       }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/convert/convert_floats.hpp>
 #include <cudf/strings/detail/convert/string_to_float.cuh>
@@ -28,6 +27,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/warp/warp_reduce.cuh>
+#include <cuda/cmath>
 #include <cuda/std/bit>
 #include <cuda/std/cassert>
 #include <cuda/std/cmath>
@@ -904,8 +904,8 @@ std::unique_ptr<column> string_to_float(data_type dtype,
 
   constexpr auto warps_per_block = 8;
   constexpr auto rows_per_block  = warps_per_block;
-  auto const num_blocks = cudf::util::div_rounding_up_safe(string_col.size(), rows_per_block);
-  auto const num_rows   = string_col.size();
+  auto const num_blocks          = cuda::ceil_div(string_col.size(), rows_per_block);
+  auto const num_rows            = string_col.size();
 
   if (dtype == data_type{type_id::FLOAT32}) {
     detail::string_to_float_kernel<float, warps_per_block * 32>

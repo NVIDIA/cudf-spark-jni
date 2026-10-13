@@ -23,7 +23,6 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/detail/valid_if.cuh>
 #include <cudf/scalar/scalar.hpp>
@@ -39,7 +38,9 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/cmath>
 #include <cuda/functional>
+#include <cuda/hierarchy>
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 #include <cuda/stream>
@@ -887,7 +888,7 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
                               std::size_t num_threads_per_row,
                               int8_t* max_path_depth_exceeded)
 {
-  auto const tidx    = cudf::detail::grid_1d::global_thread_id();
+  auto const tidx    = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   auto const row_idx = tidx / num_threads_per_row;
   if (row_idx >= input.size()) { return; }
 
@@ -955,11 +956,10 @@ struct kernel_launcher {
 
     // The number of threads for processing one input row is at least one warp.
     auto const num_threads_per_row =
-      cudf::util::div_rounding_up_safe(path_data.size(),
-                                       static_cast<std::size_t>(cudf::detail::warp_size)) *
+      cuda::ceil_div(path_data.size(), static_cast<std::size_t>(cudf::detail::warp_size)) *
       cudf::detail::warp_size;
-    auto const num_blocks = cudf::util::div_rounding_up_safe(num_threads_per_row * input.size(),
-                                                             static_cast<std::size_t>(block_size));
+    auto const num_blocks =
+      cuda::ceil_div(num_threads_per_row * input.size(), static_cast<std::size_t>(block_size));
     // Separate instantiations keep the json_tuple scan out of ordinary path-evaluation kernels.
     if (use_last_non_null) {
       get_json_object_kernel<block_size, min_block_per_sm, true>

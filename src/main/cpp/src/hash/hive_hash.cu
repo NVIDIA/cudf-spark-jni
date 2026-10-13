@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 
 #include <cuda/functional>
 #include <cuda/std/bit>
+#include <cuda/std/numeric>
 #include <cuda/std/type_traits>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
@@ -177,7 +178,7 @@ class hive_device_row_hasher {
    */
   __device__ auto operator()(cudf::size_type row_index) const noexcept
   {
-    return cudf::detail::accumulate(
+    return cuda::std::accumulate(
       _table.begin(),
       _table.end(),
       HIVE_INIT_HASH,
@@ -406,7 +407,7 @@ class hive_device_row_hasher {
           // If the child column is of primitive type, directly compute the hash value of the list
           if (child_col.type().id() != cudf::type_id::LIST &&
               child_col.type().id() != cudf::type_id::STRUCT) {
-            auto single_level_list_hash = cudf::detail::accumulate(
+            auto single_level_list_hash = cuda::std::accumulate(
               thrust::counting_iterator(0),
               thrust::counting_iterator(child_col.size()),
               HIVE_INIT_HASH,

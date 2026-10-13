@@ -22,6 +22,7 @@
 #include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/unary.hpp>
 
+#include <cuda/iterator>
 #include <cuda/stream>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -507,21 +508,22 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
           input.message_data, loc_provider, total_count, offsets_data, chars_ptr);
       CUDF_CHECK_CUDA(stream.get());
     } else {
-      auto src_iter = cudf::detail::make_counting_transform_iterator(
-        0,
-        cuda::proclaim_return_type<void const*>(
-          [message_data, loc_provider] __device__(int idx) -> void const* {
-            auto loc = loc_provider.input_location(idx);
-            if (!loc.is_present()) return nullptr;
-            return static_cast<void const*>(message_data + loc.offset);
-          }));
-      auto dst_iter = cudf::detail::make_counting_transform_iterator(
-        0,
+      auto src_iter =
+        cuda::transform_iterator(cuda::counting_iterator{0},
+                                 cuda::proclaim_return_type<void const*>(
+                                   [message_data, loc_provider] __device__(int idx) -> void const* {
+                                     auto loc = loc_provider.input_location(idx);
+                                     if (!loc.is_present()) return nullptr;
+                                     return static_cast<void const*>(message_data + loc.offset);
+                                   }));
+      auto dst_iter = cuda::transform_iterator(
+        cuda::counting_iterator{0},
         cuda::proclaim_return_type<void*>([chars_ptr, offsets_data] __device__(int idx) -> void* {
           return static_cast<void*>(chars_ptr + offsets_data[idx]);
         }));
-      auto size_iter = cudf::detail::make_counting_transform_iterator(
-        0, cuda::proclaim_return_type<size_t>([loc_provider] __device__(int idx) -> size_t {
+      auto size_iter = cuda::transform_iterator(
+        cuda::counting_iterator{0},
+        cuda::proclaim_return_type<size_t>([loc_provider] __device__(int idx) -> size_t {
           auto loc = loc_provider.input_location(idx);
           if (!loc.is_present()) return 0;
           return static_cast<size_t>(loc.length);
@@ -640,8 +642,8 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
     auto const* fragment_offsets = fragment_byte_offsets.offsets.data();
     auto* output                 = merged_data.data();
 
-    auto src_iter = cudf::detail::make_counting_transform_iterator(
-      0,
+    auto src_iter = cuda::transform_iterator(
+      cuda::counting_iterator{0},
       cuda::proclaim_return_type<void const*>(
         [message_data = input.message_data, fragment_locations, fragments, invalid] __device__(
           int idx) -> void const* {
@@ -650,12 +652,14 @@ std::unique_ptr<cudf::column> build_merged_singular_struct_column(
           return !location.is_present() ? nullptr
                                         : static_cast<void const*>(message_data + location.offset);
         }));
-    auto dst_iter = cudf::detail::make_counting_transform_iterator(
-      0, cuda::proclaim_return_type<void*>([output, fragment_offsets] __device__(int idx) -> void* {
+    auto dst_iter = cuda::transform_iterator(
+      cuda::counting_iterator{0},
+      cuda::proclaim_return_type<void*>([output, fragment_offsets] __device__(int idx) -> void* {
         return static_cast<void*>(output + fragment_offsets[idx]);
       }));
-    auto size_iter = cudf::detail::make_counting_transform_iterator(
-      0, cuda::proclaim_return_type<size_t>([fragments, invalid] __device__(int idx) -> size_t {
+    auto size_iter = cuda::transform_iterator(
+      cuda::counting_iterator{0},
+      cuda::proclaim_return_type<size_t>([fragments, invalid] __device__(int idx) -> size_t {
         auto const fragment = fragments[idx];
         return invalid[fragment.row_idx] ? 0 : static_cast<size_t>(fragment.length);
       }));

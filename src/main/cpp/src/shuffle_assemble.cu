@@ -17,6 +17,7 @@
 #include "nvtx_ranges.hpp"
 #include "shuffle_split.hpp"
 #include "shuffle_split_detail.hpp"
+#include "utilities/integer_utils.hpp"
 #include "utilities/iterator.cuh"
 
 #include <cudf/column/column_factories.hpp>
@@ -24,7 +25,6 @@
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/utilities/batched_memset.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/structs/structs_column_view.hpp>
@@ -507,7 +507,7 @@ namespace {
 __host__ __device__ constexpr size_t bitmask_allocation_size_bytes(size_type number_of_bits,
                                                                    int pad)
 {
-  return cudf::util::round_up_safe((number_of_bits + 7) / 8, pad);
+  return spark_rapids_jni::util::round_up_safe((number_of_bits + 7) / 8, pad);
 }
 
 /**
@@ -709,7 +709,7 @@ struct shared_buffer_size_functor {
     offsets_size = 0;
 
     // data
-    data_size = cudf::util::round_up_safe(
+    data_size = spark_rapids_jni::util::round_up_safe(
       cudf::type_dispatcher(data_type{col.type}, size_of_helper{}) * col.num_rows, split_align);
   }
 
@@ -753,7 +753,8 @@ struct shared_buffer_size_functor {
     validity_size = get_output_validity_size(col);
 
     // chars
-    data_size = cudf::util::round_up_safe(static_cast<size_t>(col.num_chars), split_align);
+    data_size =
+      spark_rapids_jni::util::round_up_safe(static_cast<size_t>(col.num_chars), split_align);
 
     // offsets
     offsets_size = get_output_offsets_size(col);
@@ -778,8 +779,8 @@ struct shared_buffer_size_functor {
   size_t get_output_validity_size(assemble_column_info const& col) const
   {
     return col.has_validity
-             ? cudf::util::round_up_safe(bitmask_allocation_size_bytes(col.num_rows, split_align),
-                                         split_align)
+             ? spark_rapids_jni::util::round_up_safe(
+                 bitmask_allocation_size_bytes(col.num_rows, split_align), split_align)
              : 0;
   }
 
@@ -788,7 +789,8 @@ struct shared_buffer_size_functor {
    */
   size_t get_output_offsets_size(assemble_column_info const& col) const
   {
-    return cudf::util::round_up_safe(sizeof(size_type) * (col.num_rows + 1), split_align);
+    return spark_rapids_jni::util::round_up_safe(sizeof(size_type) * (col.num_rows + 1),
+                                                 split_align);
   }
 };
 

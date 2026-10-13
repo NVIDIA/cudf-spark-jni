@@ -20,7 +20,6 @@
 
 #include <cudf/copying.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
@@ -36,6 +35,7 @@
 
 #include <cuda/cmath>
 #include <cuda/functional>
+#include <cuda/hierarchy>
 #include <cuda/std/optional>
 #include <cuda/std/utility>
 #include <cuda/stream>
@@ -791,10 +791,10 @@ CUDF_KERNEL void parse_uri_char_counter(column_device_view const in_strings,
                                         cuda::std::optional<column_device_view const> query_match)
 {
   // thread per row
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
 
   for (thread_index_type tidx = tid; tidx < in_strings.size();
-       tidx += cudf::detail::grid_1d::grid_stride()) {
+       tidx += cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x) {
     auto const row_idx = static_cast<size_type>(tidx);
     if (in_strings.is_null(row_idx)) {
       out_lengths[row_idx] = 0;
@@ -868,10 +868,10 @@ CUDF_KERNEL void parse_uri(column_device_view const in_strings,
                            size_type const* const offsets,
                            char* const out_chars)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
 
   for (thread_index_type tidx = tid; tidx < in_strings.size();
-       tidx += cudf::detail::grid_1d::grid_stride()) {
+       tidx += cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x) {
     auto const row_idx = static_cast<size_type>(tidx);
     auto const len     = offsets[row_idx + 1] - offsets[row_idx];
 

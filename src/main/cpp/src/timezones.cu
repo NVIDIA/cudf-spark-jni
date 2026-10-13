@@ -23,7 +23,6 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
@@ -36,6 +35,7 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
 #include <cuda/launch>
 #include <cuda/std/bit>
 #include <cuda/std/chrono>
@@ -764,7 +764,7 @@ std::unique_ptr<column> convert_timezones(cudf::column_view const& input,
     smem_bytes = add_staged_transition_smem_bytes(smem_bytes, reader_args.trans_count);
   }
 
-  int32_t num_blocks = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
+  int32_t num_blocks = cuda::ceil_div(input.size(), CONVERT_TZ_BLOCK_SIZE);
 
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
@@ -986,7 +986,7 @@ std::unique_ptr<column> convert_orc_from_utc_typed(cudf::column_view const& inpu
   auto const reader_args = make_orc_tz_side_kernel_args(reader);
   auto const smem_bytes  = add_staged_transition_smem_bytes(size_t{0}, reader_args.trans_count);
 
-  int32_t num_blocks       = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
+  int32_t num_blocks       = cuda::ceil_div(input.size(), CONVERT_TZ_BLOCK_SIZE);
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
                                                cuda::dynamic_shared_memory<char[]>(smem_bytes));
@@ -1157,7 +1157,7 @@ std::unique_ptr<column> convert_orc_to_spark_typed(
     smem_bytes = add_staged_transition_smem_bytes(smem_bytes, reader_args.trans_count);
   }
 
-  auto const num_blocks    = cudf::util::div_rounding_up_safe(input.size(), CONVERT_TZ_BLOCK_SIZE);
+  auto const num_blocks    = cuda::ceil_div(input.size(), CONVERT_TZ_BLOCK_SIZE);
   auto const launch_config = cuda::make_config(cuda::grid_dims(num_blocks),
                                                cuda::block_dims<CONVERT_TZ_BLOCK_SIZE>(),
                                                cuda::dynamic_shared_memory<char[]>(smem_bytes));
