@@ -17,7 +17,7 @@
 // Host-only benchmarks for the pageable pool family: CUDA runtime API calls +
 // nvbench, no device code. Each optimization technique gets its own axis:
 //   - init bench:    pretouch method (MADV_POPULATE_WRITE, manual loop, memset)
-//   - dtoh bench:    THP policy (default vs MADV_NOHUGEPAGE)
+//   - dtoh bench:    THP policy and GPU-local NUMA placement
 //   - alloc bench:   free-list/allocator variant (list, list+cache, indexed, arena)
 //   - fragment bench: O(F) list vs O(log F) indexed under heavy fragmentation
 //   - chunked bench: K-way split DtoH copies across private streams
@@ -80,13 +80,16 @@ void dtoh_pool(nvbench::state& state)
 {
   auto const size     = static_cast<std::size_t>(state.get_int64("size"));
   bool const thp_deny = state.get_string("thp") == "deny";
+  int const numa_node = state.get_string("numa") == "gpu_local"
+                          ? spark_rapids_jni::detail::gpu_numa_node()
+                          : -1;
 
   auto pool = spark_rapids_jni::pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
       spark_rapids_jni::pageable_memory_resource{}),
     size,
     /*pretouch_threads=*/8,
-    /*numa_node=*/-1,
+    numa_node,
     /*use_remainder_cache=*/false,
     /*populate_write=*/true,
     thp_deny);
@@ -406,7 +409,8 @@ NVBENCH_BENCH(pool_init)
 NVBENCH_BENCH(dtoh_pool)
   .set_name("PageablePool DtoH Copy")
   .add_int64_axis("size", {64 * kMiB, 256 * kMiB, kGiB, 4 * kGiB})
-  .add_string_axis("thp", {"default", "deny"});
+  .add_string_axis("thp", {"default", "deny"})
+  .add_string_axis("numa", {"default", "gpu_local"});
 
 NVBENCH_BENCH(dtoh_reference)
   .set_name("PageablePool DtoH Reference")
