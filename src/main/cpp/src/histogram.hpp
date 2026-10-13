@@ -36,6 +36,14 @@ namespace spark_rapids_jni {
 enum class percentile_interpolation : int32_t { WEIGHTED_ENDPOINTS = 0, ENDPOINT_DELTA = 1 };
 
 /**
+ * @brief Ordering direction for histogram values during percentile evaluation.
+ *
+ * The numeric values must remain aligned with
+ * `com.nvidia.spark.rapids.jni.Histogram.ValueOrder`.
+ */
+enum class value_order : int32_t { ASCENDING = 0, DESCENDING = 1 };
+
+/**
  * @brief Check the input if they are valid and create a histogram from them.
  *
  * Validity of the input columns are defined as following:
@@ -98,7 +106,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
  * @param percentages The input percentage values
  * @param output_as_lists Specify whether the output percentiles will be wrapped in a list
  * @param interpolation The algorithm used to interpolate between adjacent values
- * @param is_input_order_descending Whether to order histogram values from largest to smallest
+ * @param order The ordering direction to use for histogram values
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate the returned column's device memory
  * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
@@ -109,7 +117,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
   std::vector<double> const& percentages,
   bool output_as_lists,
   percentile_interpolation interpolation,
-  bool is_input_order_descending,
+  value_order order,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 

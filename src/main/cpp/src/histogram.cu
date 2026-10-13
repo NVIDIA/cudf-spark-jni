@@ -476,14 +476,14 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                                         rmm::device_async_resource_ref mr)
 {
   return percentile_from_histogram(
-    input, percentages, output_as_list, interpolation, false, stream, mr);
+    input, percentages, output_as_list, interpolation, value_order::ASCENDING, stream, mr);
 }
 
 std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
                                                         std::vector<double> const& percentages,
                                                         bool output_as_list,
                                                         percentile_interpolation interpolation,
-                                                        bool is_input_order_descending,
+                                                        value_order order,
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
@@ -492,6 +492,10 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                  interpolation == percentile_interpolation::ENDPOINT_DELTA,
                "Unsupported percentile interpolation algorithm.",
                std::invalid_argument);
+  CUDF_EXPECTS(order == value_order::ASCENDING || order == value_order::DESCENDING,
+               "Unsupported histogram value order.",
+               std::invalid_argument);
+  auto const is_descending = order == value_order::DESCENDING;
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
@@ -521,12 +525,10 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
   // null precedence along with value order, so descending values require null_order::BEFORE.
   auto const ordered_indices = cudf::sorted_order(
     labeled_histograms,
-    std::vector<cudf::order>{
-      cudf::order::ASCENDING,
-      is_input_order_descending ? cudf::order::DESCENDING : cudf::order::ASCENDING},
+    std::vector<cudf::order>{cudf::order::ASCENDING,
+                             is_descending ? cudf::order::DESCENDING : cudf::order::ASCENDING},
     std::vector<cudf::null_order>{
-      cudf::null_order::AFTER,
-      is_input_order_descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER},
+      cudf::null_order::AFTER, is_descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER},
     stream,
     default_mr);
 
