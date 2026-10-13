@@ -45,7 +45,7 @@ Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(JNIEnv* env
   {
     cudf::jni::auto_set_device(env);
     int const numa_node = (numa_bind != JNI_FALSE) ? spark_rapids_jni::detail::gpu_numa_node() : -1;
-    auto pool = std::make_unique<spark_rapids_jni::pageable_pool_resource>(
+    auto pool           = std::make_unique<spark_rapids_jni::pageable_pool_resource>(
       cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
         spark_rapids_jni::pageable_memory_resource{}),
       static_cast<std::size_t>(pool_size),

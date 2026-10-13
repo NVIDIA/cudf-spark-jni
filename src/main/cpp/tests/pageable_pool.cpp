@@ -39,12 +39,12 @@ namespace {
 
 constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
-[[nodiscard]] pageable_pool_resource make_pool(std::size_t size    = kPoolSize,
-                                               int threads         = 1,
-                                               int numa_node       = -1,
-                                               bool cache          = false,
-                                               bool populate       = true,
-                                               bool thp_deny       = false,
+[[nodiscard]] pageable_pool_resource make_pool(std::size_t size     = kPoolSize,
+                                               int threads          = 1,
+                                               int numa_node        = -1,
+                                               bool cache           = false,
+                                               bool populate        = true,
+                                               bool thp_deny        = false,
                                                bool memset_pretouch = false)
 {
   // Explicit any_resource construction is required because the converting constructor
@@ -184,7 +184,7 @@ TEST(PageablePool, NumaBindPlacesPagesOnRequestedNode)
 
   auto pool = make_pool(kPoolSize, 1, target_node);
   // Check pages spread across the pool: first, middle, last.
-  void* p   = pool.allocate_sync(kPoolSize);
+  void* p = pool.allocate_sync(kPoolSize);
   ASSERT_NE(p, nullptr);
   auto* base = static_cast<unsigned char*>(p);
   EXPECT_EQ(detail::numa_node_of(base), target_node);
@@ -371,7 +371,7 @@ TEST(PageablePool, ManualPretouchCoversPages)
 TEST(PageablePool, MemsetPretouchInitializesEntireBacking)
 {
   auto pool = make_pool(kPoolSize, 1, -1, false, false, false, true);
-  void* p = pool.allocate_sync(kPoolSize);
+  void* p   = pool.allocate_sync(kPoolSize);
   ASSERT_NE(p, nullptr);
   EXPECT_TRUE(all_eq(static_cast<unsigned char const*>(p), kPoolSize, 0));
   pool.deallocate_sync(p, kPoolSize);

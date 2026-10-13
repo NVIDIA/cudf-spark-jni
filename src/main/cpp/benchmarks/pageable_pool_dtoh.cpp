@@ -80,9 +80,8 @@ void dtoh_pool(nvbench::state& state)
 {
   auto const size     = static_cast<std::size_t>(state.get_int64("size"));
   bool const thp_deny = state.get_string("thp") == "deny";
-  int const numa_node = state.get_string("numa") == "gpu_local"
-                          ? spark_rapids_jni::detail::gpu_numa_node()
-                          : -1;
+  int const numa_node =
+    state.get_string("numa") == "gpu_local" ? spark_rapids_jni::detail::gpu_numa_node() : -1;
 
   auto pool = spark_rapids_jni::pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
