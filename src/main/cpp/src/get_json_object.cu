@@ -831,7 +831,7 @@ cuda::std::pair<int64_t, int64_t> calc_scratch_size(
   rmm::device_uvector<int64_t> d_stats(3, stream);
   scratch_size_kernel<<<1, 256, 0, stream.get()>>>(in_offsets, rows, d_stats.data());
   CUDF_CUDA_TRY(cudaPeekAtLastError());
-  auto const h_stats = cudf::detail::make_host_vector(d_stats, stream);
+  auto const h_stats = cudf::detail::make_pinned_vector(d_stats, stream);
 
   auto constexpr padding_rows = 10;
   return {h_stats[0] * padding_rows + h_stats[1], h_stats[2]};
@@ -900,7 +900,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     0);
 
   launch_general(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
-  auto h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
+  auto h_error_check = cudf::detail::make_pinned_vector(d_error_check, stream);
   auto has_no_oob    = check_error(h_error_check);
 
   std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>>
@@ -979,7 +979,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     d_error_check.end(),
     0);
   launch_general(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
-  h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
+  h_error_check = cudf::detail::make_pinned_vector(d_error_check, stream);
   has_no_oob    = check_error(h_error_check);
 
   // Identical input and paths must reproduce the recorded lengths.
