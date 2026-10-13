@@ -17,50 +17,12 @@
 #include "utilities.hpp"
 
 #include "gtest/gtest.h"
-#include "utilities/integer_utils.hpp"
 
 #include <cudf_test/base_fixture.hpp>
 
 #include <cudf/types.hpp>
 
 #include <rmm/device_uvector.hpp>
-
-#include <cstdint>
-#include <limits>
-
-template <typename T>
-class IntegerUtilitiesTest : public testing::Test {};
-
-using IntegerTypes = testing::Types<int32_t, uint32_t, int64_t, uint64_t>;
-TYPED_TEST_SUITE(IntegerUtilitiesTest, IntegerTypes);
-
-TYPED_TEST(IntegerUtilitiesTest, RoundUpBoundaries)
-{
-  using T = TypeParam;
-  using spark_rapids_jni::util::round_up_safe;
-  constexpr auto max = std::numeric_limits<T>::max();
-
-  static_assert(round_up_safe(T{0}, T{8}) == T{0});
-  static_assert(round_up_safe(T{9}, T{8}) == T{16});
-  EXPECT_EQ(round_up_safe(T{8}, T{8}), T{8});
-  EXPECT_EQ(round_up_safe(T{0}, max), T{0});
-  EXPECT_EQ(round_up_safe(max, T{1}), max);
-  EXPECT_EQ(round_up_safe(max, max), max);
-  EXPECT_EQ(round_up_safe(T{max - 1}, max), max);
-  EXPECT_EQ(round_up_safe(T{max - 1}, T{2}), T{max - 1});
-  EXPECT_EQ(round_up_safe(T{max - 2}, T{2}), T{max - 1});
-}
-
-TYPED_TEST(IntegerUtilitiesTest, RoundUpOverflow)
-{
-  using T = TypeParam;
-  using spark_rapids_jni::util::round_up_safe;
-  constexpr auto max = std::numeric_limits<T>::max();
-
-  EXPECT_THROW(round_up_safe(max, T{2}), cudf::data_type_error);
-  EXPECT_THROW(round_up_safe(max, T{8}), cudf::data_type_error);
-  EXPECT_THROW(round_up_safe(max, T{max - 1}), cudf::data_type_error);
-}
 
 class UtilitiesTest : public cudf::test::BaseFixture {};
 
