@@ -254,12 +254,14 @@ void alloc_free_impl(nvbench::state& state, Resource& pool)
 
   std::atomic<std::uint64_t> round{0};
   std::atomic<int> finished{0};
+  std::atomic<int> ready{0};
   std::atomic<bool> stop{false};
   std::vector<std::thread> workers;
   workers.reserve(threads);
   for (int t = 0; t < threads; ++t) {
-    workers.emplace_back([&pool, &round, &finished, &stop, chunk]() {
+    workers.emplace_back([&pool, &round, &finished, &ready, &stop, chunk]() {
       std::uint64_t seen = round.load();
+      ready.fetch_add(1);
       for (;;) {
         round.wait(seen);
         if (stop.load()) { return; }
@@ -275,6 +277,9 @@ void alloc_free_impl(nvbench::state& state, Resource& pool)
         finished.fetch_add(1);
       }
     });
+  }
+  while (ready.load() < threads) {
+    std::this_thread::yield();
   }
 
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
