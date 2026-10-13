@@ -54,8 +54,12 @@ public class Histogram {
    * <p>
    * The input is valid if they satisfy the following conditions:
    * - Values and frequencies columns must have the same size.
-   * - Frequencies column must be of type INT64, must not have nulls, and must not contain
-   * negative numbers.
+   * - Frequencies column must be of type INT64.
+   * - A negative frequency is invalid only when its corresponding value and frequency are
+   * non-null.
+   * <p>
+   * Rows with a null value, null frequency, or zero frequency are excluded from the histogram.
+   * This matches Spark's exact percentile update semantics.
    * <p>
    * If the input columns are valid, a histogram will be created from them. The histogram data is
    * stored in a structs column in the form of `STRUCT<value, frequency>`.

@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 
@@ -29,6 +31,7 @@ import java.util.List;
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.ENDPOINT_DELTA;
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.WEIGHTED_ENDPOINTS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class HistogramTest {
   private static final HostColumnVector.ListType DOUBLE_HISTOGRAM_TYPE =
@@ -72,6 +75,56 @@ public class HistogramTest {
              false);
          ColumnVector expected = ColumnVector.fromBoxedDoubles(5.0, null, 30.0)) {
       AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testNullInputsAreSkippedForListHistograms() {
+    try (ColumnVector values = ColumnVector.fromBoxedInts(5, 10, null, 30);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(1L, null, -1L, 1L);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, true);
+         ColumnVector percentiles = Histogram.percentileFromHistogram(histogram, new double[]{0.5},
+             false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(5.0, null, null, 30.0)) {
+      AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testNullInputsAreSkippedForStructHistograms() {
+    try (ColumnVector values = ColumnVector.fromBoxedInts(5, 10, null, 30);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(7L, null, -1L, 0L);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, false);
+         ColumnView histogramValues = histogram.getChildColumnView(0);
+         ColumnView histogramFreqs = histogram.getChildColumnView(1);
+         ColumnVector expectedValues = ColumnVector.fromBoxedInts(5, null, null, null);
+         ColumnVector expectedFreqs = ColumnVector.fromLongs(7, 1, 1, 1)) {
+      AssertUtils.assertColumnsAreEqual(expectedValues, histogramValues);
+      AssertUtils.assertColumnsAreEqual(expectedFreqs, histogramFreqs);
+    }
+  }
+
+  @Test
+  void testAllNullFrequenciesAreSkipped() {
+    try (ColumnVector values = ColumnVector.fromInts(5, 10);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(null, null);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, true);
+         ColumnVector percentiles = Histogram.percentileFromHistogram(histogram, new double[]{0.5},
+             false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null)) {
+      AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testNegativeFrequencyWithValidValueIsRejected() {
+    try (ColumnVector values = ColumnVector.fromInts(5);
+         ColumnVector freqs = ColumnVector.fromLongs(-1)) {
+      assertThrows(CudfException.class, () -> {
+        try (ColumnVector ignored = Histogram.createHistogramIfValid(values, freqs, true)) {
+          // The result must be closed if the expected exception is not thrown.
+        }
+      });
     }
   }
 

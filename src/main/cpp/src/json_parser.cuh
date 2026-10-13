@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -356,9 +356,12 @@ class json_parser {
    */
   __device__ inline void parse_first_token_in_value_and_set_current()
   {
+    if (eof()) {
+      set_current_error();
+      return;
+    }
     current_token_start_pos = curr_pos;
-    // already checked eof
-    char c = chars[curr_pos];
+    char c                  = chars[curr_pos];
     switch (c) {
       case '{':
         if (!try_push_context(json_token::START_OBJECT)) {
