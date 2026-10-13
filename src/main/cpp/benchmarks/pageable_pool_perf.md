@@ -61,3 +61,32 @@ the default pool backing is unlikely to be promoted to huge pages. GPU-local
 NUMA placement cannot be evaluated on this host. At 256 MiB, a pooled DtoH
 copy took 16.8 ms versus 143 ms into fresh malloc memory and 10.2 ms into
 pinned memory.
+
+## H100 NVL check, October 13, 2026
+
+Host: two AMD EPYC 9354 CPUs, two NUMA nodes, Linux 6.5, NVIDIA driver
+580.173.02. The H100 is on NUMA node 1. THP is set to `[madvise]`. The exact
+benchmark executable and `libcudf.so` built from commit `b3a1124c` were
+copied from the local worktree;
+`CUDA_VISIBLE_DEVICES=1` selected the H100. The host's CUDA toolkit is 12.6;
+the copied binary was built with CUDA 12.9. Each configuration ran three times,
+with 15 NVBench samples per run; the table reports the median of the three
+reported times. The additional chunked-copy runs had 30 samples each. Raw
+results are in [the H100 CSV](pageable_pool_h100_2026-10-13.csv).
+
+| Comparison | Median time | Observation |
+| --- | --- | --- |
+| 1 GiB init, 8 workers: populate / manual / memset | 51.9 / 78.7 / 492.1 ms CPU | Populate is 34% faster than manual; memset is 9.5x slower than populate. |
+| 64 KiB alloc/free, 16 workers: list / indexed / arena | 942 / 1904 / 201 µs CPU per 64 operations per worker | Arena is 4.7x faster than list; indexed loses without fragmentation. |
+| Fragmented list / indexed | 29.3 / 12.8 µs CPU per allocation/free | Indexed is 2.3x faster with separated holes. |
+| Remainder cache burst: off / on | 12.6 / 13.2 µs CPU per burst | No gain. |
+| 256 MiB DtoH: default / THP deny | 11.835 / 11.892 ms GPU | Difference is below 1%. |
+| 256 MiB DtoH: default / GPU-local NUMA | 11.835 / 11.754 ms GPU | Difference is below 1%. `mbind(MPOL_PREFERRED, node 1)` succeeded in a separate trace. |
+| 256 MiB DtoH: pool / fresh malloc / pinned | 11.835 / 137.592 / 5.029 ms GPU | Pre-touched pool is much faster than fresh pageable memory. |
+| 1 GiB chunked DtoH: 1 / 2 / 4 / 8 chunks | 54.1 / 59.1 / 48.1 / 48.0 ms GPU | Seven runs were variable, especially the two-chunk case; treat the apparent 4/8-chunk gain as tentative. |
+
+For chunked copies, the one-chunk runs ranged from 50.9 to 79.9 ms, and the
+four-chunk runs ranged from 47.3 to 59.2 ms. The paired results suggest a
+possible H100-specific gain, but host or GPU activity can dominate a single
+run. The GPU-local NUMA and THP comparisons were much smaller than the observed
+run-to-run variation and do not establish a benefit.
