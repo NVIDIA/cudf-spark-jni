@@ -20,7 +20,6 @@
 //   - dtoh bench:    THP policy and GPU-local NUMA placement
 //   - alloc bench:   free-list/allocator variant (list, list+cache, indexed, arena)
 //   - fragment bench: O(F) list vs O(log F) indexed under heavy fragmentation
-//   - chunked bench: K-way split DtoH copies across private streams
 
 #include "pageable_arena_pool_resource.hpp"
 #include "pageable_pool_resource.hpp"
@@ -178,70 +177,6 @@ void dtoh_reference(nvbench::state& state)
   }
 
   cudaFree(src);
-}
-
-// --- chunked DtoH: K private streams ---------------------------------------
-void dtoh_pool_chunked(nvbench::state& state)
-{
-  auto const size   = static_cast<std::size_t>(state.get_int64("size"));
-  auto const chunks = static_cast<int>(state.get_int64("chunks"));
-
-  auto pool = spark_rapids_jni::pageable_pool_resource(
-    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-      spark_rapids_jni::pageable_memory_resource{}),
-    size,
-    /*pretouch_threads=*/8);
-  void* dst = pool.allocate_sync(size);
-
-  void* src = checked_cuda_malloc(size);
-  if (src == nullptr) {
-    state.skip("cudaMalloc failed");
-    return;
-  }
-  if (cudaMemset(src, 0xAB, size) != cudaSuccess) {
-    cudaGetLastError();
-    state.skip("cudaMemset failed");
-    cudaFree(src);
-    return;
-  }
-
-  std::vector<cudaStream_t> streams(static_cast<std::size_t>(chunks));
-  for (auto& stream : streams) {
-    if (cudaStreamCreate(&stream) != cudaSuccess) {
-      cudaGetLastError();
-      state.skip("cudaStreamCreate failed");
-      cudaFree(src);
-      return;
-    }
-  }
-
-  state.add_global_memory_reads(size);
-  state.add_global_memory_writes(size);
-  std::size_t const chunk = size / static_cast<std::size_t>(chunks);
-  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    for (int k = 0; k < chunks; ++k) {
-      if (cudaMemcpyAsync(static_cast<char*>(dst) + k * chunk,
-                          static_cast<char*>(src) + k * chunk,
-                          chunk,
-                          cudaMemcpyDefault,
-                          streams[static_cast<std::size_t>(k)]) != cudaSuccess) {
-        cudaGetLastError();
-        throw std::runtime_error{"cudaMemcpyAsync DtoH failed"};
-      }
-    }
-    for (auto& stream : streams) {
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        cudaGetLastError();
-        throw std::runtime_error{"cudaStreamSynchronize failed"};
-      }
-    }
-  });
-
-  for (auto& stream : streams) {
-    cudaStreamDestroy(stream);
-  }
-  cudaFree(src);
-  pool.deallocate_sync(dst, size);
 }
 
 // --- alloc/free latency + contention: allocator variant axis ----------------
@@ -447,11 +382,6 @@ NVBENCH_BENCH(dtoh_reference)
   .set_name("PageablePool DtoH Reference")
   .add_int64_axis("size", {64 * kMiB, 256 * kMiB, kGiB})
   .add_string_axis("dst", {"fresh_malloc", "pinned"});
-
-NVBENCH_BENCH(dtoh_pool_chunked)
-  .set_name("PageablePool DtoH Chunked")
-  .add_int64_axis("size", {kGiB})
-  .add_int64_axis("chunks", {1, 2, 4, 8});
 
 NVBENCH_BENCH(alloc_free_list)
   .set_name("PageablePool AllocFree List")

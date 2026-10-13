@@ -21,7 +21,6 @@ one technique.
 | Contended allocator | `PageablePool AllocFree *`, `chunk=65536`, `threads=16` | list, indexed, arena |
 | Fragmentation | `PageablePool Fragmented *` | list, indexed |
 | Cached split tail | `PageablePool Remainder Cache Burst` | `cache=off`, `on` |
-| Parallel copies | `PageablePool DtoH Chunked`, `size=1073741824` | `chunks=1`, `2`, `4`, `8` |
 
 For example:
 
@@ -44,8 +43,7 @@ large allocations as the unsharded pool.
 Host: Threadripper PRO 5975WX, one NUMA node, Linux 6.17, NVIDIA driver
 590.48.01. The GPU PCI sysfs `numa_node` is `-1`, and THP is set to
 `[madvise]`. Initialization, allocator, fragmentation, and cache results are
-ranges from two runs. The chunked-copy, THP, and DtoH-reference checks were
-run once.
+ranges from two runs. The THP and DtoH-reference checks were run once.
 
 | Comparison | CPU time | Observation |
 | --- | --- | --- |
@@ -53,7 +51,6 @@ run once.
 | 64 KiB alloc/free, 16 workers: list / indexed / arena | 473–485 / 1060–1126 / 104–106 µs per 64 operations per worker | Arena is ~4.5× faster than list; indexed is slower without fragmentation. |
 | Fragmented list / indexed | 27.1–27.4 / 12.1–12.3 µs per allocation/free | Indexed is ~2.2× faster under ~2048 separated holes. |
 | Remainder cache burst: off / on | 11.66–11.69 / 11.66–11.75 µs per 32-allocation burst | No measurable gain. |
-| 1 GiB DtoH: 1 / 2 / 4 / 8 chunks | 68.4 / 67.8 / 68.6 / 68.3 ms | No useful gain from splitting the copy. |
 
 At 1 GiB, THP deny was about 1% faster than default (67.9 versus 68.7 ms),
 which is too small to establish a benefit here. With THP set to `madvise`,
@@ -71,8 +68,8 @@ copied from the local worktree;
 `CUDA_VISIBLE_DEVICES=1` selected the H100. The host's CUDA toolkit is 12.6;
 the copied binary was built with CUDA 12.9. Each configuration ran three times,
 with 15 NVBench samples per run; the table reports the median of the three
-reported times. The additional chunked-copy runs had 30 samples each. Raw
-results are in [the H100 CSV](pageable_pool_h100_2026-10-13.csv).
+reported times. Raw results are in
+[the H100 CSV](pageable_pool_h100_2026-10-13.csv).
 
 | Comparison | Median time | Observation |
 | --- | --- | --- |
@@ -83,10 +80,6 @@ results are in [the H100 CSV](pageable_pool_h100_2026-10-13.csv).
 | 256 MiB DtoH: default / THP deny | 11.835 / 11.892 ms GPU | Difference is below 1%. |
 | 256 MiB DtoH: default / GPU-local NUMA | 11.835 / 11.754 ms GPU | Difference is below 1%. `mbind(MPOL_PREFERRED, node 1)` succeeded in a separate trace. |
 | 256 MiB DtoH: pool / fresh malloc / pinned | 11.835 / 137.592 / 5.029 ms GPU | Pre-touched pool is much faster than fresh pageable memory. |
-| 1 GiB chunked DtoH: 1 / 2 / 4 / 8 chunks | 54.1 / 59.1 / 48.1 / 48.0 ms GPU | Seven runs were variable, especially the two-chunk case; treat the apparent 4/8-chunk gain as tentative. |
 
-For chunked copies, the one-chunk runs ranged from 50.9 to 79.9 ms, and the
-four-chunk runs ranged from 47.3 to 59.2 ms. The paired results suggest a
-possible H100-specific gain, but host or GPU activity can dominate a single
-run. The GPU-local NUMA and THP comparisons were much smaller than the observed
+The GPU-local NUMA and THP comparisons were much smaller than the observed
 run-to-run variation and do not establish a benefit.
