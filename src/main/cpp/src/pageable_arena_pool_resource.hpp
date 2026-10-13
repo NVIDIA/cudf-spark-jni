@@ -59,7 +59,7 @@ class pageable_arena_pool_resource_t
     : upstream_(std::move(upstream)),
       pool_size_(size),
       base_(detail::prepare_backing_region(
-        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny))
+        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny, false))
   {
     try {
       // Each arena needs at least one aligned-granularity unit of capacity.
