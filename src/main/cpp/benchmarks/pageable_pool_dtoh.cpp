@@ -29,6 +29,7 @@
 
 #include <nvbench/nvbench.cuh>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -345,6 +346,32 @@ void alloc_free_arena(nvbench::state& state)
   alloc_free_impl(state, pool);
 }
 
+// Keep the split tail below the 4 MiB cache threshold and allocate several
+// blocks before freeing any. The ordinary alloc/free benchmark flushes the
+// cache on every free, so it cannot measure the cache's intended hot path.
+void remainder_cache_burst(nvbench::state& state)
+{
+  constexpr std::size_t chunk = 64 * 1'024;
+  constexpr std::size_t count = 32;
+  bool const cache            = state.get_string("cache") == "on";
+  auto pool                   = spark_rapids_jni::pageable_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+      spark_rapids_jni::pageable_memory_resource{}),
+    4 * kMiB,
+    /*pretouch_threads=*/1,
+    /*numa_node=*/-1,
+    cache);
+  std::array<void*, count> blocks{};
+  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
+    for (auto& block : blocks) {
+      block = pool.allocate_sync(chunk);
+    }
+    for (auto* block : blocks) {
+      pool.deallocate_sync(block, chunk);
+    }
+  });
+}
+
 // --- fragmentation: O(F) list vs O(log F) indexed ---------------------------
 template <typename Resource>
 void fragmented_alloc_impl(nvbench::state& state, Resource& pool)
@@ -448,3 +475,7 @@ NVBENCH_BENCH(alloc_free_arena)
 
 NVBENCH_BENCH(fragment_list).set_name("PageablePool Fragmented List");
 NVBENCH_BENCH(fragment_indexed).set_name("PageablePool Fragmented Indexed");
+
+NVBENCH_BENCH(remainder_cache_burst)
+  .set_name("PageablePool Remainder Cache Burst")
+  .add_string_axis("cache", {"off", "on"});
