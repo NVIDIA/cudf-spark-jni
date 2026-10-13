@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,13 +22,14 @@
 #include <cudf/copying.hpp>
 #include <cudf/detail/sizes_to_offsets_iterator.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/null_mask.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
 #include <cuda/functional>
+#include <cuda/hierarchy>
 #include <cuda/stream>
 #include <thrust/logical.h>
 
@@ -95,7 +96,7 @@ CUDF_KERNEL void compute_starts_and_sizes_kernel(size_type const* offsets_of_inp
                                                  size_type* d_starts,
                                                  size_type* d_sizes)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   if (tid >= num_rows) { return; }
 
   // If either start or length is null, produce an empty list
@@ -132,7 +133,7 @@ CUDF_KERNEL void compute_gather_map(size_type const num_rows_of_input,
                                     size_type const* output_offset,
                                     size_type* d_gather_map)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   if (tid >= num_rows_of_input) { return; }
 
   auto const offset      = output_offset[tid];
@@ -161,8 +162,9 @@ auto generate_starts_and_sizes(size_type const* offsets_of_input_lists,
                                    stream,
                                    cudf::get_current_device_resource_ref());
   constexpr int block_size = 256;
-  auto grid                = cudf::detail::grid_1d{num_rows, block_size};
-  compute_starts_and_sizes_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(
+  auto const num_blocks =
+    cuda::ceil_div(static_cast<cudf::thread_index_type>(num_rows), block_size);
+  compute_starts_and_sizes_kernel<<<num_blocks, block_size, 0, stream.get()>>>(
     offsets_of_input_lists,
     num_rows,
     start_iterator,
@@ -185,9 +187,10 @@ std::unique_ptr<cudf::column> legal_list_slice(lists_column_view const& input,
 
   // generate gather map
   constexpr int block_size = 256;
-  auto grid                = cudf::detail::grid_1d{num_rows, block_size};
+  auto const num_blocks =
+    cuda::ceil_div(static_cast<cudf::thread_index_type>(num_rows), block_size);
   rmm::device_uvector<int32_t> gather_map(num_total_elements, stream);
-  compute_gather_map<<<grid.num_blocks, block_size, 0, stream.get()>>>(
+  compute_gather_map<<<num_blocks, block_size, 0, stream.get()>>>(
     num_rows,
     input.offsets_begin(),
     starts.begin<int32_t>(),
