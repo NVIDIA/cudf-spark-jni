@@ -89,4 +89,28 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
   cuda::stream_ref stream                = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr      = rmm::mr::get_current_device_resource_ref());
 
+/**
+ * @brief Compute percentiles from the given histograms using the specified value ordering.
+ *
+ * The input histograms must be given in the form of `LIST<STRUCT<ElementType, long>>`.
+ *
+ * @param input The lists of input histograms
+ * @param percentages The input percentage values
+ * @param output_as_lists Specify whether the output percentiles will be wrapped in a list
+ * @param interpolation The algorithm used to interpolate between adjacent values
+ * @param is_input_order_descending Whether to order histogram values from largest to smallest
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource used to allocate the returned column's device memory
+ * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
+ * input column
+ */
+std::unique_ptr<cudf::column> percentile_from_histogram(
+  cudf::column_view const& input,
+  std::vector<double> const& percentages,
+  bool output_as_lists,
+  percentile_interpolation interpolation,
+  bool is_input_order_descending,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
+
 }  // namespace spark_rapids_jni

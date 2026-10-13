@@ -158,6 +158,44 @@ public class HistogramTest {
   }
 
   @Test
+  void testDescendingOrder() {
+    List<HostColumnVector.StructData> finiteWithNull =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 1L), entry(null, 10L));
+    List<HostColumnVector.StructData> weighted =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 2L), entry(null, 10L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, finiteWithNull, weighted);
+         ColumnVector weightedResult = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, WEIGHTED_ENDPOINTS, true);
+         ColumnVector deltaResult = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, ENDPOINT_DELTA, true)) {
+      assertDoubleColumnExactly(weightedResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+      assertDoubleColumnExactly(deltaResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+    }
+  }
+
+  @Test
+  void testDescendingOrderSpecialValues() {
+    List<HostColumnVector.StructData> negativeInfinity =
+        Arrays.asList(entry(Double.NEGATIVE_INFINITY, 1L), entry(10.0, 1L));
+    List<HostColumnVector.StructData> positiveInfinity =
+        Arrays.asList(entry(10.0, 1L), entry(Double.POSITIVE_INFINITY, 1L));
+    List<HostColumnVector.StructData> nan =
+        Arrays.asList(entry(1.0, 1L), entry(Double.NaN, 1L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, negativeInfinity, positiveInfinity, nan);
+         ColumnVector weightedResult = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.2}, false, WEIGHTED_ENDPOINTS, true);
+         ColumnVector deltaResult = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.2}, false, ENDPOINT_DELTA, true)) {
+      assertDoubleColumnExactly(
+          weightedResult, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, Double.NaN);
+      assertDoubleColumnExactly(
+          deltaResult, Double.NEGATIVE_INFINITY, Double.NaN, Double.NaN);
+    }
+  }
+
+  @Test
   void testEndpointDeltaSpecialValues() {
     List<HostColumnVector.StructData> finiteToPositiveInfinity =
         Arrays.asList(entry(10.0, 1L), entry(Double.POSITIVE_INFINITY, 1L));
