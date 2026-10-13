@@ -129,8 +129,8 @@ public class Histogram {
   public static ColumnVector percentileFromHistogram(ColumnView input, double[] percentages,
                                                      boolean outputAsLists,
                                                      PercentileInterpolation interpolation) {
-    return new ColumnVector(percentileFromHistogramWithInterpolation(input.getNativeView(),
-        percentages, outputAsLists, interpolation.nativeId));
+    return percentileFromHistogramWithOptions(
+        input, percentages, outputAsLists, interpolation, ValueOrder.ASCENDING);
   }
 
   /**
@@ -160,9 +160,6 @@ public class Histogram {
 
   private static native long percentileFromHistogram(long inputHandle, double[] percentages,
                                                      boolean outputAsLists);
-
-  private static native long percentileFromHistogramWithInterpolation(long inputHandle,
-      double[] percentages, boolean outputAsLists, int interpolation);
 
   private static native long percentileFromHistogramWithOptions(long inputHandle,
       double[] percentages, boolean outputAsLists, int interpolation, int valueOrder);

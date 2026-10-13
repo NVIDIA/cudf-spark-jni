@@ -62,38 +62,6 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_percentileFro
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithInterpolation(
-  JNIEnv* env,
-  jclass,
-  jlong input_handle,
-  jdoubleArray jpercentages,
-  jboolean output_as_lists,
-  jint interpolation)
-{
-  JNI_NULL_CHECK(env, input_handle, "input_handle is null", 0);
-  JNI_NULL_CHECK(env, jpercentages, "jpercentages is null", 0);
-
-  JNI_TRY
-  {
-    cudf::jni::auto_set_device(env);
-
-    auto const input       = std::bit_cast<cudf::column_view const*>(input_handle);
-    auto const percentages = [&] {
-      auto const native_percentages = cudf::jni::native_jdoubleArray(env, jpercentages);
-      return std::vector<double>(native_percentages.begin(), native_percentages.end());
-    }();
-    return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::percentile_from_histogram(
-        *input,
-        percentages,
-        output_as_lists,
-        static_cast<spark_rapids_jni::percentile_interpolation>(interpolation))
-        .release());
-  }
-  JNI_CATCH(env, 0);
-}
-
-JNIEXPORT jlong JNICALL
 Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithOptions(
   JNIEnv* env,
   jclass,
