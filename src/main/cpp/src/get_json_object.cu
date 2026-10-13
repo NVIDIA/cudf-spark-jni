@@ -696,11 +696,11 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
   }
 }
 
-void launch_general(cudf::column_device_view const& input,
-                    cudf::device_span<json_path_processing_data> path_data,
-                    int8_t* max_path_depth_exceeded,
-                    bool use_last_non_null,
-                    cuda::stream_ref stream)
+void launch_kernel(cudf::column_device_view const& input,
+                   cudf::device_span<json_path_processing_data> path_data,
+                   int8_t* max_path_depth_exceeded,
+                   bool use_last_non_null,
+                   cuda::stream_ref stream)
 {
   // Both launch bounds let the compiler trade registers for fewer instructions;
   // these values were measured faster than a 256-thread, 4-block pairing.
@@ -899,7 +899,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     d_error_check.end(),
     0);
 
-  launch_general(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
+  launch_kernel(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
   auto h_error_check = cudf::detail::make_pinned_vector(d_error_check, stream);
   auto has_no_oob    = check_error(h_error_check);
 
@@ -978,7 +978,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     d_error_check.begin(),
     d_error_check.end(),
     0);
-  launch_general(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
+  launch_kernel(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
   h_error_check = cudf::detail::make_pinned_vector(d_error_check, stream);
   has_no_oob    = check_error(h_error_check);
 
