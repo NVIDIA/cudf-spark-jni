@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,4 +38,28 @@ jobs:
           # SC3010: In POSIX sh, [[ ]] is undefined.
           # SC2054: Use spaces, not commas, to separate array elements.
           # SC2124: Assigning an array to a string! Assign as array, or use * instead of @ to concatenate.
-          
+
+      - name: Test submodule-sync credential redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          source <(sed -n '/^redact_credentials() {/,/^}/p' ci/submodule-sync.sh)
+
+          expect_redaction() {
+            local username=$1 password=$2 input=$3 expected=$4 actual
+            ART_CREDS_USR=$username ART_CREDS_PSW=$password
+            actual=$(printf '%s\n' "$input" | redact_credentials)
+            if [[ "$actual" != "$expected" ]]; then
+              printf 'Expected %q, got %q\n' "$expected" "$actual" >&2
+              return 1
+            fi
+          }
+
+          expect_redaction abc abc123 'username=abc password=abc123' 'username=**** password=****'
+          expect_redaction abc123 abc 'username=abc123 password=abc' 'username=**** password=****'
+          expect_redaction 'a[b]' 'a[b]c#d' 'username=a[b] password=a[b]c#d' 'username=**** password=****'
+          encoded=$(printf '%s:%s' abc YWJj | base64 -w 0)
+          expect_redaction abc YWJj "Authorization: Basic $encoded" 'Authorization: Basic ****'
+
+      - name: Run Git network retry regression tests
+        run: ci/test-retry-git-network.sh

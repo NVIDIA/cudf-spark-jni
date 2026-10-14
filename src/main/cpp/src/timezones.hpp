@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -145,6 +145,20 @@ struct orc_tz_side {
   dst_rule dst{};
 };
 
+// Keep these values synchronized with the input kinds in GpuTimeZoneDB.java.
+enum class orc_timestamp_kind { PHYSICAL = 0, LOCAL = 1, INSTANT = 2 };
+
+/** @brief Policy options for converting ORC timestamps to Spark timestamps. */
+struct orc_to_spark_options {
+  // Exclusive historical rule-difference bounds, or INT64_MIN when no rebase is needed.
+  int64_t reader_historical_difference_end_utc_us;
+  int64_t reader_historical_difference_end_local_us;
+  orc_timestamp_kind input_kind;
+  bool writer_reader_rules_differ;
+  // Whether the reader decided the borrow in the writer's frame; false = UTC-epoch fallback.
+  bool writer_borrow_applied;
+};
+
 /**
  * @brief Convert between ORC writer timezone and reader timezone.
  *
@@ -152,15 +166,17 @@ struct orc_tz_side {
  * recurring DST rules derived from JVM timezone APIs for dates beyond the table.
  *
  * @param input The input timestamp column in microseconds.
- * @param writer_2015_year_base_offset_us Writer timezone offset at ORC's 2015-01-01 base instant.
- *        ORC applies this base-timestamp adjustment, including any DST savings in effect at that
- *        instant, before running SerializationUtils.convertBetweenTimezones. The native path
- *        applies the same adjustment first so the negative-timestamp nanos borrow is decided in
- *        the same frame as Apache ORC. Pass 0 for no adjustment.
+ * @param writer_2015_year_base_offset_us Writer timezone offset at ORC's 2015-01-01 base instant
+ *        (may include DST savings); shifts the decoded instant back into the writer frame. With
+ *        `writer_borrow_applied=false` the shift also reconstructs the Apache borrow. Pass 0 for
+ *        no adjustment.
  * @param writer writer timezone transition data, offsets, and DST rule.
  * @param reader reader timezone transition data, offsets, and DST rule.
  * @param writer_reader_rules_differ whether Apache ORC would call
  *        SerializationUtils.convertBetweenTimezones for this timezone pair.
+ * @param writer_borrow_applied whether the reader decided the negative nanos borrow in the
+ *        writer's frame (normal path). False for its UTC-epoch fallback: the borrow is then
+ *        reconstructed before the shift.
  * @param stream CUDA stream.
  * @param mr Device memory resource.
  * @return timestamps rebased between writer and reader timezones.
@@ -172,17 +188,18 @@ struct orc_tz_side {
   orc_tz_side reader,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
-  bool writer_reader_rules_differ   = true);
+  bool writer_reader_rules_differ   = true,
+  bool writer_borrow_applied        = true);
 
 /**
  * @brief Apply Apache ORC SerializationUtils.convertFromUtc semantics.
  *
- * @param input TIMESTAMP_MICROSECONDS input column.
+ * @param input TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS input column.
  * @param reader reader timezone transition data, offsets, and DST rule.
  * @param stream CUDA stream.
  * @param mr Device memory resource.
  * @return converted column with the same type as input.
- * @throws cudf::logic_error If input is not TIMESTAMP_MICROSECONDS.
+ * @throws cudf::logic_error If input is not TIMESTAMP_MILLISECONDS or TIMESTAMP_MICROSECONDS.
  */
 [[nodiscard]] std::unique_ptr<cudf::column> convert_orc_from_utc(
   cudf::column_view const& input,
@@ -191,14 +208,42 @@ struct orc_tz_side {
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
+ * @brief Convert an ORC timestamp to Spark's timestamp representation.
+ *
+ * Apache ORC decodes timestamps with java.util.TimeZone, while Spark materializes the resulting
+ * java.sql.Timestamp with java.time rules. This fuses the ORC writer/reader conversion with the
+ * historical java.util-to-java.time rebase that Spark applies.
+ *
+ * @param input TIMESTAMP_MICROSECONDS input column.
+ * @param writer_2015_year_base_offset_us Writer timezone offset at ORC's 2015-01-01 base instant.
+ * @param writer Writer timezone transition data, offsets, and DST rule.
+ * @param reader Reader timezone transition data, offsets, and DST rule.
+ * @param java_time_info java.time transition table, or nullptr when no historical rebase is needed.
+ * @param java_time_tz_index Reader timezone row in java_time_info.
+ * @param options Historical rule-difference bounds, input kind, and writer/reader conversion
+ * policy.
+ * @param stream CUDA stream.
+ * @param mr Device memory resource.
+ * @return Spark-compatible timestamps in microseconds.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> convert_orc_to_spark(
+  cudf::column_view const& input,
+  int64_t writer_2015_year_base_offset_us,
+  orc_tz_side writer,
+  orc_tz_side reader,
+  cudf::table_view const* java_time_info,
+  cudf::size_type java_time_tz_index,
+  orc_to_spark_options options,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
  * @brief JNI-compatible raw-offset overload of the ORC conversion.
  *
- * Java computes and passes the writer timezone offset at ORC's 2015-01-01 base instant separately,
- * because that value is not necessarily the raw offset: for DST zones it can include DST savings,
- * and for historical transition zones it can come from the transition table. This overload uses
- * that exact value for the base-timestamp/borrow adjustment, then forwards the transition tables
- * and raw offsets to the shared conversion kernel. Callers that need recurring DST fallback beyond
- * a transition table should use the full `orc_tz_side` overload.
+ * Java computes the writer offset at ORC's 2015-01-01 base instant (it can include DST savings or
+ * historical transitions, so it is not the raw offset). This overload shifts with that exact
+ * value and forwards the tables/offsets to the shared kernel. For recurring DST fallback beyond a
+ * transition table use the full `orc_tz_side` overload.
  *
  * @param input The input timestamp column in microseconds.
  * @param writer_tz_info_table transition/offset table, nullptr for fixed-offset TZ.

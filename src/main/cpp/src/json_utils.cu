@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -125,8 +125,9 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
   if (input.is_empty()) {
     return {std::make_unique<rmm::device_buffer>(0, stream, mr),
             '\n',
-            std::make_unique<cudf::column>(
-              rmm::device_uvector<bool>{0, stream, mr}, rmm::device_buffer{}, 0)};
+            std::make_unique<cudf::column>(rmm::device_uvector<bool>{0, stream, mr},
+                                           cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                           0)};
   }
 
   auto const default_mr  = rmm::mr::get_current_device_resource_ref();
@@ -281,7 +282,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
       : cudf::column_view{cudf::data_type{cudf::type_id::STRING},
                           input.size(),
                           input.chars_begin(stream),
-                          static_cast<cudf::bitmask_type const*>(null_mask->data()),
+                          reinterpret_cast<cudf::bitmask_type const*>(null_mask->data()),
                           null_count,
                           input.offset(),
                           std::vector<cudf::column_view>{input.offsets()}};
@@ -293,9 +294,11 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
     stream,
     mr);
 
-  return {std::move(concat_strings->release().data),
-          delimiter,
-          std::make_unique<cudf::column>(std::move(should_be_nullified), rmm::device_buffer{}, 0)};
+  return {
+    std::move(concat_strings->release().data),
+    delimiter,
+    std::make_unique<cudf::column>(
+      std::move(should_be_nullified), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0)};
 }
 
 }  // namespace detail

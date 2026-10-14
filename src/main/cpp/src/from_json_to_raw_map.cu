@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -157,10 +157,18 @@ std::unique_ptr<cudf::column> make_empty_map_from_value(std::unique_ptr<cudf::co
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(keys));
   out_keys_vals.emplace_back(std::move(value_child));
-  auto child =
-    cudf::make_structs_column(0, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto child   = cudf::make_structs_column(0,
+                                         std::move(out_keys_vals),
+                                         0,
+                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                         stream,
+                                         mr);
   auto offsets = cudf::make_empty_column(cudf::data_type(cudf::type_id::INT32));
-  return cudf::make_lists_column(0, std::move(offsets), std::move(child), 0, rmm::device_buffer{});
+  return cudf::make_lists_column(0,
+                                 std::move(offsets),
+                                 std::move(child),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 std::unique_ptr<cudf::column> make_empty_map(cuda::stream_ref stream,
@@ -744,8 +752,11 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
 
   auto [offsets, chars] = cudf::strings::detail::make_strings_children(
     substring_fn{input_json, extracted_ranges}, num_extract, stream, mr);
-  return cudf::make_strings_column(
-    num_extract, std::move(offsets), chars.release(), 0, rmm::device_buffer{});
+  return cudf::make_strings_column(num_extract,
+                                   std::move(offsets),
+                                   chars.release(),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 // Compute the offsets for the final lists of Struct<String,String>.
@@ -813,7 +824,8 @@ std::unique_ptr<cudf::column> compute_list_offsets(
 #ifdef DEBUG_FROM_JSON
   print_debug(list_offsets, "Output list offsets", ", ", stream);
 #endif
-  return std::make_unique<cudf::column>(std::move(list_offsets), rmm::device_buffer{}, 0);
+  return std::make_unique<cudf::column>(
+    std::move(list_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
 }
 
 // If a JSON line is invalid, the tokens corresponding to that line are output as
@@ -851,7 +863,7 @@ struct is_line_begin {
   }
 };
 
-std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
+std::pair<cuda::device_buffer<std::byte>, cudf::size_type> create_null_mask(
   cudf::size_type num_rows,
   std::unique_ptr<cudf::column> const& should_be_nullified,
   cudf::device_span<PdaTokenT const> tokens,
@@ -931,7 +943,9 @@ std::pair<rmm::device_buffer, cudf::size_type> create_null_mask(
   auto const valid_it          = should_be_nullified->view().begin<bool>();
   auto [null_mask, null_count] = cudf::detail::valid_if(
     valid_it, valid_it + should_be_nullified->size(), thrust::logical_not<bool>{}, stream, mr);
-  return {null_count > 0 ? std::move(null_mask) : rmm::device_buffer{0, stream, mr}, null_count};
+  return {null_count > 0 ? std::move(null_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr),
+          null_count};
 }
 
 // Array-value path: parse `Map[String, Array[String]]` JSON into
@@ -1060,8 +1074,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(extracted_keys));
   out_keys_vals.emplace_back(std::move(extracted_values));
-  auto structs_col = cudf::make_structs_column(
-    num_pairs, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto structs_col =
+    cudf::make_structs_column(num_pairs,
+                              std::move(out_keys_vals),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                              stream,
+                              mr);
 
   // Do not use `cudf::make_lists_column` since we do not need to call `purge_nonempty_nulls`
   // on the children columns as they do not have non-empty nulls.
@@ -1259,8 +1278,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   // its element child has no non-empty nulls.
   auto [inner_mask, inner_null_count] =
     cudf::bools_to_mask(cudf::device_span<bool const>(inner_valid), stream, mr);
-  auto inner_offsets_col =
-    std::make_unique<cudf::column>(std::move(inner_offsets), rmm::device_buffer{}, 0);
+  auto inner_offsets_col = std::make_unique<cudf::column>(
+    std::move(inner_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   std::vector<std::unique_ptr<cudf::column>> inner_list_children;
   inner_list_children.emplace_back(std::move(inner_offsets_col));
   inner_list_children.emplace_back(std::move(extracted_elements));
@@ -1268,7 +1287,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
     cudf::data_type{cudf::type_id::LIST},
     num_values,
     rmm::device_buffer{},
-    inner_null_count > 0 ? std::move(*inner_mask) : rmm::device_buffer{},
+    inner_null_count > 0 ? std::move(*inner_mask)
+                         : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
     inner_null_count > 0 ? inner_null_count : 0,
     std::move(inner_list_children));
 
@@ -1276,8 +1296,13 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
   out_keys_vals.emplace_back(std::move(extracted_keys));
   out_keys_vals.emplace_back(std::move(inner_list));
-  auto structs_col = cudf::make_structs_column(
-    num_values, std::move(out_keys_vals), 0, rmm::device_buffer{}, stream, mr);
+  auto structs_col =
+    cudf::make_structs_column(num_values,
+                              std::move(out_keys_vals),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                              stream,
+                              mr);
 
   // Assemble the outer list (row offsets + struct child).
   std::vector<std::unique_ptr<cudf::column>> list_children;

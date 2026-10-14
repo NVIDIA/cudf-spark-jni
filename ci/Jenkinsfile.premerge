@@ -291,10 +291,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                 parameters: [
                                     string(name: 'REPO_URL', value: githubHelper.getCloneUrl()),
                                     string(name: 'REF', value: githubHelper.getMergedSHA()),
-                                    string(name: 'BRANCH_NAME', value: "PR-${prNumber}"),
-                                    string(name: 'REFSPEC', value:
-                                        "+refs/pull/${prNumber}/merge:" +
-                                        "refs/remotes/origin/pr/${prNumber}"),
+                                    string(name: 'PR_KEY', value: prNumber.toString()),
                                     booleanParam(name: 'CHECK_QUALITY_GATE', value: true),
                                     booleanParam(name: 'MUTE_SLACK', value: true),
                                 ])

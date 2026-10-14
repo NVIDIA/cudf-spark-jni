@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,14 +23,19 @@
 #include <cudf_test/type_lists.hpp>
 
 #include <cudf/copying.hpp>
+#include <cudf/io/orc.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/wrappers/timestamps.hpp>
+
+#include <cuda_runtime.h>
 
 #include <array>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 
 auto constexpr int64_min = std::numeric_limits<int64_t>::min();
 
@@ -45,6 +50,10 @@ using millis_col =
 
 using micros_col =
   cudf::test::fixed_width_column_wrapper<cudf::timestamp_us, cudf::timestamp_s::rep>;
+
+// Global environment for temporary files used by the ORC end-to-end test.
+auto const timezones_temp_env = static_cast<cudf::test::TempDirTestEnvironment*>(
+  ::testing::AddGlobalTestEnvironment(new cudf::test::TempDirTestEnvironment));
 
 class TimeZoneTest : public cudf::test::BaseFixture {
  protected:
@@ -93,8 +102,12 @@ class TimeZoneTest : public cudf::test::BaseFixture {
     // make empty DST list<int> column, it means all timezones are non-DST
     auto dst_child   = int32_col({});
     auto dst_offsets = cudf::test::fixed_width_column_wrapper<cudf::size_type>{0, 0, 0};
-    auto dst_col     = cudf::make_lists_column(
-      2, dst_offsets.release(), dst_child.release(), 0, rmm::device_buffer{});
+    auto dst_col =
+      cudf::make_lists_column(2,
+                              dst_offsets.release(),
+                              dst_child.release(),
+                              0,
+                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     columns.push_back(std::move(dst_col));
 
     return std::make_unique<cudf::table>(std::move(columns));
@@ -450,15 +463,14 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesWriter2015BaseOffset)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(transition_expected, *transition_actual);
 }
 
-TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow)
+TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesWriterBaseOffsetToPreEpochTimestamp)
 {
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst = 0;
 
-  // cuDF decodes this pre-epoch Asia/Shanghai ORC timestamp relative to the UTC 2015 epoch when
-  // ignoreTimezoneInStripeFooter=true. Applying the Shanghai ORC base offset moves it back before
-  // the Unix epoch, where Apache ORC applies a one-second nanos borrow.
-  auto const input    = micros_col{21'087'883'873L};
+  // Decoder folds the negative nanos borrow in; the Shanghai base offset shifts the decode back
+  // to the instant Apache ORC reconstructs.
+  auto const input    = micros_col{21'086'883'873L};
   auto const expected = micros_col{-7'713'116'127L};
   auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
     input,
@@ -471,7 +483,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
 
-TEST_F(TimeZoneTest, ConvertOrcTimezonesEpochBorrowColumnShapes)
+TEST_F(TimeZoneTest, ConvertOrcTimezonesPreEpochTimestampColumnShapes)
 {
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst     = 0;
@@ -493,14 +505,14 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEpochBorrowColumnShapes)
   }
 
   {
-    auto const input    = micros_col{{21'087'883'873L, 0L, 9'001'000L}, {true, false, true}};
+    auto const input    = micros_col{{21'086'883'873L, 0L, 8'001'000L}, {true, false, true}};
     auto const expected = micros_col{{-7'713'116'127L, 0L, -28'791'999'000L}, {true, false, true}};
     auto const actual   = convert(input);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
   }
 
   {
-    auto const source   = micros_col{{0L, 21'087'883'873L, 9'001'000L}, {false, true, true}};
+    auto const source   = micros_col{{0L, 21'086'883'873L, 8'001'000L}, {false, true, true}};
     auto const input    = cudf::slice(source, {1, 3})[0];
     auto const expected = micros_col{{-7'713'116'127L, -28'791'999'000L}, {true, true}};
     auto const actual   = convert(input);
@@ -508,7 +520,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesEpochBorrowColumnShapes)
   }
 }
 
-TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrowWithDstRule)
+TEST_F(TimeZoneTest, ConvertOrcTimezonesPreEpochTimestampWithDstRule)
 {
   auto const writer_dst = make_dst_rule(/*start_mode=*/2,
                                         /*start_day=*/1,
@@ -521,15 +533,10 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst = 0;
 
-  // This models the Java/JNI path for a DST writer once the Java DST gate is opened:
-  // GpuTimeZoneDB.getOrc2015YearBaseOffsetMillis calls TimeZone.getOffset at ORC's 2015-01-01
-  // base instant for transition-table timezones. The writer is a southern-hemisphere DST
-  // timezone: raw UTC+10, DST +1h. Jan 1 is inside its DST window, so that Java helper would
-  // pass UTC+11 as writer_2015_year_base_offset_us. The base-offset adjustment moves this
-  // decoded value before the Unix epoch, where Apache ORC applies the negative timestamp nanos
-  // borrow before converting between writer and reader timezones. The expected result includes
-  // both the corrected borrow and the DST writer offset when converting to UTC.
-  auto const input    = micros_col{31'887'883'873L};
+  // Java passes TimeZone.getOffset at ORC's 2015-01-01 base instant: the southern-hemisphere
+  // writer (raw UTC+10, DST +1h) is inside its DST window in January, so the helper passes
+  // UTC+11. The decoder already folded in the borrow; the shift covers the DST writer offset.
+  auto const input    = micros_col{31'886'883'873L};
   auto const expected = micros_col{31'886'883'873L};
   auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
     input,
@@ -544,7 +551,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesCorrectsIgnoredWriterTimezoneEpochBorrow
 
 TEST_F(TimeZoneTest, ConvertOrcTimezonesTableOverloadAppliesWriter2015BaseOffset)
 {
-  auto const input    = micros_col{21'087'883'873L};
+  auto const input    = micros_col{21'086'883'873L};
   auto const expected = micros_col{-7'713'116'127L};
   auto const actual =
     spark_rapids_jni::convert_orc_writer_reader_timezones(input,
@@ -581,7 +588,7 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesTableOverloadAcceptsWriterTransitionsWit
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
 
-TEST_F(TimeZoneTest, ConvertOrcTimezonesRecomputesEpochBorrowAfterWriter2015BaseOffset)
+TEST_F(TimeZoneTest, ConvertOrcTimezonesAppliesWriter2015BaseOffsetAfterCudfBorrow)
 {
   spark_rapids_jni::dst_rule no_dst{};
   no_dst.has_dst = 0;
@@ -591,11 +598,14 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesRecomputesEpochBorrowAfterWriter2015Base
     int64_t writer_2015_year_base_offset_us;
     int64_t expected_us;
   };
-  auto const cases = std::array<test_case, 4>{{
+  // Borrow already folded in by the decoder: the base offset is a plain shift. The last case is
+  // the negative-base window (decoded < 0, shifted value in [0, 1 s), borrowable fraction).
+  auto const cases = std::array<test_case, 5>{{
     {-7'713'116'127L, 0L, -7'713'116'127L},
-    {-1'116'127L, -1'000'000L, 883'873L},
+    {-116'127L, -1'000'000L, 883'873L},
     {9'000'999L, 10'000'000L, -999'001L},
-    {9'001'000L, 10'000'000L, -1'999'000L},
+    {8'001'000L, 10'000'000L, -1'999'000L},
+    {-17'999'000'001L, -18'000'000'000L, 999'999L},
   }};
 
   for (auto const& test_case_data : cases) {
@@ -611,6 +621,109 @@ TEST_F(TimeZoneTest, ConvertOrcTimezonesRecomputesEpochBorrowAfterWriter2015Base
 
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
   }
+}
+
+TEST_F(TimeZoneTest, ConvertOrcTimezonesReconstructsBorrowForUnresolvedWriterTimezone)
+{
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst = 0;
+
+  struct test_case {
+    int64_t decoded_us;
+    int64_t writer_2015_year_base_offset_us;
+    int64_t expected_us;
+  };
+  // UTC-fallback decode: the borrow is NOT folded in. Case 1 is the GMT+08:00-shaped analog of
+  // the Shanghai reproducer (plain shift would be 1s late); case 2 lands in [0, 1 s).
+  auto const cases = std::array<test_case, 2>{{
+    {21'087'883'873L, 28'800'000'000L, -7'713'116'127L},
+    {-1'116'127L, -1'000'000L, 883'873L},
+  }};
+
+  for (auto const& test_case_data : cases) {
+    auto const input    = micros_col{test_case_data.decoded_us};
+    auto const expected = micros_col{test_case_data.expected_us};
+    auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+      input,
+      test_case_data.writer_2015_year_base_offset_us,
+      spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+      spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+      cudf::get_default_stream(),
+      cudf::get_current_device_resource_ref(),
+      /*writer_reader_rules_differ=*/false,
+      /*writer_borrow_applied=*/false);
+
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+
+  // The same inputs through the default (borrow already applied) path keep the plain-shift
+  // results, guarding against a flag leak between the two modes.
+  for (auto const& test_case_data : cases) {
+    auto const input = micros_col{test_case_data.decoded_us};
+    auto const expected =
+      micros_col{test_case_data.decoded_us - test_case_data.writer_2015_year_base_offset_us};
+    auto const actual = spark_rapids_jni::convert_orc_writer_reader_timezones(
+      input,
+      test_case_data.writer_2015_year_base_offset_us,
+      spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+      spark_rapids_jni::orc_tz_side{nullptr, 0, 0, no_dst},
+      cudf::get_default_stream(),
+      cudf::get_current_device_resource_ref());
+
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
+  }
+}
+
+// End-to-end: real ORC round trip with the decoder in the loop, so a submodule borrow-frame
+// change fails here instead of silently matching the hand-wired inputs above.
+TEST_F(TimeZoneTest, ConvertOrcTimezonesEndToEndDecoderBorrowFrame)
+{
+  // Pre-epoch fractional UTC instant of a UTC+08:00 writer: exercises the borrow and the
+  // Unix-epoch crossing on the shift.
+  auto const instant_us = -7'713'116'127L;
+
+  micros_col const instant_col{instant_us};
+  auto const table_view_in = cudf::table_view({instant_col});
+
+  auto const filename =
+    timezones_temp_env->get_temp_filepath("ConvertOrcTimezonesEndToEndDecoderBorrow.orc");
+  {
+    auto writer_options =
+      cudf::io::orc_writer_options::builder(cudf::io::sink_info(filename), table_view_in);
+    writer_options.writer_timezone("Asia/Shanghai");
+    cudf::io::write_orc(writer_options.build());
+  }
+
+  auto read_options = cudf::io::orc_reader_options::builder(cudf::io::source_info(filename))
+                        .timestamp_type(cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS})
+                        .ignore_timezone_in_stripe_footer(true)
+                        .build();
+  auto const read_result = cudf::io::read_orc(read_options);
+  auto const& decoded    = read_result.tbl->get_column(0);
+
+  // The decode must equal the written instant plus the writer epoch offset (UTC+08:00 = 28.8e9 us).
+  EXPECT_EQ(decoded.size(), 1);
+  int64_t decoded_us = 0;
+  CUDF_CUDA_TRY(cudaMemcpyAsync(&decoded_us,
+                                decoded.view().begin<cudf::timestamp_us>(),
+                                sizeof(int64_t),
+                                cudaMemcpyDefault,
+                                cudf::get_default_stream().get()));
+  CUDF_CUDA_TRY(cudaStreamSynchronize(cudf::get_default_stream().get()));
+  EXPECT_EQ(decoded_us, instant_us + 28'800'000'000L);
+
+  // The conversion must shift straight back to the instant Apache ORC reconstructs.
+  spark_rapids_jni::dst_rule no_dst{};
+  no_dst.has_dst      = 0;
+  auto const expected = micros_col{instant_us};
+  auto const actual   = spark_rapids_jni::convert_orc_writer_reader_timezones(
+    decoded.view(),
+    /*writer_2015_year_base_offset_us=*/int64_t{28'800'000'000},
+    spark_rapids_jni::orc_tz_side{nullptr, 28'800'000, 28'800'000, no_dst},
+    spark_rapids_jni::orc_tz_side{nullptr, 28'800'000, 28'800'000, no_dst},
+    cudf::get_default_stream(),
+    cudf::get_current_device_resource_ref());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *actual);
 }
 
 TEST_F(TimeZoneTest, ConvertOrcTimezonesRejectsInvalidTables)

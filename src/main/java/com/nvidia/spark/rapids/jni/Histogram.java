@@ -45,6 +45,23 @@ public class Histogram {
     }
   }
 
+  /**
+   * Ordering direction for histogram values during percentile evaluation.
+   * <p>
+   * The native IDs must remain aligned with {@code value_order} in
+   * {@code src/main/cpp/src/histogram.hpp}.
+   */
+  public enum ValueOrder {
+    ASCENDING(0),
+    DESCENDING(1);
+
+    private final int nativeId;
+
+    ValueOrder(int nativeId) {
+      this.nativeId = nativeId;
+    }
+  }
+
   static {
     NativeDepsLoader.loadNativeDeps();
   }
@@ -54,8 +71,12 @@ public class Histogram {
    * <p>
    * The input is valid if they satisfy the following conditions:
    * - Values and frequencies columns must have the same size.
-   * - Frequencies column must be of type INT64, must not have nulls, and must not contain
-   * negative numbers.
+   * - Frequencies column must be of type INT64.
+   * - A negative frequency is invalid only when its corresponding value and frequency are
+   * non-null.
+   * <p>
+   * Rows with a null value, null frequency, or zero frequency are excluded from the histogram.
+   * This matches Spark's exact percentile update semantics.
    * <p>
    * If the input columns are valid, a histogram will be created from them. The histogram data is
    * stored in a structs column in the form of `STRUCT<value, frequency>`.
@@ -108,10 +129,31 @@ public class Histogram {
   public static ColumnVector percentileFromHistogram(ColumnView input, double[] percentages,
                                                      boolean outputAsLists,
                                                      PercentileInterpolation interpolation) {
-    return new ColumnVector(percentileFromHistogramWithInterpolation(input.getNativeView(),
-        percentages, outputAsLists, interpolation.nativeId));
+    return percentileFromHistogramWithOptions(
+        input, percentages, outputAsLists, interpolation, ValueOrder.ASCENDING);
   }
 
+  /**
+   * Compute percentiles from the given histograms and percentage values using the specified
+   * interpolation algorithm and value ordering.
+   * <p>
+   * The input histograms must be given in the format `LIST<STRUCT<ElementType, long>>`.
+   *
+   * @param input         The lists of input histograms.
+   * @param percentages   The input percentage values.
+   * @param outputAsLists Specify whether the output percentiles will be wrapped into a list.
+   * @param interpolation The interpolation algorithm to use between adjacent values.
+   * @param valueOrder    The ordering direction to use for histogram values.
+   * @return A lists column, each list stores the output percentile(s) computed for the
+   * corresponding row in the input column.
+   */
+  public static ColumnVector percentileFromHistogramWithOptions(
+      ColumnView input, double[] percentages, boolean outputAsLists,
+      PercentileInterpolation interpolation, ValueOrder valueOrder) {
+    return new ColumnVector(percentileFromHistogramWithOptions(
+        input.getNativeView(), percentages, outputAsLists, interpolation.nativeId,
+        valueOrder.nativeId));
+  }
 
   private static native long createHistogramIfValid(long valuesHandle, long frequenciesHandle,
                                                     boolean outputAsLists);
@@ -119,6 +161,6 @@ public class Histogram {
   private static native long percentileFromHistogram(long inputHandle, double[] percentages,
                                                      boolean outputAsLists);
 
-  private static native long percentileFromHistogramWithInterpolation(long inputHandle,
-      double[] percentages, boolean outputAsLists, int interpolation);
+  private static native long percentileFromHistogramWithOptions(long inputHandle,
+      double[] percentages, boolean outputAsLists, int interpolation, int valueOrder);
 }

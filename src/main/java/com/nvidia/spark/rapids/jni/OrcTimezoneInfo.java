@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -44,12 +45,16 @@ import java.util.concurrent.ConcurrentMap;
  */
 class OrcTimezoneInfo {
   OrcTimezoneInfo(int initialOffset, int rawOffset, long[] transitions, int[] offsets,
-      OrcDstRuleExtractor.DstRule dstRule) {
+      OrcDstRuleExtractor.DstRule dstRule,
+      long historicalDifferenceEndUtcMillis,
+      long historicalDifferenceEndLocalMillis) {
     this.initialOffset = initialOffset;
     this.rawOffset = rawOffset;
     this.transitions = transitions;
     this.offsets = offsets;
     this.dstRule = dstRule;
+    this.historicalDifferenceEndUtcMillis = historicalDifferenceEndUtcMillis;
+    this.historicalDifferenceEndLocalMillis = historicalDifferenceEndLocalMillis;
   }
 
   // Historical offset before the first transition, in milliseconds.
@@ -66,6 +71,11 @@ class OrcTimezoneInfo {
 
   // Recurring rule used after the historical transition table, or null for no DST.
   final OrcDstRuleExtractor.DstRule dstRule;
+
+  // Exclusive upper bounds for historical java.util.TimeZone/java.time rule differences.
+  // Long.MIN_VALUE means the two rule sets do not differ in the historical prefix.
+  final long historicalDifferenceEndUtcMillis;
+  final long historicalDifferenceEndLocalMillis;
 
   // Lower bound of the range ORC supports (year 0001-01-01 UTC). Computed via
   // java.time.LocalDate, which uses the proleptic Gregorian calendar, whereas
@@ -145,7 +155,8 @@ class OrcTimezoneInfo {
       // maps them to GMT (offset 0). Derive the offset from ZoneRules instead so
       // the GPU path doesn't treat them as UTC.
       int fixedOffsetMs = rules.getOffset(Instant.EPOCH).getTotalSeconds() * 1000;
-      return new OrcTimezoneInfo(fixedOffsetMs, fixedOffsetMs, null, null, null);
+      return new OrcTimezoneInfo(fixedOffsetMs, fixedOffsetMs, null, null, null,
+          Long.MIN_VALUE, Long.MIN_VALUE);
     }
     // Use the canonical ID from the resolved ZoneId (e.g. "Asia/Kolkata" for
     // input "IST") so that TimeZone and ZoneRules always refer to the same
@@ -160,12 +171,94 @@ class OrcTimezoneInfo {
         OrcDstRuleExtractor.extractDstRule(timezoneId, tz, rules);
     List<ZoneOffsetTransition> transitionList = rules.getTransitions();
     HistoricalTransitions historicalTransitions = buildHistoricalTransitions(tz, transitionList);
+    HistoricalRuleDifferenceCutoffs historicalCutoffs =
+        buildHistoricalRuleDifferenceCutoffs(tz, rules, historicalTransitions);
     if (historicalTransitions.transitions == null) {
-      return new OrcTimezoneInfo(initialOffset, tz.getRawOffset(), null, null, dstRule);
+      return new OrcTimezoneInfo(initialOffset, tz.getRawOffset(), null, null, dstRule,
+          historicalCutoffs.utcMillis, historicalCutoffs.localMillis);
     }
     return new OrcTimezoneInfo(initialOffset,
         tz.getRawOffset(), historicalTransitions.transitions, historicalTransitions.offsets,
-        dstRule);
+        dstRule, historicalCutoffs.utcMillis, historicalCutoffs.localMillis);
+  }
+
+  /**
+   * Find the end of the historical prefix where java.util.TimeZone and java.time use different
+   * offsets. ORC uses the former, while Spark uses the latter when it materializes historical
+   * timestamps. The UTC and local cutoffs are separate because gaps and overlaps have different
+   * transition coordinates in those two frames.
+   *
+   * <p>When TimeZone has recorded transitions, its first transition remains the upper audit bound
+   * used by the existing ORC conversion contract. When it has none, inspect all fixed ZoneRules
+   * transitions so zones whose TimeZone view is constant can still correct their earlier LMT
+   * offsets.</p>
+   */
+  private static HistoricalRuleDifferenceCutoffs buildHistoricalRuleDifferenceCutoffs(
+      TimeZone tz,
+      ZoneRules rules,
+      HistoricalTransitions historicalTransitions) {
+    TreeSet<Long> transitionMillis =
+        collectHistoricalTransitionMillis(rules, historicalTransitions);
+    if (transitionMillis.isEmpty()) {
+      return HistoricalRuleDifferenceCutoffs.NONE;
+    }
+
+    long firstTimeZoneTransition = historicalTransitions.transitions == null
+        ? Long.MIN_VALUE
+        : historicalTransitions.transitions[0];
+    long auditEnd = firstTimeZoneTransition == Long.MIN_VALUE
+        ? transitionMillis.last()
+        : firstTimeZoneTransition;
+    boolean offsetsDiffer = getOffsetMillis(rules, MIN_SUPPORTED_ORC_UTC_MILLIS)
+        != tz.getOffset(MIN_SUPPORTED_ORC_UTC_MILLIS);
+    long differenceEndUtcMillis = Long.MIN_VALUE;
+    for (long transitionMs : transitionMillis) {
+      if (transitionMs > auditEnd) {
+        break;
+      }
+      if (offsetsDiffer) {
+        differenceEndUtcMillis = transitionMs;
+      }
+      offsetsDiffer = getOffsetMillis(rules, transitionMs) != tz.getOffset(transitionMs);
+    }
+    if (offsetsDiffer) {
+      // Preserve the established first-TimeZone-transition contract if a future tzdata version
+      // does not converge at the expected boundary.
+      differenceEndUtcMillis = auditEnd;
+    }
+    if (differenceEndUtcMillis == Long.MIN_VALUE) {
+      return HistoricalRuleDifferenceCutoffs.NONE;
+    }
+
+    int maxOffsetMillis = Math.max(tz.getRawOffset(), Math.max(
+        tz.getOffset(differenceEndUtcMillis - 1),
+        tz.getOffset(differenceEndUtcMillis)));
+    maxOffsetMillis = Math.max(maxOffsetMillis, Math.max(
+        getOffsetMillis(rules, differenceEndUtcMillis - 1),
+        getOffsetMillis(rules, differenceEndUtcMillis)));
+    return new HistoricalRuleDifferenceCutoffs(
+        differenceEndUtcMillis, differenceEndUtcMillis + maxOffsetMillis);
+  }
+
+  private static TreeSet<Long> collectHistoricalTransitionMillis(
+      ZoneRules rules, HistoricalTransitions historicalTransitions) {
+    TreeSet<Long> transitionMillis = new TreeSet<>();
+    if (historicalTransitions.transitions != null) {
+      for (long transition : historicalTransitions.transitions) {
+        transitionMillis.add(transition);
+      }
+    }
+    for (ZoneOffsetTransition transition : rules.getTransitions()) {
+      long transitionMs = transition.getInstant().toEpochMilli();
+      if (transitionMs >= MIN_SUPPORTED_ORC_UTC_MILLIS) {
+        transitionMillis.add(transitionMs);
+      }
+    }
+    return transitionMillis;
+  }
+
+  private static int getOffsetMillis(ZoneRules rules, long epochMillis) {
+    return rules.getOffset(Instant.ofEpochMilli(epochMillis)).getTotalSeconds() * 1000;
   }
 
   /**
@@ -367,6 +460,19 @@ class OrcTimezoneInfo {
     private HistoricalTransitions(long[] transitions, int[] offsets) {
       this.transitions = transitions;
       this.offsets = offsets;
+    }
+  }
+
+  private static final class HistoricalRuleDifferenceCutoffs {
+    private static final HistoricalRuleDifferenceCutoffs NONE =
+        new HistoricalRuleDifferenceCutoffs(Long.MIN_VALUE, Long.MIN_VALUE);
+
+    private final long utcMillis;
+    private final long localMillis;
+
+    private HistoricalRuleDifferenceCutoffs(long utcMillis, long localMillis) {
+      this.utcMillis = utcMillis;
+      this.localMillis = localMillis;
     }
   }
 }

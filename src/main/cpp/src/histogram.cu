@@ -162,7 +162,7 @@ struct percentile_dispatcher {
   //  2. Null mask to apply for the final output column containing percentile values, and
   //  3. Null count corresponding to that null mask.
   using output_type =
-    std::tuple<std::unique_ptr<cudf::column>, rmm::device_buffer, cudf::size_type>;
+    std::tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<std::byte>, cudf::size_type>;
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
@@ -252,7 +252,7 @@ struct percentile_dispatcher {
       return {std::move(percentiles), std::move(*null_mask.release()), null_count};
     }
 
-    return {std::move(percentiles), rmm::device_buffer{}, 0};
+    return {std::move(percentiles), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0};
   }
 };
 
@@ -283,7 +283,7 @@ void check_input(cudf::column_view const& input, std::vector<double> const& perc
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
-                                           rmm::device_buffer&& null_mask,
+                                           cuda::device_buffer<std::byte>&& null_mask,
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
@@ -310,8 +310,6 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
-  CUDF_EXPECTS(
-    !frequencies.has_nulls(), "The input frequencies must not have nulls.", std::invalid_argument);
   CUDF_EXPECTS(frequencies.type().id() == cudf::type_id::INT64,
                "The input frequencies must be of type INT64.",
                std::invalid_argument);
@@ -325,7 +323,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                                      cudf::make_empty_column(cudf::type_to_id<cudf::size_type>()),
                                      cudf::reduction::detail::make_empty_histogram_like(values),
                                      0,
-                                     {});
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
     } else {
       return cudf::reduction::detail::make_empty_histogram_like(values);
     }
@@ -333,32 +331,45 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
 
   auto const default_mr = rmm::mr::get_current_device_resource_ref();
 
-  // We only check if there is any row in frequencies that are negative (invalid) or zero.
-  auto check_invalid_and_zero =
+  // Check for negative frequencies among rows Spark considers, and remember whether any frequency
+  // must be sanitized because it is null or non-positive. Null values with positive frequencies
+  // need no extra work because the existing value mask already excludes them downstream.
+  auto check_invalid_and_sanitize =
     cudf::detail::make_zeroed_device_uvector_async<int8_t>(2, stream, default_mr);
 
-  // We need to check and remember which rows are valid (positive) so we can do filtering later on.
-  auto check_valid = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
+  // Frequencies that are valid and positive can safely flow downstream unchanged.
+  auto check_frequency_usable = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
 
-  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                     cuda::make_counting_iterator(0),
-                     frequencies.size(),
-                     [frequencies   = frequencies.begin<int64_t>(),
-                      check_invalid = check_invalid_and_zero.begin(),
-                      check_zero    = check_invalid_and_zero.begin() + 1,
-                      check_valid   = check_valid.begin()] __device__(auto const idx) {
-                       if (frequencies[idx] < 0) { *check_invalid = 1; }
-                       if (frequencies[idx] == 0) { *check_zero = 1; }
+  thrust::for_each_n(
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    cuda::make_counting_iterator(0),
+    frequencies.size(),
+    [frequencies            = frequencies.begin<int64_t>(),
+     values_null_mask       = values.null_mask(),
+     values_offset          = values.offset(),
+     frequencies_null_mask  = frequencies.null_mask(),
+     frequencies_offset     = frequencies.offset(),
+     check_invalid          = check_invalid_and_sanitize.begin(),
+     check_sanitize         = check_invalid_and_sanitize.begin() + 1,
+     check_frequency_usable = check_frequency_usable.begin()] __device__(auto const idx) -> void {
+      auto const value_is_valid =
+        values_null_mask == nullptr || cudf::bit_is_set(values_null_mask, values_offset + idx);
+      auto const frequency_is_valid =
+        frequencies_null_mask == nullptr ||
+        cudf::bit_is_set(frequencies_null_mask, frequencies_offset + idx);
+      auto const frequency_is_usable = frequency_is_valid && frequencies[idx] > 0;
 
-                       check_valid[idx] = static_cast<int8_t>(frequencies[idx] > 0);
-                     });
+      if (value_is_valid && frequency_is_valid && frequencies[idx] < 0) { *check_invalid = 1; }
+      if (!frequency_is_usable) { *check_sanitize = 1; }
+      check_frequency_usable[idx] = frequency_is_usable;
+    });
 
-  auto const h_checks = cudf::detail::make_std_vector(check_invalid_and_zero, stream);
+  auto const h_checks = cudf::detail::make_std_vector(check_invalid_and_sanitize, stream);
   CUDF_EXPECTS(!h_checks.front(),  // check invalid (negative) frequencies
                "The input frequencies must not contain negative values.",
                std::invalid_argument);
 
-  auto const make_structs_histogram = [&](rmm::device_buffer&& null_mask,
+  auto const make_structs_histogram = [&](cuda::device_buffer<std::byte>&& null_mask,
                                           cudf::size_type null_count) {
     // Copy values and frequencies into a new structs column.
     std::vector<std::unique_ptr<cudf::column>> values_and_frequencies;
@@ -376,7 +387,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
           std::vector<cudf::bitmask_type const*>{
             // Don't use values.null_mask(), to make sure no slicing.
             values_and_frequencies.front()->view().null_mask(),
-            static_cast<cudf::bitmask_type const*>(null_mask.data())},
+            reinterpret_cast<cudf::bitmask_type const*>(null_mask.data())},
           std::vector<cudf::size_type>{0, 0},
           values.size(),
           stream,
@@ -398,10 +409,18 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
           // If this is a null, set 1 frequency.
           if (!cudf::bit_is_set(null_mask, idx)) { frequencies[idx] = int64_t{1}; }
         });
+
+      // Every null frequency has been replaced by the safe placeholder above.
+      values_and_frequencies.back()->set_null_mask(
+        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     }
 
-    return cudf::make_structs_column(
-      values.size(), std::move(values_and_frequencies), 0, rmm::device_buffer{}, stream, mr);
+    return cudf::make_structs_column(values.size(),
+                                     std::move(values_and_frequencies),
+                                     0,
+                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                     stream,
+                                     mr);
   };
 
   auto const make_lists_histograms = [&](cudf::size_type num_elements,
@@ -410,37 +429,41 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
     auto const sizes_itr = cuda::make_constant_iterator(1);
     auto offsets         = std::get<0>(
       cudf::detail::make_offsets_child_column(sizes_itr, sizes_itr + num_elements, stream, mr));
-    return cudf::make_lists_column(
-      num_elements, std::move(offsets), std::move(structs_histogram), 0, rmm::device_buffer{});
+    return cudf::make_lists_column(num_elements,
+                                   std::move(offsets),
+                                   std::move(structs_histogram),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   };
 
   if (output_as_lists) {
-    auto child            = make_structs_histogram(rmm::device_buffer{}, 0);
+    auto child =
+      make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     auto lists_histograms = make_lists_histograms(values.size(), std::move(child));
 
-    if (!h_checks.back()) {  // all frequencies are positive
+    if (!h_checks.back()) {  // all frequencies can flow downstream unchanged
       return lists_histograms;
     }
 
-    // Frequencies contain zero.
-    // We generate a null mask in which nulls correspond to the zero row in frequencies.
+    // Some frequencies must be sanitized.
+    // We generate a null mask in which nulls correspond to unusable frequencies.
     // Then, apply it to the output lists column, empty out the null lists, and finally remove
     // the null mask.
-    // By doing so, the input rows corresponding to zero frequencies will be output as empty lists.
-    auto [null_mask, null_count] =
-      cudf::bools_to_mask(cudf::device_span<bool const>(check_valid), stream, default_mr);
+    // By doing so, input rows with unusable frequencies will be output as empty lists.
+    auto [null_mask, null_count] = cudf::bools_to_mask(
+      cudf::device_span<bool const>(check_frequency_usable), stream, default_mr);
     lists_histograms->set_null_mask(std::move(*null_mask.release()), null_count);
     lists_histograms = cudf::purge_nonempty_nulls(lists_histograms->view(), stream, mr);
-    lists_histograms->set_null_mask(rmm::device_buffer{}, 0);
+    lists_histograms->set_null_mask(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     return lists_histograms;
   } else {                   // output_as_lists==false
-    if (!h_checks.back()) {  // all frequencies are positive
-      return make_structs_histogram(rmm::device_buffer{}, 0);
+    if (!h_checks.back()) {  // all frequencies can flow downstream unchanged
+      return make_structs_histogram(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     }
 
-    // We nullify the values corresponding to zero frequencies.
+    // We nullify the values corresponding to unusable frequencies.
     auto [null_mask, null_count] =
-      cudf::bools_to_mask(cudf::device_span<bool const>(check_valid), stream, mr);
+      cudf::bools_to_mask(cudf::device_span<bool const>(check_frequency_usable), stream, mr);
     return make_structs_histogram(std::move(*null_mask.release()), null_count);
   }
 }
@@ -452,11 +475,27 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
+  return percentile_from_histogram(
+    input, percentages, output_as_list, interpolation, value_order::ASCENDING, stream, mr);
+}
+
+std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
+                                                        std::vector<double> const& percentages,
+                                                        bool output_as_list,
+                                                        percentile_interpolation interpolation,
+                                                        value_order order,
+                                                        cuda::stream_ref stream,
+                                                        rmm::device_async_resource_ref mr)
+{
   check_input(input, percentages);
   CUDF_EXPECTS(interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS ||
                  interpolation == percentile_interpolation::ENDPOINT_DELTA,
                "Unsupported percentile interpolation algorithm.",
                std::invalid_argument);
+  CUDF_EXPECTS(order == value_order::ASCENDING || order == value_order::DESCENDING,
+               "Unsupported histogram value order.",
+               std::invalid_argument);
+  auto const is_descending = order == value_order::DESCENDING;
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
@@ -482,11 +521,14 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                            0};
   auto const labeled_histograms = cudf::table_view{{labels_cv, histograms}};
   // Find the order of segmented sort elements within each histogram list.
-  // The null order must be `AFTER`.
+  // Nulls must physically sort after valid values so they can be excluded below. cuDF reverses
+  // null precedence along with value order, so descending values require null_order::BEFORE.
   auto const ordered_indices = cudf::sorted_order(
     labeled_histograms,
-    std::vector<cudf::order>{cudf::order::ASCENDING, cudf::order::ASCENDING},
-    std::vector<cudf::null_order>{cudf::null_order::AFTER, cudf::null_order::AFTER},
+    std::vector<cudf::order>{cudf::order::ASCENDING,
+                             is_descending ? cudf::order::DESCENDING : cudf::order::ASCENDING},
+    std::vector<cudf::null_order>{
+      cudf::null_order::AFTER, is_descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER},
     stream,
     default_mr);
 

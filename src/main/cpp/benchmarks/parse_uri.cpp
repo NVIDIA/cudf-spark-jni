@@ -117,7 +117,8 @@ static void bench_parse_uri(nvbench::state& state)
       cudf::type_id::INT32, distribution_id::UNIFORM, 1, data_view.size() - 1);
   auto gather_table =
     create_random_table({cudf::type_id::INT32}, row_count{n_rows}, gather_profile);
-  gather_table->get_column(0).set_null_mask(rmm::device_buffer{}, 0);
+  gather_table->get_column(0).set_null_mask(
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
 
   // Create scatter map by placing 0-index values throughout the gather-map
   auto scatter_data = cudf::sequence(

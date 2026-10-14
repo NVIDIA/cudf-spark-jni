@@ -26,6 +26,7 @@
 # SUBMODULE_SYNC_PHASES=1
 
 set -ex
+set -o pipefail
 
 phase=${1:-all}
 case "$phase" in
@@ -34,10 +35,18 @@ case "$phase" in
 esac
 if [[ $phase == all ]]; then
   state_file=$(mktemp "${TMPDIR:-/tmp}/submodule-sync-$(date +%s)-XXXXXX")
-  trap 'rm -f "$state_file"' EXIT
 else
   state_file=${2:?Pass the same temporary state-file path to prepare and validate}
 fi
+netrc_file=
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
+cleanup() {
+  [[ -z "$netrc_file" ]] || rm -f "$netrc_file"
+  if [[ $phase == all ]]; then
+    rm -f "$state_file"
+  fi
+}
+trap cleanup EXIT
 
 OWNER=${OWNER:-"NVIDIA"}
 REPO=${REPO:-"cudf-spark-jni"}
@@ -46,6 +55,61 @@ REPO_LOC="github.com/${OWNER}/${REPO}.git"
 INTERMEDIATE_HEAD=bot-submodule-sync-${REF}
 MVN_SETTINGS=${MVN_SETTINGS:-"ci/settings.xml"}
 MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -B -s $MVN_SETTINGS"
+
+# Redirect Arrow's bundled Thrift download to the Artifactory mirror (as the
+# premerge job does): cudf-pins/setup.cmake turns ARROW_THRIFT_MIRROR_URL
+# into ARROW_THRIFT_URL for the pinned version. Untraced: the condition below
+# expands ART_CREDS_* (set -x would print the password).
+set +x
+if [[ -n "${ARTIFACTORY_NAME:-}" && -n "${ART_CREDS_USR:-}" && -n "${ART_CREDS_PSW:-}" ]]; then
+  export ARROW_THRIFT_MIRROR_URL="${ARROW_THRIFT_MIRROR_URL:-https://${ARTIFACTORY_NAME}/artifactory/sw-spark-apache-remote}"
+  export CMAKE_NETRC=OPTIONAL
+  # Per-run netrc holding only the current credentials: a stale ~/.netrc
+  # entry would use credentials the filter below cannot redact.
+  netrc_file="$(mktemp "${TMPDIR:-/tmp}/netrc-thrift-XXXXXXXX")"
+  printf 'machine %s login %s password %s\n' "${ARTIFACTORY_NAME}" "${ART_CREDS_USR}" "${ART_CREDS_PSW}" > "${netrc_file}"
+  export CMAKE_NETRC_FILE="${netrc_file}"
+fi
+set -x
+
+# Redact the mirror credentials (raw and base64) from build output: a failed
+# authenticated download can print an Authorization header Jenkins won't mask.
+redact_credentials() {
+  local args=() esc filter_status=0 xtrace_was_on=0
+  if [[ $- == *x* ]]; then
+    xtrace_was_on=1
+  fi
+  # Filter arguments derive from the credentials: never traced.
+  set +x
+  local creds=()
+  local username="${ART_CREDS_USR:-}" password="${ART_CREDS_PSW:-}"
+  # The encoded form subsumes the raw ones: redact it first, so a raw
+  # replacement cannot corrupt the encoded match and leave readable residue.
+  if [[ -n "$username" || -n "$password" ]]; then
+    creds+=("$(printf '%s:%s' "$username" "$password" | base64 -w 0)")
+  fi
+  if (( ${#password} > ${#username} )); then
+    creds+=("$password" "$username")
+  else
+    creds+=("$username" "$password")
+  fi
+  for secret in "${creds[@]}"; do
+    [[ -n ${secret} ]] || continue
+    esc="$(printf '%s' "${secret}" | sed 's/[][\.\\*^$#]/\\&/g')"
+    args+=(-e "s#${esc}#****#g")
+  done
+  if [[ ${#args[@]} -eq 0 ]]; then
+    cat
+  else
+    sed "${args[@]}"
+    filter_status=$?
+  fi
+  if [[ ${xtrace_was_on} == 1 ]]; then
+    set -x
+  fi
+  # Restore tracing first: it must not overwrite the filter's status.
+  return ${filter_status}
+}
 
 release_line() {
   local version=$1
@@ -66,7 +130,7 @@ if [[ $phase != validate ]]; then
   export GIT_COMMITTER_NAME="cudf-spark automation"
   export GIT_AUTHOR_EMAIL="70000568+nvauto@users.noreply.github.com"
   export GIT_COMMITTER_EMAIL="70000568+nvauto@users.noreply.github.com"
-  git submodule update --init --recursive
+  ci/retry-git-network.sh git submodule update --init --recursive
 
   # try cleanup remote first if no open PR for HEAD targeting BASE
   $WORKSPACE/.github/workflows/action-helper/python/cleanup-bot-branch \
@@ -85,7 +149,7 @@ if [[ $phase != validate ]]; then
   if [ -n "$CUDF_TAG" ]; then
     git -C thirdparty/cudf checkout tags/$CUDF_TAG
   else
-    git submodule update --remote --merge
+    ci/retry-git-network.sh git submodule update --remote --merge
   fi
   cudf_version='<missing>'
   if [[ -r thirdparty/cudf/VERSION ]]; then
@@ -117,7 +181,7 @@ if [[ $phase != validate ]]; then
     -DUSE_GDS=ON \
     -DBUILD_TESTS=ON \
     -DUSE_SANITIZER=ON \
-    -DLIBCUDF_CONFIGURE_ONLY=ON
+    -DLIBCUDF_CONFIGURE_ONLY=ON 2>&1 | redact_credentials
 
   LIBCUDF_BUILD_PATH=$(${MVN} help:evaluate ${MVN_MIRROR} -Dexpression=libcudf.build.path -q -DforceStdout)
   # Extract the rapids-cmake sha1 that we need to pin too
@@ -165,7 +229,7 @@ ${MVN} clean verify ${MVN_MIRROR} \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest,!PackagedJarOriginCheck \
   -DBUILD_TESTS=ON \
-  -DUSE_SANITIZER=ON
+  -DUSE_SANITIZER=ON 2>&1 | redact_credentials
 verify_status=$?
 set -e
 ccache -s || true

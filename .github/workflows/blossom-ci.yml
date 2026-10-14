@@ -47,6 +47,7 @@ jobs:
         github.actor == 'hyperbolic2346' ||
         github.actor == 'igorpeshansky' ||
         github.actor == 'jihoonson' ||
+        github.actor == 'KyleFromNVIDIA' ||
         github.actor == 'liurenjie1024' ||
         github.actor == 'mythrocks' ||
         github.actor == 'nartal1' ||

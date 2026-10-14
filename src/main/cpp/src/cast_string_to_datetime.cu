@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -947,7 +947,7 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
   return make_structs_column(num_rows,
                              std::move(output_columns),
                              /* null_count */ 0,
-                             rmm::device_buffer(),
+                             cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                              stream,
                              mr);
 }
@@ -1088,12 +1088,13 @@ std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& inp
 
   auto const d_input = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
-  auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()},
-                                            input.size(),
-                                            rmm::device_buffer{},
-                                            0,
-                                            stream,
-                                            mr);
+  auto result =
+    cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()},
+                                input.size(),
+                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                0,
+                                stream,
+                                mr);
   auto validity =
     rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
 
