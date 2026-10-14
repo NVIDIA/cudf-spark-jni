@@ -75,10 +75,30 @@ inline std::size_t pool_align_up(std::size_t bytes) noexcept
   return rmm::align_up(bytes, rmm::CUDA_ALLOCATION_ALIGNMENT);
 }
 
+// Populate a worker's pages via madvise when available, with manual writes as fallback.
+inline void populate_or_touch_pages(char* chunk,
+                                    std::size_t worker_pages,
+                                    std::size_t page_size,
+                                    bool populate_write)
+{
+  // -1/1/0 = unsupported/known-good/unknown; one sticky probe avoids syscall spam.
+  static std::atomic<int> populate_state{0};
+  if (populate_write) {
+    int const state = populate_state.load();
+    if (state >= 0 && ::madvise(chunk, worker_pages * page_size, MADV_POPULATE_WRITE) == 0) {
+      populate_state.store(1);
+      return;
+    }
+    if (state == 0) { populate_state.store(-1); }  // old kernel: fall back
+  }
+  char volatile* pages = chunk;
+  for (std::size_t page = 0; page < worker_pages; ++page) {
+    pages[page * page_size] = 0;
+  }
+}
+
 // Faults in every page of [base, base + round-up-to-page bytes) with up to `threads`
-// worker threads. Workers bind to the NUMA node's CPUs when bound; page faults are
-// served via madvise(MADV_POPULATE_WRITE) when available (kernel 5.14+) and via a
-// manual per-page write otherwise.
+// worker threads. Workers bind to the NUMA node's CPUs when bound.
 inline void pretouch_parallel(
   void* base, std::size_t bytes, int threads, int numa_node, bool populate_write)
 {
@@ -94,12 +114,10 @@ inline void pretouch_parallel(
   bool bind_cpus = false;
   cpu_set_t cpus{};
   if (numa_node >= 0) { bind_cpus = node_cpu_set(numa_node, &cpus); }
-  // -1/1/0 = unsupported/known-good/unknown; one sticky probe avoids syscall spam.
-  static std::atomic<int> populate_state{0};
   std::vector<std::thread> workers;
   workers.reserve(worker_count);
   std::atomic<bool> start_workers{false};
-  auto* const pages     = static_cast<char volatile*>(base);
+  auto* const pages     = static_cast<char*>(base);
   std::size_t next_page = 0;
   try {
     for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
@@ -122,25 +140,8 @@ inline void pretouch_parallel(
         }
         // Finish creating thread stacks before concurrent page faults contend for mmap_lock.
         start_workers.wait(false);
-        auto const chunk     = pages + first_page * page_size;
-        auto const chunk_len = worker_pages * page_size;
-        if (populate_write) {
-          int const state = populate_state.load(std::memory_order_relaxed);
-          if (state == 0) {
-            if (::madvise(const_cast<char*>(chunk), chunk_len, MADV_POPULATE_WRITE) == 0) {
-              populate_state.store(1, std::memory_order_relaxed);
-              return;
-            }
-            populate_state.store(-1, std::memory_order_relaxed);  // old kernel: fall back
-          } else if (state == 1) {
-            if (::madvise(const_cast<char*>(chunk), chunk_len, MADV_POPULATE_WRITE) == 0) {
-              return;
-            }
-          }
-        }
-        for (std::size_t page = 0; page < worker_pages; ++page) {
-          pages[(first_page + page) * page_size] = 0;
-        }
+        populate_or_touch_pages(
+          pages + first_page * page_size, worker_pages, page_size, populate_write);
       });
     }
     start_workers.store(true);
@@ -401,7 +402,10 @@ class pageable_pool_resource_t
 
   bool operator==(pageable_pool_resource_t const& other) const noexcept { return this == &other; }
 
-  friend void get_property(pageable_pool_resource_t const&, cuda::mr::host_accessible) noexcept {}
+  friend void get_property(pageable_pool_resource_t const&, cuda::mr::host_accessible) noexcept
+  {
+    // The host-accessible property is a compile-time marker with no runtime state.
+  }
 
   std::size_t pool_size() const noexcept { return pool_size_; }
 

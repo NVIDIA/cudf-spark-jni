@@ -239,20 +239,21 @@ public final class PageableMemoryPool implements AutoCloseable {
    * the pool is exhausted, so callers can fall back gracefully.
    */
   private HostMemoryBuffer tryAllocateInternal(long bytes) {
+    long allocated;
     lifecycleLock.readLock().lock();
     try {
       if (this.poolHandle == -1) {
         throw new IllegalStateException("Pageable memory pool has been closed");
       }
-      long allocated = allocFromPageablePool(this.poolHandle, bytes);
-      if (allocated == -1) {
-        return null;
-      }
-      return new HostMemoryBuffer(allocated, bytes,
-              new PageableHostBufferCleaner(allocated, bytes));
+      allocated = allocFromPageablePool(this.poolHandle, bytes);
     } finally {
       lifecycleLock.readLock().unlock();
     }
+    if (allocated == -1) {
+      return null;
+    }
+    return new HostMemoryBuffer(allocated, bytes,
+            new PageableHostBufferCleaner(allocated, bytes));
   }
 
   private void free(long address, long size) {

@@ -67,7 +67,9 @@ inline bool parse_cpu_list(char const* path, cpu_set_t* out)
   bool any = false;
   char line[8192];
   while (std::fgets(line, sizeof(line), fp) != nullptr) {
-    for (char* tok = std::strtok(line, ",\n"); tok != nullptr; tok = std::strtok(nullptr, ",\n")) {
+    char* saveptr = nullptr;
+    for (char* tok = ::strtok_r(line, ",\n", &saveptr); tok != nullptr;
+         tok       = ::strtok_r(nullptr, ",\n", &saveptr)) {
       unsigned int lo = 0, hi = 0;
       int const matched = std::sscanf(tok, "%u-%u", &lo, &hi);
       if (matched <= 0) { continue; }
@@ -101,11 +103,10 @@ inline bool node_cpu_set(int node, cpu_set_t* out)
  * @brief Returns the NUMA node of the host address (get_mempolicy with
  * MPOL_F_NODE|MPOL_F_ADDR), or -1 when it cannot be determined. Useful for tests.
  */
-inline int numa_node_of(void const* addr)
+inline int numa_node_of(void* addr)
 {
   int node      = -1;
-  long const rc = ::syscall(
-    SYS_get_mempolicy, &node, nullptr, 0, const_cast<void*>(addr), MPOL_F_NODE | MPOL_F_ADDR);
+  long const rc = ::syscall(SYS_get_mempolicy, &node, nullptr, 0, addr, MPOL_F_NODE | MPOL_F_ADDR);
   return rc == 0 ? node : -1;
 }
 
