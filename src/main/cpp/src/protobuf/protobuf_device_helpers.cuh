@@ -103,6 +103,7 @@ void set_error_once_async(protobuf_error* error_flag,
                           protobuf_error error,
                           cuda::stream_ref stream);
 
+// On success, size is bounded by the remaining bytes in [cur, end).
 __device__ inline bool get_wire_type_size(proto_wire_type wt,
                                           uint8_t const* cur,
                                           uint8_t const* end,
@@ -141,16 +142,34 @@ __device__ inline bool skip_sized_field(uint8_t const* cur,
                                         uint8_t const*& out_cur)
 {
   uint32_t size;
-  // Ensure we don't skip past the end of the buffer
-  if (!get_wire_type_size(wt, cur, end, size) || size > end - cur) return false;
+  if (!get_wire_type_size(wt, cur, end, size)) return false;
   out_cur = cur + size;
   return true;
 }
 
+// error_flag may be nullptr when the caller only needs success or failure.
 __device__ inline bool decode_tag(uint8_t const*& cur,
                                   uint8_t const* end,
                                   proto_tag& tag,
-                                  protobuf_error* error_flag);
+                                  protobuf_error* error_flag)
+{
+  uint32_t key;
+  uint32_t key_bytes;
+  if (!read_varint32(cur, end, key, key_bytes)) {
+    set_error_once(error_flag, protobuf_error::VARINT);
+    return false;
+  }
+
+  cur += key_bytes;
+  uint32_t fn = key >> 3;
+  if (fn == 0 || fn > static_cast<uint32_t>(MAX_FIELD_NUMBER)) {
+    set_error_once(error_flag, protobuf_error::FIELD_NUMBER);
+    return false;
+  }
+  tag.field_number = static_cast<int>(fn);
+  tag.wire_type    = static_cast<proto_wire_type>(key & 0x7);
+  return true;
+}
 
 // Keep the rare group stack out of the scanner hot paths.
 static __device__ __noinline__ bool skip_group(uint8_t const* cur,
@@ -214,6 +233,7 @@ __device__ inline bool get_field_data_location(uint8_t const* cur,
     uint32_t len;
     uint32_t len_bytes;
     if (!read_varint32(cur, end, len, len_bytes)) return false;
+    // Keep the signed-range check defensively; the caller bounds the buffer by cudf::size_type.
     if (len > static_cast<uint32_t>(end - cur - len_bytes) || !cuda::std::in_range<int>(len)) {
       return false;
     }
@@ -312,29 +332,6 @@ __device__ inline bool check_message_bounds(T start,
     set_error_once(error_flag, protobuf_error::BOUNDS);
     return false;
   }
-  return true;
-}
-
-__device__ inline bool decode_tag(uint8_t const*& cur,
-                                  uint8_t const* end,
-                                  proto_tag& tag,
-                                  protobuf_error* error_flag)
-{
-  uint32_t key;
-  uint32_t key_bytes;
-  if (!read_varint32(cur, end, key, key_bytes)) {
-    set_error_once(error_flag, protobuf_error::VARINT);
-    return false;
-  }
-
-  cur += key_bytes;
-  uint32_t fn = key >> 3;
-  if (fn == 0 || fn > static_cast<uint32_t>(MAX_FIELD_NUMBER)) {
-    set_error_once(error_flag, protobuf_error::FIELD_NUMBER);
-    return false;
-  }
-  tag.field_number = static_cast<int>(fn);
-  tag.wire_type    = static_cast<proto_wire_type>(key & 0x7);
   return true;
 }
 

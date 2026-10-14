@@ -367,8 +367,8 @@ CUDF_KERNEL void extract_lengths_kernel(LocationProvider loc_provider,
   if (idx >= total_items) return;
 
   auto loc = loc_provider.input_location(idx);
-  // Present lengths are bounded by the input buffer and defaults by the host check, both of
-  // which cuDF limits to int32_t.
+  // Both input buffer length and default_length are limited to int32_t, one by cuDF, and the
+  // other by a host-side check.
   out_lengths[idx] = static_cast<int32_t>(loc.is_present() ? loc.length : default_length);
 }
 

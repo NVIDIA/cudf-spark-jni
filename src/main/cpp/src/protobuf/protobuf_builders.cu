@@ -366,7 +366,6 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
   auto h_name_chars = cudf::detail::make_pinned_vector_async<uint8_t>(total_name_chars, stream);
   uint8_t* cursor   = h_name_chars.data();
   for (auto const& name : enum_name_bytes) {
-    if (name.empty()) { continue; }
     std::copy(name.cbegin(), name.cend(), cursor);
     cursor += name.size();
   }

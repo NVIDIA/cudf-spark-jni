@@ -342,7 +342,7 @@ __device__ bool walk_repeated_element(uint8_t const* cur,
     // occurrence; `skip_field` advances past the field but doesn't surface those. The count
     // path's `f` ignores them, but sharing one helper keeps the walker generic over both
     // actions and avoids re-validating field bounds twice.
-    field_location data;
+    field_location data = field_location::missing();
     if (!get_field_data_location(cur, msg_end, wt, data)) {
       set_error_once(error_flag, protobuf_error::FIELD_SIZE);
       return false;
