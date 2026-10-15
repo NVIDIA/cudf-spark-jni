@@ -17,6 +17,7 @@
 #include "utilities.hpp"
 
 #include "gtest/gtest.h"
+#include "utilities/integer_utils.hpp"
 
 #include <cudf_test/base_fixture.hpp>
 
@@ -24,7 +25,27 @@
 
 #include <rmm/device_uvector.hpp>
 
+#include <cstdint>
+#include <limits>
+
 class UtilitiesTest : public cudf::test::BaseFixture {};
+
+TEST_F(UtilitiesTest, RoundUpSafe)
+{
+  auto const check = [](auto zero) {
+    using T              = decltype(zero);
+    constexpr T multiple = 8;
+    constexpr T largest  = std::numeric_limits<T>::max() / multiple * multiple;
+
+    using spark_rapids_jni::util::round_up_safe;
+    EXPECT_EQ(round_up_safe(zero, multiple), zero);
+    EXPECT_EQ(round_up_safe(multiple, multiple), multiple);
+    EXPECT_EQ(round_up_safe(largest - T{1}, multiple), largest);
+    EXPECT_THROW(round_up_safe(largest + T{1}, multiple), cudf::data_type_error);
+  };
+  check(int64_t{0});
+  check(uint64_t{0});
+}
 
 TEST_F(UtilitiesTest, BitwiseOr)
 {
