@@ -234,10 +234,10 @@ add_library(
   src/MapJni.cpp
   src/MapUtilsJni.cpp
   src/MapZipWithUtilsJNI.cpp
+  src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
-  src/PackedHostToDeviceCopyJni.cpp
   src/PageablePoolJni.cpp
   src/ParseURIJni.cpp
   src/ProtobufJni.cpp

@@ -30,6 +30,7 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
+#include <span>
 
 namespace spark_rapids_jni {
 
@@ -69,10 +70,9 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
  * @param stream CUDA stream the copies are queued on or forked from
  * @return The event recorded after the copies, which the caller must destroy
  */
-cudaEvent_t copy_host_buffers_to_device_async(
-  cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
-  cudf::device_span<uint8_t> destination,
-  bool on_side_stream,
-  cuda::stream_ref stream = cudf::get_default_stream());
+cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const> const> buffers,
+                                              cudf::device_span<uint8_t> destination,
+                                              bool on_side_stream,
+                                              cuda::stream_ref stream = cudf::get_default_stream());
 
 }  // namespace spark_rapids_jni

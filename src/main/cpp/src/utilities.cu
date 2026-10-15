@@ -16,6 +16,7 @@
 
 #include "utilities.hpp"
 
+#include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/null_mask.hpp>
@@ -33,6 +34,7 @@
 #include <cuda_runtime_api.h>
 
 #include <cstddef>
+#include <vector>
 
 namespace spark_rapids_jni {
 
@@ -86,11 +88,10 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   return out;
 }
 
-cudaEvent_t copy_host_buffers_to_device_async(
-  cudf::host_span<cudf::host_span<uint8_t const> const> buffers,
-  cudf::device_span<uint8_t> destination,
-  bool on_side_stream,
-  cuda::stream_ref stream)
+cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const> const> buffers,
+                                              cudf::device_span<uint8_t> destination,
+                                              bool on_side_stream,
+                                              cuda::stream_ref stream)
 {
   std::size_t total = 0;
   for (auto const& buffer : buffers) {
@@ -105,6 +106,9 @@ cudaEvent_t copy_host_buffers_to_device_async(
   try {
     // Buffers adjacent in host memory land adjacent in the destination, so a run of them moves as
     // one copy.
+    std::vector<void*> dsts;
+    std::vector<void const*> srcs;
+    std::vector<std::size_t> sizes;
     auto* const base   = destination.data();
     std::size_t offset = 0;
     for (std::size_t run_start = 0; run_start < buffers.size();) {
@@ -116,11 +120,16 @@ cudaEvent_t copy_host_buffers_to_device_async(
         ++run_end;
       }
       if (run_bytes > 0) {
-        CUDF_CUDA_TRY(
-          cudaMemcpyAsync(base + offset, src, run_bytes, cudaMemcpyDefault, copy_stream.get()));
+        dsts.push_back(base + offset);
+        srcs.push_back(src);
+        sizes.push_back(run_bytes);
       }
       offset += run_bytes;
       run_start = run_end;
+    }
+    if (!dsts.empty()) {
+      CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+        dsts.data(), srcs.data(), sizes.data(), dsts.size(), copy_stream));
     }
 
     cudaEvent_t event;

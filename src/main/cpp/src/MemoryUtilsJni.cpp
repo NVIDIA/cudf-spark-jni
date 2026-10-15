@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 extern "C" {
@@ -50,7 +51,7 @@ Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_copyAsync(JNIEnv* env,
     CUDF_EXPECTS(addrs.size() == lens.size(),
                  "host buffer addresses and lengths must have the same count");
 
-    std::vector<cudf::host_span<uint8_t const>> buffers;
+    std::vector<std::span<uint8_t const>> buffers;
     buffers.reserve(lens.size());
     for (int i = 0; i < lens.size(); ++i) {
       CUDF_EXPECTS(lens[i] >= 0, "host buffer length must not be negative");
