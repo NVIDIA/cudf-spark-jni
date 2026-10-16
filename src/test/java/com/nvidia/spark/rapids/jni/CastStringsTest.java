@@ -609,6 +609,30 @@ public class CastStringsTest {
     }
   }
 
+  @Test
+  void hexToBytesTest() {
+    try (
+      ColumnVector input = ColumnVector.fromStrings("4142", "aF", "F", "ABC", "", "GG",
+          "0xFF", null, "00FF", "001122334455667788");
+      ColumnVector expected = ColumnVector.fromLists(
+        new HostColumnVector.ListType(true, new HostColumnVector.BasicType(true, DType.UINT8)),
+        Arrays.asList((byte) 0x41, (byte) 0x42),
+        Arrays.asList((byte) 0xAF),
+        Arrays.asList((byte) 0x0F),
+        Arrays.asList((byte) 0x0A, (byte) 0xBC),
+        Arrays.asList(),
+        null,
+        null,
+        null,
+        Arrays.asList((byte) 0x00, (byte) 0xFF),
+        Arrays.asList((byte) 0x00, (byte) 0x11, (byte) 0x22, (byte) 0x33,
+            (byte) 0x44, (byte) 0x55, (byte) 0x66, (byte) 0x77, (byte) 0x88));
+      ColumnVector result = CastStrings.hexToBytes(input)
+    ) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
   /**
    * Mock timezone info for testing.
    */

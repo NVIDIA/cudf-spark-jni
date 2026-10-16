@@ -192,6 +192,16 @@ public class CastStrings {
   }
 
   /**
+   * Decode hexadecimal strings into binary values. Invalid strings become null.
+   *
+   * @param cv The input strings column
+   * @return a new LIST<UINT8> ColumnVector containing the decoded bytes
+   */
+  public static ColumnVector hexToBytes(ColumnView cv) {
+    return new ColumnVector(hexToBytes(cv.getNativeView()));
+  }
+
+  /**
    * Trims and parses strings to intermediate result.
    * This is the first phase of casting string with timezone to timestamp.
    *
@@ -428,6 +438,7 @@ public class CastStrings {
     boolean ansiEnabled, int dtype);
   private static native long fromIntegersWithBase(long nativeColumnView, int base);
   private static native long bytesToHex(long nativeColumnView);
+  private static native long hexToBytes(long nativeColumnView);
 
   private static native long parseTimestampStringsToIntermediate(
       long input, int defaultTimezoneIndex,

@@ -266,4 +266,19 @@ std::unique_ptr<cudf::column> bytes_to_hex(
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
+/**
+ * @brief Decode hexadecimal strings into binary lists of bytes.
+ *
+ * Odd-length strings are decoded with a leading zero nibble. Invalid strings become null.
+ *
+ * @param input The input strings column
+ * @param stream Stream on which to operate.
+ * @param mr Memory resource for returned column
+ * @return A LIST<UINT8> column containing the decoded bytes
+ */
+std::unique_ptr<cudf::column> hex_to_bytes(
+  cudf::strings_column_view const& input,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
 }  // namespace spark_rapids_jni

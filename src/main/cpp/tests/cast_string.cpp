@@ -20,12 +20,15 @@
 #include <cudf_test/table_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
+#include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/strings/convert/convert_floats.hpp>
 
 #include <rmm/device_uvector.hpp>
 
 #include <cast_string.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -42,11 +45,233 @@ struct StringToDecimalTests : public test::BaseFixture {};
 
 struct ParseTimestampWithFormatTests : public test::BaseFixture {};
 
+struct HexToBytesTests : public test::BaseFixture {};
+
 template <typename T>
 struct StringToFloatTests : public test::BaseFixture {};
 
 TYPED_TEST_SUITE(StringToIntegerTests, cudf::test::IntegralTypesNotBool);
 TYPED_TEST_SUITE(StringToFloatTests, cudf::test::FloatingPointTypes);
+
+TEST_F(HexToBytesTests, SparkUnhexSemantics)
+{
+  std::vector<std::string> values{"4142",
+                                  "aF",
+                                  "F",
+                                  "ABC",
+                                  "",
+                                  "GG",
+                                  "0xFF",
+                                  " F",
+                                  "00ff",
+                                  "7F80",
+                                  "00",
+                                  "bad",
+                                  "001122334455667788",
+                                  "ignored"};
+  std::vector<bool> valid(values.size(), true);
+  valid.back()     = false;
+  auto const input = test::strings_column_wrapper(values.begin(), values.end(), valid.begin());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+  auto const expected =
+    test::lists_column_wrapper<uint8_t>({{0x41, 0x42},
+                                         {0xAF},
+                                         {0x0F},
+                                         {0x0A, 0xBC},
+                                         {},
+                                         {},
+                                         {},
+                                         {},
+                                         {0x00, 0xFF},
+                                         {0x7F, 0x80},
+                                         {0x00},
+                                         {0x0B, 0xAD},
+                                         {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88},
+                                         {}},
+                                        test::iterators::nulls_at({5, 6, 7, 13}));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected);
+}
+
+TEST_F(HexToBytesTests, SlicedInput)
+{
+  std::vector<std::string> values{"outside", "AB", "bad!", "ignored", "FF", "outside"};
+  std::vector<bool> valid{true, true, true, false, true, true};
+  auto const strings = test::strings_column_wrapper(values.begin(), values.end(), valid.begin());
+  auto const sliced  = cudf::slice(strings, {1, 5})[0];
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{sliced}, cudf::get_default_stream());
+  auto const expected = test::lists_column_wrapper<uint8_t>({{0xAB}, {}, {}, {0xFF}},
+                                                            test::iterators::nulls_at({1, 2}));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected);
+}
+
+TEST_F(HexToBytesTests, EmptyInput)
+{
+  auto const input = test::strings_column_wrapper{};
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+  auto const expected = test::lists_column_wrapper<uint8_t>{};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected);
+}
+
+TEST_F(HexToBytesTests, LongRows)
+{
+  std::string valid(131'073, 'A');
+  std::string invalid = valid;
+  invalid.back()      = 'G';
+  std::vector<std::string> values{valid, invalid, "ignored"};
+  std::vector<bool> input_validity{true, true, false};
+  auto const input =
+    test::strings_column_wrapper(values.begin(), values.end(), input_validity.begin());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+
+  std::vector<uint8_t> expected_bytes(65'537, 0xAA);
+  expected_bytes.front() = 0x0A;
+  auto const expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto const expected_offsets =
+    test::fixed_width_column_wrapper<cudf::size_type>{0, 65'537, 65'537, 65'537};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view().child(0), expected_offsets);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view().child(1), expected_child);
+  EXPECT_EQ(actual->view().null_count(), 2);
+}
+
+TEST_F(HexToBytesTests, SlicedLongRow)
+{
+  std::vector<std::string> values{"outside", std::string(131'072, 'F'), "outside"};
+  auto const input  = test::strings_column_wrapper(values.begin(), values.end());
+  auto const sliced = cudf::slice(input, {1, 2})[0];
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{sliced}, cudf::get_default_stream());
+
+  std::vector<uint8_t> expected_bytes(65'536, 0xFF);
+  auto const expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto const expected_offsets = test::fixed_width_column_wrapper<cudf::size_type>{0, 65'536};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view().child(0), expected_offsets);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view().child(1), expected_child);
+  EXPECT_EQ(actual->view().null_count(), 0);
+}
+
+TEST_F(HexToBytesTests, ManyShortRows)
+{
+  std::vector<std::string> values(8193, "aF");
+  auto const input = test::strings_column_wrapper(values.begin(), values.end());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+
+  std::vector<uint8_t> expected_bytes(values.size(), 0xAF);
+  auto const expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view().child(1), expected_child);
+  EXPECT_EQ(actual->view().null_count(), 0);
+}
+
+TEST_F(HexToBytesTests, ManyRowsWithLongValues)
+{
+  std::vector<std::string> values(8193, "aF");
+  values[0]        = std::string(131'073, 'A');
+  values[1]        = values[0];
+  values[1].back() = 'G';
+  std::vector<bool> validity(values.size(), true);
+  validity[2]      = false;
+  auto const input = test::strings_column_wrapper(values.begin(), values.end(), validity.begin());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+
+  std::vector<cudf::size_type> expected_offsets(values.size() + 1);
+  for (std::size_t row = 0; row < values.size(); ++row) {
+    expected_offsets[row + 1] = expected_offsets[row] + (row == 0 ? 65'537 : row < 3 ? 0 : 1);
+  }
+  auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
+    expected_offsets.begin(), expected_offsets.end());
+  std::vector<uint8_t> expected_bytes(expected_offsets.back(), 0xAF);
+  std::fill_n(expected_bytes.begin(), 65'537, 0xAA);
+  expected_bytes.front() = 0x0A;
+  auto expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto const valid_iter = test::iterators::nulls_at({1, 2});
+  auto [null_mask, null_count] =
+    cudf::test::detail::make_null_mask(valid_iter, valid_iter + values.size());
+  auto const expected = cudf::make_lists_column(values.size(),
+                                                expected_offsets_column.release(),
+                                                expected_child.release(),
+                                                null_count,
+                                                std::move(null_mask));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
+}
+
+TEST_F(HexToBytesTests, ManyRowsWithSparseLongValues)
+{
+  std::vector<std::string> values(20'001, "aF");
+  values[0]        = std::string(131'073, 'A');
+  values[1]        = values[0];
+  values[1].back() = 'G';
+  std::vector<bool> validity(values.size(), true);
+  validity[2]      = false;
+  auto const input = test::strings_column_wrapper(values.begin(), values.end(), validity.begin());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+
+  std::vector<cudf::size_type> expected_offsets(values.size() + 1);
+  for (std::size_t row = 0; row < values.size(); ++row) {
+    expected_offsets[row + 1] = expected_offsets[row] + (row == 0 ? 65'537 : row < 3 ? 0 : 1);
+  }
+  auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
+    expected_offsets.begin(), expected_offsets.end());
+  std::vector<uint8_t> expected_bytes(expected_offsets.back(), 0xAF);
+  std::fill_n(expected_bytes.begin(), 65'537, 0xAA);
+  expected_bytes.front() = 0x0A;
+  auto expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto const valid_iter = test::iterators::nulls_at({1, 2});
+  auto [null_mask, null_count] =
+    cudf::test::detail::make_null_mask(valid_iter, valid_iter + values.size());
+  auto const expected = cudf::make_lists_column(values.size(),
+                                                expected_offsets_column.release(),
+                                                expected_child.release(),
+                                                null_count,
+                                                std::move(null_mask));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
+}
+
+TEST_F(HexToBytesTests, SlicedSparseLongRowsAtThreshold)
+{
+  std::vector<std::string> values(20'003, "aF");
+  values[10'002]        = std::string(312, 'A');
+  values[20'001]        = std::string(312, 'A');
+  values[20'001].back() = 'G';
+  std::vector<bool> validity(values.size(), true);
+  validity[10'003]  = false;
+  auto const input  = test::strings_column_wrapper(values.begin(), values.end(), validity.begin());
+  auto const sliced = cudf::slice(input, {1, 20'002})[0];
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{sliced}, cudf::get_default_stream());
+
+  std::vector<cudf::size_type> expected_offsets(20'002);
+  for (std::size_t row = 0; row < 20'001; ++row) {
+    auto const row_size       = row == 10'001 ? 156 : row == 10'002 || row == 20'000 ? 0 : 1;
+    expected_offsets[row + 1] = expected_offsets[row] + row_size;
+  }
+  auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
+    expected_offsets.begin(), expected_offsets.end());
+
+  std::vector<uint8_t> expected_bytes(expected_offsets.back(), 0xAF);
+  std::fill_n(expected_bytes.begin() + expected_offsets[10'001], 156, 0xAA);
+  auto expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto const valid_iter = test::iterators::nulls_at({10'002, 20'000});
+  auto [null_mask, null_count] =
+    cudf::test::detail::make_null_mask(valid_iter, valid_iter + 20'001);
+  auto const expected = cudf::make_lists_column(20'001,
+                                                expected_offsets_column.release(),
+                                                expected_child.release(),
+                                                null_count,
+                                                std::move(null_mask));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
+}
 
 TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
 {

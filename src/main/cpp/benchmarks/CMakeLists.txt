@@ -75,6 +75,9 @@ ConfigureBench(ROW_CONVERSION_BENCH
 ConfigureBench(STRING_TO_FLOAT_BENCH
   cast_string_to_float.cpp)
 
+ConfigureBench(UNHEX_BENCH
+  unhex.cpp)
+
 ConfigureBench(LONG_TO_BINARY_STRING_BENCH
   cast_long_to_binary_string.cpp)
 
