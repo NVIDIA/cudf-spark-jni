@@ -1,5 +1,5 @@
 #=============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -95,3 +95,6 @@ ConfigureBench(PROTOBUF_DECODE_BENCH
 
 ConfigureBench(FROM_JSON_BENCH
   from_json.cu)
+
+ConfigureBench(PAGEABLE_POOL_BENCH
+  pageable_pool_dtoh.cpp)
