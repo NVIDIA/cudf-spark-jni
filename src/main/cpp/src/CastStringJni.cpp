@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@
 #include <cudf/unary.hpp>
 
 #include <bit>
+#include <optional>
 
 constexpr char const* JNI_CAST_ERROR_CLASS = "com/nvidia/spark/rapids/jni/CastException";
 // Keep these values synchronized with CastStrings.TIME_PARSER_POLICY_*.
@@ -387,6 +388,31 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseDateSt
     auto const input_view =
       cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
     return cudf::jni::release_as_jlong(spark_rapids_jni::parse_strings_to_date(input_view));
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_CastStrings_parseCsvDate(JNIEnv* env,
+                                                          jclass,
+                                                          jlong input_column,
+                                                          jstring j_format,
+                                                          jboolean fallback,
+                                                          jboolean trim_control_characters)
+{
+  JNI_NULL_CHECK(env, input_column, "input column is null", 0);
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto const input =
+      cudf::strings_column_view(*std::bit_cast<cudf::column_view const*>(input_column));
+    std::optional<std::string> format;
+    if (j_format != nullptr) {
+      auto const text = cudf::jni::native_jstring(env, j_format);
+      format.emplace(text.get(), text.size_bytes());
+    }
+    return cudf::jni::release_as_jlong(spark_rapids_jni::parse_csv_date_strings(
+      input, format, {static_cast<bool>(fallback), static_cast<bool>(trim_control_characters)}));
   }
   JNI_CATCH(env, 0);
 }
