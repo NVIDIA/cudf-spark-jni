@@ -16,13 +16,18 @@
 
 #include "get_json_object.hpp"
 
+#include <benchmarks/common/gjo_scenario_generators.hpp>
+
 #include <cudf_test/base_fixture.hpp>
+#include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/debug_utilities.hpp>
 
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/error.hpp>
 
 #include <cstdint>
+#include <random>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -71,4 +76,33 @@ TEST_F(GetJsonObjectTest, RejectsInvalidNamedFieldMatchContracts)
     spark_rapids_jni::get_json_object_multiple_paths(
       input, nested_paths, -1, -1, spark_rapids_jni::named_field_match_policy::LAST_NON_NULL),
     cudf::logic_error);
+}
+
+TEST_F(GetJsonObjectTest, ScenarioSeedChangesGeneratedValues)
+{
+  // The nested scenario's field values and absence pattern must depend on the seed,
+  // otherwise the seed axis measures one input twice.
+  auto& table          = spark_rapids_jni::gjo_scenarios::nested_table_135();
+  auto const num_rows  = std::size_t{4};
+  auto const row_bytes = std::size_t{10240};
+
+  std::vector<cudf::test::strings_column_wrapper> inputs;
+  for (std::uint64_t seed : {std::uint64_t{1}, std::uint64_t{2}}) {
+    std::mt19937_64 rng{seed};
+    auto rows =
+      spark_rapids_jni::gjo_scenarios::nested_build_rows(rng, table, num_rows, row_bytes, seed);
+    inputs.emplace_back(rows.begin(), rows.end());
+  }
+
+  std::vector<std::vector<path_spec>> const paths{{named_path("aafgihrfqbh")}};
+  std::vector<std::vector<std::string>> outputs;
+  for (auto const& input : inputs) {
+    auto const view   = cudf::strings_column_view{input};
+    auto const result = spark_rapids_jni::get_json_object_multiple_paths(view, paths, -1, -1);
+    outputs.push_back(cudf::test::to_strings(*result.front()));
+  }
+
+  // Same rows count, different generated values for at least one row.
+  EXPECT_EQ(outputs[0].size(), outputs[1].size());
+  EXPECT_NE(outputs[0], outputs[1]);
 }
