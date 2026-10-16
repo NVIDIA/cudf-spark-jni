@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#include "utilities.hpp"
+
+#include <cudf/detail/utilities/cuda_memcpy.hpp>
+#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
@@ -27,6 +31,10 @@
 
 #include <cuda/functional>
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
+
+#include <cstddef>
+#include <vector>
 
 namespace spark_rapids_jni {
 
@@ -78,6 +86,64 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
                       }));
 
   return out;
+}
+
+cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const> const> buffers,
+                                              cudf::device_span<uint8_t> destination,
+                                              bool on_side_stream,
+                                              cuda::stream_ref stream)
+{
+  std::size_t total = 0;
+  for (auto const& buffer : buffers) {
+    total += buffer.size();
+  }
+  CUDF_EXPECTS(total <= destination.size(), "host buffers do not fit in the destination");
+
+  // Forking orders the side stream behind everything already queued on `stream`, including the
+  // destination's allocation and any earlier copy into it.
+  auto const copy_stream = on_side_stream ? cudf::detail::fork_streams(stream, 1).front() : stream;
+
+  try {
+    // Buffers adjacent in host memory land adjacent in the destination, so a run of them moves as
+    // one copy.
+    std::vector<void*> dsts;
+    std::vector<void const*> srcs;
+    std::vector<std::size_t> sizes;
+    auto* const base   = destination.data();
+    std::size_t offset = 0;
+    for (std::size_t run_start = 0; run_start < buffers.size();) {
+      auto const* const src = buffers[run_start].data();
+      auto run_bytes        = buffers[run_start].size();
+      auto run_end          = run_start + 1;
+      while (run_end < buffers.size() && buffers[run_end].data() == src + run_bytes) {
+        run_bytes += buffers[run_end].size();
+        ++run_end;
+      }
+      if (run_bytes > 0) {
+        dsts.push_back(base + offset);
+        srcs.push_back(src);
+        sizes.push_back(run_bytes);
+      }
+      offset += run_bytes;
+      run_start = run_end;
+    }
+    if (!dsts.empty()) {
+      CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+        dsts.data(), srcs.data(), sizes.data(), dsts.size(), copy_stream));
+    }
+
+    cudaEvent_t event;
+    CUDF_CUDA_TRY(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+    if (auto const err = cudaEventRecord(event, copy_stream.get()); err != cudaSuccess) {
+      cudaEventDestroy(event);
+      CUDF_CUDA_TRY(err);
+    }
+    return event;
+  } catch (...) {
+    // Block until the copies already queued finish, since no event reaches the caller to wait on
+    cudaStreamSynchronize(copy_stream.get());
+    throw;
+  }
 }
 
 }  // namespace spark_rapids_jni
