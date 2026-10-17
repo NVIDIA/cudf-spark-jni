@@ -24,8 +24,10 @@ import ai.rapids.cudf.JSONOptions;
 import ai.rapids.cudf.Schema;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,6 +35,24 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FromJsonToStructsTest {
+  private static final int DECIMAL_SCALE = -5;
+  private static final int DECIMAL_PRECISION = 10;
+  private static final DType DECIMAL_TYPE =
+      DType.create(DType.DTypeEnum.DECIMAL64, DECIMAL_SCALE);
+
+  private static final class DecimalTestData {
+    private final String[] decimalStrings;
+    private final String[] jsonStrings;
+    private final Long[] expectedUnscaledValues;
+
+    private DecimalTestData(String[] decimalStrings, String[] jsonStrings,
+                            Long[] expectedUnscaledValues) {
+      this.decimalStrings = decimalStrings;
+      this.jsonStrings = jsonStrings;
+      this.expectedUnscaledValues = expectedUnscaledValues;
+    }
+  }
+
   private static JSONOptions getOptions() {
     return JSONOptions.builder()
         .withNormalizeSingleQuotes(true)
@@ -60,6 +80,117 @@ public class FromJsonToStructsTest {
             value,
             Collections.singletonList(new HostColumnVector.StructData(value, "x"))),
         value);
+  }
+
+  private static Schema decimalSchema() {
+    return Schema.builder().column(DECIMAL_TYPE, "data", DECIMAL_PRECISION).build();
+  }
+
+  private static DecimalTestData unicodeDecimalTestData() {
+    List<String> decimalStrings = new ArrayList<>();
+    List<Long> expectedUnscaledValues = new ArrayList<>();
+
+    // BigDecimal accepts every BMP character for which Character.isDigit(char) is true.
+    for (int codePoint = Character.MIN_VALUE; codePoint <= Character.MAX_VALUE; ++codePoint) {
+      char character = (char) codePoint;
+      if (Character.isDigit(character)) {
+        decimalStrings.add("\"" + character + "\"");
+        expectedUnscaledValues.add(Character.digit(character, 10) * 100000L);
+      }
+    }
+
+    // These digit blocks were added after Java 8's Unicode version. On an older JVM they must
+    // remain invalid even if the native cuDF Unicode table recognizes them.
+    for (char character : new char[] {'\u0DE6', '\uA9F0'}) {
+      decimalStrings.add("\"" + character + "\"");
+      expectedUnscaledValues.add(Character.isDigit(character)
+          ? Character.digit(character, 10) * 100000L : null);
+    }
+
+    String[] issueValues = {
+        "\u0967,\u0966\u0966\u0966.\u0966\u0966\u0967",
+        "\u0E51,\u0E50\u0E50\u0E50.\u0E50\u0E50\u0E51",
+        "\u0967", "\u0E51", "\u0967\u0966", "\u0E51\u0E50", "1\u0662\u096D"
+    };
+    Long[] issueExpected = {
+        100000100L, 100000100L, 100000L, 100000L, 1000000L, 1000000L, 12700000L
+    };
+    for (int index = 0; index < issueValues.length; ++index) {
+      decimalStrings.add("\"" + issueValues[index] + "\"");
+      expectedUnscaledValues.add(issueExpected[index]);
+    }
+
+    // BigDecimal evaluates UTF-16 code units, so supplementary decimal digits remain invalid.
+    decimalStrings.add("\"\uD835\uDFCF\"");
+    expectedUnscaledValues.add(null);
+    // Numeric characters outside the Unicode Decimal_Number category also remain invalid.
+    decimalStrings.add("\"\u00B2\"");
+    expectedUnscaledValues.add(null);
+
+    String[] jsonStrings = new String[decimalStrings.size()];
+    for (int index = 0; index < jsonStrings.length; ++index) {
+      jsonStrings[index] = "{\"data\":" + decimalStrings.get(index) + "}";
+    }
+    return new DecimalTestData(
+        decimalStrings.toArray(new String[0]),
+        jsonStrings,
+        expectedUnscaledValues.toArray(new Long[0]));
+  }
+
+  @Test
+  void testConvertFromStringsNormalizesUnicodeDecimalDigits() {
+    DecimalTestData data = unicodeDecimalTestData();
+    try (ColumnVector input = ColumnVector.fromStrings(data.decimalStrings);
+         ColumnVector actual =
+             JSONUtils.convertFromStrings(input, decimalSchema(), false, true);
+         ColumnVector expected =
+             ColumnVector.decimalFromBoxedLongs(DECIMAL_SCALE, data.expectedUnscaledValues)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testConvertFromStringsNormalizesUnquotedDigitsWithoutRemovingCommas() {
+    try (ColumnVector input =
+             ColumnVector.fromStrings("\u0967", "1\u0662\u096D", "\u0967,\u0966", "", (String) null);
+         ColumnVector actual =
+             JSONUtils.convertFromStrings(input, decimalSchema(), false, true);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(
+             DECIMAL_SCALE, 100000L, 12700000L, null, null, null)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsNormalizesUnicodeDecimalDigits() {
+    DecimalTestData data = unicodeDecimalTestData();
+    try (ColumnVector input = ColumnVector.fromStrings(data.jsonStrings);
+         ColumnVector actual =
+             JSONUtils.fromJSONToStructs(input, decimalSchema(), getOptions(), true);
+         ColumnView actualDecimals = actual.getChildColumnView(0);
+         ColumnVector expected =
+             ColumnVector.decimalFromBoxedLongs(DECIMAL_SCALE, data.expectedUnscaledValues)) {
+      assertColumnsAreEqual(expected, actualDecimals);
+    }
+  }
+
+  @Test
+  void testFromJsonToStructsNormalizesNestedDecimalDigits() {
+    Schema.Builder root = Schema.builder();
+    root.addColumn(DType.STRUCT, "nested")
+        .column(DECIMAL_TYPE, "amount", DECIMAL_PRECISION);
+    Long laterDigit = Character.isDigit('\u0DE6') ? 0L : null;
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "{\"nested\":{\"amount\":\"\u0967\"}}",
+             "{\"nested\":{\"amount\":\"\u0DE6\"}}",
+             "{\"nested\":{\"amount\":\"2\"}}");
+         ColumnVector actual = JSONUtils.fromJSONToStructs(input, root.build(), getOptions(), true);
+         ColumnView nested = actual.getChildColumnView(0);
+         ColumnView decimals = nested.getChildColumnView(0);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(
+             DECIMAL_SCALE, 100000L, laterDigit, 200000L)) {
+      assertColumnsAreEqual(expected, decimals);
+    }
   }
 
   @Test

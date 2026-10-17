@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -93,7 +93,8 @@ void BM_from_json_to_structs(nvbench::state& state)
                                              /*allow_leading_zeros=*/true,
                                              /*allow_nonnumeric_numbers=*/true,
                                              /*allow_unquoted_control=*/true,
-                                             /*is_us_locale=*/true);
+                                             /*is_us_locale=*/true,
+                                             /*decimal_digit_values=*/{});
   });
 
   state.add_buffer_size(num_rows, "rows", "Rows");
