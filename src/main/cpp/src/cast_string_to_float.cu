@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/convert/convert_floats.hpp>
 #include <cudf/strings/detail/convert/string_to_float.cuh>
+#include <cudf/strings/detail/copying.hpp>
 #include <cudf/utilities/bit.hpp>
 
 #include <rmm/resource_ref.hpp>
@@ -893,6 +894,12 @@ std::unique_ptr<column> string_to_float(data_type dtype,
   CUDF_EXPECTS(dtype == data_type{type_id::FLOAT32} || dtype == data_type{type_id::FLOAT64},
                "invalid float data type");
   if (string_col.size() == 0) { return cudf::make_empty_column(dtype); }
+
+  if (string_col.offset() != 0) {
+    auto const normalized = cudf::strings::detail::copy_slice(
+      string_col, 0, string_col.size(), stream, cudf::get_current_device_resource_ref());
+    return string_to_float(dtype, strings_column_view{normalized->view()}, ansi_mode, stream, mr);
+  }
 
   auto out = cudf::make_numeric_column(dtype, string_col.size(), mask_state::ALL_NULL, stream, mr);
 

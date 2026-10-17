@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -380,6 +380,26 @@ public class CastStringsTest {
       } finally {
         result.forEach(ColumnVector::close);
       }
+    }
+  }
+
+  @Test
+  void castDecimalRejectsInvalidExtremeExponentAndDigitlessMantissa() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "0E2147483648", "0E-2147483648", "0.0E-2147483647",
+             "0E ", "0E+ ", "0E- ", ".", "e", "E2");
+         ColumnVector actual = CastStrings.toDecimal(input, false, 10, 0)) {
+      assertEquals(input.getRowCount(), actual.getNullCount());
+    }
+  }
+
+  @Test
+  void castZeroWithExtremeExponentMatchesSpark() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "0.0E57", "0E2147483646", "0E2147483647");
+         ColumnVector actual = CastStrings.toDecimal(input, false, 10, 0);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(0, 0L, 0L, 0L)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
     }
   }
 
