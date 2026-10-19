@@ -16,7 +16,6 @@
 
 package com.nvidia.spark.rapids.jni;
 
-import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.DeviceMemoryBuffer;
 import ai.rapids.cudf.HostMemoryBuffer;
 import org.junit.jupiter.api.Test;
@@ -50,19 +49,20 @@ public class PackedHostToDeviceCopyTest {
   }
 
   // Two buffers adjacent in host memory, one from another allocation, an empty one, and one past
-  // a gap, so that the copy covers both merged and separate runs.
+  // a gap, so that the copy covers both merged and separate runs. Only waitOnEvent() orders the
+  // read-back after a side-stream copy; the buffers are large so a missing wait likely shows.
   private static void checkMixedLayout(boolean onSideStream) {
-    try (HostMemoryBuffer whole = filled(64, 0);
-         HostMemoryBuffer other = filled(7, 100);
-         HostMemoryBuffer first = whole.slice(0, 10);
-         HostMemoryBuffer adjacent = whole.slice(10, 15);
-         HostMemoryBuffer empty = whole.slice(30, 0);
-         HostMemoryBuffer pastGap = whole.slice(40, 10)) {
+    int unit = 1 << 18;
+    try (HostMemoryBuffer whole = filled(64 * unit, 0);
+         HostMemoryBuffer other = filled(7 * unit, 100);
+         HostMemoryBuffer first = whole.slice(0, 10 * unit);
+         HostMemoryBuffer adjacent = whole.slice(10 * unit, 15 * unit);
+         HostMemoryBuffer empty = whole.slice(30 * unit, 0);
+         HostMemoryBuffer pastGap = whole.slice(40 * unit, 10 * unit)) {
       HostMemoryBuffer[] hostBuffers = {first, adjacent, other, empty, pastGap};
       try (PackedHostToDeviceCopy copy =
                PackedHostToDeviceCopy.copyAsync(hostBuffers, onSideStream)) {
         copy.waitOnEvent();
-        Cuda.deviceSynchronize();
         assertCopied(hostBuffers, copy.getBuffers());
       }
     }

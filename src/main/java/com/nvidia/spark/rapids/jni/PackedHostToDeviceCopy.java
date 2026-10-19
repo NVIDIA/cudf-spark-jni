@@ -144,15 +144,16 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
   }
 
   private static Throwable closeCollecting(DeviceMemoryBuffer buffer, Throwable failure) {
-    if (buffer != null) {
-      try {
-        buffer.close();
-      } catch (Throwable t) {
-        if (failure == null) {
-          return t;
-        }
-        failure.addSuppressed(t);
+    if (buffer == null) {
+      return failure;
+    }
+    try {
+      buffer.close();
+    } catch (Throwable t) {
+      if (failure == null) {
+        return t;
       }
+      failure.addSuppressed(t);
     }
     return failure;
   }

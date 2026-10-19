@@ -17,7 +17,6 @@
 #include "utilities.hpp"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
-#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
@@ -25,6 +24,7 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/cuda_stream_pool.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/device_vector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -88,6 +88,19 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   return out;
 }
 
+namespace {
+
+// Separate from cudf's stream pool, which could hand the decode the same stream as the copy.
+// Never freed, so it outlives CUDA driver teardown at exit.
+rmm::cuda_stream_pool& side_stream_pool()
+{
+  static auto* const pool = new rmm::cuda_stream_pool(rmm::cuda_stream_pool::default_size,
+                                                      rmm::cuda_stream::flags::non_blocking);
+  return *pool;
+}
+
+}  // namespace
+
 cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const> const> buffers,
                                               cudf::device_span<uint8_t> destination,
                                               bool on_side_stream,
@@ -99,9 +112,12 @@ cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const>
   }
   CUDF_EXPECTS(total <= destination.size(), "host buffers do not fit in the destination");
 
-  // Forking orders the side stream behind everything already queued on `stream`, including the
-  // destination's allocation and any earlier copy into it.
-  auto const copy_stream = on_side_stream ? cudf::detail::fork_streams(stream, 1).front() : stream;
+  auto const copy_stream = on_side_stream ? side_stream_pool().get_stream() : stream;
+  if (on_side_stream) {
+    // Order the copies behind everything already queued on `stream`, including the
+    // destination's allocation and any earlier copy into it.
+    copy_stream.wait(stream);
+  }
 
   try {
     // Buffers adjacent in host memory land adjacent in the destination, so a run of them moves as
@@ -109,23 +125,18 @@ cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const>
     std::vector<void*> dsts;
     std::vector<void const*> srcs;
     std::vector<std::size_t> sizes;
-    auto* const base   = destination.data();
-    std::size_t offset = 0;
-    for (std::size_t run_start = 0; run_start < buffers.size();) {
-      auto const* const src = buffers[run_start].data();
-      auto run_bytes        = buffers[run_start].size();
-      auto run_end          = run_start + 1;
-      while (run_end < buffers.size() && buffers[run_end].data() == src + run_bytes) {
-        run_bytes += buffers[run_end].size();
-        ++run_end;
+    auto* dst = destination.data();
+    for (auto const& buffer : buffers) {
+      if (buffer.empty()) { continue; }
+      if (!srcs.empty() &&
+          buffer.data() == static_cast<uint8_t const*>(srcs.back()) + sizes.back()) {
+        sizes.back() += buffer.size();
+      } else {
+        dsts.push_back(dst);
+        srcs.push_back(buffer.data());
+        sizes.push_back(buffer.size());
       }
-      if (run_bytes > 0) {
-        dsts.push_back(base + offset);
-        srcs.push_back(src);
-        sizes.push_back(run_bytes);
-      }
-      offset += run_bytes;
-      run_start = run_end;
+      dst += buffer.size();
     }
     if (!dsts.empty()) {
       CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
