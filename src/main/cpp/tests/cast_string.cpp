@@ -239,59 +239,63 @@ TEST_F(HexToBytesTests, ManyRowsWithSparseLongValues)
 
 TEST_F(HexToBytesTests, MixedLengthsAcrossChunks)
 {
-  // Rows of every length up to 99 characters start and end at all positions within the decoder's
-  // character chunks. Invalid characters appear at the first, middle, and last positions.
-  std::vector<std::string> values;
-  for (int row = 0; row < 3'000; ++row) {
-    auto const length = row % 100;
-    std::string value(length, ' ');
-    for (int i = 0; i < length; ++i) {
-      value[i] = "0123456789abcdefABCDEF"[(row + i) % 22];
-    }
-    if (length > 0 && row % 7 == 0) { value[(row / 7 % 3) * (length - 1) / 2] = 'g'; }
-    values.push_back(value);
-  }
-  auto input = test::strings_column_wrapper(values.begin(), values.end()).release();
-  // Null rows keep their characters, which must be ignored.
-  auto const null_iter = test::iterators::nulls_at({5, 1'234, 2'999});
-  auto [input_mask, input_null_count] =
-    cudf::test::detail::make_null_mask(null_iter, null_iter + values.size());
-  input->set_null_mask(std::move(input_mask), input_null_count);
-  auto const sliced = cudf::slice(input->view(), {3, 3'000})[0];
-  auto const actual =
-    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{sliced}, cudf::get_default_stream());
-
-  auto const decode = [](char value) {
-    return static_cast<uint8_t>(value <= '9' ? value - '0' : (value | 0x20) - 'a' + 10);
-  };
-  std::vector<cudf::size_type> expected_offsets{0};
-  std::vector<uint8_t> expected_bytes;
-  std::vector<bool> expected_valid;
-  for (std::size_t row = 3; row < values.size(); ++row) {
-    auto const& value = values[row];
-    auto const valid  = null_iter[row] && value.find('g') == std::string::npos;
-    if (valid) {
-      std::size_t i = 0;
-      if (value.size() % 2 != 0) { expected_bytes.push_back(decode(value[i++])); }
-      for (; i < value.size(); i += 2) {
-        expected_bytes.push_back((decode(value[i]) << 4) | decode(value[i + 1]));
+  // Rows of every length below `max_length` start and end at all positions within the decoder's
+  // character chunks. Invalid characters appear at the first, middle, and last positions. A batch
+  // of rows up to 32 characters is decoded one thread per row, and one with longer rows by chunks.
+  for (int const max_length : {33, 100}) {
+    SCOPED_TRACE(max_length);
+    std::vector<std::string> values;
+    for (int row = 0; row < 3'000; ++row) {
+      auto const length = row % max_length;
+      std::string value(length, ' ');
+      for (int i = 0; i < length; ++i) {
+        value[i] = "0123456789abcdefABCDEF"[(row + i) % 22];
       }
+      if (length > 0 && row % 7 == 0) { value[(row / 7 % 3) * (length - 1) / 2] = 'g'; }
+      values.push_back(value);
     }
-    expected_valid.push_back(valid);
-    expected_offsets.push_back(expected_bytes.size());
+    auto input = test::strings_column_wrapper(values.begin(), values.end()).release();
+    // Null rows keep their characters, which must be ignored.
+    auto const null_iter = test::iterators::nulls_at({5, 1'234, 2'999});
+    auto [input_mask, input_null_count] =
+      cudf::test::detail::make_null_mask(null_iter, null_iter + values.size());
+    input->set_null_mask(std::move(input_mask), input_null_count);
+    auto const sliced = cudf::slice(input->view(), {3, 3'000})[0];
+    auto const actual =
+      spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{sliced}, cudf::get_default_stream());
+
+    auto const decode = [](char value) {
+      return static_cast<uint8_t>(value <= '9' ? value - '0' : (value | 0x20) - 'a' + 10);
+    };
+    std::vector<cudf::size_type> expected_offsets{0};
+    std::vector<uint8_t> expected_bytes;
+    std::vector<bool> expected_valid;
+    for (std::size_t row = 3; row < values.size(); ++row) {
+      auto const& value = values[row];
+      auto const valid  = null_iter[row] && value.find('g') == std::string::npos;
+      if (valid) {
+        std::size_t i = 0;
+        if (value.size() % 2 != 0) { expected_bytes.push_back(decode(value[i++])); }
+        for (; i < value.size(); i += 2) {
+          expected_bytes.push_back((decode(value[i]) << 4) | decode(value[i + 1]));
+        }
+      }
+      expected_valid.push_back(valid);
+      expected_offsets.push_back(expected_bytes.size());
+    }
+    auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
+      expected_offsets.begin(), expected_offsets.end());
+    auto expected_child =
+      test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+    auto [null_mask, null_count] =
+      cudf::test::detail::make_null_mask(expected_valid.begin(), expected_valid.end());
+    auto const expected = cudf::make_lists_column(expected_valid.size(),
+                                                  expected_offsets_column.release(),
+                                                  expected_child.release(),
+                                                  null_count,
+                                                  std::move(null_mask));
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
   }
-  auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
-    expected_offsets.begin(), expected_offsets.end());
-  auto expected_child =
-    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
-  auto [null_mask, null_count] =
-    cudf::test::detail::make_null_mask(expected_valid.begin(), expected_valid.end());
-  auto const expected = cudf::make_lists_column(expected_valid.size(),
-                                                expected_offsets_column.release(),
-                                                expected_child.release(),
-                                                null_count,
-                                                std::move(null_mask));
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
 }
 
 TEST_F(HexToBytesTests, SlicedSparseLongRowsAtThreshold)

@@ -38,6 +38,7 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/transform.h>
+#include <thrust/transform_reduce.h>
 
 #include <cstdint>
 
@@ -108,63 +109,122 @@ struct decoded_size_fn {
   }
 };
 
+/**
+ * @brief Characters validated or decoded by one thread.
+ *
+ * When every row of a batch fits in a chunk, one thread per row avoids searching for the row of
+ * each chunk. Otherwise, the batch is split into fixed-size character chunks, so that one long row
+ * does not serialize the batch on a single thread.
+ */
 constexpr int64_t chars_per_thread = 32;
 
 /**
- * @brief Functor to validate or decode a fixed-size chunk of input characters.
+ * @brief Functor to validate or decode the characters `[char_idx, stop)` of one row.
  *
- * Splitting the characters rather than the rows keeps the work independent of the string lengths.
- * Each thread finds the row of its first character and walks forward from there. Without an
- * output, a thread clears the validity bit of each row with an invalid character. With an output,
- * the thread at the low nibble of each byte of a valid row writes the byte; an odd-length string
- * has an implicit leading zero nibble.
+ * Without an output, it clears the validity bit of a row with an invalid character. With an
+ * output, it writes each byte of a valid row whose low nibble is in the range; an odd-length
+ * string has an implicit leading zero nibble.
  */
-struct hex_chunk_fn {
+struct hex_decode_fn {
   cudf::detail::input_offsetalator d_in_offsets;
-  cudf::size_type num_rows;
   char const* d_chars;
-  int64_t first_char;
-  int64_t last_char;
   cudf::bitmask_type* d_mask;
   cudf::size_type const* d_out_offsets;
   uint8_t* d_out;
 
+  __device__ void operator()(cudf::size_type row, int64_t char_idx, int64_t stop) const
+  {
+    if (!cudf::bit_is_set(d_mask, row)) { return; }
+    if (d_out == nullptr) {
+      for (; char_idx < stop; ++char_idx) {
+        if (hex_digit(static_cast<unsigned char>(d_chars[char_idx])) < 0) {
+          cudf::clear_bit(d_mask, row);
+          return;
+        }
+      }
+      return;
+    }
+    auto const begin = d_in_offsets[row];
+    auto const odd   = (d_in_offsets[row + 1] - begin) & 1;
+    auto* out        = d_out + d_out_offsets[row];
+    // Start at the low nibble of the first byte in the range.
+    for (char_idx += ((char_idx - begin + odd) & 1) == 0; char_idx < stop; char_idx += 2) {
+      auto const high =
+        char_idx == begin ? 0 : hex_digit(static_cast<unsigned char>(d_chars[char_idx - 1]));
+      auto const low                    = hex_digit(static_cast<unsigned char>(d_chars[char_idx]));
+      out[(char_idx - begin + odd) / 2] = static_cast<uint8_t>((high << 4) | low);
+    }
+  }
+};
+
+struct hex_row_fn {
+  hex_decode_fn decode;
+
+  __device__ void operator()(cudf::size_type row) const
+  {
+    decode(row, decode.d_in_offsets[row], decode.d_in_offsets[row + 1]);
+  }
+};
+
+/**
+ * @brief Functor to validate or decode a fixed-size chunk of input characters.
+ *
+ * Each thread finds the row of its first character and walks forward from there.
+ */
+struct hex_chunk_fn {
+  hex_decode_fn decode;
+  cudf::size_type num_rows;
+  int64_t first_char;
+  int64_t last_char;
+
   __device__ void operator()(int64_t chunk) const
   {
-    auto char_idx       = first_char + chunk * chars_per_thread;
-    auto const end_char = cuda::std::min(char_idx + chars_per_thread, last_char);
+    auto const d_in_offsets = decode.d_in_offsets;
+    auto char_idx           = first_char + chunk * chars_per_thread;
+    auto const end_char     = cuda::std::min(char_idx + chars_per_thread, last_char);
     auto const row_end =
       thrust::upper_bound(thrust::seq, d_in_offsets, d_in_offsets + num_rows + 1, char_idx);
     auto row = static_cast<cudf::size_type>(cuda::std::distance(d_in_offsets, row_end) - 1);
     while (char_idx < end_char) {
-      auto const begin = d_in_offsets[row];
-      auto const end   = d_in_offsets[row + 1];
-      auto const stop  = cuda::std::min(end, end_char);
-      if (cudf::bit_is_set(d_mask, row)) {
-        if (d_out == nullptr) {
-          for (; char_idx < stop; ++char_idx) {
-            if (hex_digit(static_cast<unsigned char>(d_chars[char_idx])) < 0) {
-              cudf::clear_bit(d_mask, row);
-              break;
-            }
-          }
-        } else {
-          auto const odd = (end - begin) & 1;
-          auto* out      = d_out + d_out_offsets[row];
-          // Start at the low nibble of the first byte in this chunk.
-          for (char_idx += ((char_idx - begin + odd) & 1) == 0; char_idx < stop; char_idx += 2) {
-            auto const high =
-              char_idx == begin ? 0 : hex_digit(static_cast<unsigned char>(d_chars[char_idx - 1]));
-            auto const low = hex_digit(static_cast<unsigned char>(d_chars[char_idx]));
-            out[(char_idx - begin + odd) / 2] = static_cast<uint8_t>((high << 4) | low);
-          }
-        }
-      }
+      auto const stop = cuda::std::min(d_in_offsets[row + 1], end_char);
+      decode(row, char_idx, stop);
       char_idx = stop;
       ++row;
     }
   }
 };
+
+struct row_length_fn {
+  cudf::detail::input_offsetalator d_in_offsets;
+
+  __device__ int64_t operator()(cudf::size_type row) const
+  {
+    return d_in_offsets[row + 1] - d_in_offsets[row];
+  }
+};
+
+/**
+ * @brief Run `decode` over all rows, one thread per row or per character chunk.
+ */
+void for_each_hex_row(hex_decode_fn const& decode,
+                      cudf::size_type num_rows,
+                      int64_t first_char,
+                      int64_t last_char,
+                      bool by_row,
+                      cuda::stream_ref stream)
+{
+  auto const policy = rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref());
+  if (by_row) {
+    thrust::for_each_n(
+      policy, thrust::make_counting_iterator(cudf::size_type{0}), num_rows, hex_row_fn{decode});
+    return;
+  }
+  auto const chunks = (last_char - first_char + chars_per_thread - 1) / chars_per_thread;
+  thrust::for_each_n(policy,
+                     thrust::make_counting_iterator(int64_t{0}),
+                     chunks,
+                     hex_chunk_fn{decode, num_rows, first_char, last_char});
+}
 
 }  // namespace
 
@@ -218,37 +278,35 @@ std::unique_ptr<cudf::column> hex_to_bytes(cudf::strings_column_view const& inpu
     cudf::strings::detail::get_offset_value(input.offsets(), input.offset(), stream);
   auto const last_char =
     cudf::strings::detail::get_offset_value(input.offsets(), input.offset() + input.size(), stream);
-  auto const chunks = (last_char - first_char + chars_per_thread - 1) / chars_per_thread;
-  auto chunk_fn     = hex_chunk_fn{
-    cudf::detail::offsetalator_factory::make_input_iterator(input.offsets(), input.offset()),
-    input.size(),
-    input.chars_begin(stream),
-    first_char,
-    last_char,
-    d_mask,
-    nullptr,
-    nullptr};
+  auto const d_in_offsets =
+    cudf::detail::offsetalator_factory::make_input_iterator(input.offsets(), input.offset());
+  auto const rows = thrust::make_counting_iterator(cudf::size_type{0});
+  // No row is longer than all the characters, and a batch with a longer average row needs chunks.
+  auto const num_chars = last_char - first_char;
+  auto const by_row =
+    num_chars <= chars_per_thread ||
+    (num_chars <= chars_per_thread * input.size() &&
+     thrust::transform_reduce(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
+                              rows,
+                              rows + input.size(),
+                              row_length_fn{d_in_offsets},
+                              int64_t{0},
+                              cuda::maximum{}) <= chars_per_thread);
+  auto decode = hex_decode_fn{d_in_offsets, input.chars_begin(stream), d_mask, nullptr, nullptr};
   // Validate before sizing so that invalid rows do not reserve any output bytes.
-  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                     thrust::make_counting_iterator(int64_t{0}),
-                     chunks,
-                     chunk_fn);
+  for_each_hex_row(decode, input.size(), first_char, last_char, by_row, stream);
 
   auto const d_column = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
-  auto const sizes = thrust::make_transform_iterator(
-    thrust::make_counting_iterator(cudf::size_type{0}), decoded_size_fn{*d_column, d_mask});
+  auto const sizes = thrust::make_transform_iterator(rows, decoded_size_fn{*d_column, d_mask});
   auto [offsets, total_bytes] =
     cudf::detail::make_offsets_child_column(sizes, sizes + input.size(), stream, mr);
 
   auto bytes = rmm::device_uvector<uint8_t>(total_bytes, stream, mr);
   if (total_bytes > 0) {
-    chunk_fn.d_out_offsets = offsets->view().begin<cudf::size_type>();
-    chunk_fn.d_out         = bytes.data();
-    thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                       thrust::make_counting_iterator(int64_t{0}),
-                       chunks,
-                       chunk_fn);
+    decode.d_out_offsets = offsets->view().begin<cudf::size_type>();
+    decode.d_out         = bytes.data();
+    for_each_hex_row(decode, input.size(), first_char, last_char, by_row, stream);
   }
 
   auto const null_count = cudf::null_count(d_mask, 0, input.size(), stream);

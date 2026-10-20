@@ -20,6 +20,9 @@
 #include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
+
+#include <rmm/mr/cuda_async_memory_resource.hpp>
 
 #include <cast_string.hpp>
 #include <nvbench/nvbench.cuh>
@@ -45,6 +48,10 @@ std::unique_ptr<cudf::column> make_hex_strings(cudf::size_type num_rows, int32_t
 
 void unhex(nvbench::state& state)
 {
+  // Allocate from a stream-ordered pool like Spark does, so that synchronous cudaMalloc and
+  // cudaFree calls do not hide the decode time.
+  static rmm::mr::cuda_async_memory_resource async_mr;
+  cudf::set_current_device_resource(async_mr);
   auto const num_rows        = static_cast<cudf::size_type>(state.get_int64("num_rows"));
   auto const string_length   = static_cast<int32_t>(state.get_int64("string_length"));
   auto const long_row_length = static_cast<int32_t>(state.get_int64("long_row_length"));
@@ -91,6 +98,6 @@ void unhex(nvbench::state& state)
 NVBENCH_BENCH(unhex)
   .set_name("Unhex")
   .add_int64_axis("num_rows", {1, 4'096, 1'048'576, 8'388'608})
-  .add_int64_axis("string_length", {16, 512, 1'048'576})
+  .add_int64_axis("string_length", {16, 64, 512, 1'048'576})
   .add_int64_axis("long_row_length", {0, 1'048'576})
   .add_int64_axis("invalid_percent", {0, 1});
