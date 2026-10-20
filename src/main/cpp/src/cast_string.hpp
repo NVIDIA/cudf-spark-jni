@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 #include <cuda/stream>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace spark_rapids_jni {
@@ -247,6 +248,47 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   std::string const& format,
   bool legacy,
   bool exception_policy,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+struct csv_date_parse_options {
+  bool enable_fallback;
+  bool trim_control_characters;
+};
+
+/**
+ * @brief Parse CORRECTED CSV dates using the default grammar or strict Spark format tokens.
+ *
+ * With an explicit format, the first attempt requires exact field widths, preserves whitespace
+ * and consumes the entire input. It accepts signed/extended yyyy years and validates parsed
+ * time fields.
+ *
+ * The explicit-format attempt range-checks all parsed time fields, including incomplete patterns
+ * such as HH:ss. Spark may accept out-of-range values for these patterns. The plugin excludes
+ * them from GPU CSV parsing and falls back to CPU; their behavior is outside this API's Spark
+ * compatibility guarantee.
+ *
+ * When format is absent, the first attempt uses the shared CAST grammar. If the first attempt
+ * fails, optional fallback removes all original GMT occurrences and retries that grammar. CAST
+ * trims whitespace according to options.trim_control_characters, accepts partial dates, and
+ * ignores a suffix starting with a space or T after a complete date without validating its time
+ * fields.
+ *
+ * Results are returned as days directly without a microsecond intermediate. Missing date fields
+ * default to 1970/1/1. Null inputs and values rejected by all enabled attempts, including invalid
+ * calendar dates or epoch-day overflows, produce nulls.
+ *
+ * @param input Input strings.
+ * @param format Optional numeric Spark pattern using yyyy, MM, dd, HH, mm and ss.
+ * @param options Fallback policy and the runtime's UTF8String.trimAll whitespace semantics.
+ * @param stream Stream on which to operate.
+ * @param mr Memory resource for the returned column.
+ * @return A timestamp_D column, with nulls for invalid inputs.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> parse_csv_date_strings(
+  cudf::strings_column_view const& input,
+  std::optional<std::string> const& format,
+  csv_date_parse_options options,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

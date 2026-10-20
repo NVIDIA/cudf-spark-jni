@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1358,6 +1358,86 @@ public class CastStringsTest {
         ColumnVector actual = CastStrings.toTimestamp(
             inputCv, "Z", /* ansi */ true, SPARK_330_VERSION)) {
       Assertions.assertNull(actual);
+    }
+  }
+
+  @Test
+  void parseCsvDateRepeatedFields() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+            "2020-05-01-05", "2020-05-01-06", null);
+        ColumnVector actual = CastStrings.parseCsvDate(input, "yyyy-MM-dd-MM", false, true);
+        ColumnVector expected = ColumnVector.timestampDaysFromBoxedInts(18383, null, null)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void parseCsvDateJniOptions() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+            "2020-05-01", "20GMT20-05-01", "\u007f2020-05-01\u007f", null);
+        ColumnVector strict = CastStrings.parseCsvDate(input, "yyyy-MM-dd", false, true);
+        ColumnVector strictExpected = ColumnVector.timestampDaysFromBoxedInts(
+            18383, null, null, null);
+        ColumnVector fallback = CastStrings.parseCsvDate(input, "yyyy/MM/dd", true, false);
+        ColumnVector fallbackExpected = ColumnVector.timestampDaysFromBoxedInts(
+            18383, 18383, null, null);
+        ColumnVector defaultFormat = CastStrings.parseCsvDate(input, null, false, true);
+        ColumnVector defaultExpected = ColumnVector.timestampDaysFromBoxedInts(
+            18383, null, 18383, null);
+        ColumnVector defaultOldTrim = CastStrings.parseCsvDate(input, null, false, false);
+        ColumnVector defaultOldTrimExpected = ColumnVector.timestampDaysFromBoxedInts(
+            18383, null, null, null);
+        ColumnVector defaultFallback = CastStrings.parseCsvDate(input, null, true, true);
+        ColumnVector defaultFallbackExpected = ColumnVector.timestampDaysFromBoxedInts(
+            18383, 18383, 18383, null)) {
+      AssertUtils.assertColumnsAreEqual(strictExpected, strict);
+      AssertUtils.assertColumnsAreEqual(fallbackExpected, fallback);
+      AssertUtils.assertColumnsAreEqual(defaultExpected, defaultFormat);
+      AssertUtils.assertColumnsAreEqual(defaultOldTrimExpected, defaultOldTrim);
+      AssertUtils.assertColumnsAreEqual(defaultFallbackExpected, defaultFallback);
+    }
+  }
+
+  @Test
+  void parseCsvDateEpochDayBoundaries() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+            "+5881580-07-10", "+5881580-07-11", "+5881580-07-12",
+            "-5877641-06-24", "-5877641-06-23", "-5877641-06-22", null);
+        ColumnVector actual = CastStrings.parseCsvDate(input, "yyyy-MM-dd", false, true);
+        ColumnVector expected = ColumnVector.timestampDaysFromBoxedInts(
+            Integer.MAX_VALUE - 1, Integer.MAX_VALUE, null,
+            Integer.MIN_VALUE + 1, Integer.MIN_VALUE, null, null)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void parseCsvDateEmptyAndAllNull() {
+    for (String format : new String[] {null, "yyyy-MM-dd"}) {
+      for (boolean fallback : new boolean[] {false, true}) {
+        try (ColumnVector empty = ColumnVector.fromStrings();
+            ColumnVector emptyResult = CastStrings.parseCsvDate(empty, format, fallback, true);
+            ColumnVector emptyExpected = ColumnVector.timestampDaysFromBoxedInts();
+            ColumnVector allNull = ColumnVector.fromStrings(null, null, null);
+            ColumnVector nullResult = CastStrings.parseCsvDate(allNull, format, fallback, true);
+            ColumnVector nullExpected = ColumnVector.timestampDaysFromBoxedInts(null, null, null)) {
+          AssertUtils.assertColumnsAreEqual(emptyExpected, emptyResult);
+          AssertUtils.assertColumnsAreEqual(nullExpected, nullResult);
+        }
+      }
+    }
+  }
+
+  @Test
+  void parseCsvDateRejectsUnsupportedFormats() {
+    try (ColumnVector input = ColumnVector.fromStrings("2020-05-01")) {
+      for (String format : new String[] {"", "yyyy-M-dd", "yyyy-MM-dd HH:mm:SS"}) {
+        Assertions.assertThrows(CudfException.class, () -> {
+          try (ColumnVector result = CastStrings.parseCsvDate(input, format, false, true)) {
+            fail("Unsupported format should be rejected: " + format);
+          }
+        });
+      }
     }
   }
 

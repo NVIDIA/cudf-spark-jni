@@ -913,7 +913,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   auto src_offsets = rmm::device_uvector<size_type>(strings_count, stream);
 
   // copy null mask
-  cuda::device_buffer<std::byte> null_mask =
+  cuda::device_buffer<cudf::bitmask_type> null_mask =
     input.parent().nullable()
       ? cudf::copy_bitmask(input.parent(), stream, mr)
       : cudf::create_null_mask(input.size(), mask_state::ALL_VALID, stream, mr);
