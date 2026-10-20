@@ -51,7 +51,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "cfec78babd7f443bf1ec2cb0c606d7fb8b8e0097",
+      "git_tag" : "5c2b9755b182de46e5838c6a5aabf5899a2938b2",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.12"
