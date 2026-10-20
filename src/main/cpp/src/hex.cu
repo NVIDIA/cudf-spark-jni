@@ -21,6 +21,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
 #include <cudf/detail/sizes_to_offsets_iterator.cuh>
+#include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/detail/utilities.hpp>
@@ -110,7 +111,7 @@ struct decoded_size_fn {
 };
 
 /**
- * @brief Characters validated or decoded by one thread.
+ * @brief Characters decoded by one thread.
  *
  * When every row of a batch fits in a chunk, one thread per row avoids searching for the row of
  * each chunk. Otherwise, the batch is split into fixed-size character chunks, so that one long row
@@ -119,11 +120,10 @@ struct decoded_size_fn {
 constexpr int64_t chars_per_thread = 32;
 
 /**
- * @brief Functor to validate or decode the characters `[char_idx, stop)` of one row.
+ * @brief Functor to decode the characters `[char_idx, stop)` of one row.
  *
- * Without an output, it clears the validity bit of a row with an invalid character. With an
- * output, it writes each byte of a valid row whose low nibble is in the range; an odd-length
- * string has an implicit leading zero nibble.
+ * It writes each byte whose low nibble is in the range; an odd-length string has an implicit
+ * leading zero nibble. It clears the validity bit of a row with an invalid character.
  */
 struct hex_decode_fn {
   cudf::detail::input_offsetalator d_in_offsets;
@@ -135,15 +135,6 @@ struct hex_decode_fn {
   __device__ void operator()(cudf::size_type row, int64_t char_idx, int64_t stop) const
   {
     if (!cudf::bit_is_set(d_mask, row)) { return; }
-    if (d_out == nullptr) {
-      for (; char_idx < stop; ++char_idx) {
-        if (hex_digit(static_cast<unsigned char>(d_chars[char_idx])) < 0) {
-          cudf::clear_bit(d_mask, row);
-          return;
-        }
-      }
-      return;
-    }
     auto const begin = d_in_offsets[row];
     auto const odd   = (d_in_offsets[row + 1] - begin) & 1;
     auto* out        = d_out + d_out_offsets[row];
@@ -151,7 +142,11 @@ struct hex_decode_fn {
     for (char_idx += ((char_idx - begin + odd) & 1) == 0; char_idx < stop; char_idx += 2) {
       auto const high =
         char_idx == begin ? 0 : hex_digit(static_cast<unsigned char>(d_chars[char_idx - 1]));
-      auto const low                    = hex_digit(static_cast<unsigned char>(d_chars[char_idx]));
+      auto const low = hex_digit(static_cast<unsigned char>(d_chars[char_idx]));
+      if ((high | low) < 0) {
+        cudf::clear_bit(d_mask, row);
+        return;
+      }
       out[(char_idx - begin + odd) / 2] = static_cast<uint8_t>((high << 4) | low);
     }
   }
@@ -192,6 +187,33 @@ struct hex_chunk_fn {
       ++row;
     }
   }
+};
+
+/**
+ * @brief Functor to copy the decoded bytes of one row to its position in the compacted output.
+ */
+struct copy_row_fn {
+  cudf::size_type const* d_offsets;
+  uint8_t const* d_bytes;
+  cudf::size_type const* d_compact_offsets;
+  uint8_t* d_compact_bytes;
+
+  __device__ void operator()(cudf::size_type row) const
+  {
+    auto const begin = d_compact_offsets[row];
+    auto const size  = d_compact_offsets[row + 1] - begin;
+    auto const* src  = d_bytes + d_offsets[row];
+    for (cudf::size_type i = 0; i < size; ++i) {
+      d_compact_bytes[begin + i] = src[i];
+    }
+  }
+};
+
+struct row_bytes_fn {
+  cudf::size_type const* d_offsets;
+  uint8_t* d_bytes;
+
+  __device__ uint8_t* operator()(cudf::size_type row) const { return d_bytes + d_offsets[row]; }
 };
 
 struct row_length_fn {
@@ -292,24 +314,50 @@ std::unique_ptr<cudf::column> hex_to_bytes(cudf::strings_column_view const& inpu
                                                 row_length_fn{d_in_offsets},
                                                 int64_t{0},
                                                 cuda::maximum{}) <= chars_per_thread);
-  auto decode = hex_decode_fn{d_in_offsets, input.chars_begin(stream), d_mask, nullptr, nullptr};
-  // Validate before sizing so that invalid rows do not reserve any output bytes.
-  for_each_hex_row(decode, input.size(), first_char, last_char, by_row, stream);
 
+  // Size every non-null row as valid hex, and validate while decoding.
   auto const d_column = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
   auto const sizes = thrust::make_transform_iterator(rows, decoded_size_fn{*d_column, d_mask});
   auto [offsets, total_bytes] =
     cudf::detail::make_offsets_child_column(sizes, sizes + input.size(), stream, mr);
-
   auto bytes = rmm::device_uvector<uint8_t>(total_bytes, stream, mr);
   if (total_bytes > 0) {
-    decode.d_out_offsets = offsets->view().begin<cudf::size_type>();
-    decode.d_out         = bytes.data();
+    auto const decode = hex_decode_fn{d_in_offsets,
+                                      input.chars_begin(stream),
+                                      d_mask,
+                                      offsets->view().begin<cudf::size_type>(),
+                                      bytes.data()};
     for_each_hex_row(decode, input.size(), first_char, last_char, by_row, stream);
   }
 
   auto const null_count = cudf::null_count(d_mask, 0, input.size(), stream);
+  if (null_count > input.null_count()) {
+    // Drop the bytes of the rows found invalid, so that null rows are empty. Short rows are copied
+    // one thread per row, and long rows by a batched copy that splits them.
+    auto [compact_offsets, compact_bytes] =
+      cudf::detail::make_offsets_child_column(sizes, sizes + input.size(), stream, mr);
+    auto compact = rmm::device_uvector<uint8_t>(compact_bytes, stream, mr);
+    if (compact_bytes > 0) {
+      auto const d_offsets         = offsets->view().begin<cudf::size_type>();
+      auto const d_compact_offsets = compact_offsets->view().begin<cudf::size_type>();
+      if (by_row) {
+        thrust::for_each_n(policy,
+                           rows,
+                           input.size(),
+                           copy_row_fn{d_offsets, bytes.data(), d_compact_offsets, compact.data()});
+      } else {
+        cudf::detail::batched_memcpy_async(
+          thrust::make_transform_iterator(rows, row_bytes_fn{d_offsets, bytes.data()}),
+          thrust::make_transform_iterator(rows, row_bytes_fn{d_compact_offsets, compact.data()}),
+          sizes,
+          input.size(),
+          stream);
+      }
+    }
+    offsets = std::move(compact_offsets);
+    bytes   = std::move(compact);
+  }
   if (null_count == 0) { valid_mask = cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED); }
   auto child = std::make_unique<cudf::column>(
     std::move(bytes), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
