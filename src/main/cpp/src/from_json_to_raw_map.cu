@@ -863,7 +863,7 @@ struct is_line_begin {
   }
 };
 
-std::pair<cuda::device_buffer<std::byte>, cudf::size_type> create_null_mask(
+std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type> create_null_mask(
   cudf::size_type num_rows,
   std::unique_ptr<cudf::column> const& should_be_nullified,
   cudf::device_span<PdaTokenT const> tokens,

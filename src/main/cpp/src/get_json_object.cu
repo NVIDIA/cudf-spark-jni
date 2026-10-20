@@ -1164,7 +1164,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   }
   // From here, we had out-of-bound write. Although this is very rare, it may still happen.
 
-  std::vector<std::pair<cuda::device_buffer<std::byte>, cudf::size_type>>
+  std::vector<std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type>>
     out_null_masks_and_null_counts;
   std::vector<std::pair<std::unique_ptr<cudf::column>, int64_t>> out_offsets_and_sizes;
   std::vector<rmm::device_uvector<char>> out_char_buffers;

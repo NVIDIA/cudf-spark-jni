@@ -161,8 +161,8 @@ struct percentile_dispatcher {
   //  1. The output percentile values,
   //  2. Null mask to apply for the final output column containing percentile values, and
   //  3. Null count corresponding to that null mask.
-  using output_type =
-    std::tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<std::byte>, cudf::size_type>;
+  using output_type = std::
+    tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<cudf::bitmask_type>, cudf::size_type>;
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
@@ -283,7 +283,7 @@ void check_input(cudf::column_view const& input, std::vector<double> const& perc
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
-                                           cuda::device_buffer<std::byte>&& null_mask,
+                                           cuda::device_buffer<cudf::bitmask_type>&& null_mask,
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
@@ -369,7 +369,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                "The input frequencies must not contain negative values.",
                std::invalid_argument);
 
-  auto const make_structs_histogram = [&](cuda::device_buffer<std::byte>&& null_mask,
+  auto const make_structs_histogram = [&](cuda::device_buffer<cudf::bitmask_type>&& null_mask,
                                           cudf::size_type null_count) {
     // Copy values and frequencies into a new structs column.
     std::vector<std::unique_ptr<cudf::column>> values_and_frequencies;

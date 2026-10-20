@@ -15,6 +15,7 @@
  */
 
 #include "cast_string.hpp"
+#include "date_parse.cuh"
 #include "datetime_utils.cuh"
 #include "nvtx_ranges.hpp"
 
@@ -36,6 +37,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/std/bit>
 #include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -50,8 +52,10 @@
 
 // This kernel mirrors the formatters Spark uses for to_timestamp / unix_timestamp /
 // ParseToTimestamp: java.text.SimpleDateFormat for LEGACY, and java.time.DateTimeFormatter with a
-// STRICT resolver for CORRECTED. It is NOT a drop-in for the CSV/JSON read path, which uses
-// commons-lang3 FastDateFormat and has different whitespace rules — do not reuse it there.
+// STRICT resolver for CORRECTED. CSV dates have a separate entry point below: they require
+// strict widths, signed/extended years and date output, without expression whitespace rules.
+// The JSON read path has different format and whitespace rules;
+// this parser is not a drop-in replacement for it.
 namespace spark_rapids_jni {
 
 namespace {
@@ -62,38 +66,6 @@ namespace {
 // does not trimAll. So the outer trim must match: a leading control byte like '\r'/'\f'/'\v'
 // rejects on CPU and must not be treated as whitespace here.
 __device__ bool is_whitespace(unsigned char c) { return c == ' ' || c == '\t'; }
-
-// Read between `min_d` and `max_d` digits greedily. Advances pos by the digits read.
-// Returns false (and the partial pos advance is irrelevant since walk_tokens aborts on failure).
-__device__ bool read_min_max_digits(
-  unsigned char const* p, int& pos, int end, int min_d, int max_d, int& v)
-{
-  v          = 0;
-  int digits = 0;
-  while (pos < end && digits < max_d) {
-    int const c = static_cast<int>(p[pos]) - '0';
-    if (c < 0 || c > 9) { break; }
-    v = v * 10 + c;
-    ++digits;
-    ++pos;
-  }
-  return digits >= min_d;
-}
-
-__device__ bool try_parse_char(unsigned char const* p, int& pos, int end, unsigned char c)
-{
-  if (pos >= end || p[pos] != c) { return false; }
-  ++pos;
-  return true;
-}
-
-// Skip [ \t]* — LEGACY whitespace-before-field fold (see compile_format).
-__device__ void skip_ht_whitespace(unsigned char const* p, int& pos, int end)
-{
-  while (pos < end && (p[pos] == ' ' || p[pos] == '\t')) {
-    ++pos;
-  }
-}
 
 // Returns true iff the first non-[ \t] char is '\n'. Mirrors rejectLeadingNewlineThenStrip.
 __device__ bool has_leading_newline(unsigned char const* p, int end)
@@ -132,7 +104,9 @@ struct parsed_dt {
 // internally model a pattern as a sequence of printer-parser steps: each step consumes a
 // well-defined chunk of the input and either succeeds or fails the row.
 enum tok_kind : uint8_t {
-  TOK_DIGITS,           // a = field, b = min_digits, c = max_digits
+  TOK_DIGITS,  // a = field, b = min_digits, c = max_digits
+  // STRICT DateTimeFormatter year with SignStyle.EXCEEDS_PAD.
+  TOK_CSV_YEAR,         // a = reserved adjacent digits, b = min_digits, c = max_digits
   TOK_LITERAL,          // a = literal char
   TOK_SKIP_HT_WS,       // skip [ \t]* (legacy whitespace fold)
   TOK_TRAIL_EOF,        // pos must equal end
@@ -185,10 +159,36 @@ uint8_t letter_to_field(char c)
   }
 }
 
-std::vector<format_token> compile_format(std::string const& fmt,
-                                         bool legacy,
-                                         bool strict_corrected = false)
+enum class format_dialect {
+  corrected_expression,
+  legacy_expression,
+  exception_expression,
+  csv_date
+};
+
+format_token compile_csv_year(std::string const& format, size_t next, uint8_t width)
 {
+  CUDF_EXPECTS(width == 4, "CSV date year pattern must be yyyy", std::invalid_argument);
+  size_t reserved = 0;
+  // Reserve following fixed-width numeric fields, as DateTimeFormatter's adjacent-value parser
+  // does. This handles packed formats through the same tokens as separated numeric formats.
+  while (next < format.size() && std::isalpha(static_cast<unsigned char>(format[next])) &&
+         format[next] != 'y') {
+    auto const letter = format[next];
+    do {
+      ++reserved;
+      ++next;
+    } while (next < format.size() && format[next] == letter);
+  }
+  CUDF_EXPECTS(reserved <= 255, "too many adjacent date digits", std::invalid_argument);
+  return {TOK_CSV_YEAR, static_cast<uint8_t>(reserved), 4, 19};
+}
+
+std::vector<format_token> compile_format(std::string const& fmt, format_dialect dialect)
+{
+  bool const legacy           = dialect == format_dialect::legacy_expression;
+  bool const csv_date         = dialect == format_dialect::csv_date;
+  bool const strict_corrected = csv_date || dialect == format_dialect::exception_expression;
   std::vector<format_token> out;
   size_t const n       = fmt.size();
   bool saw_digit_field = false;
@@ -220,7 +220,11 @@ std::vector<format_token> compile_format(std::string const& fmt,
       // Skip [ \t] before each field, except inside a packed run which stays exact-width.
       bool const abuts_prev_field = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1])));
       if (legacy && !abuts_prev_field) { out.push_back({TOK_SKIP_HT_WS, 0, 0, 0}); }
-      out.push_back({TOK_DIGITS, letter_to_field(c), min_d, max_d});
+      if (csv_date && c == 'y') {
+        out.push_back(compile_csv_year(fmt, j, run));
+      } else {
+        out.push_back({TOK_DIGITS, letter_to_field(c), min_d, max_d});
+      }
       saw_digit_field = true;
       i               = j;
     } else {
@@ -240,19 +244,55 @@ std::vector<format_token> compile_format(std::string const& fmt,
 
 // ---- Device-side: per-row walker over the compiled token stream. --------------------------------
 
-__device__ bool store_field(parsed_dt& d, uint8_t field, int v)
+__device__ bool read_csv_year(date_parse::cursor<>& input, format_token token, int& year)
+{
+  bool const negative = input.consume('-');
+  bool const positive = !negative && input.consume('+');
+  auto probe          = input;
+  int digits          = 0;
+  while (digits < token.c + token.a && probe.peek() >= '0' && probe.peek() <= '9') {
+    ++digits;
+    ++probe.pos;
+  }
+  digits -= token.a;
+  if (digits < token.b || input.read_digits(digits, year) != digits) { return false; }
+  // Spark converts yyyy to proleptic uuuu. EXCEEDS_PAD requires '+' beyond four positive
+  // digits, forbids it for four digits, and rejects negative zero.
+  if (positive ? digits <= token.b : (!negative && digits != token.b)) { return false; }
+  if (negative && year == 0) { return false; }
+  if (negative) { year = -year; }
+  return true;
+}
+
+template <bool CheckConflicts>
+__device__ bool store_field_value(int& target, int value, uint8_t mask, uint8_t& seen_fields)
+{
+  if constexpr (CheckConflicts) {
+    if ((seen_fields & mask) != 0 && target != value) { return false; }
+    seen_fields |= mask;
+  }
+  target = value;
+  return true;
+}
+
+template <bool CheckConflicts>
+__device__ bool store_field(parsed_dt& d, uint8_t field, int v, uint8_t& seen_fields)
 {
   switch (field) {
-    case FLD_YEAR: d.year = v; return true;
-    case FLD_MONTH: d.month = v; return true;
-    case FLD_DAY: d.day = v; return true;
-    case FLD_HOUR: d.hour = v; return true;
-    case FLD_MINUTE: d.minute = v; return true;
-    case FLD_SECOND: d.second = v; return true;
+    case FLD_YEAR: return store_field_value<CheckConflicts>(d.year, v, 1 << FLD_YEAR, seen_fields);
+    case FLD_MONTH:
+      return store_field_value<CheckConflicts>(d.month, v, 1 << FLD_MONTH, seen_fields);
+    case FLD_DAY: return store_field_value<CheckConflicts>(d.day, v, 1 << FLD_DAY, seen_fields);
+    case FLD_HOUR: return store_field_value<CheckConflicts>(d.hour, v, 1 << FLD_HOUR, seen_fields);
+    case FLD_MINUTE:
+      return store_field_value<CheckConflicts>(d.minute, v, 1 << FLD_MINUTE, seen_fields);
+    case FLD_SECOND:
+      return store_field_value<CheckConflicts>(d.second, v, 1 << FLD_SECOND, seen_fields);
     default: return false;
   }
 }
 
+template <bool CheckConflicts = false>
 __device__ bool walk_tokens(unsigned char const* p,
                             int pos,
                             int end,
@@ -260,25 +300,33 @@ __device__ bool walk_tokens(unsigned char const* p,
                             int num_tokens,
                             parsed_dt& d)
 {
+  date_parse::cursor<> input{p, pos, end};
+  // CSV rejects conflicting repetitions; expression specializations keep last-value semantics.
+  uint8_t seen_fields = 0;
   for (int i = 0; i < num_tokens; ++i) {
     auto const& t = tokens[i];
     bool ok       = true;
     switch (t.kind) {
-      case TOK_DIGITS: {
-        int v = 0;
-        ok    = read_min_max_digits(p, pos, end, t.b, t.c, v);
-        if (ok) { ok = store_field(d, t.a, v); }
+      case TOK_CSV_YEAR: {
+        int year = 0;
+        ok       = read_csv_year(input, t, year) &&
+             store_field<CheckConflicts>(d, FLD_YEAR, year, seen_fields);
         break;
       }
-      case TOK_LITERAL: ok = try_parse_char(p, pos, end, t.a); break;
-      case TOK_SKIP_HT_WS: skip_ht_whitespace(p, pos, end); break;
-      case TOK_TRAIL_EOF: ok = (pos == end); break;
-      case TOK_TRAIL_NON_DIGIT:
-        if (pos < end) {
-          unsigned char const c = p[pos];
-          ok                    = !(c >= '0' && c <= '9');
+      case TOK_DIGITS: {
+        int v = 0;
+        ok    = input.read_digits(t.c, v) >= t.b;
+        if (ok) { ok = store_field<CheckConflicts>(d, t.a, v, seen_fields); }
+        break;
+      }
+      case TOK_LITERAL: ok = input.consume(t.a); break;
+      case TOK_SKIP_HT_WS:
+        while (input.peek() == ' ' || input.peek() == '\t') {
+          ++input.pos;
         }
         break;
+      case TOK_TRAIL_EOF: ok = input.eof(); break;
+      case TOK_TRAIL_NON_DIGIT: ok = !(input.peek() >= '0' && input.peek() <= '9'); break;
       default: ok = false; break;
     }
     if (!ok) { return false; }
@@ -354,7 +402,58 @@ struct parse_with_format_fn {
   }
 };
 
+struct csv_date_parser {
+  cudf::device_span<format_token const> tokens;
+  csv_date_parse_options options;
+
+  __device__ bool operator()(cudf::string_view input, cudf::timestamp_D& result) const
+  {
+    auto const* p   = cuda::std::bit_cast<unsigned char const*>(input.data());
+    auto const size = input.size_bytes();
+    if (tokens.empty()) {
+      if (date_parse::parse_cast(
+            date_parse::cursor<>{p, 0, size}, options.trim_control_characters, result)) {
+        return true;
+      }
+    } else {
+      parsed_dt d{};
+      if (walk_tokens<true>(p, 0, size, tokens.data(), static_cast<int>(tokens.size()), d) &&
+          date_time_utils::is_valid_time(d.hour, d.minute, d.second, 0) &&
+          date_parse::to_days(d.year, d.month, d.day, result)) {
+        return true;
+      }
+    }
+    return options.enable_fallback &&
+           date_parse::parse_cast(
+             date_parse::cursor<true>{p, 0, size}, options.trim_control_characters, result);
+  }
+};
+
 }  // namespace
+
+std::unique_ptr<cudf::column> parse_csv_date_strings(cudf::strings_column_view const& input,
+                                                     std::optional<std::string> const& format,
+                                                     csv_date_parse_options options,
+                                                     cuda::stream_ref stream,
+                                                     rmm::device_async_resource_ref mr)
+{
+  SRJ_FUNC_RANGE();
+  auto const host_tokens =
+    format ? compile_format(*format, format_dialect::csv_date) : std::vector<format_token>{};
+  if (input.size() == 0 || !format) {
+    return date_parse::parse_dates(input, csv_date_parser{{}, options}, stream, mr);
+  }
+
+  auto const temp_mr = cudf::get_current_device_resource_ref();
+  auto staging = cudf::detail::make_pinned_vector_async<format_token>(host_tokens.size(), stream);
+  std::copy(host_tokens.begin(), host_tokens.end(), staging.begin());
+  auto tokens = cudf::detail::make_device_uvector_async(staging, stream, temp_mr);
+  return date_parse::parse_dates(
+    input,
+    csv_date_parser{cudf::device_span<format_token const>{tokens.data(), tokens.size()}, options},
+    stream,
+    mr);
+}
 
 std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
@@ -368,10 +467,15 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   CUDF_EXPECTS(!(legacy && exception_policy),
                "LEGACY and EXCEPTION policies cannot both be enabled",
                std::invalid_argument);
-  auto host_tokens = compile_format(format, legacy, exception_policy);
-  auto host_legacy_tokens =
-    exception_policy ? compile_format(format, true) : std::vector<format_token>{};
-  auto const num_rows = input.size();
+  auto host_tokens =
+    compile_format(format,
+                   legacy ? format_dialect::legacy_expression
+                          : (exception_policy ? format_dialect::exception_expression
+                                              : format_dialect::corrected_expression));
+  auto host_legacy_tokens = exception_policy
+                              ? compile_format(format, format_dialect::legacy_expression)
+                              : std::vector<format_token>{};
+  auto const num_rows     = input.size();
   if (num_rows == 0) {
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()});
   }

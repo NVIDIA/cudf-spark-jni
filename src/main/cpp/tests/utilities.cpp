@@ -64,8 +64,7 @@ TEST_F(UtilitiesTest, BitwiseOr)
     std::vector<cudf::bitmask_type> expect{
       0x11111001, 0xffffffff, 0xffff0000, 0xf101010f, 0xab0100ab};
     auto d_result = spark_rapids_jni::bitmask_bitwise_or({{da}, {db}}, stream);
-    CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
-                 "Unexpected output size");
+    CUDF_EXPECTS(d_result->size() == expect.size(), "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
     cudaMemcpy(result.data(),
                d_result->data(),
@@ -96,8 +95,7 @@ TEST_F(UtilitiesTest, BitwiseOr)
     std::vector<cudf::bitmask_type> expect{
       0x10011001, 0x0000ffff, 0xffff0000, 0x01010101, 0xab0000ab};
     auto d_result = spark_rapids_jni::bitmask_bitwise_or({{da}, {db}, {dc}, {dd}}, stream);
-    CUDF_EXPECTS(d_result->size() == expect.size() * sizeof(cudf::bitmask_type),
-                 "Unexpected output size");
+    CUDF_EXPECTS(d_result->size() == expect.size(), "Unexpected output size");
     std::vector<cudf::bitmask_type> result(expect.size());
     cudaMemcpy(result.data(),
                d_result->data(),
