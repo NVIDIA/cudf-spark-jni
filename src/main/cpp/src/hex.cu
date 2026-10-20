@@ -283,15 +283,15 @@ std::unique_ptr<cudf::column> hex_to_bytes(cudf::strings_column_view const& inpu
   auto const rows = thrust::make_counting_iterator(cudf::size_type{0});
   // No row is longer than all the characters, and a batch with a longer average row needs chunks.
   auto const num_chars = last_char - first_char;
-  auto const by_row =
-    num_chars <= chars_per_thread ||
-    (num_chars <= chars_per_thread * input.size() &&
-     thrust::transform_reduce(rmm::exec_policy(stream, cudf::get_current_device_resource_ref()),
-                              rows,
-                              rows + input.size(),
-                              row_length_fn{d_in_offsets},
-                              int64_t{0},
-                              cuda::maximum{}) <= chars_per_thread);
+  auto const policy    = rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref());
+  auto const by_row    = num_chars <= chars_per_thread ||
+                      (num_chars <= chars_per_thread * input.size() &&
+                       thrust::transform_reduce(policy,
+                                                rows,
+                                                rows + input.size(),
+                                                row_length_fn{d_in_offsets},
+                                                int64_t{0},
+                                                cuda::maximum{}) <= chars_per_thread);
   auto decode = hex_decode_fn{d_in_offsets, input.chars_begin(stream), d_mask, nullptr, nullptr};
   // Validate before sizing so that invalid rows do not reserve any output bytes.
   for_each_hex_row(decode, input.size(), first_char, last_char, by_row, stream);
