@@ -339,6 +339,56 @@ TEST_F(HexToBytesTests, SlicedSparseLongRowsAtThreshold)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
 }
 
+TEST_F(HexToBytesTests, CompactsRowsAfterInvalidRows)
+{
+  // Rows found invalid while decoding are dropped from the output, so that the bytes of later
+  // rows move by amounts that are not word multiples, and long rows span many copy chunks.
+  std::vector<std::string> values;
+  for (int row = 0; row < 60; ++row) {
+    auto const length = row % 3 == 0 ? 9'001 + row : row % 3 == 1 ? 1 + row : 5'000 + row;
+    std::string value(length, ' ');
+    for (int i = 0; i < length; ++i) {
+      value[i] = "0123456789abcdef"[(row * 7 + i) % 16];
+    }
+    if (row % 4 == 1) { value[length / 2] = 'x'; }
+    values.push_back(value);
+  }
+  auto const input = test::strings_column_wrapper(values.begin(), values.end());
+  auto const actual =
+    spark_rapids_jni::hex_to_bytes(cudf::strings_column_view{input}, cudf::get_default_stream());
+
+  auto const decode = [](char value) {
+    return static_cast<uint8_t>(value <= '9' ? value - '0' : value - 'a' + 10);
+  };
+  std::vector<cudf::size_type> expected_offsets{0};
+  std::vector<uint8_t> expected_bytes;
+  std::vector<bool> expected_valid;
+  for (auto const& value : values) {
+    auto const valid = value.find('x') == std::string::npos;
+    if (valid) {
+      std::size_t i = 0;
+      if (value.size() % 2 != 0) { expected_bytes.push_back(decode(value[i++])); }
+      for (; i < value.size(); i += 2) {
+        expected_bytes.push_back((decode(value[i]) << 4) | decode(value[i + 1]));
+      }
+    }
+    expected_valid.push_back(valid);
+    expected_offsets.push_back(expected_bytes.size());
+  }
+  auto expected_offsets_column = test::fixed_width_column_wrapper<cudf::size_type>(
+    expected_offsets.begin(), expected_offsets.end());
+  auto expected_child =
+    test::fixed_width_column_wrapper<uint8_t>(expected_bytes.begin(), expected_bytes.end());
+  auto [null_mask, null_count] =
+    cudf::test::detail::make_null_mask(expected_valid.begin(), expected_valid.end());
+  auto const expected = cudf::make_lists_column(values.size(),
+                                                expected_offsets_column.release(),
+                                                expected_child.release(),
+                                                null_count,
+                                                std::move(null_mask));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(actual->view(), expected->view());
+}
+
 TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
 {
   auto const strings = test::strings_column_wrapper{"2024-05-06"};
