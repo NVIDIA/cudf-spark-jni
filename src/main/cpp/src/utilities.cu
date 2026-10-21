@@ -125,6 +125,9 @@ cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const>
     std::vector<void*> dsts;
     std::vector<void const*> srcs;
     std::vector<std::size_t> sizes;
+    dsts.reserve(buffers.size());
+    srcs.reserve(buffers.size());
+    sizes.reserve(buffers.size());
     auto* dst = destination.data();
     for (auto const& buffer : buffers) {
       if (buffer.empty()) { continue; }

@@ -58,8 +58,11 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
    * Queue the copies of the host buffers to one packed device allocation.
    *
    * @param hostBuffers the buffers to copy, which must stay open until the result is closed
-   * @param onSideStream whether to queue the copies on a stream forked from the default stream
-   *                     rather than on the default stream itself
+   * @param onSideStream run the copies on a stream forked from the default stream rather than on
+   *                     the default stream itself, so they overlap decode work already queued on
+   *                     the default stream instead of serializing behind it. Turn this on when
+   *                     there is such work to overlap with, and off otherwise to avoid the extra
+   *                     cross-stream synchronization.
    * @return the staged copy, which the caller must close
    */
   public static PackedHostToDeviceCopy copyAsync(HostMemoryBuffer[] hostBuffers,
