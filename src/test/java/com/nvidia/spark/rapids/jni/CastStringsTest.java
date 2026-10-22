@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import org.junit.jupiter.api.Assertions;
@@ -39,6 +40,12 @@ import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.Table;
 
 public class CastStringsTest {
+  private static String repeat(char value, int count) {
+    char[] chars = new char[count];
+    Arrays.fill(chars, value);
+    return new String(chars);
+  }
+
   @Test
   void castToIntegerTest() {
     Table.TestBuilder tb = new Table.TestBuilder();
@@ -354,27 +361,15 @@ public class CastStringsTest {
   // Regression test for https://github.com/NVIDIA/cudf-spark/issues/16466.
   @Test
   void castToFloatsExtremeExponentTest() {
-    char[] longMantissa = new char[10001];
-    Arrays.fill(longMantissa, '0');
-    longMantissa[0] = '1';
-    String cancellingExponent = new String(longMantissa) + "e-10000";
-    char[] boundaryExponent = new char[29];
-    Arrays.fill(boundaryExponent, '0');
-    String invalidBoundarySuffix = "1e" + new String(boundaryExponent) + "fX";
+    String cancellingExponent = "1" + repeat('0', 10000) + "e-10000";
+    String invalidBoundarySuffix = "1e" + repeat('0', 29) + "fX";
+    String invalidNonExponentBoundarySuffix = "1" + repeat('0', 30) + "fX";
     // Place E immediately before and at the end of a 32-character parser window.
-    char[] fastBoundaryMantissa = new char[30];
-    Arrays.fill(fastBoundaryMantissa, '0');
-    fastBoundaryMantissa[fastBoundaryMantissa.length - 1] = '1';
-    char[] slowBoundaryMantissa = new char[31];
-    Arrays.fill(slowBoundaryMantissa, '0');
-    slowBoundaryMantissa[slowBoundaryMantissa.length - 1] = '1';
+    String fastBoundaryMantissa = repeat('0', 29) + "1";
+    String slowBoundaryMantissa = repeat('0', 30) + "1";
     // Exercise the complete-in-window fast path and arbitrary-length slow path boundary.
-    char[] fastExponent = new char[18];
-    Arrays.fill(fastExponent, '0');
-    fastExponent[fastExponent.length - 1] = '1';
-    char[] slowExponent = new char[19];
-    Arrays.fill(slowExponent, '0');
-    slowExponent[slowExponent.length - 1] = '1';
+    String fastExponent = repeat('0', 17) + "1";
+    String slowExponent = repeat('0', 18) + "1";
     String[] inputs = new String[] {
         "-630111.628E-58858",
         "630111.628E58858",
@@ -382,8 +377,8 @@ public class CastStringsTest {
         "1E5000",
         "-1E-5000",
         "1E-5000",
-        "1e" + new String(fastExponent),
-        "1e" + new String(slowExponent),
+        "1e" + fastExponent,
+        "1e" + slowExponent,
         "1e00000000000000000000000000000000000000001",
         "-1e-00000000000000000000000000000000000000001",
         "123456789012345678901234567890E-58858",
@@ -395,8 +390,10 @@ public class CastStringsTest {
         "-9007199254740993e-99999999999999999999999999999999" +
             "999999999999999999999999999999999999",
         cancellingExponent,
-        new String(fastBoundaryMantissa) + "E2",
-        new String(slowBoundaryMantissa) + "E2",
+        fastBoundaryMantissa + "E2",
+        slowBoundaryMantissa + "E2",
+        fastBoundaryMantissa + "E-2",
+        slowBoundaryMantissa + "E-2",
         "0e99999",
         "-0e99999"
     };
@@ -405,7 +402,7 @@ public class CastStringsTest {
          ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT32);
          HostColumnVector hostGot = got.copyToHost()) {
       for (int i = 0; i < inputs.length; i++) {
-        assertTrue(!hostGot.isNull(i), "float row " + i + " input=" + inputs[i]);
+        assertFalse(hostGot.isNull(i), "float row " + i + " input=" + inputs[i]);
         float expected = Float.parseFloat(inputs[i]);
         float actual = hostGot.getFloat(i);
         assertEquals(Float.floatToRawIntBits(expected),
@@ -417,7 +414,7 @@ public class CastStringsTest {
          ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT64);
          HostColumnVector hostGot = got.copyToHost()) {
       for (int i = 0; i < inputs.length; i++) {
-        assertTrue(!hostGot.isNull(i), "double row " + i + " input=" + inputs[i]);
+        assertFalse(hostGot.isNull(i), "double row " + i + " input=" + inputs[i]);
         double expected = Double.parseDouble(inputs[i]);
         double actual = hostGot.getDouble(i);
         assertEquals(Double.doubleToRawLongBits(expected),
@@ -425,19 +422,23 @@ public class CastStringsTest {
       }
     }
 
-    for (DType outputType : new DType[] {DType.FLOAT32, DType.FLOAT64}) {
-      try (ColumnVector in = ColumnVector.fromStrings(invalidBoundarySuffix);
-           ColumnVector got = CastStrings.toFloat(in, false, outputType);
-           HostColumnVector hostGot = got.copyToHost()) {
-        assertTrue(hostGot.isNull(0),
-            "trailing garbage after a batch-boundary suffix must be rejected for " + outputType);
-      }
-      try (ColumnVector in = ColumnVector.fromStrings(invalidBoundarySuffix)) {
-        Assertions.assertThrows(CastException.class, () -> {
-          try (ColumnVector ignored = CastStrings.toFloat(in, true, outputType)) {
-            // The ANSI cast must throw before returning a column.
-          }
-        });
+    String[] invalidSuffixInputs =
+        new String[] {invalidBoundarySuffix, invalidNonExponentBoundarySuffix};
+    for (String invalidInput : invalidSuffixInputs) {
+      for (DType outputType : new DType[] {DType.FLOAT32, DType.FLOAT64}) {
+        try (ColumnVector in = ColumnVector.fromStrings(invalidInput);
+             ColumnVector got = CastStrings.toFloat(in, false, outputType);
+             HostColumnVector hostGot = got.copyToHost()) {
+          assertTrue(hostGot.isNull(0),
+              "trailing garbage after a batch-boundary suffix must be rejected for " + outputType);
+        }
+        try (ColumnVector in = ColumnVector.fromStrings(invalidInput)) {
+          Assertions.assertThrows(CastException.class, () -> {
+            try (ColumnVector ignored = CastStrings.toFloat(in, true, outputType)) {
+              // The ANSI cast must throw before returning a column.
+            }
+          });
+        }
       }
     }
   }

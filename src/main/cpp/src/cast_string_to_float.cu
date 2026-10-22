@@ -242,10 +242,9 @@ __device__ __inline__ T default_double_path(uint64_t digits, int64_t exp_ten, in
                      : -cuda::std::numeric_limits<T>::infinity();
   }
 
-  // Even the largest uint64_t scaled this far underflows below half of double's denorm_min.
-  constexpr int minimum_nonzero_exponent = cuda::std::numeric_limits<double>::min_exponent10 -
-                                           cuda::std::numeric_limits<double>::max_digits10 -
-                                           cuda::std::numeric_limits<uint64_t>::digits10;
+  // Performance shortcut: UINT64_MAX * 1e-343 is about 1.84e-324, below half of double's
+  // denorm_min (about 2.47e-324), so round-to-nearest produces signed zero.
+  constexpr int minimum_nonzero_exponent = -343;
   if (exp_ten <= minimum_nonzero_exponent) {
     return sign >= 0 ? static_cast<T>(0) : -static_cast<T>(0);
   }
@@ -420,6 +419,16 @@ class string_to_float {
   static constexpr int max_safe_digits = 19;
 
  private:
+  __device__ __forceinline__ uint64_t
+  reduce_digits(char c, int num_digits, cub::WarpReduce<uint64_t>::TempStorage& temp_storage)
+  {
+    uint64_t const digit = _warp_lane < num_digits
+                             ? static_cast<uint64_t>(c - '0') * _ipow[(num_digits - _warp_lane) - 1]
+                             : 0;
+    return __shfl_sync(
+      0xffffffff, cub::WarpReduce<uint64_t>(temp_storage).Sum(digit, num_digits), 0);
+  }
+
   // shuffle down to remove whitespace
   __device__ void remove_leading_whitespace()
   {
@@ -650,15 +659,9 @@ class string_to_float {
         // add as many digits to the running sum as we can.
         int const safe_count = min(max_safe_digits - real_digits, num_chars);
 
-        // our local digit
-        uint64_t const digit = _warp_lane < safe_count ? static_cast<uint64_t>(_c - '0') *
-                                                           _ipow[(safe_count - _warp_lane) - 1]
-                                                       : 0;
-
         if (safe_count > 0) {
           // only lane 0 will have the real value so we need to shfl it to the rest of the threads.
-          digits = (digits * _ipow[safe_count]) +
-                   __shfl_sync(0xffffffff, WarpReduce(temp_storage).Sum(digit, safe_count), 0);
+          digits = (digits * _ipow[safe_count]) + reduce_digits(_c, safe_count, temp_storage);
           real_digits += safe_count;
         }
 
@@ -758,12 +761,8 @@ class string_to_float {
         bool const exponent_ends_in_batch = first_non_digit > 0 || _bstart + _blen == _len;
 
         if (num_digits > 0 && num_digits <= max_digits_per_step && exponent_ends_in_batch) {
-          uint64_t const digit = _warp_lane < num_digits ? static_cast<uint64_t>(exponent_c - '0') *
-                                                             _ipow[(num_digits - _warp_lane) - 1]
-                                                         : 0;
-          uint64_t const fast_exp =
-            __shfl_sync(0xffffffff, WarpReduce(temp_storage).Sum(digit, num_digits), 0);
-          _c = __shfl_down_sync(0xffffffff, exponent_c, num_digits);
+          uint64_t const fast_exp = reduce_digits(exponent_c, num_digits, temp_storage);
+          _c                      = __shfl_down_sync(0xffffffff, exponent_c, num_digits);
           _bpos += chars_to_skip + num_digits;
           return fast_exp_sign < 0 ? -static_cast<int64_t>(fast_exp)
                                    : static_cast<int64_t>(fast_exp);
@@ -798,12 +797,8 @@ class string_to_float {
         int const num_digits       = first_non_digit > 0 ? first_non_digit - 1 : num_chars;
         if (num_digits == 0) { break; }
 
-        int const step_size  = min(max_digits_per_step, num_digits);
-        uint64_t const digit = _warp_lane < step_size ? static_cast<uint64_t>(_c - '0') *
-                                                          _ipow[(step_size - _warp_lane) - 1]
-                                                      : 0;
-        uint64_t const step_value =
-          __shfl_sync(0xffffffff, WarpReduce(temp_storage).Sum(digit, step_size), 0);
+        int const step_size       = min(max_digits_per_step, num_digits);
+        uint64_t const step_value = reduce_digits(_c, step_size, temp_storage);
         if (!seen_digit) {
           // Any 18-digit value fits below max_manual_exp, so the first step cannot overflow.
           manual_exp = step_value;
