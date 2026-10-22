@@ -184,10 +184,13 @@ __device__ __forceinline__ int swar_lowest_flag_offset32(uint32_t flags)
  * Numbers accept -0 and 1e01, but reject 01, +1, 1., 1e and 1e+.
  * Success covers the first root value; trailing bytes are ignored. Malformed input reports ERROR,
  * and nesting overflow also sets max_nesting_depth_exceeded for the caller's error policy.
+ * CoopSkip=true supports collective skip; only the identical-state merged walk arms it.
+ * Unarmed parsers permit lane-specific values; CoopSkip=false remains serial.
  */
-class json_parser {
+template <bool CoopSkip = false>
+class json_parser_impl {
  public:
-  __device__ inline explicit json_parser(char_range _chars)
+  __device__ inline explicit json_parser_impl(char_range _chars)
     : chars(_chars), curr_pos(0), current_token(json_token::INIT), max_depth_exceeded(false)
   {
   }
@@ -195,21 +198,28 @@ class json_parser {
  private:
   static __device__ inline bool get_bit_value(int64_t number, int bitIndex)
   {
-    long shifted = number >> bitIndex;
-
-    bool bit_value = shifted & 1;
-
-    return bit_value;
+    if constexpr (CoopSkip) {
+      return (number >> bitIndex) & 1;
+    } else {
+      long shifted   = number >> bitIndex;
+      bool bit_value = shifted & 1;
+      return bit_value;
+    }
   }
 
   static __device__ inline void set_bit_value(int64_t& number, int bit_index, bool bit_value)
   {
-    long mask = 1L << bit_index;
-
-    if (bit_value) {
-      number |= mask;
+    if constexpr (CoopSkip) {
+      long mask = 1L << bit_index;
+      number    = bit_value ? (number | mask) : (number & ~mask);
     } else {
-      number &= ~mask;
+      long mask = 1L << bit_index;
+
+      if (bit_value) {
+        number |= mask;
+      } else {
+        number &= ~mask;
+      }
     }
   }
 
@@ -308,59 +318,107 @@ class json_parser {
 
   __device__ inline void parse_first_token_in_value_and_set_current()
   {
+    current_token_start_pos = curr_pos;
     if (eof()) {
       set_current_error();
       return;
     }
-    current_token_start_pos = curr_pos;
-    char c                  = chars[curr_pos];
-    switch (c) {
-      case '{':
-        if (!try_push_context(json_token::START_OBJECT)) {
-          max_depth_exceeded = true;
-          set_current_error();
-        } else {
-          curr_pos++;
-          current_token = json_token::START_OBJECT;
+    char c = chars[curr_pos];
+    if constexpr (CoopSkip) {
+      switch (c) {
+        case '{':
+        case '[': {
+          auto const token = c == '{' ? json_token::START_OBJECT : json_token::START_ARRAY;
+          if (!try_push_context(token)) {
+            max_depth_exceeded = true;
+            set_current_error();
+          } else {
+            curr_pos++;
+            current_token = token;
+          }
+          break;
         }
-        break;
-      case '[':
-        if (!try_push_context(json_token::START_ARRAY)) {
-          max_depth_exceeded = true;
-          set_current_error();
-        } else {
+        case '"':
+        case '\'': parse_string_and_set_current(); break;
+        case 't':
+        case 'f':
+        case 'n':
           curr_pos++;
-          current_token = json_token::START_ARRAY;
-        }
-        break;
-      case '"':
-
-      case '\'': parse_string_and_set_current(); break;
-      case 't':
-        curr_pos++;
-        parse_true_and_set_current();
-        break;
-      case 'f':
-        curr_pos++;
-        parse_false_and_set_current();
-        break;
-      case 'n':
-        curr_pos++;
-        parse_null_and_set_current();
-        break;
-      default: parse_number_and_set_current(); break;
+          parse_literal(c == 't'   ? "rue"
+                        : c == 'f' ? "alse"
+                                   : "ull",
+                        c == 't'   ? json_token::VALUE_TRUE
+                        : c == 'f' ? json_token::VALUE_FALSE
+                                   : json_token::VALUE_NULL);
+          break;
+        default: parse_number_and_set_current(); break;
+      }
+    } else {
+      switch (c) {
+        case '{':
+          if (!try_push_context(json_token::START_OBJECT)) {
+            max_depth_exceeded = true;
+            set_current_error();
+          } else {
+            curr_pos++;
+            current_token = json_token::START_OBJECT;
+          }
+          break;
+        case '[':
+          if (!try_push_context(json_token::START_ARRAY)) {
+            max_depth_exceeded = true;
+            set_current_error();
+          } else {
+            curr_pos++;
+            current_token = json_token::START_ARRAY;
+          }
+          break;
+        case '"':
+        case '\'': parse_string_and_set_current(); break;
+        case 't':
+          curr_pos++;
+          parse_true_and_set_current();
+          break;
+        case 'f':
+          curr_pos++;
+          parse_false_and_set_current();
+          break;
+        case 'n':
+          curr_pos++;
+          parse_null_and_set_current();
+          break;
+        default: parse_number_and_set_current(); break;
+      }
     }
   }
 
   __device__ inline void parse_string_and_set_current()
   {
-    [[maybe_unused]] auto const [success, matched, end] =
-      try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)});
-    if (success) {
-      curr_pos      = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
-      current_token = json_token::VALUE_STRING;
+    if constexpr (CoopSkip) {
+      bool has_backslash = false;
+      auto const [success, matched, end] =
+        try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)},
+                         char_range_reader(char_range::null()),
+                         &has_backslash,
+                         _coop_lane,
+                         _coop_width,
+                         _coop_mask);
+      if (success) {
+        curr_pos            = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
+        current_token       = json_token::VALUE_STRING;
+        token_has_backslash = has_backslash;
+      } else {
+        set_current_error();
+      }
     } else {
-      set_current_error();
+      [[maybe_unused]] auto const [success, matched, end] =
+        try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)});
+      if (success) {
+        curr_pos      = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
+        current_token = json_token::VALUE_STRING;
+      } else {
+        set_current_error();
+      }
     }
   }
 
@@ -623,6 +681,71 @@ class json_parser {
     return cuda::std::make_tuple(false, false, nullptr);
   }
 
+  /**
+   * Requires an opening single or double quote; scans bytes without validating UTF-8.
+   * Returns {success, decoded name matched, raw cursor after the closing quote}.
+   * Matching is false with a null name; failure returns {false, false, nullptr}.
+   * Only the merged walk arms collective skip; named lanes share cursor, quote, width and mask.
+   * A negative coop_lane selects serial skip; otherwise it is group-relative.
+   * Initialize non-null has_backslash to false; true marks raw backslashes, not byte changes.
+   */
+  static __device__ inline cuda::std::tuple<bool, bool, char const*> try_parse_string(
+    char_range_reader str,
+    char_range_reader to_match,
+    bool* has_backslash,
+    int coop_lane,
+    int coop_width,
+    unsigned coop_mask)
+  {
+    if (str.is_empty()) { return cuda::std::make_tuple(false, false, nullptr); }
+    char const quote_char   = str.current_char();
+    bool matched_field_name = !to_match.is_null();
+
+    str.next();
+
+    // Value-path skip accepts controls; matching still examines each byte serially.
+    if (to_match.is_null()) {
+      bool const have_stop =
+        coop_lane >= 0 ? coop_skip_safe_run(str, quote_char, coop_lane, coop_width, coop_mask)
+                       : swar_safe_run<false>(str, nullptr, quote_char, false);
+      if (!have_stop) { return cuda::std::make_tuple(false, false, nullptr); }
+    }
+
+    // ASCII delimiters cannot occur inside valid UTF-8 multibyte sequences.
+    while (!str.is_empty()) {
+      char c = str.current_char();
+      int v  = static_cast<int>(c);
+      if (c == quote_char) {
+        str.next();
+        matched_field_name = matched_field_name && (to_match.is_null() || to_match.is_empty());
+        return cuda::std::make_tuple(true, matched_field_name, str.data());
+      } else if (v >= 0 && v < 32) {
+        matched_field_name = matched_field_name && try_match_char(to_match, c);
+        str.next();
+        continue;
+      } else if ('\\' == c) {
+        if (has_backslash != nullptr) { *has_backslash = true; }
+        str.next();
+
+        char* copy_dest_nullptr = nullptr;
+        int output_size_bytes   = 0;
+        if (!try_skip_escape_part(str,
+                                  to_match,
+                                  copy_dest_nullptr,
+                                  escape_style::UNESCAPED,
+                                  output_size_bytes,
+                                  matched_field_name)) {
+          return cuda::std::make_tuple(false, false, nullptr);
+        }
+      } else {
+        str.next();
+        matched_field_name = matched_field_name && try_match_char(to_match, c);
+      }
+    }
+
+    return cuda::std::make_tuple(false, false, nullptr);
+  }
+
   static __device__ inline bool try_match_char(char_range_reader& reader, char c)
   {
     if (!reader.is_null()) {
@@ -762,6 +885,67 @@ class json_parser {
     }
   }
 
+ public:
+  /**
+   * All lanes of one aligned 16- or 32-lane row group enter with identical cursor, quote and mask.
+   * group_lane is group-relative; complete aligned words, including the masked head, must be
+   * readable. Short ranges use the scalar tail. True stops on the first quote or backslash;
+   * false exhausts the range. Scalar parsing consumes the stop; clear windows always advance.
+   */
+  static __device__ inline bool coop_skip_safe_run(
+    char_range_reader& str, char quote_char, int group_lane, int width, unsigned mask)
+  {
+    uint64_t const quote_w = static_cast<uint8_t>(quote_char) * 0x0101010101010101ULL;
+    uint64_t const bs_w    = static_cast<uint8_t>('\\') * 0x0101010101010101ULL;
+    // A sentinel cannot win a valid lane's first-stop ballot.
+    int constexpr k_no_stop = 0x7fffffff;
+    auto const resolve      = [&](uint64_t flags, int rel) {
+      unsigned const ballot = __ballot_sync(mask, flags != 0);
+      if (ballot == 0) { return false; }
+      int const winner = __ffs(ballot) - 1;  // absolute lane, group-uniform
+      str.advance(__shfl_sync(mask, rel, winner % width, width));
+      return true;
+    };
+
+    if (str.size() >= 8) {
+      int const misalign = static_cast<int>(reinterpret_cast<uintptr_t>(str.data()) & 7);
+      int const avail    = misalign + static_cast<int>(str.size());
+      // A partial word stays for the scalar tail to avoid skipping its bytes.
+      int const nfull_words    = cuda::std::min(avail / 8, width);
+      bool const word_in_range = group_lane < nfull_words;
+      uint64_t const w     = word_in_range ? swar_load64(str.data() - misalign + 8 * group_lane) |
+                                           (group_lane == 0 ? ((1ULL << (misalign * 8)) - 1) : 0ULL)
+                                           : ~0ULL;
+      uint64_t const flags = swar_zero_byte_flags64(w ^ quote_w) | swar_zero_byte_flags64(w ^ bs_w);
+      int const rel =
+        flags != 0 ? 8 * group_lane + swar_lowest_flag_offset64(flags) - misalign : k_no_stop;
+      if (resolve(flags, rel)) { return true; }
+      // Advance only past complete words; the partial tail remains unscanned.
+      str.advance(8 * nfull_words - misalign);
+    }
+
+    // Out-of-range lanes use sentinel words and cannot vote for a stop.
+    while (str.size() >= 8) {
+      int const size_now       = static_cast<int>(str.size());
+      int const nfull_words    = cuda::std::min(size_now / 8, width);
+      bool const word_in_range = group_lane < nfull_words;
+      uint64_t const w         = word_in_range ? swar_load64(str.data() + 8 * group_lane) : ~0ULL;
+      uint64_t const flags = swar_zero_byte_flags64(w ^ quote_w) | swar_zero_byte_flags64(w ^ bs_w);
+      int const rel = flags != 0 ? 8 * group_lane + swar_lowest_flag_offset64(flags) : k_no_stop;
+      if (resolve(flags, rel)) { return true; }
+      str.advance(8 * nfull_words);
+    }
+
+    // The caller's scalar resume consumes a stop byte and records backslashes.
+    while (!str.is_empty()) {
+      char const c = str.current_char();
+      if (c == quote_char || c == '\\') { return true; }
+      str.next();
+    }
+    return false;
+  }
+
+  // Call is_hex_digit first: zero also denotes a non-hex byte, so this is not a validator.
   static __device__ inline uint8_t hex_value(char c)
   {
     if (c >= '0' && c <= '9') return c - '0';
@@ -982,6 +1166,17 @@ class json_parser {
     return try_skip_one_or_more_digits(number_digits_length);
   }
 
+  __device__ inline void parse_literal(char const* rest, json_token token)
+  {
+    for (; *rest != '\0'; ++rest) {
+      if (!try_skip(curr_pos, *rest)) {
+        set_current_error();
+        return;
+      }
+    }
+    current_token = token;
+  }
+
   __device__ inline void parse_true_and_set_current()
   {
     if (try_skip(curr_pos, 'r') && try_skip(curr_pos, 'u') && try_skip(curr_pos, 'e')) {
@@ -1014,15 +1209,34 @@ class json_parser {
     bool& matched_field_name, char_range to_match_field_name = char_range::null())
   {
     current_token_start_pos = curr_pos;
-    auto const [success, matched, end] =
-      try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)},
-                       char_range_reader{cuda::std::move(to_match_field_name)});
-    if (success) {
-      matched_field_name = matched;
-      curr_pos           = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
-      current_token      = json_token::FIELD_NAME;
+    if constexpr (CoopSkip) {
+      bool has_backslash = false;
+      auto const [success, matched, end] =
+        try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)},
+                         char_range_reader{cuda::std::move(to_match_field_name)},
+                         &has_backslash,
+                         _coop_lane,
+                         _coop_width,
+                         _coop_mask);
+      if (success) {
+        matched_field_name = matched;
+        curr_pos           = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
+        current_token      = json_token::FIELD_NAME;
+        token_has_backslash_field_name = has_backslash;
+      } else {
+        set_current_error();
+      }
     } else {
-      set_current_error();
+      auto const [success, matched, end] =
+        try_parse_string(char_range_reader{chars.slice(curr_pos, chars.size() - curr_pos)},
+                         char_range_reader{cuda::std::move(to_match_field_name)});
+      if (success) {
+        matched_field_name = matched;
+        curr_pos           = static_cast<cudf::size_type>(cuda::std::distance(chars.data(), end));
+        current_token      = json_token::FIELD_NAME;
+      } else {
+        set_current_error();
+      }
     }
   }
 
@@ -1106,6 +1320,18 @@ class json_parser {
   }
 
  public:
+  /**
+   * Arms only the identical-state merged walk; lane is the absolute warp lane, width is 16 or 32,
+   * and mask names exactly that aligned row group. Every named lane must reach each collective.
+   * General evaluation and lane-strided materialization stay unarmed, even with CoopSkip=true.
+   */
+  __device__ inline void enable_warp_cooperative_skip(int lane, int width, unsigned mask)
+  {
+    _coop_lane  = lane % width;
+    _coop_width = width;
+    _coop_mask  = mask;
+  }
+
   // ERROR and SUCCESS end the token stream even before input ends; SUCCESS ignores trailing bytes.
   __device__ json_token next_token()
   {
@@ -1134,6 +1360,15 @@ class json_parser {
   }
 
   __device__ json_token get_current_token() const { return current_token; }
+
+  // Requires CoopSkip=true and VALUE_STRING; reports raw backslashes, not decoded-byte changes.
+  __device__ inline bool current_token_is_escaped_string() const { return token_has_backslash; }
+
+  // Requires CoopSkip=true and FIELD_NAME; false permits raw-byte comparison and length buckets.
+  __device__ inline bool current_token_is_escaped_field_name() const
+  {
+    return token_has_backslash_field_name;
+  }
 
   // Raw string and field-name ranges include both quotes and retain escapes.
   __device__ inline char_range current_range() const
@@ -1305,7 +1540,20 @@ class json_parser {
   cudf::size_type current_token_start_pos;
   json_token current_token;
 
+  // Tracks raw backslashes in the last string token; populated only with CoopSkip=true.
+  bool token_has_backslash = false;
+
+  // Separate field-name escape flag preserves the value token's flag.
+  bool token_has_backslash_field_name = false;
+
   bool max_depth_exceeded;
+  // Only the merged walk arms cooperative skip; -1 selects serial SWAR elsewhere.
+  int _coop_lane      = -1;
+  int _coop_width     = 0;
+  unsigned _coop_mask = 0u;
 };
+
+// General evaluation uses the serial specialization; merged materialization stays unarmed.
+using json_parser = json_parser_impl<>;
 
 }  // namespace spark_rapids_jni
