@@ -66,9 +66,10 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
  * @param buffers The host buffers to copy
  * @param destination The device buffer to copy into, at least as large as the host buffers combined
  * @param on_side_stream Run the copies on a stream forked from `stream` rather than on `stream`
- *        itself, so they overlap decode work already queued on `stream` instead of serializing
- *        behind it. The caller turns this on when there is such work to overlap with, and off
- *        otherwise to avoid the extra cross-stream synchronization.
+ *        itself, so they overlap work queued on `stream` afterwards, before the returned event is
+ *        waited on. The copies still wait for work already queued on `stream`. The caller turns
+ *        this on when there is such later work (e.g. decode) to overlap with, and off otherwise to
+ *        avoid the extra cross-stream synchronization.
  * @param stream CUDA stream the copies are queued on or forked from
  * @return The event recorded after the copies, which the caller must destroy
  */

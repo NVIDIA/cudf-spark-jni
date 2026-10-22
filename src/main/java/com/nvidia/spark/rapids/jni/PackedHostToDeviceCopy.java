@@ -59,9 +59,10 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
    *
    * @param hostBuffers the buffers to copy, which must stay open until the result is closed
    * @param onSideStream run the copies on a stream forked from the default stream rather than on
-   *                     the default stream itself, so they overlap decode work already queued on
-   *                     the default stream instead of serializing behind it. Turn this on when
-   *                     there is such work to overlap with, and off otherwise to avoid the extra
+   *                     the default stream itself, so they overlap work queued on the default
+   *                     stream afterwards, before waitOnEvent(). The copies still wait for work
+   *                     already queued on the default stream. Turn this on when there is such later
+   *                     work (e.g. decode) to overlap with, and off otherwise to avoid the extra
    *                     cross-stream synchronization.
    * @return the staged copy, which the caller must close
    */

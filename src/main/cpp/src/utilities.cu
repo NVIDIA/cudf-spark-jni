@@ -131,6 +131,7 @@ cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const>
     auto* dst = destination.data();
     for (auto const& buffer : buffers) {
       if (buffer.empty()) { continue; }
+      // Contiguous with the current run: extend it instead of starting a new copy.
       if (!srcs.empty() &&
           buffer.data() == static_cast<uint8_t const*>(srcs.back()) + sizes.back()) {
         sizes.back() += buffer.size();
