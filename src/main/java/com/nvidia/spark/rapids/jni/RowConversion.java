@@ -28,6 +28,10 @@ public class RowConversion {
    * For details about how this method functions refer to
    * {@link #convertToRowsFixedWidthOptimized()}.
    *
+   * Unlike {@link #convertToRowsFixedWidthOptimized()}, this method also supports STRING columns:
+   * each string is encoded as an 8-byte (offset, length) slot in the fixed-width region with the
+   * payload in the row's trailing variable-width region.
+   *
    * The only thing different between this method and {@link #convertToRowsFixedWidthOptimized()}
    * is that this can handle rougly 250M columns while {@link #convertToRowsFixedWidthOptimized()}
    * can only handle columns less than 100
@@ -43,9 +47,8 @@ public class RowConversion {
 
   /**
    * Convert this table of columns into a row major format that is useful for interacting with other
-   * systems that do row major processing of the data. Fixed-width column types and strings are
-   * supported; strings are encoded as an 8-byte (offset, length) slot in the fixed-width region
-   * with the payload in the row's trailing variable-width region.
+   * systems that do row major processing of the data. Currently only fixed-width column types are
+   * supported.
    * <p/>
    * The output is one or more ColumnVectors that are lists of bytes. A ColumnVector that is a
    * list of bytes can have at most 2GB of data stored in it. Multiple ColumnVectors are returned

@@ -32,6 +32,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 struct ColumnToRowTests : public cudf::test::BaseFixture {};
@@ -1397,11 +1398,11 @@ TEST_F(RowToColumnTests, FromRowsStringSizeCheckFuzz)
     for (int c = 0; c < ncols; ++c) {
       if (rng() % 3 == 0) {
         schema.push_back(cudf::data_type{cudf::type_id::STRING});
-        std::vector<char const*> payload;
+        std::vector<std::string> payload;
         std::vector<bool> validity;
         for (int r = 0; r < 8; ++r) {
           int const len = str_len(rng);
-          payload.push_back(len == 0 ? "" : std::string(len, 'x').c_str());
+          payload.emplace_back(len, 'x');
           validity.push_back(rng() % 4 != 0);
         }
         columns.push_back(
