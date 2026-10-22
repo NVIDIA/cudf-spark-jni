@@ -45,10 +45,14 @@
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
 #include <thrust/iterator/counting_iterator.h>
-#include <thrust/transform_reduce.h>
+#include <thrust/uninitialized_fill.h>
 
 #include <algorithm>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
 #include <numeric>
 
 namespace spark_rapids_jni {
@@ -135,7 +139,7 @@ class json_generator {
   {
     if (array_depth > 0) { is_curr_array_empty = false; }
 
-    auto copied = parser.write_unescaped_text(out_begin + offset + output_len);
+    auto copied = parser.write_token_text(out_begin + offset + output_len, escape_style::UNESCAPED);
     output_len += copied;
   }
 
@@ -715,6 +719,8 @@ __device__ named_path_selection select_last_non_null(json_parser& p,
 struct json_path_processing_data {
   cudf::device_span<path_instruction const> path_commands;
   cudf::detail::input_offsetalator offsets;
+  // First input offset for sliced scratch; exact-size retry offsets start at zero.
+  int64_t base_offset;
   cuda::std::pair<char const*, cudf::size_type>* out_stringviews;
   char* out_buf;
   int8_t* has_out_of_bound;
@@ -752,7 +758,8 @@ __launch_bounds__(block_size, min_block_per_sm) CUDF_KERNEL
     return;
   }
 
-  char* const dst                 = path.out_buf + path.offsets[row_idx];
+  // Slice offsets are absolute, but scratch owns only the selected bytes.
+  char* const dst                 = path.out_buf + (path.offsets[row_idx] - path.base_offset);
   auto const max_size             = path.offsets[row_idx + 1] - path.offsets[row_idx];
   bool is_valid                   = false;
   cudf::size_type out_size        = 0;
@@ -806,10 +813,11 @@ struct kernel_launcher {
     // Testing favored these 128-thread, 8-block bounds over a 256-thread, 4-block alternative.
     static constexpr int block_size       = 128;
     static constexpr int min_block_per_sm = 8;
-
-    auto const num_threads_per_row =
-      cuda::ceil_div(path_data.size(), static_cast<std::size_t>(cudf::detail::warp_size)) *
-      cudf::detail::warp_size;
+    constexpr std::size_t warp_size       = 32;  // matches cudf::detail::warp_size
+    // Power-of-two groups pack short path batches: 3 paths use 4 threads; 1 and 33 use 32 and 64.
+    auto const num_threads_per_row = path_data.size() <= warp_size && path_data.size() > 1
+                                       ? std::bit_ceil(path_data.size())
+                                       : cuda::ceil_div(path_data.size(), warp_size) * warp_size;
     auto const num_blocks =
       cuda::ceil_div(num_threads_per_row * input.size(), static_cast<std::size_t>(block_size));
     // Separate instantiations keep the json_tuple scan out of ordinary path-evaluation kernels.
@@ -894,26 +902,56 @@ construct_path_commands(
           std::move(h_inst_names)};
 }
 
-// Reserve input bytes plus ten longest-row lengths as slack for speculative output expansion.
-int64_t calc_scratch_size(cudf::strings_column_view const& input,
-                          cudf::detail::input_offsetalator const& in_offsets,
-                          cuda::stream_ref stream)
+/**
+ * One 256-thread block writes {maximum row bytes, selected bytes, first absolute offset} to stats.
+ * The sum covers selected rows, not their parent column; ten longest-row lengths add scratch slack.
+ * The offset range must have rows + 1 entries, and stats must have three writable int64 entries.
+ */
+__global__ void scratch_size_kernel(cudf::detail::input_offsetalator const offsets,
+                                    cudf::size_type rows,
+                                    int64_t* stats)
 {
-  auto const max_row_size = thrust::transform_reduce(
-    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-    thrust::make_counting_iterator(0),
-    thrust::make_counting_iterator(input.size()),
-    cuda::proclaim_return_type<int64_t>(
-      [in_offsets] __device__(auto const idx) { return in_offsets[idx + 1] - in_offsets[idx]; }),
-    int64_t{0},
-    cuda::maximum{});
+  // Threads scan disjoint row sets to share the input reads.
+  constexpr int block_threads = 256;
+  int64_t max_row_size        = 0;
+  int64_t chars_size          = 0;
+  for (uint32_t idx = threadIdx.x; idx < static_cast<uint32_t>(rows); idx += block_threads) {
+    auto const row_size = offsets[idx + 1] - offsets[idx];
+    max_row_size        = cuda::std::max(max_row_size, row_size);
+    chars_size += row_size;
+  }
+  __shared__ int64_t s_max[block_threads];
+  __shared__ int64_t s_sum[block_threads];
+  s_max[threadIdx.x] = max_row_size;
+  s_sum[threadIdx.x] = chars_size;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int t = 1; t < block_threads; ++t) {
+      max_row_size = cuda::std::max(max_row_size, s_max[t]);
+      chars_size += s_sum[t];
+    }
+    stats[0] = max_row_size;
+    stats[1] = chars_size;
+    stats[2] = offsets[0];
+  }
+}
+
+// Returns {scratch bytes, first absolute offset} after one readback of the selected-row statistics.
+cuda::std::pair<int64_t, int64_t> calc_scratch_size(
+  cudf::strings_column_view const& input,
+  cudf::detail::input_offsetalator const& in_offsets,
+  cuda::stream_ref stream)
+{
+  // Read all statistics together to avoid separate synchronizations.
+  auto const rows = input.size();
+  rmm::device_uvector<int64_t> d_stats(3, stream);
+  scratch_size_kernel<<<1, 256, 0, stream.get()>>>(in_offsets, rows, d_stats.data());
+  CUDF_CUDA_TRY(cudaPeekAtLastError());
+  auto const h_stats = cudf::detail::make_pinned_vector(d_stats, stream);
 
   // Padding covers speculative writes beyond the final row's input-sized slice.
-  auto const scratch_size = [&, max_row_size = max_row_size] {
-    auto constexpr padding_rows = 10;
-    return input.chars_size(stream) + max_row_size * padding_rows;
-  }();
-  return scratch_size;
+  auto constexpr padding_rows = 10;
+  return {h_stats[0] * padding_rows + h_stats[1], h_stats[2]};
 }
 
 // The last marker is depth overflow: throw first; otherwise true means every size marker is zero.
@@ -930,6 +968,7 @@ bool check_error(cudf::detail::host_vector<int8_t> const& error_check)
 std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   cudf::column_device_view const& input,
   cudf::detail::input_offsetalator const& in_offsets,
+  int64_t base_offset,
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
   int64_t scratch_size,
@@ -966,6 +1005,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
     h_path_data.emplace_back(json_path_processing_data{d_json_paths[idx],
                                                        in_offsets,
+                                                       base_offset,
                                                        out_stringviews.back().data(),
                                                        scratch_buffers.back().data(),
                                                        d_error_check.data() + idx});
@@ -1026,6 +1066,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
         json_path_processing_data{d_json_paths[idx],
                                   cudf::detail::offsetalator_factory::make_input_iterator(
                                     out_offsets_and_sizes.back().first->view()),
+                                  0,
                                   out_sview.data(),
                                   out_char_buffers.back().data(),
                                   d_error_check.data() + idx});
@@ -1105,7 +1146,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
 
   auto const in_offsets =
     cudf::detail::offsetalator_factory::make_input_iterator(input.offsets(), input.offset());
-  auto const scratch_size = calc_scratch_size(input, in_offsets, stream);
+  auto const [scratch_size, base_offset] = calc_scratch_size(input, in_offsets, stream);
   if (memory_budget_bytes <= 0 && parallel_override <= 0) {
     parallel_override = static_cast<int>(sorted_indices.size());
   }
@@ -1141,7 +1182,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
       }
     }
     auto tmp = get_json_object_batch(
-      *d_input_ptr, in_offsets, batch, scratch_size, use_last_non_null, stream, mr);
+      *d_input_ptr, in_offsets, base_offset, batch, scratch_size, use_last_non_null, stream, mr);
     for (std::size_t i = 0; i < tmp.size(); i++) {
       std::size_t out_i = output_ids[i];
       output[out_i]     = std::move(tmp[i]);

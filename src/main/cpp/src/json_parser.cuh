@@ -24,6 +24,8 @@
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 
+#include <cstring>
+
 namespace spark_rapids_jni {
 
 enum class escape_style {
@@ -112,9 +114,69 @@ class char_range_reader : public char_range {
     _len--;
   }
 
+  // Caller ensures at least n bytes remain.
+  __device__ inline void advance(int n)
+  {
+    _data += n;
+    _len -= n;
+  }
+
   // Requires a non-empty range.
   __device__ inline char current_char() const { return _data[0]; }
 };
+
+// Requires eight readable bytes at an 8-byte-aligned address.
+__device__ __forceinline__ uint64_t swar_load64(char const* p)
+{
+  return *static_cast<uint64_t const*>(__builtin_assume_aligned(p, 8));
+}
+
+// Requires four readable bytes at a four-byte-aligned address.
+__device__ __forceinline__ uint32_t swar_load32(char const* p)
+{
+  return *static_cast<uint32_t const*>(__builtin_assume_aligned(p, 4));
+}
+
+/**
+ * The aligned word containing p must be readable, including bytes before p.
+ * Masking earlier bytes with 0xFF prevents false stops and subtraction borrows.
+ */
+__device__ __forceinline__ uint64_t swar_masked_head64(char const* p)
+{
+  int const misalign = static_cast<int>(reinterpret_cast<uintptr_t>(p) & 7);
+  uint64_t const w   = swar_load64(p - misalign);
+  return w | ((1ULL << (misalign * 8)) - 1);
+}
+
+// Requires the aligned four-byte word containing p to be readable.
+__device__ __forceinline__ uint32_t swar_masked_head32(char const* p)
+{
+  int const misalign = static_cast<int>(reinterpret_cast<uintptr_t>(p) & 3);
+  uint32_t const w   = swar_load32(p - misalign);
+  return w | ((1u << (misalign * 8)) - 1);
+}
+
+// The lowest flag is exact; borrow can only flag later bytes.
+__device__ __forceinline__ uint64_t swar_zero_byte_flags64(uint64_t x)
+{
+  return (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
+}
+
+__device__ __forceinline__ uint32_t swar_zero_byte_flags32(uint32_t x)
+{
+  return (x - 0x01010101u) & ~x & 0x80808080u;
+}
+
+// Flags must be nonzero; the lowest flag identifies the first true stop byte.
+__device__ __forceinline__ int swar_lowest_flag_offset64(uint64_t flags)
+{
+  return (__ffsll(static_cast<long long>(flags)) - 1) / 8;
+}
+
+__device__ __forceinline__ int swar_lowest_flag_offset32(uint32_t flags)
+{
+  return (__ffs(flags) - 1) / 8;
+}
 
 /**
  * Token-by-token parser with Spark/Jackson's relaxed strings: single quotes and raw controls are
@@ -154,9 +216,34 @@ class json_parser {
   __device__ inline bool eof(cudf::size_type pos) const { return pos >= chars.size(); }
   __device__ inline bool eof() const { return curr_pos >= chars.size(); }
 
+ public:
   static __device__ inline bool is_hex_digit(char c)
   {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+  }
+
+  // Decodes b/f/n/r/t for validated names; other bytes pass through and are not validated here.
+  static __device__ inline char simple_escape(char c)
+  {
+    switch (c) {
+      case 'b': return '\b';
+      case 'f': return '\f';
+      case 'n': return '\n';
+      case 'r': return '\r';
+      case 't': return '\t';
+      default: return c;
+    }
+  }
+
+  // A null destination counts bytes; a non-null destination copies the literal.
+  static __device__ inline int write_lit(char* destination, char const* text, int len)
+  {
+    if (nullptr != destination) {
+      for (int i = 0; i < len; ++i) {
+        *destination++ = text[i];
+      }
+    }
+    return len;
   }
 
   static __device__ inline bool is_digit(char c) { return (c >= '0' && c <= '9'); }
@@ -277,64 +364,132 @@ class json_parser {
     }
   }
 
-  static __device__ inline char to_hex_char(unsigned int v)
-  {
-    if (v < 10)
-      return '0' + v;
-    else
-      return 'A' + (v - 10);
-  }
-
   // Requires a control byte below 32: NUL becomes \u0000; a null output only counts bytes.
   static __device__ inline int escape_char(unsigned char c, char* output)
   {
-    if (nullptr == output) {
-      switch (c) {
-        case 8:             // \b
-        case 9:             // \t
-        case 10:            // \n
-        case 12:            // \f
-        case 13: return 2;  // \r
-        default: return 6;  // \u00XX
+    char letter = 0;
+    switch (c) {
+      case 8: letter = 'b'; break;
+      case 9: letter = 't'; break;
+      case 10: letter = 'n'; break;
+      case 12: letter = 'f'; break;
+      case 13: letter = 'r'; break;
+      default: break;
+    }
+    if (output != nullptr) {
+      output[0] = '\\';
+      if (letter != 0) {
+        output[1] = letter;
+      } else {
+        constexpr char hex[] = "0123456789ABCDEF";
+        output[1]            = 'u';
+        output[2]            = '0';
+        output[3]            = '0';
+        output[4]            = hex[c >> 4];
+        output[5]            = hex[c & 0x0F];
       }
     }
-    switch (c) {
-      case 8:
-        output[0] = '\\';
-        output[1] = 'b';
-        return 2;
-      case 9:
-        output[0] = '\\';
-        output[1] = 't';
-        return 2;
-      case 10:
-        output[0] = '\\';
-        output[1] = 'n';
-        return 2;
-      case 12:
-        output[0] = '\\';
-        output[1] = 'f';
-        return 2;
-      case 13:
-        output[0] = '\\';
-        output[1] = 'r';
-        return 2;
-      default:
-        output[0] = '\\';
-        output[1] = 'u';
-        output[2] = '0';
-        output[3] = '0';
+    return letter != 0 ? 2 : 6;
+  }
 
-        if (c >= 16) {
-          output[4] = '1';
-        } else {
-          output[4] = '0';
-        }
+  /**
+   * Advances to the first quote/backslash without consuming it; aligned loads skip ordinary runs.
+   * The aligned head word must be readable, including bytes before the cursor; tails stay in range.
+   * Copy=true returns bytes copied/counted and also stops at controls or a requested double quote.
+   * Copy=false accepts raw controls and returns true at a stop, false if the range is exhausted.
+   */
+  template <bool Copy>
+  static __device__ inline int swar_safe_run(char_range_reader& str,
+                                             char* copy_dest,
+                                             char quote_char,
+                                             bool stop_on_plain_quote)
+  {
+    uint64_t const quote_w = static_cast<uint8_t>(quote_char) * 0x0101010101010101ULL;
+    uint64_t const bs_w    = static_cast<uint8_t>('\\') * 0x0101010101010101ULL;
+    // Control bytes have zero high three bits.
+    uint64_t const ctl_mask = 0xE0E0E0E0E0E0E0E0ULL;
+    uint64_t const plain_quote_w =
+      stop_on_plain_quote ? static_cast<uint8_t>('"') * 0x0101010101010101ULL : 0ULL;
 
-        unsigned int v = c % 16;
-        output[5]      = to_hex_char(v);
-        return 6;
+    int copied = 0;
+    auto take  = [&](int n) {
+      if constexpr (Copy) {
+        if (copy_dest != nullptr) { memcpy(copy_dest, str.data(), n); }
+      }
+      str.advance(n);
+      if constexpr (Copy) {
+        copy_dest = copy_dest == nullptr ? nullptr : copy_dest + n;
+        copied += n;
+      }
+    };
+    auto stop64 = [&](uint64_t w) {
+      // Combine stop flags; combining byte values before detecting zeros can hide matches.
+      if constexpr (Copy) {
+        return swar_zero_byte_flags64(w ^ quote_w) | swar_zero_byte_flags64(w ^ bs_w) |
+               swar_zero_byte_flags64(w & ctl_mask) |
+               (stop_on_plain_quote ? swar_zero_byte_flags64(w ^ plain_quote_w) : 0ULL);
+      } else {
+        return swar_zero_byte_flags64(w ^ quote_w) | swar_zero_byte_flags64(w ^ bs_w);
+      }
+    };
+    auto stop32 = [&](uint32_t w) {
+      if constexpr (Copy) {
+        return swar_zero_byte_flags32(w ^ (static_cast<uint8_t>(quote_char) * 0x01010101u)) |
+               swar_zero_byte_flags32(w ^ 0x5C5C5C5Cu) | swar_zero_byte_flags32(w & 0xE0E0E0E0u) |
+               (stop_on_plain_quote ? swar_zero_byte_flags32(w ^ 0x22222222u) : 0u);
+      } else {
+        return swar_zero_byte_flags32(w ^ (static_cast<uint8_t>(quote_char) * 0x01010101u)) |
+               swar_zero_byte_flags32(w ^ 0x5C5C5C5Cu);
+      }
+    };
+    if (str.size() >= 8) {
+      int const misalign  = static_cast<int>(reinterpret_cast<uintptr_t>(str.data()) & 7);
+      uint64_t const w    = swar_masked_head64(str.data());
+      uint64_t const stop = stop64(w);
+      int const run       = (stop == 0 ? 8 : swar_lowest_flag_offset64(stop)) - misalign;
+      if (run > 0) { take(run); }
+      if (stop != 0) { return Copy ? copied : true; }
+    } else if (str.size() >= 4) {
+      int const misalign  = static_cast<int>(reinterpret_cast<uintptr_t>(str.data()) & 3);
+      uint32_t const w    = swar_masked_head32(str.data());
+      uint32_t const stop = stop32(w);
+      int const run       = (stop == 0 ? 4 : swar_lowest_flag_offset32(stop)) - misalign;
+      if (run > 0) { take(run); }
+      if (stop != 0) { return Copy ? copied : true; }
     }
+    while (str.size() >= 8 && (reinterpret_cast<uintptr_t>(str.data()) & 7) == 0 &&
+           (copy_dest == nullptr || (reinterpret_cast<uintptr_t>(copy_dest) & 7) == 0)) {
+      uint64_t const w    = swar_load64(str.data());
+      uint64_t const stop = stop64(w);
+      if (stop != 0) {
+        int const run = swar_lowest_flag_offset64(stop);
+        if (run > 0) { take(run); }
+        return Copy ? copied : true;
+      }
+      take(8);
+    }
+    while (str.size() >= 4 && (reinterpret_cast<uintptr_t>(str.data()) & 3) == 0 &&
+           (copy_dest == nullptr || (reinterpret_cast<uintptr_t>(copy_dest) & 3) == 0)) {
+      uint32_t const w    = swar_load32(str.data());
+      uint32_t const stop = stop32(w);
+      if (stop != 0) {
+        int const run = swar_lowest_flag_offset32(stop);
+        if (run > 0) { take(run); }
+        return Copy ? copied : true;
+      }
+      take(4);
+    }
+    while (!str.is_empty()) {
+      char const c = str.current_char();
+      if (c == quote_char || c == '\\') { return Copy ? copied : true; }
+      if constexpr (Copy) {
+        if ((stop_on_plain_quote && c == '"') || static_cast<uint8_t>(c) < 0x20) { return copied; }
+        if (copy_dest != nullptr) { *copy_dest++ = c; }
+      }
+      str.next();
+      if constexpr (Copy) { ++copied; }
+    }
+    return Copy ? copied : false;
   }
 
   /**
@@ -357,6 +512,15 @@ class json_parser {
     }
 
     str.next();
+
+    // A double quote inside single quotes must stop the copy so quoted output can escape it.
+    {
+      bool const stop_on_plain_quote = (escape_style::ESCAPED == w_style);
+      int const copied =
+        swar_safe_run<true>(str, copy_destination, quote_char, stop_on_plain_quote);
+      output_size_bytes += copied;
+      if (copy_destination != nullptr) { copy_destination += copied; }
+    }
 
     while (!str.is_empty()) {
       char const c = str.current_char();
@@ -419,6 +583,12 @@ class json_parser {
 
     str.next();
 
+    // Value-path skip accepts controls; matching still examines each byte serially.
+    if (to_match.is_null()) {
+      bool const have_stop = swar_safe_run<false>(str, nullptr, quote_char, false);
+      if (!have_stop) { return cuda::std::make_tuple(false, false, nullptr); }
+    }
+
     // ASCII delimiters cannot occur inside valid UTF-8 multibyte sequences.
     while (!str.is_empty()) {
       char c = str.current_char();
@@ -445,9 +615,7 @@ class json_parser {
           return cuda::std::make_tuple(false, false, nullptr);
         }
       } else {
-        if (!try_skip_safe_code_point(str, c)) {
-          return cuda::std::make_tuple(false, false, nullptr);
-        }
+        str.next();
         matched_field_name = matched_field_name && try_match_char(to_match, c);
       }
     }
@@ -594,17 +762,6 @@ class json_parser {
     }
   }
 
-  static __device__ inline bool try_skip_safe_code_point(char_range_reader& str, char c)
-  {
-    int v = static_cast<int>(c);
-    if (!(v >= 0 && v < 32)) {
-      str.next();
-      return true;
-    } else {
-      return false;
-    }
-  }
-
   static __device__ inline uint8_t hex_value(char c)
   {
     if (c >= '0' && c <= '9') return c - '0';
@@ -723,6 +880,7 @@ class json_parser {
     return true;
   }
 
+ private:
   // Number grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`; 1e01 is valid, 01 is not.
   __device__ inline void parse_number_and_set_current()
   {
@@ -733,7 +891,6 @@ class json_parser {
     if (try_unsigned_number(is_float, number_digits_length)) {
       if (check_max_num_len(number_digits_length)) {
         current_token = (is_float ? json_token::VALUE_NUMBER_FLOAT : json_token::VALUE_NUMBER_INT);
-        number_token_len = curr_pos - current_token_start_pos;
       } else {
         set_current_error();
       }
@@ -869,13 +1026,16 @@ class json_parser {
     }
   }
 
-  // Inspecting callers zero separator flags; this only sets them true. Matching is FIELD_NAME-only.
+  // Inspecting callers zero separator; this only sets ':' or ','. Matching is FIELD_NAME-only.
   __device__ inline void parse_next_token_and_set_current(
-    bool& has_comma_before_token,
-    bool& has_colon_before_token,
-    bool& matched_field_name,
-    char_range to_match_field_name = char_range::null())
+    char& separator, bool& matched_field_name, char_range to_match_field_name = char_range::null())
   {
+    auto const close = [&](json_token token) {
+      current_token_start_pos = curr_pos;
+      curr_pos++;
+      pop_curr_context();
+      current_token = token;
+    };
     skip_whitespaces();
     if (!eof()) {
       char const c = chars[curr_pos];
@@ -890,16 +1050,13 @@ class json_parser {
         if (is_object_context()) {
           if (current_token == json_token::START_OBJECT) {
             if (c == '}') {
-              current_token_start_pos = curr_pos;
-              curr_pos++;
-              pop_curr_context();
-              current_token = json_token::END_OBJECT;
+              close(json_token::END_OBJECT);
             } else {
               parse_field_name_and_set_current(matched_field_name, to_match_field_name);
             }
           } else if (current_token == json_token::FIELD_NAME) {
             if (c == ':') {
-              has_colon_before_token = true;
+              separator = ':';
               curr_pos++;
               skip_whitespaces();
               parse_first_token_in_value_and_set_current();
@@ -908,12 +1065,9 @@ class json_parser {
             }
           } else {
             if (c == '}') {
-              current_token_start_pos = curr_pos;
-              curr_pos++;
-              pop_curr_context();
-              current_token = json_token::END_OBJECT;
+              close(json_token::END_OBJECT);
             } else if (c == ',') {
-              has_comma_before_token = true;
+              separator = ',';
               curr_pos++;
               skip_whitespaces();
               parse_field_name_and_set_current(matched_field_name, to_match_field_name);
@@ -924,24 +1078,18 @@ class json_parser {
         } else {
           if (current_token == json_token::START_ARRAY) {
             if (c == ']') {
-              current_token_start_pos = curr_pos;
-              curr_pos++;
-              pop_curr_context();
-              current_token = json_token::END_ARRAY;
+              close(json_token::END_ARRAY);
             } else {
               parse_first_token_in_value_and_set_current();
             }
           } else {
             if (c == ',') {
-              has_comma_before_token = true;
+              separator = ',';
               curr_pos++;
               skip_whitespaces();
               parse_first_token_in_value_and_set_current();
             } else if (c == ']') {
-              current_token_start_pos = curr_pos;
-              curr_pos++;
-              pop_curr_context();
-              current_token = json_token::END_ARRAY;
+              close(json_token::END_ARRAY);
             } else {
               set_current_error();
             }
@@ -962,26 +1110,27 @@ class json_parser {
   __device__ json_token next_token()
   {
     // These write-only outputs are ignored.
-    bool has_comma_before_token;
-    bool has_colon_before_token;
+    char separator = 0;
     bool matched_field_name;
-    parse_next_token_and_set_current(
-      has_comma_before_token, has_colon_before_token, matched_field_name);
+    parse_next_token_and_set_current(separator, matched_field_name);
     return current_token;
   }
 
   // The match result is valid only for FIELD_NAME.
   __device__ bool parse_next_token_with_matching(cudf::string_view to_match_field_name)
   {
-    // These write-only separator outputs are ignored.
-    bool has_comma_before_token;
-    bool has_colon_before_token;
-    bool matched_field_name;
-    parse_next_token_and_set_current(has_comma_before_token,
-                                     has_colon_before_token,
-                                     matched_field_name,
-                                     char_range{to_match_field_name});
+    // The write-only separator output is ignored.
+    char separator          = 0;
+    bool matched_field_name = false;
+    parse_next_token_and_set_current(
+      separator, matched_field_name, char_range{to_match_field_name});
     return matched_field_name;
+  }
+
+  // Valid only for the just-parsed numeric token.
+  __device__ inline cudf::size_type number_len() const
+  {
+    return curr_pos - current_token_start_pos;
   }
 
   __device__ json_token get_current_token() const { return current_token; }
@@ -1022,149 +1171,47 @@ class json_parser {
     return false;
   }
 
-  __device__ cudf::size_type compute_unescaped_len() const { return write_unescaped_text(nullptr); }
-
   /**
-   * A null destination only counts bytes; strings are decoded without surrounding quotes.
+   * Returns bytes written or counted for the current token without advancing parser state.
+   * A null destination only counts bytes; strings follow style, numbers normalize in either style.
+   * UNESCAPED omits quotes; ESCAPED emits double quotes and re-escapes controls and simple escapes.
+   * Unicode escapes decode in either style.
    * E.g. \u4E2D\u56FD becomes six bytes: E4 B8 AD E5 9B BD; quoted output adds two bytes.
+   * ESCAPED: a lone double quote becomes four bytes (quote, backslash, quote, quote).
    * Integer -0 becomes 0; floats normalize through double, e.g. 200.000 becomes 200.0.
+   * Other integers retain their spelling; INIT, ERROR and SUCCESS produce zero bytes.
    */
-  __device__ cudf::size_type write_unescaped_text(char* destination) const
+  __device__ cudf::size_type write_token_text(char* destination, escape_style style) const
   {
     switch (current_token) {
-      case json_token::VALUE_STRING: {
-        char_range_reader reader(current_range());
-        return write_string(reader, destination, escape_style::UNESCAPED);
-      }
+      case json_token::VALUE_TRUE: return write_lit(destination, "true", 4);
+      case json_token::VALUE_FALSE: return write_lit(destination, "false", 5);
+      case json_token::VALUE_NULL: return write_lit(destination, "null", 4);
       case json_token::VALUE_NUMBER_INT:
-        if (number_token_len == 2 && chars[current_token_start_pos] == '-' &&
+        if (number_len() == 2 && chars[current_token_start_pos] == '-' &&
             chars[current_token_start_pos + 1] == '0') {
           if (nullptr != destination) *destination++ = '0';
           return 1;
         }
         if (nullptr != destination) {
-          for (cudf::size_type i = 0; i < number_token_len; ++i) {
+          for (cudf::size_type i = 0; i < number_len(); ++i) {
             *destination++ = chars[current_token_start_pos + i];
           }
         }
-        return number_token_len;
+        return number_len();
       case json_token::VALUE_NUMBER_FLOAT: {
         // Floats can expand: 1E308 becomes 1.0E308; 0.003 stays 0.003, but 0.0003 becomes 3.0E-4.
         // Trailing zeros drop: 351.980 becomes 351.98; 0.0000000000003 becomes 3.0E-13.
         // Large finite values also normalize: 12345678900000000000.0 becomes 1.23456789E19.
         // Even raw output quotes overflow: 1.0E309 becomes "Infinity", -1E309 becomes "-Infinity".
         double d_value =
-          cudf::strings::detail::stod(chars.slice_sv(current_token_start_pos, number_token_len));
+          cudf::strings::detail::stod(chars.slice_sv(current_token_start_pos, number_len()));
         return spark_rapids_jni::ftos_converter::double_normalization(d_value, destination);
       }
-      case json_token::VALUE_TRUE:
-        if (nullptr != destination) {
-          *destination++ = 't';
-          *destination++ = 'r';
-          *destination++ = 'u';
-          *destination++ = 'e';
-        }
-        return 4;
-      case json_token::VALUE_FALSE:
-        if (nullptr != destination) {
-          *destination++ = 'f';
-          *destination++ = 'a';
-          *destination++ = 'l';
-          *destination++ = 's';
-          *destination++ = 'e';
-        }
-        return 5;
-      case json_token::VALUE_NULL:
-        if (nullptr != destination) {
-          *destination++ = 'n';
-          *destination++ = 'u';
-          *destination++ = 'l';
-          *destination++ = 'l';
-        }
-        return 4;
+      case json_token::VALUE_STRING:
       case json_token::FIELD_NAME: {
         char_range_reader reader(current_range());
-        return write_string(reader, destination, escape_style::UNESCAPED);
-      }
-      case json_token::START_ARRAY:
-        if (nullptr != destination) { *destination++ = '['; }
-        return 1;
-      case json_token::END_ARRAY:
-        if (nullptr != destination) { *destination++ = ']'; }
-        return 1;
-      case json_token::START_OBJECT:
-        if (nullptr != destination) { *destination++ = '{'; }
-        return 1;
-      case json_token::END_OBJECT:
-        if (nullptr != destination) { *destination++ = '}'; }
-        return 1;
-      case json_token::SUCCESS:
-      case json_token::ERROR:
-      case json_token::INIT: return 0;
-    }
-    return 0;
-  }
-
-  __device__ cudf::size_type compute_escaped_len() const { return write_escaped_text(nullptr); }
-
-  /**
-   * A null destination only counts bytes; numbers normalize exactly as in unescaped output.
-   * A lone double quote becomes four bytes (quote, backslash, quote, quote).
-   * \u4E2D\u56FD becomes eight bytes: two quotes around E4 B8 AD E5 9B BD.
-   */
-  __device__ cudf::size_type write_escaped_text(char* destination) const
-  {
-    switch (current_token) {
-      case json_token::VALUE_STRING: {
-        char_range_reader reader(current_range());
-        return write_string(reader, destination, escape_style::ESCAPED);
-      }
-      case json_token::VALUE_NUMBER_INT: {
-        if (number_token_len == 2 && chars[current_token_start_pos] == '-' &&
-            chars[current_token_start_pos + 1] == '0') {
-          if (nullptr != destination) *destination++ = '0';
-          return 1;
-        }
-        if (nullptr != destination) {
-          for (cudf::size_type i = 0; i < number_token_len; ++i) {
-            *destination++ = chars[current_token_start_pos + i];
-          }
-        }
-        return number_token_len;
-      }
-      case json_token::VALUE_NUMBER_FLOAT: {
-        double d_value =
-          cudf::strings::detail::stod(chars.slice_sv(current_token_start_pos, number_token_len));
-        return spark_rapids_jni::ftos_converter::double_normalization(d_value, destination);
-      }
-      case json_token::VALUE_TRUE:
-        if (nullptr != destination) {
-          *destination++ = 't';
-          *destination++ = 'r';
-          *destination++ = 'u';
-          *destination++ = 'e';
-        }
-        return 4;
-      case json_token::VALUE_FALSE:
-        if (nullptr != destination) {
-          *destination++ = 'f';
-          *destination++ = 'a';
-          *destination++ = 'l';
-          *destination++ = 's';
-          *destination++ = 'e';
-        }
-        return 5;
-      case json_token::VALUE_NULL:
-        if (nullptr != destination) {
-          *destination++ = 'n';
-          *destination++ = 'u';
-          *destination++ = 'l';
-          *destination++ = 'l';
-        }
-        return 4;
-      case json_token::FIELD_NAME: {
-        char_range_reader reader(current_range());
-        return write_string(reader, destination, escape_style::ESCAPED);
+        return write_string(reader, destination, style);
       }
       case json_token::START_ARRAY:
         if (nullptr != destination) { *destination++ = '['; }
@@ -1206,35 +1253,24 @@ class json_parser {
       case json_token::VALUE_STRING:
       case json_token::VALUE_TRUE:
       case json_token::VALUE_FALSE:
-      case json_token::VALUE_NULL:
-        if (nullptr != copy_to) {
-          size_t copy_len = write_escaped_text(copy_to);
-          return {true, copy_len};
-        } else {
-          size_t copy_len = compute_escaped_len();
-          return {true, copy_len};
-        }
+      case json_token::VALUE_NULL: {
+        size_t copy_len = write_token_text(copy_to, escape_style::ESCAPED);
+        return {true, copy_len};
+      }
       case json_token::START_ARRAY:
-      case json_token::START_OBJECT:
+      case json_token::START_OBJECT: {
         // The matching end token lowers stack_size by one from this saved depth.
         size_t sum_copy_len   = 0;
         int backup_stack_size = stack_size;
 
-        if (nullptr != copy_to) {
-          int len = write_escaped_text(copy_to);
-          sum_copy_len += len;
-          copy_to += len;
-        } else {
-          sum_copy_len += compute_escaped_len();
-        }
+        int len = write_token_text(copy_to, escape_style::ESCAPED);
+        sum_copy_len += len;
+        if (nullptr != copy_to) { copy_to += len; }
 
         while (true) {
-          bool has_comma_before_token = false;
-          bool has_colon_before_token = false;
-
+          char separator = 0;
           bool matched_field_name;  // ignored
-          parse_next_token_and_set_current(
-            has_comma_before_token, has_colon_before_token, matched_field_name);
+          parse_next_token_and_set_current(separator, matched_field_name);
 
           // check the JSON format
           if (current_token == json_token::ERROR) {
@@ -1242,27 +1278,17 @@ class json_parser {
             return {false, sum_copy_len};
           }
 
-          if (nullptr != copy_to) {
-            if (has_comma_before_token) {
-              sum_copy_len++;
-              *copy_to++ = ',';
-            }
-            if (has_colon_before_token) {
-              sum_copy_len++;
-              *copy_to++ = ':';
-            }
-            int len = write_escaped_text(copy_to);
-            sum_copy_len += len;
-            copy_to += len;
-          } else {
-            if (has_comma_before_token) { sum_copy_len++; }
-            if (has_colon_before_token) { sum_copy_len++; }
-            sum_copy_len += compute_escaped_len();
+          if (separator != 0) {
+            sum_copy_len++;
+            if (nullptr != copy_to) { *copy_to++ = separator; }
           }
+          len = write_token_text(copy_to, escape_style::ESCAPED);
+          sum_copy_len += len;
+          if (nullptr != copy_to) { copy_to += len; }
 
           if (backup_stack_size - 1 == stack_size) { return {true, sum_copy_len}; }
         }
-        return {false, 0};
+      }
     }
 
     return {false, 0};
@@ -1277,8 +1303,6 @@ class json_parser {
   int64_t context_stack;
   int stack_size = 0;
   cudf::size_type current_token_start_pos;
-  cudf::size_type number_token_len;
-
   json_token current_token;
 
   bool max_depth_exceeded;
