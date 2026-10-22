@@ -16,6 +16,8 @@
 
 #include "get_json_object.hpp"
 
+#include <benchmarks/common/gjo_scenario_generators.hpp>
+
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
@@ -541,6 +543,10 @@ INSTANTIATE_TEST_SUITE_P(PaddingAndQuotes,
                          testing::Combine(testing::Range(0, 9), testing::Values('"', '\'')));
 
 using spark_rapids_jni::path_instruction_type;
+using spark_rapids_jni::gjo_scenarios::nested_build_paths;
+using spark_rapids_jni::gjo_scenarios::nested_build_rows;
+using spark_rapids_jni::gjo_scenarios::nested_table_135;
+using spark_rapids_jni::gjo_scenarios::nested_table_33;
 
 namespace {
 
@@ -1333,6 +1339,79 @@ TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
   expect_first7_parity(batch_out, general_out, 7, "retry parity column ");
 }
 
+TEST_F(GetJsonObjectTest, DegenerateEmptyAndAllNullInputs)
+{
+  // Empty rows, all-null rows, and zero paths must return their degenerate outputs.
+  auto const rows = same_rows(64, R"({"k":{"v":"V"}})");
+
+  auto const degenerate_paths = named_depth2({"k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"});
+  for (auto const path_count : {8u, 1u}) {
+    cudf::test::strings_column_wrapper empty_col{};
+    auto out =
+      run_fused(cudf::strings_column_view{empty_col}, first_n(degenerate_paths, path_count));
+    ASSERT_EQ(out.size(), path_count);
+    for (auto const& col : out) {
+      ASSERT_NE(col, nullptr);
+      EXPECT_EQ(col->type().id(), cudf::type_id::STRING);
+      EXPECT_EQ(col->size(), 0);
+      EXPECT_EQ(col->null_count(), 0);
+    }
+  }
+  {
+    std::vector<std::string> payload(64, "x");
+    std::vector<bool> invalid(64, false);
+    cudf::test::strings_column_wrapper null_col(payload.begin(), payload.end(), invalid.begin());
+    auto input = cudf::strings_column_view{null_col};
+    ASSERT_EQ(input.size(), 64);
+    ASSERT_EQ(input.null_count(), 64);
+    auto out = run_fused(input, named_depth2({"k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"}));
+    ASSERT_EQ(out.size(), 8u);
+    for (auto const& col : out) {
+      ASSERT_NE(col, nullptr);
+      EXPECT_EQ(col->type().id(), cudf::type_id::STRING);
+      EXPECT_EQ(col->size(), 64);
+      EXPECT_EQ(col->null_count(), 64);
+    }
+  }
+  {
+    multi_paths none;
+    auto out = run_fused(cudf::strings_column_view{col_from(rows)}, none);
+    EXPECT_TRUE(out.empty());
+  }
+}
+
+TEST_F(GetJsonObjectTest, SingleOutputBypassRoutes)
+{
+  // A single path bypasses batching both normally and after an OOB retry.
+  {
+    auto const rows = alt_rows(64, R"({"k":{"v":"even"}})", R"({"x":{"v":"odd"}})");
+    auto out        = run_fused(cudf::strings_column_view{col_from(rows)}, named_depth2({"k"}));
+    ASSERT_EQ(out.size(), 1u);
+    auto const [vals, mask] = cudf::test::to_host<std::string>(out[0]->view());
+    ASSERT_EQ(vals.size(), 64u);
+    EXPECT_EQ(out[0]->null_count(), 32);
+    for (int r = 0; r < 64; ++r) {
+      bool const is_valid = row_valid(*out[0], mask, r);
+      EXPECT_EQ(is_valid, r % 2 == 0) << "row " << r;
+      if (r % 2 == 0) { EXPECT_EQ(vals[r], "even") << "row " << r; }
+    }
+    EXPECT_EQ(out[0]->view().child(0).type().id(), cudf::type_id::INT32);
+  }
+  {
+    auto const bomb   = std::string(30, '"');
+    auto const row    = R"({"k":{"a":')" + bomb + R"('}})";
+    auto const rows   = same_rows(64, row);
+    auto const expect = quote_bomb_value(30);
+    ASSERT_EQ(row.size(), 44u) << "anatomy comment drifted";
+    ASSERT_EQ(expect.size(), 68u) << "anatomy comment drifted";
+
+    multi_paths single{named({"k"})};
+    auto out = run_fused(cudf::strings_column_view{col_from(rows)}, single);
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[0], expect, true));
+  }
+}
+
 TEST_F(GetJsonObjectTest, UnquotedObjectKeySubtreeParity)
 {
   // Unquoted object keys must use normalized writer bytes, never certified raw bytes.
@@ -1362,6 +1441,62 @@ TEST_F(GetJsonObjectTest, UnquotedObjectKeySubtreeParity)
     ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], c.expected, true));
     ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", false));
     expect_first7_parity(batch_out, general_out, 7, "unquoted-key parity column ");
+  }
+}
+
+TEST_F(GetJsonObjectTest, L2FixProdShapeSharedStringviewsParity)
+{
+  // Production 33/135-path shapes must share stringviews safely and match a general oracle.
+  auto const batch33  = nested_build_paths(nested_table_33(), 33);
+  auto const batch135 = nested_build_paths(nested_table_135(), 135);
+
+  std::mt19937_64 rng{42};
+  auto const rows33 = nested_build_rows(rng, nested_table_33(), 96, 4 * 1024, 42);
+  rng.seed(42);
+  auto const rows135 = nested_build_rows(rng, nested_table_135(), 96, 4 * 1024, 42);
+  auto const col33   = col_from(rows33);
+  auto const col135  = col_from(rows135);
+
+  auto const out33  = run_fused(cudf::strings_column_view{col33}, batch33);
+  auto const out135 = run_fused(cudf::strings_column_view{col135}, batch135);
+  ASSERT_EQ(out33.size(), 33u);
+  ASSERT_EQ(out135.size(), 135u);
+
+  // Every column of both outputs is compared elementwise (values + validity) against a
+  // single-path evaluation of the same query; 300 rows (> 256) forces a partial final word.
+  std::mt19937_64 rng33{7};
+  auto const rows33_wide = nested_build_rows(rng33, nested_table_33(), 300, 4 * 1024, 7);
+  rng33.seed(7);
+  auto const rows135_wide = nested_build_rows(rng33, nested_table_135(), 300, 4 * 1024, 7);
+  auto const col33_wide   = col_from(rows33_wide);
+  auto const col135_wide  = col_from(rows135_wide);
+
+  auto const out33_wide  = run_fused(cudf::strings_column_view{col33_wide}, batch33);
+  auto const out135_wide = run_fused(cudf::strings_column_view{col135_wide}, batch135);
+  ASSERT_EQ(out33_wide.size(), 33u);
+  ASSERT_EQ(out135_wide.size(), 135u);
+
+  auto expect_every_column_parity = [&](auto const& outs, auto const& paths, auto const& col) {
+    for (std::size_t col_idx = 0; col_idx < outs.size(); ++col_idx) {
+      SCOPED_TRACE("wide parity column " + std::to_string(col_idx));
+      multi_paths one;
+      one.push_back(paths[col_idx]);
+      auto const single = run_fused(cudf::strings_column_view{col}, one);
+      ASSERT_EQ(single.size(), 1u);
+      ASSERT_NO_FATAL_FAILURE(expect_columns_parity(outs[col_idx], single[0]));
+    }
+  };
+  expect_every_column_parity(out33_wide, batch33, col33_wide);
+  expect_every_column_parity(out135_wide, batch135, col135_wide);
+
+  // The 96-row shapes keep their full-content sanity check as well.
+  for (std::size_t col = 0; col < out33.size(); ++col) {
+    SCOPED_TRACE("s33 sanity column " + std::to_string(col));
+    auto const [vals, mask] = cudf::test::to_host<std::string>(out33[col]->view());
+    ASSERT_EQ(vals.size(), 96u);
+    for (std::size_t r = 0; r < vals.size(); ++r) {
+      if (row_valid(*out33[col], mask, r)) { EXPECT_FALSE(vals[r].empty()) << "row " << r; }
+    }
   }
 }
 
@@ -1402,6 +1537,24 @@ TEST_F(GetJsonObjectTest, LastNonNullWideNamedBatches)
       }
     }
   }
+}
+
+TEST_F(GetJsonObjectTest, PackedReadbackRejectsDepthErrors)
+{
+  auto const nested    = std::string(65, '[') + "0" + std::string(65, ']');
+  auto const input_col = col_from(same_rows(32, R"({"a":)" + nested + "}"));
+  auto const input     = cudf::strings_column_view{input_col};
+  multi_paths paths;
+  for (int p = 0; p < 8; ++p) {
+    paths.push_back(named({"a"}));
+  }
+
+  // Both selection policies reach packed readback; neither may expose depth-error metadata.
+  EXPECT_THROW(spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1),
+               cudf::logic_error);
+  EXPECT_THROW(spark_rapids_jni::get_json_object_multiple_paths(
+                 input, paths, -1, -1, spark_rapids_jni::named_field_match_policy::LAST_NON_NULL),
+               cudf::logic_error);
 }
 
 TEST_F(GetJsonObjectTest, MergedRouteRejectsDepthErrors)
