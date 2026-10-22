@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,8 +43,9 @@ public class RowConversion {
 
   /**
    * Convert this table of columns into a row major format that is useful for interacting with other
-   * systems that do row major processing of the data. Currently only fixed-width column types are
-   * supported.
+   * systems that do row major processing of the data. Fixed-width column types and strings are
+   * supported; strings are encoded as an 8-byte (offset, length) slot in the fixed-width region
+   * with the payload in the row's trailing variable-width region.
    * <p/>
    * The output is one or more ColumnVectors that are lists of bytes. A ColumnVector that is a
    * list of bytes can have at most 2GB of data stored in it. Multiple ColumnVectors are returned
