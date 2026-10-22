@@ -351,6 +351,97 @@ public class CastStringsTest {
     }
   }
 
+  // Regression test for https://github.com/NVIDIA/cudf-spark/issues/16466.
+  @Test
+  void castToFloatsExtremeExponentTest() {
+    char[] longMantissa = new char[10001];
+    Arrays.fill(longMantissa, '0');
+    longMantissa[0] = '1';
+    String cancellingExponent = new String(longMantissa) + "e-10000";
+    char[] boundaryExponent = new char[29];
+    Arrays.fill(boundaryExponent, '0');
+    String invalidBoundarySuffix = "1e" + new String(boundaryExponent) + "fX";
+    // Place E immediately before and at the end of a 32-character parser window.
+    char[] fastBoundaryMantissa = new char[30];
+    Arrays.fill(fastBoundaryMantissa, '0');
+    fastBoundaryMantissa[fastBoundaryMantissa.length - 1] = '1';
+    char[] slowBoundaryMantissa = new char[31];
+    Arrays.fill(slowBoundaryMantissa, '0');
+    slowBoundaryMantissa[slowBoundaryMantissa.length - 1] = '1';
+    // Exercise the complete-in-window fast path and arbitrary-length slow path boundary.
+    char[] fastExponent = new char[18];
+    Arrays.fill(fastExponent, '0');
+    fastExponent[fastExponent.length - 1] = '1';
+    char[] slowExponent = new char[19];
+    Arrays.fill(slowExponent, '0');
+    slowExponent[slowExponent.length - 1] = '1';
+    String[] inputs = new String[] {
+        "-630111.628E-58858",
+        "630111.628E58858",
+        "-1E5000",
+        "1E5000",
+        "-1E-5000",
+        "1E-5000",
+        "1e" + new String(fastExponent),
+        "1e" + new String(slowExponent),
+        "1e00000000000000000000000000000000000000001",
+        "-1e-00000000000000000000000000000000000000001",
+        "123456789012345678901234567890E-58858",
+        "1234567890123456789012345678901E-58858",
+        "1e99999999999999999999999999999999" +
+            "999999999999999999999999999999999999",
+        "-1e-99999999999999999999999999999999" +
+            "999999999999999999999999999999999999",
+        "-9007199254740993e-99999999999999999999999999999999" +
+            "999999999999999999999999999999999999",
+        cancellingExponent,
+        new String(fastBoundaryMantissa) + "E2",
+        new String(slowBoundaryMantissa) + "E2",
+        "0e99999",
+        "-0e99999"
+    };
+
+    try (ColumnVector in = ColumnVector.fromStrings(inputs);
+         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT32);
+         HostColumnVector hostGot = got.copyToHost()) {
+      for (int i = 0; i < inputs.length; i++) {
+        assertTrue(!hostGot.isNull(i), "float row " + i + " input=" + inputs[i]);
+        float expected = Float.parseFloat(inputs[i]);
+        float actual = hostGot.getFloat(i);
+        assertEquals(Float.floatToRawIntBits(expected),
+            Float.floatToRawIntBits(actual), "float row " + i + " input=" + inputs[i]);
+      }
+    }
+
+    try (ColumnVector in = ColumnVector.fromStrings(inputs);
+         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT64);
+         HostColumnVector hostGot = got.copyToHost()) {
+      for (int i = 0; i < inputs.length; i++) {
+        assertTrue(!hostGot.isNull(i), "double row " + i + " input=" + inputs[i]);
+        double expected = Double.parseDouble(inputs[i]);
+        double actual = hostGot.getDouble(i);
+        assertEquals(Double.doubleToRawLongBits(expected),
+            Double.doubleToRawLongBits(actual), "double row " + i + " input=" + inputs[i]);
+      }
+    }
+
+    for (DType outputType : new DType[] {DType.FLOAT32, DType.FLOAT64}) {
+      try (ColumnVector in = ColumnVector.fromStrings(invalidBoundarySuffix);
+           ColumnVector got = CastStrings.toFloat(in, false, outputType);
+           HostColumnVector hostGot = got.copyToHost()) {
+        assertTrue(hostGot.isNull(0),
+            "trailing garbage after a batch-boundary suffix must be rejected for " + outputType);
+      }
+      try (ColumnVector in = ColumnVector.fromStrings(invalidBoundarySuffix)) {
+        Assertions.assertThrows(CastException.class, () -> {
+          try (ColumnVector ignored = CastStrings.toFloat(in, true, outputType)) {
+            // The ANSI cast must throw before returning a column.
+          }
+        });
+      }
+    }
+  }
+
   @Test
   void castToDecimalTest() {
     Table.TestBuilder tb = new Table.TestBuilder();
