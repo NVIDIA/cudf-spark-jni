@@ -119,7 +119,8 @@ class char_range_reader : public char_range {
 /**
  * Token-by-token parser with Spark/Jackson's relaxed strings: single quotes and raw controls are
  * accepted, but whitespace is only space, tab, CR or LF. Scans do not validate UTF-8.
- * Numbers accept -0 and 1e01, but reject 01, +1, 1., 1e and 1e+.
+ * Valid strings: "\"" , '\'' , '\"' , "\'" and bare ' or "; ASCII control chars [0, 32) are
+ * accepted inside strings. Numbers accept -0 and 1e01, but reject 01, +1, 1., 1e and 1e+.
  * Success covers the first root value; trailing bytes are ignored. Malformed input reports ERROR,
  * and nesting overflow also sets max_nesting_depth_exceeded for the caller's error policy.
  */
@@ -246,8 +247,7 @@ class json_parser {
           current_token = json_token::START_ARRAY;
         }
         break;
-      case '"':
-
+      case '"': [[fallthrough]];
       case '\'': parse_string_and_set_current(); break;
       case 't':
         curr_pos++;

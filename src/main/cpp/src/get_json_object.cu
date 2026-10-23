@@ -26,7 +26,6 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
-#include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
@@ -1061,17 +1060,16 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   // Identical input and paths must reproduce measured lengths; still check the retry for overflow.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
-  // Rebuild each retried column from its own post-retry pairs: the batched factory produced a
-  // pair/column mismatch with interleaved valid and malformed rows in the reported failure, and
-  // the per-column path keeps each column's assembly independent.
-  for (std::size_t i = 0; i < oob_indices.size(); ++i) {
-    auto const out_idx   = oob_indices[i];
-    auto const out_sview = cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>{
-      out_stringviews[out_idx].data(), static_cast<std::size_t>(input.size())};
-    // Rebuild from the retry's committed pairs: the pre-retry offsets only size the scratch
-    // slots, so adopting them as logical offsets would leak unwritten trailing bytes into rows.
-    output[out_idx] =
-      cudf::strings::detail::make_strings_column(out_sview.begin(), out_sview.end(), stream, mr);
+  // Retry pairs carry committed lengths; scratch offsets only reserve write space.
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> oob_spans;
+  oob_spans.reserve(oob_indices.size());
+  for (auto const out_idx : oob_indices) {
+    oob_spans.emplace_back(cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>{
+      out_stringviews[out_idx].data(), static_cast<std::size_t>(input.size())});
+  }
+  auto oob_output = cudf::make_strings_column_batch(oob_spans, stream, mr);
+  for (std::size_t idx = 0; idx < oob_indices.size(); ++idx) {
+    output[oob_indices[idx]] = std::move(oob_output[idx]);
   }
   return output;
 }
