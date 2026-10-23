@@ -70,6 +70,7 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   auto const num_paths  = static_cast<std::size_t>(state.get_int64("num_paths"));
   auto const seed       = static_cast<uint64_t>(state.get_int64("seed"));
   auto const scenario   = static_cast<scenario_id>(state.get_int64("scenario"));
+  auto const budget     = state.get_int64("memory_budget_bytes");
 
   auto const& table = scenario == scenario_id::NESTED_135 ? nested_table_135() : nested_table_33();
   auto const paths  = nested_build_paths(table, scenario == scenario_id::NESTED_135 ? 135 : 33);
@@ -101,7 +102,7 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   state.add_element_count(num_paths, "paths");
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::get_json_object_multiple_paths(
-      cudf::strings_column_view{input}, tiled, -1, -1);
+      cudf::strings_column_view{input}, tiled, budget, -1);
   });
 }
 
@@ -112,4 +113,5 @@ NVBENCH_BENCH(BM_get_json_object_multiple_paths)
                    static_cast<nvbench::int64_t>(scenario_id::NESTED_33)})
   .add_int64_axis("size_bytes", {10 * 1'024 * 1'024, 100 * 1'024 * 1'024})
   .add_int64_axis("num_paths", {1, 8, 32, 33, 135})
-  .add_int64_axis("seed", {1, 2});
+  .add_int64_axis("seed", {1, 2})
+  .add_int64_axis("memory_budget_bytes", {-1, 4LL * 1'024 * 1'024 * 1'024});
