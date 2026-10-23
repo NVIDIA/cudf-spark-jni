@@ -364,6 +364,7 @@ public class CastStringsTest {
     String cancellingExponent = "1" + repeat('0', 10000) + "e-10000";
     String invalidBoundarySuffix = "1e" + repeat('0', 29) + "fX";
     String invalidNonExponentBoundarySuffix = "1" + repeat('0', 30) + "fX";
+    String saturatedExponentWithGarbage = "1e" + repeat('9', 64) + "X";
     // Place E immediately before and at the end of a 32-character parser window.
     String fastBoundaryMantissa = repeat('0', 29) + "1";
     String slowBoundaryMantissa = repeat('0', 30) + "1";
@@ -394,43 +395,60 @@ public class CastStringsTest {
         slowBoundaryMantissa + "E2",
         fastBoundaryMantissa + "E-2",
         slowBoundaryMantissa + "E-2",
+        "1e" + repeat('0', 29) + "f",
+        "1e" + repeat('0', 29) + "d ",
+        // Check the exact boundary of the early signed-zero shortcut.
+        "9999999999999999999e-342",
+        "-9999999999999999999e-342",
+        "9999999999999999999e-343",
+        "-9999999999999999999e-343",
         "0e99999",
         "-0e99999"
     };
 
-    try (ColumnVector in = ColumnVector.fromStrings(inputs);
-         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT32);
-         HostColumnVector hostGot = got.copyToHost()) {
-      for (int i = 0; i < inputs.length; i++) {
-        assertFalse(hostGot.isNull(i), "float row " + i + " input=" + inputs[i]);
-        float expected = Float.parseFloat(inputs[i]);
-        float actual = hostGot.getFloat(i);
-        assertEquals(Float.floatToRawIntBits(expected),
-            Float.floatToRawIntBits(actual), "float row " + i + " input=" + inputs[i]);
+    for (boolean ansiMode : new boolean[] {false, true}) {
+      try (ColumnVector in = ColumnVector.fromStrings(inputs);
+           ColumnVector got = CastStrings.toFloat(in, ansiMode, DType.FLOAT32);
+           HostColumnVector hostGot = got.copyToHost()) {
+        for (int i = 0; i < inputs.length; i++) {
+          assertFalse(hostGot.isNull(i), "float row " + i + " input=" + inputs[i]);
+          float expected = Float.parseFloat(inputs[i]);
+          float actual = hostGot.getFloat(i);
+          assertEquals(Float.floatToRawIntBits(expected),
+              Float.floatToRawIntBits(actual), "float row " + i + " input=" + inputs[i]);
+        }
+      }
+
+      try (ColumnVector in = ColumnVector.fromStrings(inputs);
+           ColumnVector got = CastStrings.toFloat(in, ansiMode, DType.FLOAT64);
+           HostColumnVector hostGot = got.copyToHost()) {
+        for (int i = 0; i < inputs.length; i++) {
+          assertFalse(hostGot.isNull(i), "double row " + i + " input=" + inputs[i]);
+          double expected = Double.parseDouble(inputs[i]);
+          double actual = hostGot.getDouble(i);
+          assertEquals(Double.doubleToRawLongBits(expected),
+              Double.doubleToRawLongBits(actual), "double row " + i + " input=" + inputs[i]);
+        }
       }
     }
 
-    try (ColumnVector in = ColumnVector.fromStrings(inputs);
-         ColumnVector got = CastStrings.toFloat(in, false, DType.FLOAT64);
-         HostColumnVector hostGot = got.copyToHost()) {
-      for (int i = 0; i < inputs.length; i++) {
-        assertFalse(hostGot.isNull(i), "double row " + i + " input=" + inputs[i]);
-        double expected = Double.parseDouble(inputs[i]);
-        double actual = hostGot.getDouble(i);
-        assertEquals(Double.doubleToRawLongBits(expected),
-            Double.doubleToRawLongBits(actual), "double row " + i + " input=" + inputs[i]);
-      }
-    }
-
-    String[] invalidSuffixInputs =
-        new String[] {invalidBoundarySuffix, invalidNonExponentBoundarySuffix};
-    for (String invalidInput : invalidSuffixInputs) {
+    String[] invalidInputs = new String[] {
+        invalidBoundarySuffix,
+        invalidNonExponentBoundarySuffix,
+        "1e",
+        "1e+",
+        "1e-",
+        repeat('0', 30) + "1E",
+        repeat('0', 29) + "1E-",
+        saturatedExponentWithGarbage
+    };
+    for (String invalidInput : invalidInputs) {
       for (DType outputType : new DType[] {DType.FLOAT32, DType.FLOAT64}) {
         try (ColumnVector in = ColumnVector.fromStrings(invalidInput);
              ColumnVector got = CastStrings.toFloat(in, false, outputType);
              HostColumnVector hostGot = got.copyToHost()) {
           assertTrue(hostGot.isNull(0),
-              "trailing garbage after a batch-boundary suffix must be rejected for " + outputType);
+              "invalid input must be rejected for " + outputType + ": " + invalidInput);
         }
         try (ColumnVector in = ColumnVector.fromStrings(invalidInput)) {
           Assertions.assertThrows(CastException.class, () -> {
