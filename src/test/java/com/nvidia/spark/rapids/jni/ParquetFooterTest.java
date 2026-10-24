@@ -25,6 +25,8 @@ import org.apache.parquet.format.CompressionCodec;
 import org.apache.parquet.format.ConvertedType;
 import org.apache.parquet.format.Encoding;
 import org.apache.parquet.format.FieldRepetitionType;
+import org.apache.parquet.format.IEEE754TotalOrder;
+import org.apache.parquet.format.KeyValue;
 import org.apache.parquet.format.RowGroup;
 import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.format.Type;
@@ -610,6 +612,74 @@ public class ParquetFooterTest {
       org.apache.parquet.format.FileMetaData reparsed =
           Util.readFileMetaData(new ByteArrayInputStream(framed, 4, total - 12));
       assertEquals(4, reparsed.getColumn_orders().size());
+    }
+  }
+
+  @Test
+  void testIeee754TotalOrderColumnOrderRoundTrip() throws Exception {
+    // The Float/Double regression that forced the revert of #4851: parquet-java 1.18.1 writes
+    // ColumnOrder union field 2 (IEEE_754_TOTAL_ORDER) on FLOAT/DOUBLE columns, which the old
+    // Arrow 21 schema skipped on read and re-emitted as an empty union (parquet-mr rejects with
+    // "Unrecognized type 0"). The reader must carry the union selector through the prune map and
+    // the writer must re-emit it as field 2, not drop it.
+    org.apache.parquet.format.FileMetaData meta = makeNestedFooter(1234);
+    // The nested footer has 6 leaf columns; give each an IEEE_754_TOTAL_ORDER as Spark would see
+    // on a Float/Double file, and prune to 4 leaves through the MAP drop.
+    List<ColumnOrder> orders = new ArrayList<>();
+    for (int i = 0; i < 6; i++) {
+      orders.add(ColumnOrder.IEEE_754_TOTAL_ORDER(new IEEE754TotalOrder()));
+    }
+    meta.setColumn_orders(orders);
+    byte[] bytes = serialize(meta);
+    try (ParquetFooter footer = readFooter(bytes, 0, -1, makePrunedReadSchema());
+         HostMemoryBuffer out = footer.serializeThriftFile()) {
+      assertEquals(3, footer.getNumColumns());
+      int total = (int) out.getLength();
+      byte[] framed = new byte[total];
+      out.getBytes(framed, 0, 0, total);
+      org.apache.parquet.format.FileMetaData reparsed =
+          Util.readFileMetaData(new ByteArrayInputStream(framed, 4, total - 12));
+      // All 4 surviving column orders must come back as IEEE_754_TOTAL_ORDER (field 2), not an
+      // empty union -- parquet-mr would have thrown on the empty variant.
+      List<ColumnOrder> outOrders = reparsed.getColumn_orders();
+      assertEquals(4, outOrders.size());
+      for (ColumnOrder order : outOrders) {
+        assertEquals(ColumnOrder._Fields.IEEE_754__TOTAL__ORDER, order.getSetField());
+      }
+    }
+  }
+
+  @Test
+  void testLegacyRebaseMarkersRoundTrip() throws Exception {
+    // The LEGACY datetime regression that forced the revert of #4851: Spark tags a file written
+    // with the pre-2.0 (INT96/Julian) datetime convention via key_value_metadata entries such as
+    // "org.apache.spark.sql.parquet.row.metadata" and the "spark.sql.create.version"/
+    // "org.apache.spark.int96NoRebase"-style markers, and expects them back verbatim on the
+    // rewritten footer. key_value_metadata must survive read -> prune -> write untouched.
+    org.apache.parquet.format.FileMetaData meta = makeFooter(
+        makeRowGroup(1000, 100, 200));
+    List<KeyValue> markers = new ArrayList<>();
+    markers.add(new KeyValue("writer.model.name").setValue("spark"));
+    markers.add(new KeyValue("org.apache.spark.sql.parquet.row.metadata")
+                    .setValue("{\"type\":\"struct\",\"fields\":[{\"name\":\"a\","
+                                  + "\"type\":\"integer\",\"nullable\":true}]}"));
+    markers.add(new KeyValue("spark.sql.create.version").setValue("3.5.5"));
+    meta.setKey_value_metadata(markers);
+    byte[] bytes = serialize(meta);
+    try (ParquetFooter footer = readFooter(bytes, 0, -1);
+         HostMemoryBuffer out = footer.serializeThriftFile()) {
+      int total = (int) out.getLength();
+      byte[] framed = new byte[total];
+      out.getBytes(framed, 0, 0, total);
+      org.apache.parquet.format.FileMetaData reparsed =
+          Util.readFileMetaData(new ByteArrayInputStream(framed, 4, total - 12));
+      // Every marker key AND value must survive the round trip verbatim.
+      List<KeyValue> outMeta = reparsed.getKey_value_metadata();
+      assertEquals(3, outMeta.size());
+      for (int i = 0; i < markers.size(); i++) {
+        assertEquals(markers.get(i).getKey(), outMeta.get(i).getKey());
+        assertEquals(markers.get(i).getValue(), outMeta.get(i).getValue());
+      }
     }
   }
 
