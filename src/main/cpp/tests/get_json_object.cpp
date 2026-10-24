@@ -17,13 +17,21 @@
 #include "get_json_object.hpp"
 
 #include <cudf_test/base_fixture.hpp>
+#include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/cudf_gtest.hpp>
 
 #include <cudf/column/column.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/types.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -46,6 +54,18 @@ cudf::test::strings_column_wrapper expected_column(std::vector<std::string> cons
                                                    std::vector<bool> const& valid)
 {
   return cudf::test::strings_column_wrapper(values.begin(), values.end(), valid.begin());
+}
+
+// Apply validity after building strings, since nullable wrappers erase null rows' bytes.
+[[nodiscard]] std::unique_ptr<cudf::column> make_nonempty_nulls(
+  std::vector<std::string> const& rows, std::vector<bool> const& valid)
+{
+  auto input            = cudf::test::strings_column_wrapper(rows.begin(), rows.end()).release();
+  auto const chars_size = cudf::strings_column_view{*input}.chars_size(cudf::get_default_stream());
+  auto [mask, null_count] = cudf::test::detail::make_null_mask(valid.begin(), valid.end());
+  input->set_null_mask(std::move(mask), null_count);
+  EXPECT_EQ(cudf::strings_column_view{*input}.chars_size(cudf::get_default_stream()), chars_size);
+  return input;
 }
 
 // A malformed row must null only itself.
@@ -303,4 +323,56 @@ TEST_F(GetJsonObjectTest, RejectsInvalidNamedFieldMatchContracts)
     spark_rapids_jni::get_json_object_multiple_paths(
       input, nested_paths, -1, -1, spark_rapids_jni::named_field_match_policy::LAST_NON_NULL),
     cudf::logic_error);
+}
+
+TEST_F(GetJsonObjectTest, NonEmptyNulls)
+{
+  // The empty prefix offsets the sliced mask without moving the character base.
+  auto const input_col =
+    make_nonempty_nulls({"",
+                         R"({"k":"first","k":"last","k":null})",
+                         R"({"k":"masked-first","k":"masked-last"})",
+                         R"({"k":""})",
+                         R"({"k":null,"k":"set"})",
+                         "",
+                         "",
+                         R"({"k":x})",
+                         R"({"k":"sentinel"})"},
+                        {true, true, false, true, true, true, false, false, true});
+  ASSERT_EQ(input_col->null_count(), 3);
+  auto const first_expected =
+    expected_column({"", "first", "", "", "", "", "", "", "sentinel"},
+                    {false, true, false, true, false, false, false, false, true});
+  auto const last_expected =
+    expected_column({"", "last", "", "", "set", "", "", "", "sentinel"},
+                    {false, true, false, true, true, false, false, false, true});
+  auto const missing_expected =
+    expected_column(std::vector<std::string>(9), std::vector<bool>(9, false));
+  std::vector<std::vector<path_spec>> const paths{
+    {named_path("k")}, {named_path("missing")}, {named_path("k")}};
+
+  for (auto const offset : std::array<cudf::size_type, 2>{0, 1}) {
+    SCOPED_TRACE(testing::Message() << "offset=" << offset);
+    auto const input =
+      cudf::strings_column_view{cudf::slice(*input_col, {offset, input_col->size()}).front()};
+    auto const first   = cudf::slice(first_expected, {offset, input_col->size()}).front();
+    auto const last    = cudf::slice(last_expected, {offset, input_col->size()}).front();
+    auto const missing = cudf::slice(missing_expected, {offset, input_col->size()}).front();
+    auto const single  = spark_rapids_jni::get_json_object(input, {named_path("k")});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(first, *single);
+
+    for (auto const budget : std::array<int64_t, 2>{-1, 1}) {
+      SCOPED_TRACE(testing::Message() << "budget=" << budget);
+      auto const first_batch =
+        spark_rapids_jni::get_json_object_multiple_paths(input, paths, budget, -1);
+      auto const last_batch = spark_rapids_jni::get_json_object_multiple_paths(
+        input, paths, budget, -1, spark_rapids_jni::named_field_match_policy::LAST_NON_NULL);
+      ASSERT_EQ(first_batch.size(), paths.size());
+      ASSERT_EQ(last_batch.size(), paths.size());
+      for (std::size_t i = 0; i < paths.size(); ++i) {
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(i == 1 ? missing : first, *first_batch[i]);
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(i == 1 ? missing : last, *last_batch[i]);
+      }
+    }
+  }
 }
