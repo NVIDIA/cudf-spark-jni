@@ -44,6 +44,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -62,10 +64,25 @@ namespace {
 
 // ---- Low-level string-parsing primitives. ------------------------------------------------------
 
-// LEGACY parses via java.text.SimpleDateFormat, which skips only ' ' and '\t' before fields — it
-// does not trimAll. So the outer trim must match: a leading control byte like '\r'/'\f'/'\v'
-// rejects on CPU and must not be treated as whitespace here.
-__device__ bool is_whitespace(unsigned char c) { return c == ' ' || c == '\t'; }
+// LEGACY SimpleDateFormat parses a numeric field as a long and narrows it with Number.intValue(),
+// so the value keeps only its low 32 bits; a value beyond the long range becomes a double whose
+// intValue() saturates to an invalid field value. Thus `4294969320` reads as 2024, while
+// `9223372036854777832` is rejected. Reads one or more digits before `end`.
+__device__ bool read_legacy_digits(date_parse::cursor<>& input, int end, int& v)
+{
+  int64_t acc = 0;
+  int digits  = 0;
+  while (input.pos < end) {
+    int const c = input.peek() - '0';
+    if (c < 0 || c > 9) { break; }
+    if (acc > (LLONG_MAX - c) / 10) { return false; }
+    acc = acc * 10 + c;
+    ++digits;
+    ++input.pos;
+  }
+  v = static_cast<int32_t>(static_cast<uint32_t>(acc));
+  return digits > 0;
+}
 
 // Returns true iff the first non-[ \t] char is '\n'. Mirrors rejectLeadingNewlineThenStrip.
 __device__ bool has_leading_newline(unsigned char const* p, int end)
@@ -75,17 +92,6 @@ __device__ bool has_leading_newline(unsigned char const* p, int end)
     ++probe;
   }
   return probe < end && p[probe] == '\n';
-}
-
-// In-place trim: advance pos past leading whitespace, pull end back past trailing.
-__device__ void trim(unsigned char const* p, int& pos, int& end)
-{
-  while (pos < end && is_whitespace(p[pos])) {
-    ++pos;
-  }
-  while (pos < end && is_whitespace(p[end - 1])) {
-    --end;
-  }
 }
 
 // Year/month/day/hour/minute/second; defaults match cuDF strftime missing-field semantics.
@@ -107,8 +113,8 @@ enum tok_kind : uint8_t {
   TOK_DIGITS,  // a = field, b = min_digits, c = max_digits
   // STRICT DateTimeFormatter year with SignStyle.EXCEEDS_PAD.
   TOK_CSV_YEAR,         // a = reserved adjacent digits, b = min_digits, c = max_digits
+  TOK_LEGACY_DIGITS,    // a = field, b = obeyCount width (0 means unbounded)
   TOK_LITERAL,          // a = literal char
-  TOK_SKIP_HT_WS,       // skip [ \t]* (legacy whitespace fold)
   TOK_TRAIL_EOF,        // pos must equal end
   TOK_TRAIL_NON_DIGIT,  // pos == end OR p[pos] is not a digit (legacy tail rule)
 };
@@ -132,9 +138,23 @@ struct format_token {
 //   s → second
 // A letter run must have length 2 for non-year fields; year is whatever its run length says.
 // Width policy:
-//   - "Packed" runs (a digit field abutting another digit field without a literal between them,
-//     e.g. yyyyMMdd) get exact width — otherwise the boundary is ambiguous.
-//   - Otherwise CORRECTED uses exact width and LEGACY uses [1, 2].
+//   - CORRECTED uses exact width, including packed runs.
+//   - LEGACY mirrors SimpleDateFormat's `obeyCount` rule: a field uses a raw input window of its
+//     pattern width when the next field is numeric with no delimiter. Skipped space/tab consumes
+//     that window, and the field fails when the window extends past the end of the input.
+//     Otherwise it parses one or more digits after skipping space/tab, permitting arbitrary
+//     leading zeroes and narrowing the value like Number.intValue().
+//     Thus `MMyyyy` reads `12024` as month 12/year 24, while `yyyyMMdd` reads `2024101` as
+//     year 2024/month 10/day 1.
+//   - Every policy rejects one- and two-letter year patterns. SimpleDateFormat interprets an
+//     exactly two-digit input through a moving 80-year window, and DateTimeFormatter reads `yy`
+//     as a reduced year based at 2000 and `y` as a variable-width year. This kernel implements
+//     neither. The cudf-spark compatibility allowlists use four-letter years.
+//   - LEGACY returns null for years past the timestamp range (after 294247), where Spark CPU
+//     fails the query with an ArithmeticException from millisToMicros. This is a known
+//     deviation; EXCEPTION and CORRECTED match Spark.
+//   - LEGACY rejects year 0. Non-lenient SimpleDateFormat parses `y` as year-of-era, whose
+//     GregorianCalendar minimum is 1, so `MMyyyy` input `010` is null rather than 0000-01-01.
 //   - CORRECTED `yyyy/MM/dd` keeps the existing cudf-spark compatibility contract and accepts
 //     1-2 digit month/day fields. This intentionally DEVIATES from Spark CPU, whose STRICT
 //     DateTimeFormatter rejects single-digit fields ("2024/5/6" is null on CPU); the GPU
@@ -142,8 +162,7 @@ struct format_token {
 // Literal handling:
 //   - A space matches exactly one ' '. Spark rejects 'T' as the separator for a space pattern
 //     under both policies (unlike the format-less cast, which accepts 'T').
-//   - LEGACY: SimpleDateFormat skips [ \t] before every numeric field, so a TOK_SKIP_HT_WS
-//     precedes each non-packed digit field (subsumes the old REMOVE_WHITESPACE_FROM_MONTH_DAY).
+//   - LEGACY: SimpleDateFormat skips [ \t] before every numeric field, including packed fields.
 // The trailing token is TOK_TRAIL_EOF for CORRECTED and TOK_TRAIL_NON_DIGIT for LEGACY.
 
 uint8_t letter_to_field(char c)
@@ -201,8 +220,6 @@ std::vector<format_token> compile_format(std::string const& fmt, format_dialect 
       while (j < n && fmt[j] == c) {
         ++j;
       }
-      bool const packed = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1]))) ||
-                          (j < n && std::isalpha(static_cast<unsigned char>(fmt[j])));
       if (j - i > 9) {
         throw std::invalid_argument(std::string("pattern letter run too long: ") + c);
       }
@@ -213,17 +230,21 @@ std::vector<format_token> compile_format(std::string const& fmt, format_dialect 
         throw std::invalid_argument(std::string("non-year pattern letter run must be length 2: ") +
                                     c);
       }
-      uint8_t const run         = static_cast<uint8_t>(j - i);
-      bool const variable_width = (legacy && !packed) || corrected_variable_width_slash_date;
-      uint8_t const min_d       = (c == 'y') ? run : (variable_width ? 1 : run);
-      uint8_t const max_d       = run;
-      // Skip [ \t] before each field, except inside a packed run which stays exact-width.
-      bool const abuts_prev_field = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1])));
-      if (legacy && !abuts_prev_field) { out.push_back({TOK_SKIP_HT_WS, 0, 0, 0}); }
-      if (csv_date && c == 'y') {
+      uint8_t const run = static_cast<uint8_t>(j - i);
+      if (!csv_date && c == 'y' && run <= 2) {
+        throw std::invalid_argument("one- and two-letter year patterns are not supported");
+      }
+      if (legacy) {
+        bool const abuts_next_field = j < n && std::isalpha(static_cast<unsigned char>(fmt[j]));
+        out.push_back({TOK_LEGACY_DIGITS,
+                       letter_to_field(c),
+                       static_cast<uint8_t>(abuts_next_field ? run : 0),
+                       0});
+      } else if (csv_date && c == 'y') {
         out.push_back(compile_csv_year(fmt, j, run));
       } else {
-        out.push_back({TOK_DIGITS, letter_to_field(c), min_d, max_d});
+        bool const variable_width = corrected_variable_width_slash_date && c != 'y';
+        out.push_back({TOK_DIGITS, letter_to_field(c), variable_width ? uint8_t{1} : run, run});
       }
       saw_digit_field = true;
       i               = j;
@@ -319,12 +340,26 @@ __device__ bool walk_tokens(unsigned char const* p,
         if (ok) { ok = store_field<CheckConflicts>(d, t.a, v, seen_fields); }
         break;
       }
-      case TOK_LITERAL: ok = input.consume(t.a); break;
-      case TOK_SKIP_HT_WS:
-        while (input.peek() == ' ' || input.peek() == '\t') {
+      case TOK_LEGACY_DIGITS: {
+        // SimpleDateFormat skips only ' ' and '\t' before each numeric field. It captures the
+        // packed field's input limit before skipping, so skipped characters count against the
+        // pattern width, and it fails the field when that limit is past the end of the input.
+        // Thus " 12024" with MMyyyy has only one month digit inside the two-character window,
+        // and "2 1" with yyyyMM is rejected.
+        if (t.b != 0 && input.end - input.pos < t.b) {
+          ok = false;
+          break;
+        }
+        int const field_end = t.b == 0 ? input.end : input.pos + t.b;
+        while (input.pos < field_end && (input.peek() == ' ' || input.peek() == '\t')) {
           ++input.pos;
         }
+        int v = 0;
+        ok    = read_legacy_digits(input, field_end, v);
+        if (ok) { ok = store_field<CheckConflicts>(d, t.a, v, seen_fields); }
         break;
+      }
+      case TOK_LITERAL: ok = input.consume(t.a); break;
       case TOK_TRAIL_EOF: ok = input.eof(); break;
       case TOK_TRAIL_NON_DIGIT: ok = !(input.peek() >= '0' && input.peek() <= '9'); break;
       default: ok = false; break;
@@ -339,7 +374,8 @@ struct parse_with_format_fn {
   cudf::device_span<format_token const> tokens;
   bool legacy;
   cudf::device_span<format_token const> legacy_tokens;
-  cudf::size_type* first_exception_row;
+  cudf::size_type* first_error_row;
+  cudf::size_type* first_disagreement_row;
   bool* validity;
   cudf::timestamp_us* output;
 
@@ -358,12 +394,11 @@ struct parse_with_format_fn {
 
     if (parse_legacy) {
       if (has_leading_newline(p, end)) { return false; }
-      trim(p, pos, end);
-      if (pos >= end) { return false; }
     }
 
     parsed_dt d{};
     if (!walk_tokens(p, pos, end, parse_tokens.data(), static_cast<int>(parse_tokens.size()), d) ||
+        (parse_legacy && d.year < 1) ||
         !date_time_utils::is_valid_date_for_timestamp(d.year, d.month, d.day) ||
         !date_time_utils::is_valid_time(d.hour, d.minute, d.second, /*us*/ 0)) {
       return false;
@@ -394,10 +429,17 @@ struct parse_with_format_fn {
     }
 
     set_invalid(idx);
-    if (first_exception_row != nullptr && parse(p, sv.size_bytes(), legacy_tokens, true, parsed)) {
-      auto first_exception_row_ref =
-        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*first_exception_row};
-      first_exception_row_ref.fetch_min(idx, cuda::memory_order_relaxed);
+    bool const parser_disagreement =
+      !legacy_tokens.empty() && parse(p, sv.size_bytes(), legacy_tokens, true, parsed);
+    if (first_error_row != nullptr) {
+      auto first_error_row_ref =
+        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*first_error_row};
+      first_error_row_ref.fetch_min(idx, cuda::memory_order_relaxed);
+    }
+    if (first_disagreement_row != nullptr && parser_disagreement) {
+      auto first_disagreement_row_ref =
+        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*first_disagreement_row};
+      first_disagreement_row_ref.fetch_min(idx, cuda::memory_order_relaxed);
     }
   }
 };
@@ -460,6 +502,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   std::string const& format,
   bool legacy,
   bool exception_policy,
+  bool fail_on_error,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
@@ -493,9 +536,14 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   auto device_legacy_tokens =
     cudf::detail::make_device_uvector_async(host_legacy_token_staging, stream, temp_mr);
 
-  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
+  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_error_row;
+  if (fail_on_error) {
+    first_error_row =
+      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
+  }
+  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_disagreement_row;
   if (exception_policy) {
-    first_exception_row =
+    first_disagreement_row =
       std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
   }
 
@@ -521,17 +569,21 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
       legacy,
       cudf::device_span<format_token const>{device_legacy_tokens.data(),
                                             device_legacy_tokens.size()},
-      first_exception_row ? first_exception_row->data() : nullptr,
+      first_error_row ? first_error_row->data() : nullptr,
+      first_disagreement_row ? first_disagreement_row->data() : nullptr,
       validity.begin(),
       result->mutable_view().begin<cudf::timestamp_us>()});
 
-  if (first_exception_row) {
+  if (first_error_row || first_disagreement_row) {
     // value(stream) synchronizes the stream before returning the device value to the host.
-    auto const row = first_exception_row->value(stream);
+    auto const first_invalid = first_error_row ? first_error_row->value(stream) : num_rows;
+    auto const first_disagreement =
+      first_disagreement_row ? first_disagreement_row->value(stream) : num_rows;
+    auto const row = std::min(first_invalid, first_disagreement);
     if (row < num_rows) {
       auto const error         = cudf::get_element(input.parent(), row, stream, temp_mr);
       auto const& string_error = static_cast<cudf::string_scalar const&>(*error);
-      throw cast_error(row, string_error.to_string(stream));
+      throw cast_error(row, string_error.to_string(stream), row == first_disagreement);
     }
   }
 

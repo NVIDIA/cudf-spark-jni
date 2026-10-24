@@ -43,37 +43,39 @@ constexpr jint TIME_PARSER_POLICY_CORRECTED = 0;
 constexpr jint TIME_PARSER_POLICY_LEGACY    = 1;
 constexpr jint TIME_PARSER_POLICY_EXCEPTION = 2;
 
-#define CATCH_CAST_EXCEPTION(env, ret_val)                                     \
-  JNI_CATCH_BEGIN(env, ret_val)                                                \
-  catch (spark_rapids_jni::cast_error const& e)                                \
-  {                                                                            \
-    if (env->ExceptionOccurred()) { return ret_val; }                          \
-    jclass ex_class = env->FindClass(JNI_CAST_ERROR_CLASS);                    \
-    if (ex_class != NULL) {                                                    \
-      jmethodID ctor_id = env->GetMethodID(ex_class, "<init>", "([BI)V");      \
-      if (ctor_id != NULL) {                                                   \
-        std::string const& n_msg = e.get_string_with_error();                  \
-        auto const j_msg_size    = static_cast<jsize>(n_msg.size());           \
-        jbyteArray j_msg         = env->NewByteArray(j_msg_size);              \
-        if (env->ExceptionCheck()) { return ret_val; }                         \
-        if (j_msg == NULL) {                                                   \
-          jclass oom_class = env->FindClass(cudf::jni::OOM_ERROR_CLASS);       \
-          if (oom_class != NULL) {                                             \
-            env->ThrowNew(oom_class, "Unable to allocate cast error message"); \
-          }                                                                    \
-          return ret_val;                                                      \
-        }                                                                      \
-        env->SetByteArrayRegion(                                               \
-          j_msg, 0, j_msg_size, reinterpret_cast<jbyte const*>(n_msg.data())); \
-        if (env->ExceptionCheck()) { return ret_val; }                         \
-        jint e_row         = static_cast<jint>(e.get_row_number());            \
-        jobject cuda_error = env->NewObject(ex_class, ctor_id, j_msg, e_row);  \
-        if (cuda_error != NULL) { env->Throw((jthrowable)cuda_error); }        \
-      }                                                                        \
-    }                                                                          \
-    return ret_val;                                                            \
-  }                                                                            \
-  CATCH_SPECIAL_EXCEPTION(env, ret_val)                                        \
+#define CATCH_CAST_EXCEPTION(env, ret_val)                                                     \
+  JNI_CATCH_BEGIN(env, ret_val)                                                                \
+  catch (spark_rapids_jni::cast_error const& e)                                                \
+  {                                                                                            \
+    if (env->ExceptionOccurred()) { return ret_val; }                                          \
+    jclass ex_class = env->FindClass(JNI_CAST_ERROR_CLASS);                                    \
+    if (ex_class != NULL) {                                                                    \
+      jmethodID ctor_id = env->GetMethodID(ex_class, "<init>", "([BIZ)V");                     \
+      if (ctor_id != NULL) {                                                                   \
+        std::string const& n_msg = e.get_string_with_error();                                  \
+        auto const j_msg_size    = static_cast<jsize>(n_msg.size());                           \
+        jbyteArray j_msg         = env->NewByteArray(j_msg_size);                              \
+        if (env->ExceptionCheck()) { return ret_val; }                                         \
+        if (j_msg == NULL) {                                                                   \
+          jclass oom_class = env->FindClass(cudf::jni::OOM_ERROR_CLASS);                       \
+          if (oom_class != NULL) {                                                             \
+            env->ThrowNew(oom_class, "Unable to allocate cast error message");                 \
+          }                                                                                    \
+          return ret_val;                                                                      \
+        }                                                                                      \
+        env->SetByteArrayRegion(                                                               \
+          j_msg, 0, j_msg_size, reinterpret_cast<jbyte const*>(n_msg.data()));                 \
+        if (env->ExceptionCheck()) { return ret_val; }                                         \
+        jint e_row = static_cast<jint>(e.get_row_number());                                    \
+        jboolean const is_disagreement =                                                       \
+          static_cast<jboolean>(e.is_time_parser_policy_disagreement());                       \
+        jobject cuda_error = env->NewObject(ex_class, ctor_id, j_msg, e_row, is_disagreement); \
+        if (cuda_error != NULL) { env->Throw((jthrowable)cuda_error); }                        \
+      }                                                                                        \
+    }                                                                                          \
+    return ret_val;                                                                            \
+  }                                                                                            \
+  CATCH_SPECIAL_EXCEPTION(env, ret_val)                                                        \
   CATCH_STD_EXCEPTION(env, ret_val)
 
 extern "C" {
@@ -436,8 +438,13 @@ Java_com_nvidia_spark_rapids_jni_CastStrings_parseCsvDate(JNIEnv* env,
   JNI_CATCH(env, 0);
 }
 
-JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimestampWithFormat(
-  JNIEnv* env, jclass, jlong input_column, jstring j_format, jint time_parser_policy)
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimestampWithFormat(JNIEnv* env,
+                                                                      jclass,
+                                                                      jlong input_column,
+                                                                      jstring j_format,
+                                                                      jint time_parser_policy,
+                                                                      jboolean fail_on_error)
 {
   JNI_NULL_CHECK(env, input_column, "input column is null", 0);
   JNI_NULL_CHECK(env, j_format, "format is null", 0);
@@ -457,7 +464,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_CastStrings_parseTimest
     auto const legacy           = time_parser_policy == TIME_PARSER_POLICY_LEGACY;
     auto const exception_policy = time_parser_policy == TIME_PARSER_POLICY_EXCEPTION;
     return cudf::jni::release_as_jlong(spark_rapids_jni::parse_timestamp_strings_with_format(
-      input_view, format, legacy, exception_policy, cudf::get_default_stream()));
+      input_view, format, legacy, exception_policy, fail_on_error, cudf::get_default_stream()));
   }
   CATCH_CAST_EXCEPTION(env, 0);
 }
