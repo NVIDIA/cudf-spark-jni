@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ public class RowConversion {
   /**
    * For details about how this method functions refer to
    * {@link #convertToRowsFixedWidthOptimized()}.
+   *
+   * Unlike {@link #convertToRowsFixedWidthOptimized()}, this method also supports STRING columns:
+   * each string is encoded as an 8-byte (offset, length) slot in the fixed-width region with the
+   * payload in the row's trailing variable-width region.
    *
    * The only thing different between this method and {@link #convertToRowsFixedWidthOptimized()}
    * is that this can handle rougly 250M columns while {@link #convertToRowsFixedWidthOptimized()}
