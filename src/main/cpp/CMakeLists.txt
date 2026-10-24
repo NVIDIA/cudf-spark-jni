@@ -234,6 +234,7 @@ add_library(
   src/MapJni.cpp
   src/MapUtilsJni.cpp
   src/MapZipWithUtilsJNI.cpp
+  src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
