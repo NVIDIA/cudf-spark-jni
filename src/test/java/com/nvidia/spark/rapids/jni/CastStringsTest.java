@@ -494,6 +494,26 @@ public class CastStringsTest {
   }
 
   @Test
+  void castDecimalRejectsInvalidExtremeExponentAndDigitlessMantissa() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "0E2147483648", "0E-2147483648", "0.0E-2147483647",
+             "0E ", "0E+ ", "0E- ", ".", "e", "E2");
+         ColumnVector actual = CastStrings.toDecimal(input, false, 10, 0)) {
+      assertEquals(input.getRowCount(), actual.getNullCount());
+    }
+  }
+
+  @Test
+  void castZeroWithExtremeExponentMatchesSpark() {
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "0.0E57", "0E2147483646", "0E2147483647");
+         ColumnVector actual = CastStrings.toDecimal(input, false, 10, 0);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(0, 0L, 0L, 0L)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void castToDecimalNoStripTest() {
     Table.TestBuilder tb = new Table.TestBuilder();
     tb.decimal32Column(0, null, 9, 4, 2, 21, null, null);

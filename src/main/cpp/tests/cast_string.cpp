@@ -23,6 +23,8 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/strings/convert/convert_floats.hpp>
+#include <cudf/utilities/error.hpp>
+#include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
 
@@ -1027,6 +1029,17 @@ TYPED_TEST(StringToIntegerTests, Simple)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
+TYPED_TEST(StringToIntegerTests, SlicedInput)
+{
+  auto const strings = test::strings_column_wrapper{"outside-before", "1", "2", "outside-after"};
+  auto const sliced  = cudf::slice(strings, {1, 3})[0];
+  auto const sliced_strings = strings_column_view{sliced};
+  auto const result         = spark_rapids_jni::string_to_integer(
+    data_type{type_to_id<TypeParam>()}, sliced_strings, false, true, cudf::get_default_stream());
+  auto const expected = test::fixed_width_column_wrapper<TypeParam>({1, 2}, {1, 1});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
 TYPED_TEST(StringToIntegerTests, Ansi)
 {
   auto const strings = test::strings_column_wrapper(
@@ -1565,6 +1578,92 @@ TEST_F(StringToDecimalTests, Empty)
   EXPECT_EQ(result->type().scale(), 2);
 }
 
+TEST_F(StringToDecimalTests, MismatchedJsonQuoteCountsThrows)
+{
+  auto const strings      = test::strings_column_wrapper{"0", "0"};
+  auto const scv          = strings_column_view{strings};
+  auto const stream       = cudf::get_default_stream();
+  auto short_quote_counts = rmm::device_uvector<int8_t>(1, stream);
+  auto long_quote_counts  = rmm::device_uvector<int8_t>(3, stream);
+
+  EXPECT_THROW(
+    static_cast<void>(spark_rapids_jni::string_to_decimal(
+      1, 0, scv, false, false, cudf::device_span<int8_t const>{short_quote_counts}, stream)),
+    cudf::logic_error);
+  EXPECT_THROW(
+    static_cast<void>(spark_rapids_jni::string_to_decimal(
+      1, 0, scv, false, false, cudf::device_span<int8_t const>{long_quote_counts}, stream)),
+    cudf::logic_error);
+}
+
+TEST_F(StringToDecimalTests, ExtremeExponentCarryDoesNotOverflowPosition)
+{
+  auto const stream  = cudf::get_default_stream();
+  auto const strings = test::strings_column_wrapper{"9.9e2147483646"};
+  auto const result =
+    spark_rapids_jni::string_to_decimal(1, 0, strings_column_view{strings}, false, false, stream);
+  auto const expected = test::fixed_point_column_wrapper<int32_t>({0}, {0}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
+TEST_F(StringToDecimalTests, ZeroAtExtremeExponentMatchesSpark)
+{
+  auto const stream  = cudf::get_default_stream();
+  auto const strings = test::strings_column_wrapper{"0e2147483647", "0e2147483646"};
+  auto const result =
+    spark_rapids_jni::string_to_decimal(1, 0, strings_column_view{strings}, false, false, stream);
+  auto const expected =
+    test::fixed_point_column_wrapper<int32_t>({0, 0}, {1, 1}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
+TEST_F(StringToDecimalTests, DigitlessMantissaIsInvalid)
+{
+  auto const stream  = cudf::get_default_stream();
+  auto const strings = test::strings_column_wrapper{".", "e", "E2"};
+  auto const result =
+    spark_rapids_jni::string_to_decimal(1, 0, strings_column_view{strings}, false, false, stream);
+  auto const expected =
+    test::fixed_point_column_wrapper<int32_t>({0, 0, 0}, {0, 0, 0}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
+TEST_F(StringToDecimalTests, SlicedInput)
+{
+  auto const stream = cudf::get_default_stream();
+  auto const strings =
+    test::strings_column_wrapper{"outside-before", "0e2147483647", "7", "outside-after"};
+  auto const sliced = cudf::slice(strings, {1, 3})[0];
+  auto const result =
+    spark_rapids_jni::string_to_decimal(1, 0, strings_column_view{sliced}, false, false, stream);
+  auto const expected =
+    test::fixed_point_column_wrapper<int32_t>({0, 7}, {1, 1}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
+TEST_F(StringToDecimalTests, JsonZeroExponent)
+{
+  auto const stream = cudf::get_default_stream();
+  std::vector<std::string> const string_values{"0e2147483647",
+                                               "-0.00e2147483647",
+                                               "0e2147483647",
+                                               "+0e2147483647",
+                                               "+0e2147483647",
+                                               "0.e2147483647",
+                                               ".0e2147483647",
+                                               "0.01e2147483647"};
+  auto const strings = test::strings_column_wrapper(string_values.begin(), string_values.end());
+  auto const quote_counts = test::fixed_width_column_wrapper<int8_t>{0, 0, 2, 0, 2, 0, 0, 0};
+  cudf::column_view const quote_counts_view = quote_counts;
+  auto const quote_counts_span              = cudf::device_span<int8_t const>{
+    quote_counts_view.data<int8_t>(), static_cast<std::size_t>(quote_counts_view.size())};
+  auto const result = spark_rapids_jni::string_to_decimal(
+    1, 0, strings_column_view{strings}, false, false, quote_counts_span, stream);
+  auto const expected = test::fixed_point_column_wrapper<int32_t>(
+    {0, 0, 0, 0, 0, 0, 0, 0}, {1, 1, 1, 0, 1, 0, 0, 0}, numeric::scale_type{0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
 TEST_F(StringToDecimalTests, NonEmptyNulls)
 {
   auto const strings =
@@ -1617,6 +1716,19 @@ TYPED_TEST(StringToFloatTests, Simple)
     data_type{type_to_id<TypeParam>()}, strings_column_view{in}, false, cudf::get_default_stream());
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected->view());
+}
+
+TYPED_TEST(StringToFloatTests, SlicedInput)
+{
+  auto const strings =
+    test::strings_column_wrapper{"outside-before", "1.5", "-2.25", "outside-after"};
+  auto const sliced         = cudf::slice(strings, {1, 3})[0];
+  auto const sliced_strings = strings_column_view{sliced};
+  auto const result         = spark_rapids_jni::string_to_float(
+    data_type{type_to_id<TypeParam>()}, sliced_strings, false, cudf::get_default_stream());
+  auto const expected = test::fixed_width_column_wrapper<TypeParam>(
+    {static_cast<TypeParam>(1.5), static_cast<TypeParam>(-2.25)}, {1, 1});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
 TYPED_TEST(StringToFloatTests, DecimalPointAfterTruncatedDigitsAcrossBatches)
