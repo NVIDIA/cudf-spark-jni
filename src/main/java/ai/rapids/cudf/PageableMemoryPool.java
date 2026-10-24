@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * JNI interface to a rmm::pool_memory_resource backed by a host memory resource that
@@ -28,6 +29,10 @@ public final class PageableMemoryPool implements AutoCloseable {
   // Do NOT use singleton_ directly!  Use the getSingleton accessor instead.
   private static volatile PageableMemoryPool singleton_ = null;
   private static volatile Future<PageableMemoryPool> initFuture = null;
+  // Instance lifecycle gate: alloc/free take the READ lock (they run concurrently and
+  // the native pool serializes its own free list), close/shutdown take the WRITE lock
+  // so pool teardown waits for in-flight operations instead of racing them.
+  private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
   private long poolHandle;
   private long poolSize;
 
@@ -35,7 +40,8 @@ public final class PageableMemoryPool implements AutoCloseable {
     NativeDepsLoader.loadNativeDeps();
   }
 
-  private static native long newPageablePoolMemoryResource(long poolSize, int pretouchThreads);
+  private static native long newPageablePoolMemoryResource(
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny);
 
   private static native void releasePageablePoolMemoryResource(long poolPtr);
 
@@ -124,11 +130,29 @@ public final class PageableMemoryPool implements AutoCloseable {
    * @param pretouchThreads number of worker threads to use for the parallel pre-touch
    */
   public static synchronized void initialize(long poolSize, int pretouchThreads) {
+    initialize(poolSize, pretouchThreads, false);
+  }
+
+  /**
+   * Initialize the pool. The backing buffer is allocated and pre-touched (each system page
+   * written to force the kernel to map physical pages) using the given thread count.
+   * Pre-touching parallelizes the page-fault work so it amortizes to a few hundred ms
+   * for multi-GB pools instead of several seconds serially.
+   *
+   * @param poolSize        size of the pool in bytes
+   * @param pretouchThreads number of worker threads to use for the parallel pre-touch
+   * @param numaBind        when true, request the backing buffer to be placed on the NUMA
+   *                        node local to the GPU (and pre-touch workers bound to that node's
+   *                        CPUs). Binding is best-effort: it is silently skipped when the
+   *                        node cannot be resolved or restricted by the environment.
+   */
+  public static synchronized void initialize(long poolSize, int pretouchThreads, boolean numaBind) {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
+    boolean thpDeny = "deny".equals(System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP"));
     FutureTask<PageableMemoryPool> task =
-        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads));
+        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads, numaBind, thpDeny));
     Thread initThread = new Thread(task, "pageable pool init");
     initThread.setDaemon(true);
     initThread.start();
@@ -162,6 +186,7 @@ public final class PageableMemoryPool implements AutoCloseable {
    * @param bytes size in bytes to allocate
    * @return newly created buffer, or null if the pool is uninitialized or exhausted
    *         (caller should fall back to a regular malloc'd buffer)
+   * @throws IllegalStateException if the pool has been closed
    */
   public static HostMemoryBuffer tryAllocate(long bytes) {
     if (bytes <= 0) {
@@ -185,16 +210,27 @@ public final class PageableMemoryPool implements AutoCloseable {
     return 0;
   }
 
-  private PageableMemoryPool(long poolSize, int pretouchThreads) {
-    this.poolHandle = newPageablePoolMemoryResource(poolSize, pretouchThreads);
+  private PageableMemoryPool(
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny) {
+    this.poolHandle =
+        newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind, thpDeny);
     this.poolSize = poolSize;
   }
 
+  /**
+   * Release the native pool. Waits for any in-flight allocation or free (read gate)
+   * to complete first; further allocation or free throws IllegalStateException.
+   */
   @Override
-  public synchronized void close() {
-    if (this.poolHandle != -1) {
-      releasePageablePoolMemoryResource(this.poolHandle);
-      this.poolHandle = -1;
+  public void close() {
+    lifecycleLock.writeLock().lock();
+    try {
+      if (this.poolHandle != -1) {
+        releasePageablePoolMemoryResource(this.poolHandle);
+        this.poolHandle = -1;
+      }
+    } finally {
+      lifecycleLock.writeLock().unlock();
     }
   }
 
@@ -202,11 +238,17 @@ public final class PageableMemoryPool implements AutoCloseable {
    * Attempts to allocate from the pageable pool. Returns null rather than throwing if
    * the pool is exhausted, so callers can fall back gracefully.
    */
-  private synchronized HostMemoryBuffer tryAllocateInternal(long bytes) {
-    if (this.poolHandle == -1) {
-      throw new IllegalStateException("Pageable memory pool has been closed");
+  private HostMemoryBuffer tryAllocateInternal(long bytes) {
+    long allocated;
+    lifecycleLock.readLock().lock();
+    try {
+      if (this.poolHandle == -1) {
+        throw new IllegalStateException("Pageable memory pool has been closed");
+      }
+      allocated = allocFromPageablePool(this.poolHandle, bytes);
+    } finally {
+      lifecycleLock.readLock().unlock();
     }
-    long allocated = allocFromPageablePool(this.poolHandle, bytes);
     if (allocated == -1) {
       return null;
     }
@@ -214,10 +256,15 @@ public final class PageableMemoryPool implements AutoCloseable {
             new PageableHostBufferCleaner(allocated, bytes));
   }
 
-  private synchronized void free(long address, long size) {
-    if (this.poolHandle == -1) {
-      throw new IllegalStateException("Pageable memory pool has been closed");
+  private void free(long address, long size) {
+    lifecycleLock.readLock().lock();
+    try {
+      if (this.poolHandle == -1) {
+        throw new IllegalStateException("Pageable memory pool has been closed");
+      }
+      freeFromPageablePool(this.poolHandle, address, size);
+    } finally {
+      lifecycleLock.readLock().unlock();
     }
-    freeFromPageablePool(this.poolHandle, address, size);
   }
 }
