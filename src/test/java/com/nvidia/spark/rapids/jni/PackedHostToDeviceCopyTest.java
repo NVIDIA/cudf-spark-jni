@@ -19,9 +19,13 @@ package com.nvidia.spark.rapids.jni;
 import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.DeviceMemoryBuffer;
 import ai.rapids.cudf.HostMemoryBuffer;
+import ai.rapids.cudf.Rmm;
+import ai.rapids.cudf.RmmAllocationMode;
+import ai.rapids.cudf.RmmEventHandler;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class PackedHostToDeviceCopyTest {
 
@@ -134,6 +138,101 @@ public class PackedHostToDeviceCopyTest {
         assertPackLengths(new long[]{8, 8}, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
+    }
+  }
+
+  // Padding applies to the pack's total, not to each buffer: 3 + 6 bytes pad to 16.
+  @Test
+  void testOnePackPadded() {
+    try (HostMemoryBuffer whole = filled(16, 0);
+         HostMemoryBuffer three = whole.slice(0, 3);
+         HostMemoryBuffer six = whole.slice(3, 6)) {
+      HostMemoryBuffer[] hostBuffers = {three, six};
+      try (PackedHostToDeviceCopy copy = PackedHostToDeviceCopy.copyAsync(
+               hostBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE)) {
+        assertPackLengths(new long[]{16}, copy.getPacks());
+        assertCopied(hostBuffers, copy.getBuffers());
+      }
+    }
+  }
+
+  // A leading empty buffer opens the first pack, and the next buffer joins it rather than starting
+  // a second one.
+  @Test
+  void testLeadingEmptyBuffer() {
+    try (HostMemoryBuffer whole = filled(16, 0);
+         HostMemoryBuffer empty = whole.slice(0, 0);
+         HostMemoryBuffer five = whole.slice(0, 5);
+         HostMemoryBuffer seven = whole.slice(5, 7)) {
+      HostMemoryBuffer[] hostBuffers = {empty, five, seven};
+      try (PackedHostToDeviceCopy copy =
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, Cuda.DEFAULT_STREAM, 8)) {
+        assertPackLengths(new long[]{8, 8}, copy.getPacks());
+        assertCopied(hostBuffers, copy.getBuffers());
+      }
+    }
+  }
+
+  // Failing the second of three pack allocations frees the first and leaves nothing in flight, so
+  // the call can be retried with a smaller cap.
+  @Test
+  void testFailedAllocationFreesPacks() {
+    if (Rmm.isInitialized()) {
+      Rmm.shutdown();
+    }
+    Rmm.initialize(RmmAllocationMode.CUDA_DEFAULT, null, 512 * 1024 * 1024);
+    RmmSpark.setEventHandler(new RmmEventHandler() {
+      @Override
+      public long[] getAllocThresholds() {
+        return null;
+      }
+
+      @Override
+      public long[] getDeallocThresholds() {
+        return null;
+      }
+
+      @Override
+      public void onAllocThreshold(long totalAllocSize) {
+      }
+
+      @Override
+      public void onDeallocThreshold(long totalAllocSize) {
+      }
+    }, "stderr");
+    long threadId = RmmSpark.getCurrentThreadId();
+    long taskId = 1;
+    RmmSpark.startDedicatedTaskThread(threadId, taskId, Thread.currentThread());
+    try (Cuda.Stream stream = new Cuda.Stream(true);
+         HostMemoryBuffer whole = filled(6 * UNIT, 0);
+         HostMemoryBuffer b0 = whole.slice(0, UNIT);
+         HostMemoryBuffer b1 = whole.slice(UNIT, UNIT);
+         HostMemoryBuffer b2 = whole.slice(2 * UNIT, UNIT);
+         HostMemoryBuffer b3 = whole.slice(3 * UNIT, UNIT);
+         HostMemoryBuffer b4 = whole.slice(4 * UNIT, UNIT);
+         HostMemoryBuffer b5 = whole.slice(5 * UNIT, UNIT)) {
+      HostMemoryBuffer[] hostBuffers = {b0, b1, b2, b3, b4, b5};
+
+      // A cap of 2 units makes 3 packs; skip the first allocation and fail the second.
+      long allocatedBefore = Rmm.getTotalBytesAllocated();
+      RmmSpark.forceRetryOOM(threadId, 1, RmmSpark.OomInjectionType.GPU.ordinal(), 1);
+      assertThrows(GpuRetryOOM.class,
+          () -> PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, 2L * UNIT));
+      assertEquals(allocatedBefore, Rmm.getTotalBytesAllocated(), "bytes still allocated");
+      RmmSpark.blockThreadUntilReady();
+
+      // Retry with half the cap: one buffer per pack.
+      try (PackedHostToDeviceCopy copy =
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, UNIT)) {
+        copy.waitOnEvent();
+        assertPackLengths(new long[]{UNIT, UNIT, UNIT, UNIT, UNIT, UNIT}, copy.getPacks());
+        assertCopied(hostBuffers, copy.getBuffers());
+      }
+    } finally {
+      RmmSpark.removeDedicatedThreadAssociation(threadId, taskId);
+      RmmSpark.taskDone(taskId);
+      TaskPriority.taskDone(taskId);
+      Rmm.shutdown();
     }
   }
 
