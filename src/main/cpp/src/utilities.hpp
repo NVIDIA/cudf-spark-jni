@@ -27,9 +27,7 @@
 
 #include <cuda/buffer>
 #include <cuda/stream>
-#include <cuda_runtime_api.h>
 
-#include <cstdint>
 #include <span>
 
 namespace spark_rapids_jni {
@@ -58,24 +56,13 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
- * @brief Queue copies of host buffers into a device buffer, packed back to back in order
+ * @brief Make `stream` wait for the work queued so far on each of `streams`
  *
- * Buffers adjacent in host memory move in a single copy. The host buffers and `destination` must
- * stay valid until the returned event completes.
+ * Does not block the calling thread, and does not order later work on `streams`.
  *
- * @param buffers The host buffers to copy
- * @param destination The device buffer to copy into, at least as large as the host buffers combined
- * @param on_side_stream Run the copies on a stream forked from `stream` rather than on `stream`
- *        itself, so they overlap work queued on `stream` afterwards, before the returned event is
- *        waited on. The copies still wait for work already queued on `stream`. The caller turns
- *        this on when there is such later work (e.g. decode) to overlap with, and off otherwise to
- *        avoid the extra cross-stream synchronization.
- * @param stream CUDA stream the copies are queued on or forked from
- * @return The event recorded after the copies, which the caller must destroy
+ * @param streams The streams to wait on
+ * @param stream The stream that waits
  */
-cudaEvent_t copy_host_buffers_to_device_async(std::span<std::span<uint8_t const> const> buffers,
-                                              cudf::device_span<uint8_t> destination,
-                                              bool on_side_stream,
-                                              cuda::stream_ref stream = cudf::get_default_stream());
+void join_streams(std::span<cuda::stream_ref const> streams, cuda::stream_ref stream);
 
 }  // namespace spark_rapids_jni

@@ -289,6 +289,7 @@ add_library(
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
+  src/memory_utils.cu
   src/multiply.cu
   src/number_converter.cu
   src/parse_timestamp_with_format.cu
