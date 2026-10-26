@@ -204,6 +204,12 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
         } else {
           failure.addSuppressed(t);
         }
+        // Without the join, block until the default stream's reads finish before freeing.
+        try {
+          Cuda.DEFAULT_STREAM.sync();
+        } catch (Throwable t2) {
+          failure.addSuppressed(t2);
+        }
       }
     }
 
