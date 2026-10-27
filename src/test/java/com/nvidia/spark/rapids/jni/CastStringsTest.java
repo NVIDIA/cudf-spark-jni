@@ -1928,12 +1928,17 @@ public class CastStringsTest {
   void parseTimestampWithFormat_legacyPackedAndDateTime() {
     long ts = expectedUs(2024, 12, 31, 23, 59, 58);
 
-    // yyyyMMdd packed: exactly 8 digits, year(4)+month(2)+day(2).
+    // yyyyMMdd packed: year and month obey their pattern widths because another numeric field
+    // follows, while the terminal day is variable-width under SimpleDateFormat.
     assertParsedTimestamp(
-        new String[]{"20240506", "2024050", "202405061", " 20240506 "},
+        new String[]{"20240506", "2024101", "202410001", "2024050", "202411", "20241",
+                     "202405061", "20240506 ", " 20240506 "},
         "yyyyMMdd", true,
-        new Long[]{expectedUs(2024, 5, 6, 0, 0, 0), null, null,
-                    expectedUs(2024, 5, 6, 0, 0, 0)});
+        new Long[]{expectedUs(2024, 5, 6, 0, 0, 0),
+                    expectedUs(2024, 10, 1, 0, 0, 0),
+                    expectedUs(2024, 10, 1, 0, 0, 0),
+                    null, null, null, null,
+                    expectedUs(2024, 5, 6, 0, 0, 0), null});
 
     // yyyyMMdd HH:mm:ss: 'T' separator rejected (literal space matches only ' ').
     assertParsedTimestamp(
@@ -1946,6 +1951,152 @@ public class CastStringsTest {
         new String[]{"2024/12/31 23:59:58", "2024/12/31T23:59:58", "2024/12/31 23:59:58Z"},
         "yyyy/MM/dd HH:mm:ss", true,
         new Long[]{ts, null, ts});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyPackedVariableWidth() {
+    assertParsedTimestamp(
+        new String[]{"12024", "1224", "124", "012024", "1200024", "1212345",
+                     "120000012345", "12024x"},
+        "MMyyyy", true,
+        new Long[]{expectedUs(24, 12, 1, 0, 0, 0),
+                    expectedUs(24, 12, 1, 0, 0, 0),
+                    expectedUs(4, 12, 1, 0, 0, 0),
+                    expectedUs(2024, 1, 1, 0, 0, 0),
+                    expectedUs(24, 12, 1, 0, 0, 0),
+                    expectedUs(12345, 12, 1, 0, 0, 0),
+                    expectedUs(12345, 12, 1, 0, 0, 0),
+                    expectedUs(24, 12, 1, 0, 0, 0)});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyPackedWhitespaceUsesRawFieldWidth() {
+    long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"202405 06", "202405\t06", "2024 506", "2024\t506", "20245 06",
+                     "2024  506", " 2020506"},
+        "yyyyMMdd", true,
+        new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06,
+                   null, expectedUs(202, 5, 6, 0, 0, 0)});
+    assertParsedTimestamp(
+        new String[]{"12 024", "12\t024", "1 2024", "1\t2024", " 12024", "  12024"},
+        "MMyyyy", true,
+        new Long[]{expectedUs(24, 12, 1, 0, 0, 0), expectedUs(24, 12, 1, 0, 0, 0),
+                   expectedUs(2024, 1, 1, 0, 0, 0), expectedUs(2024, 1, 1, 0, 0, 0),
+                   expectedUs(2024, 1, 1, 0, 0, 0), null});
+    assertParsedTimestamp(
+        new String[]{"202405 06", "2024 506"},
+        "yyyyMMdd", false,
+        new Long[]{null, null});
+    assertParsedTimestamp(
+        new String[]{"12 024", " 12024"},
+        "MMyyyy", false,
+        new Long[]{null, null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyDelimitedFieldsAreVariableWidth() {
+    assertParsedTimestamp(
+        new String[]{"24-1-1", "0024-1-1", "20245-005-0001", "0000012345-1-1"},
+        "yyyy-MM-dd", true,
+        new Long[]{expectedUs(24, 1, 1, 0, 0, 0),
+                    expectedUs(24, 1, 1, 0, 0, 0),
+                    expectedUs(20245, 5, 1, 0, 0, 0),
+                    expectedUs(12345, 1, 1, 0, 0, 0)});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyRejectsYearZero() {
+    // Non-lenient SimpleDateFormat rejects year-of-era 0 for packed and delimited fields alike.
+    assertParsedTimestamp(
+        new String[]{"010", "01000", "010000", "011"},
+        "MMyyyy", true,
+        new Long[]{null, null, null, expectedUs(1, 1, 1, 0, 0, 0)});
+    assertParsedTimestamp(
+        new String[]{"00000101", "00010101"},
+        "yyyyMMdd", true,
+        new Long[]{null, expectedUs(1, 1, 1, 0, 0, 0)});
+    assertParsedTimestamp(
+        new String[]{"0000-01-01", "0-01-01", "0000000000-1-1"},
+        "yyyy-MM-dd", true,
+        new Long[]{null, null, null});
+    // Neither parser accepts these rows, so EXCEPTION returns null instead of a disagreement.
+    assertParsedTimestamp(
+        new String[]{"010", "01000"},
+        "MMyyyy", CastStrings.TIME_PARSER_POLICY_EXCEPTION,
+        new Long[]{null, null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyPackedWindowMustFitInput() {
+    // SimpleDateFormat rejects a packed field whose raw window extends past the input.
+    long y2 = expectedUs(2, 1, 1, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"2 1", "2 01", "  2 1", "20241"},
+        "yyyyMM", true,
+        new Long[]{null, y2, y2, expectedUs(2024, 1, 1, 0, 0, 0)});
+    assertParsedTimestamp(new String[]{"3 2"}, "yyyydd", true, new Long[]{null});
+    assertParsedTimestamp(new String[]{"8\t2"}, "yyyyHH", true, new Long[]{null});
+    assertParsedTimestamp(
+        new String[]{"2 1"}, "yyyyMM", CastStrings.TIME_PARSER_POLICY_EXCEPTION,
+        new Long[]{null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyNarrowsLongFieldsLikeIntValue() {
+    // SimpleDateFormat parses a variable-width field as a long and keeps its low 32 bits. Values
+    // that wrap negative, or exceed the long range, are rejected.
+    long y2024 = expectedUs(2024, 1, 1, 0, 0, 0);
+    assertParsedTimestamp(
+        new String[]{"4294969320-1-1", "00000000004294969320-1-1", "2024-1-4294967297",
+                     "2147483648-1-1", "9223372036854775807-1-1", "9223372036854777832-1-1",
+                     "99999999999999999999-1-1"},
+        "yyyy-MM-dd", true,
+        new Long[]{y2024, y2024, y2024, null, null, null, null});
+    assertParsedTimestamp(
+        new String[]{"2024054294967297", "014294969320"},
+        "yyyyMMdd", true,
+        new Long[]{expectedUs(2024, 5, 1, 0, 0, 0), null});
+    assertParsedTimestamp(
+        new String[]{"014294969320"},
+        "MMyyyy", true,
+        new Long[]{y2024});
+    assertParsedTimestamp(
+        new String[]{"2024-01-01 4294967306:00:00"},
+        "yyyy-MM-dd HH:mm:ss", true,
+        new Long[]{expectedUs(2024, 1, 1, 10, 0, 0)});
+    CastException error = assertExceptionPolicyDisagreement("4294969320-01-01", "yyyy-MM-dd");
+    Assertions.assertTrue(error.isTimeParserPolicyDisagreement());
+  }
+
+  @Test
+  void parseTimestampWithFormat_rejectsTwoDigitYearPatterns() {
+    try (ColumnVector in = ColumnVector.fromStrings("24")) {
+      for (String format : new String[]{"y", "yy", "yy-MM"}) {
+        for (int policy : new int[]{CastStrings.TIME_PARSER_POLICY_CORRECTED,
+                                    CastStrings.TIME_PARSER_POLICY_LEGACY,
+                                    CastStrings.TIME_PARSER_POLICY_EXCEPTION}) {
+          Assertions.assertThrows(CudfException.class,
+              () -> CastStrings.parseTimestampWithFormat(in, format, policy));
+        }
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_legacyYearsPastTimestampRangeAreNull() {
+    // Known deviation: Spark CPU LEGACY fails these rows with ArithmeticException from
+    // millisToMicros. EXCEPTION matches Spark: neither parser accepts them, so the result is null.
+    assertParsedTimestamp(
+        new String[]{"294247-01-01", "294248-01-01", "300000-01-01", "300001-01-01"},
+        "yyyy-MM-dd", true,
+        new Long[]{expectedUs(294247, 1, 1, 0, 0, 0), null, null, null});
+    assertParsedTimestamp(
+        new String[]{"300000-01-01"},
+        "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION,
+        new Long[]{null});
+    CastException error = assertExceptionPolicyDisagreement("294247-01-01", "yyyy-MM-dd");
+    Assertions.assertTrue(error.isTimeParserPolicyDisagreement());
   }
 
   @Test
@@ -2108,12 +2259,34 @@ public class CastStringsTest {
         {"yyyy-MM-dd", " 2024-05-06 "},
         {"yyyy-MM-dd", "2024- 05- 06"},
         {"yyyy-MM-dd HH:mm:ss", "1999-12-31  11:59:59"},
-        {"yyyy/MM/dd", "2024/5/6"}
+        {"yyyy-MM-dd", "24-1-1"},
+        {"yyyy/MM/dd", "2024/5/6"},
+        {"yyyyMMdd", "2024101"},
+        {"yyyyMMdd", "202410001"},
+        {"yyyyMMdd", "202405 06"},
+        {"yyyyMMdd", "2024 506"},
+        {"MMyyyy", "12024"},
+        {"MMyyyy", "1224"},
+        {"MMyyyy", "124"},
+        {"MMyyyy", "1212345"},
+        {"MMyyyy", "12 024"},
+        {"MMyyyy", " 12024"}
     };
     for (String[] testCase : cases) {
       CastException error = assertExceptionPolicyDisagreement(testCase[1], testCase[0]);
       Assertions.assertEquals(0, error.getRowWithError());
       Assertions.assertEquals(testCase[1], error.getStringWithError());
+      Assertions.assertTrue(error.isTimeParserPolicyDisagreement());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_packedWhitespaceDisagreesWithFailOnError() {
+    try (ColumnVector in = ColumnVector.fromStrings("202405 06")) {
+      CastException error = Assertions.assertThrows(CastException.class,
+          () -> CastStrings.parseTimestampWithFormat(
+              in, "yyyyMMdd", CastStrings.TIME_PARSER_POLICY_EXCEPTION, true));
+      Assertions.assertTrue(error.isTimeParserPolicyDisagreement());
     }
   }
 
@@ -2153,6 +2326,25 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_failOnErrorDistinguishesFirstInvalidFromDisagreement() {
+    String[][] cases = {
+        {"2024-05-06", "invalid", "2024-05-06xxx"},
+        {"2024-05-06", "2024-05-06xxx", "invalid"}
+    };
+    boolean[] expectedDisagreement = {false, true};
+    for (int i = 0; i < cases.length; ++i) {
+      try (ColumnVector in = ColumnVector.fromStrings(cases[i])) {
+        CastException error = Assertions.assertThrows(CastException.class,
+            () -> CastStrings.parseTimestampWithFormat(
+                in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION, true));
+        Assertions.assertEquals(1, error.getRowWithError());
+        Assertions.assertEquals(cases[i][1], error.getStringWithError());
+        Assertions.assertEquals(expectedDisagreement[i], error.isTimeParserPolicyDisagreement());
+      }
+    }
+  }
+
+  @Test
   void parseTimestampWithFormat_exceptionPolicyReportsSliceRelativeRow() {
     try (ColumnVector full = ColumnVector.fromStrings(
             "outside", "2024-05-06", "2024-05-06xxx", " 2024-05-07 ");
@@ -2179,6 +2371,36 @@ public class CastStringsTest {
               in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_EXCEPTION));
       Assertions.assertEquals(17, error.getRowWithError());
       Assertions.assertEquals(inputs[17], error.getStringWithError());
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_failOnErrorReportsInvalidInput() {
+    int[] policies = {
+        CastStrings.TIME_PARSER_POLICY_CORRECTED,
+        CastStrings.TIME_PARSER_POLICY_LEGACY,
+        CastStrings.TIME_PARSER_POLICY_EXCEPTION
+    };
+    for (int policy : policies) {
+      try (ColumnVector in = ColumnVector.fromStrings("2024-05-06", "invalid", null)) {
+        CastException error = Assertions.assertThrows(
+            CastException.class,
+            () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd", policy, true));
+        Assertions.assertEquals(1, error.getRowWithError());
+        Assertions.assertEquals("invalid", error.getStringWithError());
+        Assertions.assertFalse(error.isTimeParserPolicyDisagreement());
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_failOnErrorAllowsValidAndNullInput() {
+    try (ColumnVector in = ColumnVector.fromStrings("2024-05-06", null);
+        ColumnVector actual = CastStrings.parseTimestampWithFormat(
+            in, "yyyy-MM-dd", CastStrings.TIME_PARSER_POLICY_CORRECTED, true);
+        ColumnVector expected = ColumnVector.timestampMicroSecondsFromBoxedLongs(
+            expectedUs(2024, 5, 6, 0, 0, 0), null)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
     }
   }
 

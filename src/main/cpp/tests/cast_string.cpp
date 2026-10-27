@@ -396,8 +396,9 @@ TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
   auto const strings = test::strings_column_wrapper{"2024-05-06"};
   strings_column_view scv{strings};
 
-  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
-               std::invalid_argument);
+  EXPECT_THROW(
+    spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true, false),
+    std::invalid_argument);
 }
 
 TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviation)
@@ -411,11 +412,11 @@ TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviatio
     test::fixed_width_column_wrapper<timestamp_us>({18'383 * us_per_day, 18'414 * us_per_day});
   for (bool const legacy : {false, true}) {
     auto const result = spark_rapids_jni::parse_timestamp_strings_with_format(
-      strings_column_view{strings}, "yyyy-MM-dd-MM", legacy, false);
+      strings_column_view{strings}, "yyyy-MM-dd-MM", legacy, false, false);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
   }
   auto const exception_result = spark_rapids_jni::parse_timestamp_strings_with_format(
-    strings_column_view{strings}, "yyyy-MM-dd-MM", false, true);
+    strings_column_view{strings}, "yyyy-MM-dd-MM", false, true, false);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(exception_result->view(), expected);
 }
 
