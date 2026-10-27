@@ -727,7 +727,8 @@ struct json_path_processing_data {
 
 /**
  * Evaluates one (row, path) per active thread; padded path slots and rows return without parsing.
- * Each row uses ceil(num_paths / warp_size) whole warps, so no warp mixes rows.
+ * A row uses `num_threads_per_row` threads: a packed power-of-two group for 2–16 paths (so one
+ * warp spans multiple rows); 1 and 17+ paths use whole warp(s).
  *
  * Keep both __launch_bounds__ arguments: NVCC's default register heuristic caused costly spilling
  * in this parser. Specifying min_block_per_sm lets it use more registers within the launch limit
