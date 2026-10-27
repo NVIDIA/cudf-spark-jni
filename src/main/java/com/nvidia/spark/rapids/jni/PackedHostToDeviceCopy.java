@@ -199,16 +199,12 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
       try {
         joinStreams(Cuda.DEFAULT_STREAM.getStream(), stream.getStream());
       } catch (Throwable t) {
-        if (failure == null) {
-          failure = t;
-        } else {
-          failure.addSuppressed(t);
-        }
+        failure = addFailure(failure, t);
         // Without the join, block until the default stream's reads finish before freeing.
         try {
           Cuda.DEFAULT_STREAM.sync();
         } catch (Throwable t2) {
-          failure.addSuppressed(t2);
+          failure = addFailure(failure, t2);
         }
       }
     }
@@ -222,40 +218,42 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
     }
 
     // Release the event.
-    if (event != null) {
-      try {
-        event.close();
-      } catch (Throwable t) {
-        if (failure == null) {
-          failure = t;
-        } else {
-          failure.addSuppressed(t);
-        }
-      }
-    }
+    failure = closeCollecting(event, failure);
 
-    // Rethrow the first failure, with any later ones suppressed into it.
-    if (failure instanceof Error) {
-      throw (Error) failure;
-    }
-    if (failure != null) {
-      throw (RuntimeException) failure;
-    }
+    rethrow(failure);
   }
 
-  private static Throwable closeCollecting(DeviceMemoryBuffer buffer, Throwable failure) {
-    if (buffer == null) {
+  // Keep the first failure, with any later ones suppressed into it.
+  private static Throwable addFailure(Throwable failure, Throwable t) {
+    if (failure == null) {
+      return t;
+    }
+    failure.addSuppressed(t);
+    return failure;
+  }
+
+  private static Throwable closeCollecting(AutoCloseable resource, Throwable failure) {
+    if (resource == null) {
       return failure;
     }
     try {
-      buffer.close();
+      resource.close();
     } catch (Throwable t) {
-      if (failure == null) {
-        return t;
-      }
-      failure.addSuppressed(t);
+      return addFailure(failure, t);
     }
     return failure;
+  }
+
+  private static void rethrow(Throwable failure) {
+    if (failure instanceof Error) {
+      throw (Error) failure;
+    }
+    if (failure instanceof RuntimeException) {
+      throw (RuntimeException) failure;
+    }
+    if (failure != null) {
+      throw new RuntimeException(failure);
+    }
   }
 
   // Destination d takes the next dstCounts[d] host buffers, packed back to back.
