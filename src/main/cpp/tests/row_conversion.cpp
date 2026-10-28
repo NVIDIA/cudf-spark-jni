@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,10 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <random>
+#include <string>
+#include <vector>
 
 struct ColumnToRowTests : public cudf::test::BaseFixture {};
 struct RowToColumnTests : public cudf::test::BaseFixture {};
@@ -1298,5 +1301,133 @@ TEST_F(RowToColumnTests, ManyStrings)
 
     auto in_view = cudf::slice(in, {0, new_cols->num_rows()});
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(in_view[0], *new_cols);
+  }
+}
+
+// Regression coverage for the convert_from_rows size check: the old check derived the minimum
+// row size from the EXPANDED schema (each STRING split into two INT32 columns), whose validity
+// byte count ceil(expanded/8) can exceed the producer's ceil(real/8) and spuriously reject
+// rows of empty-payload strings. These tests pin the boundary schemas where the two formulas
+// diverge, plus the short-payload strings that make the divergence reachable at all.
+TEST_F(RowToColumnTests, FromRowsStringSizeCheckEmptyPayloads)
+{
+  // [STRING, BYTE*7]: producer rows are 16 bytes (8-byte string slot + 7 bytes + 1 validity
+  // byte); the old expanded-schema check demanded 24 and threw on any all-empty/all-null
+  // string column.
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::STRING},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8}};
+
+  // All-empty strings: minimum-size rows; the old check rejected this outright.
+  {
+    cudf::test::strings_column_wrapper a({"", "", "", "", ""});
+    cudf::test::fixed_width_column_wrapper<int8_t> b({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> c({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> d({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> e({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> f({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> g({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> h({0, 1, 2, 3, 4});
+    cudf::table_view in(std::vector<cudf::column_view>{a, b, c, d, e, f, g, h});
+    auto rows   = spark_rapids_jni::convert_to_rows(in);
+    auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(*result, in);
+  }
+
+  // All-null strings: same minimum row size, nulls carried by the validity bytes.
+  {
+    cudf::test::strings_column_wrapper a({"", "", "", "", ""}, {false, false, false, false, false});
+    cudf::test::fixed_width_column_wrapper<int8_t> b({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> c({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> d({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> e({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> f({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> g({0, 1, 2, 3, 4});
+    cudf::test::fixed_width_column_wrapper<int8_t> h({0, 1, 2, 3, 4});
+    cudf::table_view in(std::vector<cudf::column_view>{a, b, c, d, e, f, g, h});
+    auto rows   = spark_rapids_jni::convert_to_rows(in);
+    auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(*result, in);
+  }
+}
+
+TEST_F(RowToColumnTests, FromRowsStringSizeCheckShortPayloads)
+{
+  // Short payloads near the divergence threshold: the strings add 1-8 bytes of payload each,
+  // so rows sit just past the minimum where the old check's extra validity byte still fit but
+  // real rows already crossed an 8-byte boundary.
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::STRING},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8},
+                                      cudf::data_type{cudf::type_id::INT8}};
+
+  cudf::test::strings_column_wrapper a({"ab", "", "cd", "", "ef"});
+  cudf::test::fixed_width_column_wrapper<int8_t> b({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> c({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> d({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> e({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> f({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> g({0, 1, 2, 3, 4});
+  cudf::test::fixed_width_column_wrapper<int8_t> h({0, 1, 2, 3, 4});
+  cudf::table_view in(std::vector<cudf::column_view>{a, b, c, d, e, f, g, h});
+  auto rows   = spark_rapids_jni::convert_to_rows(in);
+  auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(*result, in);
+}
+
+TEST_F(RowToColumnTests, FromRowsStringSizeCheckFuzz)
+{
+  // Random schemas with strings: round-trip to catch any schema where the producer's row size
+  // and the checker's minimum disagree, regardless of payload mix.
+  std::mt19937 rng(20261022);
+  std::uniform_int_distribution<int> col_count(2, 12);
+  std::uniform_int_distribution<int> str_len(0, 5);
+  for (int trial = 0; trial < 64; ++trial) {
+    int const ncols = col_count(rng);
+    std::vector<cudf::data_type> schema;
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    for (int c = 0; c < ncols; ++c) {
+      if (rng() % 3 == 0) {
+        schema.push_back(cudf::data_type{cudf::type_id::STRING});
+        std::vector<std::string> payload;
+        std::vector<bool> validity;
+        for (int r = 0; r < 8; ++r) {
+          int const len = str_len(rng);
+          payload.emplace_back(len, 'x');
+          validity.push_back(rng() % 4 != 0);
+        }
+        columns.push_back(
+          cudf::test::strings_column_wrapper(payload.begin(), payload.end(), validity.begin())
+            .release());
+      } else {
+        schema.push_back(cudf::data_type{cudf::type_id::INT32});
+        std::vector<int32_t> vals;
+        std::vector<bool> validity;
+        for (int r = 0; r < 8; ++r) {
+          vals.push_back(static_cast<int32_t>(rng()));
+          validity.push_back(rng() % 4 != 0);
+        }
+        columns.push_back(cudf::test::fixed_width_column_wrapper<int32_t>(
+                            vals.begin(), vals.end(), validity.begin())
+                            .release());
+      }
+    }
+    std::vector<cudf::column_view> views;
+    for (auto const& col : columns) {
+      views.push_back(col->view());
+    }
+    cudf::table_view in(views);
+    auto rows   = spark_rapids_jni::convert_to_rows(in);
+    auto result = spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema);
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(*result, in);
   }
 }
