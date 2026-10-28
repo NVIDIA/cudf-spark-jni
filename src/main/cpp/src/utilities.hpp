@@ -28,8 +28,6 @@
 #include <cuda/buffer>
 #include <cuda/stream>
 
-#include <span>
-
 namespace spark_rapids_jni {
 
 template <typename T>
@@ -54,15 +52,5 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
-
-/**
- * @brief Make `stream` wait for the work queued so far on each of `streams`
- *
- * Does not block the calling thread, and does not order later work on `streams`.
- *
- * @param streams The streams to wait on
- * @param stream The stream that waits
- */
-void join_streams(std::span<cuda::stream_ref const> streams, cuda::stream_ref stream);
 
 }  // namespace spark_rapids_jni

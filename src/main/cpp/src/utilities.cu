@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include "utilities.hpp"
-
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
@@ -29,9 +27,6 @@
 
 #include <cuda/functional>
 #include <cuda/stream>
-#include <cuda_runtime_api.h>
-
-#include <unordered_map>
 
 namespace spark_rapids_jni {
 
@@ -83,32 +78,6 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
                       }));
 
   return out;
-}
-
-namespace {
-
-// One event per thread and device, reused by every join: each use records it and queues the wait
-// on it before the thread can use it again. Never destroyed, so it outlives CUDA driver teardown
-// at exit.
-cudaEvent_t event_for_thread()
-{
-  thread_local std::unordered_map<int, cudaEvent_t> events;
-  int device;
-  CUDF_CUDA_TRY(cudaGetDevice(&device));
-  auto& event = events[device];
-  if (event == nullptr) { CUDF_CUDA_TRY(cudaEventCreateWithFlags(&event, cudaEventDisableTiming)); }
-  return event;
-}
-
-}  // namespace
-
-void join_streams(std::span<cuda::stream_ref const> streams, cuda::stream_ref stream)
-{
-  auto const event = event_for_thread();
-  for (auto const& waited_on : streams) {
-    CUDF_CUDA_TRY(cudaEventRecord(event, waited_on.get()));
-    CUDF_CUDA_TRY(cudaStreamWaitEvent(stream.get(), event, 0));
-  }
 }
 
 }  // namespace spark_rapids_jni

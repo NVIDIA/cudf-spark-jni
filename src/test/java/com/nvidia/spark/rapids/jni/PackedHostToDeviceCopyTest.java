@@ -22,12 +22,26 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import ai.rapids.cudf.Rmm;
 import ai.rapids.cudf.RmmAllocationMode;
 import ai.rapids.cudf.RmmEventHandler;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class PackedHostToDeviceCopyTest {
+
+  private Cuda.Event event;
+
+  @BeforeEach
+  void createEvent() {
+    event = new Cuda.Event();
+  }
+
+  @AfterEach
+  void closeEvent() {
+    event.close();
+  }
 
   private static HostMemoryBuffer filled(int length, int seed) {
     HostMemoryBuffer buffer = HostMemoryBuffer.allocate(length);
@@ -66,7 +80,7 @@ public class PackedHostToDeviceCopyTest {
   // one, and 10 units past a gap, so that the copy covers both merged and separate runs. Only
   // waitOnEvent() orders the read-back after a side-stream copy; the buffers are large so a missing
   // wait likely shows. The unit is a multiple of 8, so the packs carry no padding.
-  private static void checkMixedLayout(Cuda.Stream stream, long maxPackBytes,
+  private void checkMixedLayout(Cuda.Stream stream, long maxPackBytes,
       long... expectedPackUnits) {
     long[] expectedPackLengths = new long[expectedPackUnits.length];
     for (int p = 0; p < expectedPackUnits.length; p++) {
@@ -80,8 +94,8 @@ public class PackedHostToDeviceCopyTest {
          HostMemoryBuffer pastGap = whole.slice(40 * UNIT, 10 * UNIT)) {
       HostMemoryBuffer[] hostBuffers = {first, adjacent, other, empty, pastGap};
       try (PackedHostToDeviceCopy copy =
-               PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, maxPackBytes)) {
-        copy.waitOnEvent();
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, maxPackBytes, event)) {
+        copy.waitOnEvent(Cuda.DEFAULT_STREAM);
         assertPackLengths(expectedPackLengths, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
@@ -134,7 +148,7 @@ public class PackedHostToDeviceCopyTest {
          HostMemoryBuffer five = whole.slice(3, 5)) {
       HostMemoryBuffer[] hostBuffers = {three, empty, five};
       try (PackedHostToDeviceCopy copy =
-               PackedHostToDeviceCopy.copyAsync(hostBuffers, Cuda.DEFAULT_STREAM, 2)) {
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, Cuda.DEFAULT_STREAM, 2, event)) {
         assertPackLengths(new long[]{8, 8}, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
@@ -149,7 +163,7 @@ public class PackedHostToDeviceCopyTest {
          HostMemoryBuffer six = whole.slice(3, 6)) {
       HostMemoryBuffer[] hostBuffers = {three, six};
       try (PackedHostToDeviceCopy copy = PackedHostToDeviceCopy.copyAsync(
-               hostBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE)) {
+               hostBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE, event)) {
         assertPackLengths(new long[]{16}, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
@@ -166,7 +180,7 @@ public class PackedHostToDeviceCopyTest {
          HostMemoryBuffer seven = whole.slice(5, 7)) {
       HostMemoryBuffer[] hostBuffers = {empty, five, seven};
       try (PackedHostToDeviceCopy copy =
-               PackedHostToDeviceCopy.copyAsync(hostBuffers, Cuda.DEFAULT_STREAM, 8)) {
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, Cuda.DEFAULT_STREAM, 8, event)) {
         assertPackLengths(new long[]{8, 8}, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
@@ -217,14 +231,14 @@ public class PackedHostToDeviceCopyTest {
       long allocatedBefore = Rmm.getTotalBytesAllocated();
       RmmSpark.forceRetryOOM(threadId, 1, RmmSpark.OomInjectionType.GPU.ordinal(), 1);
       assertThrows(GpuRetryOOM.class,
-          () -> PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, 2L * UNIT));
+          () -> PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, 2L * UNIT, event));
       assertEquals(allocatedBefore, Rmm.getTotalBytesAllocated(), "bytes still allocated");
       RmmSpark.blockThreadUntilReady();
 
       // Retry with half the cap: one buffer per pack.
       try (PackedHostToDeviceCopy copy =
-               PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, UNIT)) {
-        copy.waitOnEvent();
+               PackedHostToDeviceCopy.copyAsync(hostBuffers, stream, UNIT, event)) {
+        copy.waitOnEvent(Cuda.DEFAULT_STREAM);
         assertPackLengths(new long[]{UNIT, UNIT, UNIT, UNIT, UNIT, UNIT}, copy.getPacks());
         assertCopied(hostBuffers, copy.getBuffers());
       }
@@ -239,8 +253,8 @@ public class PackedHostToDeviceCopyTest {
   @Test
   void testNoBuffers() {
     try (PackedHostToDeviceCopy copy = PackedHostToDeviceCopy.copyAsync(
-             new HostMemoryBuffer[0], Cuda.DEFAULT_STREAM, Long.MAX_VALUE)) {
-      copy.waitOnEvent();
+             new HostMemoryBuffer[0], Cuda.DEFAULT_STREAM, Long.MAX_VALUE, event)) {
+      copy.waitOnEvent(Cuda.DEFAULT_STREAM);
       assertEquals(0, copy.getBuffers().length);
     }
   }
@@ -252,9 +266,33 @@ public class PackedHostToDeviceCopyTest {
          HostMemoryBuffer b = whole.slice(4, 0)) {
       HostMemoryBuffer[] hostBuffers = {a, b};
       try (PackedHostToDeviceCopy copy = PackedHostToDeviceCopy.copyAsync(
-               hostBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE)) {
-        copy.waitOnEvent();
+               hostBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE, event)) {
+        copy.waitOnEvent(Cuda.DEFAULT_STREAM);
         assertCopied(hostBuffers, copy.getBuffers());
+      }
+    }
+  }
+
+  // As a two-stage read does: the payload copy on a side stream is queued behind the filter copy,
+  // and the decode stream waits on each copy before reading it.
+  @Test
+  void testFilterThenPayload() {
+    try (Cuda.Stream payloadStream = new Cuda.Stream(true);
+         HostMemoryBuffer filterData = filled(8 * UNIT, 3);
+         HostMemoryBuffer payloadData = filled(16 * UNIT, 50)) {
+      HostMemoryBuffer[] filterBuffers = {filterData};
+      HostMemoryBuffer[] payloadBuffers = {payloadData};
+      try (Cuda.Event payloadEvent = new Cuda.Event();
+           PackedHostToDeviceCopy filter = PackedHostToDeviceCopy.copyAsync(
+               filterBuffers, Cuda.DEFAULT_STREAM, Long.MAX_VALUE, event)) {
+        filter.makeStreamWait(payloadStream);
+        try (PackedHostToDeviceCopy payload = PackedHostToDeviceCopy.copyAsync(
+                 payloadBuffers, payloadStream, Long.MAX_VALUE, payloadEvent)) {
+          filter.waitOnEvent(Cuda.DEFAULT_STREAM);
+          assertCopied(filterBuffers, filter.getBuffers());
+          payload.waitOnEvent(Cuda.DEFAULT_STREAM);
+          assertCopied(payloadBuffers, payload.getBuffers());
+        }
       }
     }
   }
@@ -263,8 +301,8 @@ public class PackedHostToDeviceCopyTest {
   void testCloseTwice() {
     try (Cuda.Stream stream = new Cuda.Stream(true);
          HostMemoryBuffer data = filled(16, 7)) {
-      PackedHostToDeviceCopy copy =
-          PackedHostToDeviceCopy.copyAsync(new HostMemoryBuffer[]{data}, stream, Long.MAX_VALUE);
+      PackedHostToDeviceCopy copy = PackedHostToDeviceCopy.copyAsync(
+          new HostMemoryBuffer[]{data}, stream, Long.MAX_VALUE, event);
       copy.close();
       copy.close();
     }

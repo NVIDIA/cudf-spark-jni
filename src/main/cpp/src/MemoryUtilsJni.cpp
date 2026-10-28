@@ -16,55 +16,53 @@
 
 #include "cudf_jni_apis.hpp"
 #include "memory_utils.hpp"
-#include "utilities.hpp"
 
 #include <cudf/utilities/error.hpp>
-#include <cudf/utilities/span.hpp>
+
+#include <rmm/device_buffer.hpp>
 
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
 
+namespace {
+
+cuda::stream_ref as_stream(jlong j_stream)
+{
+  return cuda::stream_ref{reinterpret_cast<cudaStream_t>(j_stream)};
+}
+
+}  // namespace
+
 extern "C" {
 
-// The destinations must have been allocated on `j_stream`, since nothing orders the copies behind
-// any other stream.
-JNIEXPORT void JNICALL
+// Returns the pack count, then each pack's rmm::device_buffer*, address and length, then each host
+// buffer's pack and offset in it. Java takes ownership of the device_buffers.
+JNIEXPORT jlongArray JNICALL
 Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_copyAsync(JNIEnv* env,
                                                                   jclass,
                                                                   jlongArray j_addrs,
                                                                   jlongArray j_lens,
-                                                                  jlongArray j_dst_addrs,
-                                                                  jlongArray j_dst_lens,
-                                                                  jintArray j_dst_counts,
+                                                                  jlong j_max_pack_bytes,
                                                                   jlong j_stream)
 {
-  // Reject null arrays.
-  JNI_NULL_CHECK(env, j_addrs, "host buffer addresses are null", );
-  JNI_NULL_CHECK(env, j_lens, "host buffer lengths are null", );
-  JNI_NULL_CHECK(env, j_dst_addrs, "destination addresses are null", );
-  JNI_NULL_CHECK(env, j_dst_lens, "destination lengths are null", );
-  JNI_NULL_CHECK(env, j_dst_counts, "destination buffer counts are null", );
+  JNI_NULL_CHECK(env, j_addrs, "host buffer addresses are null", nullptr);
+  JNI_NULL_CHECK(env, j_lens, "host buffer lengths are null", nullptr);
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
 
-    // Read the Java arrays and check their counts agree.
     cudf::jni::native_jlongArray addrs(env, j_addrs);
     cudf::jni::native_jlongArray lens(env, j_lens);
-    cudf::jni::native_jlongArray dst_addrs(env, j_dst_addrs);
-    cudf::jni::native_jlongArray dst_lens(env, j_dst_lens);
-    cudf::jni::native_jintArray dst_counts(env, j_dst_counts);
     CUDF_EXPECTS(addrs.size() == lens.size(),
                  "host buffer addresses and lengths must have the same count");
-    CUDF_EXPECTS(dst_addrs.size() == dst_lens.size() && dst_addrs.size() == dst_counts.size(),
-                 "destination addresses, lengths and buffer counts must have the same count");
+    CUDF_EXPECTS(j_max_pack_bytes >= 0, "max pack bytes must not be negative");
 
-    // Wrap the host buffers in spans.
     std::vector<std::span<uint8_t const>> buffers;
     buffers.reserve(lens.size());
     for (int i = 0; i < lens.size(); ++i) {
@@ -72,54 +70,66 @@ Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_copyAsync(JNIEnv* env,
       buffers.emplace_back(reinterpret_cast<uint8_t const*>(addrs[i]),
                            static_cast<std::size_t>(lens[i]));
     }
-
-    // Gather the copies: destination d takes the next dst_counts[d] buffers, packed back to back.
-    // Each buffer adds at most one copy.
-    spark_rapids_jni::batched_copies copies;
-    copies.dsts.reserve(buffers.size());
-    copies.srcs.reserve(buffers.size());
-    copies.sizes.reserve(buffers.size());
-    std::size_t first = 0;
-    for (int d = 0; d < dst_addrs.size(); ++d) {
-      CUDF_EXPECTS(dst_lens[d] >= 0, "destination length must not be negative");
-      CUDF_EXPECTS(dst_counts[d] >= 0, "destination buffer count must not be negative");
-      auto const count = static_cast<std::size_t>(dst_counts[d]);
-      CUDF_EXPECTS(first + count <= buffers.size(),
-                   "destination buffer counts exceed the host buffers");
-      auto const destination = cudf::device_span<uint8_t>(reinterpret_cast<uint8_t*>(dst_addrs[d]),
-                                                          static_cast<std::size_t>(dst_lens[d]));
-      spark_rapids_jni::add_packed_copies(
-        std::span<std::span<uint8_t const> const>(buffers).subspan(first, count),
-        destination,
-        copies);
-      first += count;
-    }
-    CUDF_EXPECTS(first == buffers.size(),
-                 "destination buffer counts do not cover the host buffers");
-
     // The arrays were only read, so skip copying them back to Java.
     addrs.cancel();
     lens.cancel();
-    dst_addrs.cancel();
-    dst_lens.cancel();
-    dst_counts.cancel();
 
-    // Queue all the copies in one call.
-    auto const stream = cuda::stream_ref{reinterpret_cast<cudaStream_t>(j_stream)};
-    spark_rapids_jni::copy_batch_async(copies, stream);
+    // Plan the packs, then make the result buffers before copying, so nothing after the copies are
+    // queued can throw.
+    auto const plan =
+      spark_rapids_jni::plan_packs(buffers, static_cast<std::size_t>(j_max_pack_bytes));
+    auto const pack_count   = static_cast<int>(plan.pack_sizes.size());
+    auto const buffer_count = static_cast<int>(buffers.size());
+    auto const base         = 1 + 3 * pack_count;
+    cudf::jni::native_jlongArray layout(env, base + 2 * buffer_count);
+    auto* const out = layout.data();
+
+    // Copy the buffers to packed device allocations.
+    auto packs = spark_rapids_jni::copy_packed_async(buffers, plan, as_stream(j_stream));
+
+    // Build and return the layout.
+    out[0] = pack_count;
+    for (int p = 0; p < pack_count; ++p) {
+      out[1 + 3 * p] = std::bit_cast<jlong>(packs[p].get());
+      out[2 + 3 * p] = std::bit_cast<jlong>(packs[p]->data());
+      out[3 + 3 * p] = static_cast<jlong>(packs[p]->size());
+    }
+    for (int i = 0; i < buffer_count; ++i) {
+      out[base + 2 * i]     = static_cast<jlong>(plan.pack_of[i]);
+      out[base + 2 * i + 1] = static_cast<jlong>(plan.offsets[i]);
+    }
+    for (auto& pack : packs) {
+      static_cast<void>(pack.release());
+    }
+    return layout.get_jArray();
+  }
+  JNI_CATCH(env, nullptr);
+}
+
+// Free each pack in `j_layout`, as copyAsync returned it, on `j_stream` when it is closed.
+JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_setFreeStream(
+  JNIEnv* env, jclass, jlongArray j_layout, jlong j_stream)
+{
+  JNI_NULL_CHECK(env, j_layout, "layout is null", );
+  JNI_TRY
+  {
+    auto const stream = as_stream(j_stream);
+    cudf::jni::native_jlongArray layout(env, j_layout);
+    for (int p = 0; p < layout[0]; ++p) {
+      std::bit_cast<rmm::device_buffer*>(layout[1 + 3 * p])->set_stream(stream);
+    }
+    layout.cancel();
   }
   JNI_CATCH(env, );
 }
 
-JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_joinStreams(
-  JNIEnv* env, jclass, jlong j_waited_on, jlong j_stream)
+JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_freePack(
+  JNIEnv* env, jclass, jlong j_handle)
 {
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto const waited_on = cuda::stream_ref{reinterpret_cast<cudaStream_t>(j_waited_on)};
-    spark_rapids_jni::join_streams({&waited_on, 1},
-                                   cuda::stream_ref{reinterpret_cast<cudaStream_t>(j_stream)});
+    delete std::bit_cast<rmm::device_buffer*>(j_handle);
   }
   JNI_CATCH(env, );
 }
