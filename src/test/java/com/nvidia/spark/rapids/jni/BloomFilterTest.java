@@ -231,8 +231,9 @@ public class BloomFilterTest {
   void testPutRejectsNonInt64(int version) {
     try (Scalar bloomFilter = BloomFilter.create(version, 3, 1024, 0);
          ColumnVector ints = ColumnVector.fromInts(20, 80, 100);
-         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a")) {
-      for (ColumnVector bad : new ColumnVector[]{ints, strings}) {
+         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a");
+         ColumnVector dict = strings.dictionaryEncode()) {
+      for (ColumnVector bad : new ColumnVector[]{ints, strings, dict}) {
         CudfException e = assertThrows(CudfException.class,
             () -> BloomFilter.put(bloomFilter, bad));
         assertTrue(e.getMessage().contains("requires an INT64 input column"), e.getMessage());
@@ -246,10 +247,11 @@ public class BloomFilterTest {
     try (Scalar bloomFilter = BloomFilter.create(version, 3, 1024, 0);
          ColumnVector input = ColumnVector.fromLongs(20, 80, 100);
          ColumnVector ints = ColumnVector.fromInts(20, 80, 100);
-         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a")) {
+         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a");
+         ColumnVector dict = strings.dictionaryEncode()) {
       BloomFilter.put(bloomFilter, input);
       try (ColumnView bloomList = bloomFilter.getListAsColumnView()) {
-        for (ColumnVector bad : new ColumnVector[]{ints, strings}) {
+        for (ColumnVector bad : new ColumnVector[]{ints, strings, dict}) {
           CudfException e = assertThrows(CudfException.class, () -> {
             try (ColumnVector result = BloomFilter.probe(bloomFilter, bad)) {}
           });

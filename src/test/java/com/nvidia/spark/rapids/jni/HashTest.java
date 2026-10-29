@@ -1026,4 +1026,117 @@ public class HashTest {
         "CRC32 mismatch for single computation vs incremental");
     }
   }
+
+  private static final String LONG_STRING = "A very long (greater than 128 bytes/char string) to " +
+      "test a multi hash-step data point in the Murmur3 hash function. This string needed to be longer.";
+
+  /**
+   * Every Spark hasher must hash the columns containing dictionaries exactly like the same columns
+   * with the dictionaries decoded to STRING.
+   */
+  private static void assertDictionaryHashesLikeStrings(ColumnView[] withDictionaries,
+                                                        ColumnView[] withStrings) {
+    try (ColumnVector murmurExpected = Hash.murmurHash32(42, withStrings);
+         ColumnVector murmurResult = Hash.murmurHash32(42, withDictionaries);
+         ColumnVector xxhashExpected = Hash.xxhash64(withStrings);
+         ColumnVector xxhashResult = Hash.xxhash64(withDictionaries);
+         ColumnVector hiveExpected = Hash.hiveHash(withStrings);
+         ColumnVector hiveResult = Hash.hiveHash(withDictionaries)) {
+      assertColumnsAreEqual(murmurExpected, murmurResult);
+      assertColumnsAreEqual(xxhashExpected, xxhashResult);
+      assertColumnsAreEqual(hiveExpected, hiveResult);
+    }
+  }
+
+  @Test
+  void testDictionaryHashMatchesStrings() {
+    try (ColumnVector strings = ColumnVector.fromStrings(
+             "abc", "", null, "abc", LONG_STRING, "", null, " \ud720\ud721", "abc");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, -4, 5, 6, null, 8, 9)) {
+      assertEquals(DType.DICTIONARY32, dict.getType());
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dict}, new ColumnView[]{strings});
+      assertDictionaryHashesLikeStrings(new ColumnView[]{ints, dict, dict},
+          new ColumnView[]{ints, strings, strings});
+    }
+  }
+
+  @Test
+  void testEmptyDictionaryHash() {
+    try (ColumnVector strings = ColumnVector.fromStrings();
+         ColumnVector dict = strings.dictionaryEncode()) {
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dict}, new ColumnView[]{strings});
+    }
+  }
+
+  @Test
+  void testSlicedDictionaryHashMatchesStrings() {
+    try (ColumnVector strings = ColumnVector.fromStrings(
+             "abc", "", null, "abc", LONG_STRING, "", null, " \ud720\ud721", "abc");
+         ColumnVector dict = strings.dictionaryEncode()) {
+      ColumnView[] dictSlices = dict.splitAsViews(2, 6);
+      ColumnView[] stringSlices = strings.splitAsViews(2, 6);
+      try {
+        for (int i = 0; i < dictSlices.length; i++) {
+          assertDictionaryHashesLikeStrings(new ColumnView[]{dictSlices[i]},
+              new ColumnView[]{stringSlices[i]});
+        }
+      } finally {
+        for (ColumnView slice : dictSlices) {
+          slice.close();
+        }
+        for (ColumnView slice : stringSlices) {
+          slice.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  void testInt8IndicesDictionaryHashMatchesStrings() {
+    try (ColumnVector keys = ColumnVector.fromStrings("", "abc", LONG_STRING, "unused");
+         ColumnVector indices = ColumnVector.fromBoxedBytes(
+             (byte) 1, (byte) 0, null, (byte) 2, (byte) 1, (byte) 0, null);
+         ColumnVector dict = ColumnVector.makeDictionary(keys, indices);
+         ColumnView dictIndices = dict.getDictionaryIndices();
+         ColumnVector strings = ColumnVector.fromStrings(
+             "abc", "", null, LONG_STRING, "abc", "", null)) {
+      assertEquals(DType.INT8, dictIndices.getType());
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dict}, new ColumnView[]{strings});
+    }
+  }
+
+  @Test
+  void testStructOfDictionaryHashMatchesStrings() {
+    try (ColumnVector strings = ColumnVector.fromStrings(
+             "abc", "", null, "abc", LONG_STRING, "", null);
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, -4, 5, 6, null);
+         ColumnVector dictStruct = ColumnVector.makeStruct(dict, ints);
+         ColumnVector stringStruct = ColumnVector.makeStruct(strings, ints);
+         ColumnVector nestedDictStruct = ColumnVector.makeStruct(ints, dictStruct);
+         ColumnVector nestedStringStruct = ColumnVector.makeStruct(ints, stringStruct)) {
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dictStruct},
+          new ColumnView[]{stringStruct});
+      assertDictionaryHashesLikeStrings(new ColumnView[]{nestedDictStruct},
+          new ColumnView[]{nestedStringStruct});
+    }
+  }
+
+  @Test
+  void testListOfDictionaryHashMatchesStrings() {
+    try (ColumnVector strings = ColumnVector.fromStrings(
+             "abc", "", null, "abc", LONG_STRING, "", null, " \ud720\ud721");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector offsets = ColumnVector.fromInts(0, 2, 2, 5, 8);
+         ColumnVector dictList = dict.makeListFromOffsets(4, offsets);
+         ColumnVector stringList = strings.makeListFromOffsets(4, offsets);
+         ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, -4);
+         ColumnVector dictListStruct = ColumnVector.makeStruct(dictList, ints);
+         ColumnVector stringListStruct = ColumnVector.makeStruct(stringList, ints)) {
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dictList}, new ColumnView[]{stringList});
+      assertDictionaryHashesLikeStrings(new ColumnView[]{dictListStruct},
+          new ColumnView[]{stringListStruct});
+    }
+  }
 }

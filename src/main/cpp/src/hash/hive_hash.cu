@@ -193,10 +193,13 @@ class hive_device_row_hasher {
  private:
   /**
    * @brief Computes the hash value of an element in the given column.
+   *
+   * A DICTIONARY32 element, at the top level or nested, is hashed as its STRING key with the
+   * STRING rule.
    */
   class element_hasher_adapter {
    public:
-    using hash_functor_t = cudf::detail::row::hash::element_hasher<hash_function, Nullate>;
+    using hash_functor_t = dictionary_aware_element_hasher<hash_function, Nullate>;
 
     __device__ element_hasher_adapter(Nullate check_nulls) noexcept
       : hash_functor{check_nulls, HIVE_INIT_HASH, HIVE_INIT_HASH}
@@ -485,6 +488,7 @@ std::unique_ptr<cudf::column> hive_hash(cudf::table_view const& input,
   if (input.num_columns() == 0 || input.num_rows() == 0) { return output; }
 
   check_nested_depth(input);
+  check_dictionary_keys(input);
 
   bool const nullable = has_nested_nulls(input);
   auto const input_view =
