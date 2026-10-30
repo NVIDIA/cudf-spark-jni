@@ -2072,6 +2072,21 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormatChecked_offsetSecondsMatchJdk() {
+    String prefix = "1970-01-01 00:00:00";
+    for (String[] offsets : new String[][]{
+        {"XX", "+0830", "+083001", "-083001", "+083060"},
+        {"XXX", "+08:30", "+08:30:01", "-08:30:01", "+08:30:60"}}) {
+      // JDK 8 accepts optional seconds for XX/XXX, while newer JDKs reject them.
+      // The running JDK is the independent oracle for the checked JNI entry point.
+      List<String> inputs = Arrays.asList(prefix + "Z", prefix + offsets[1],
+          prefix + offsets[2], prefix + offsets[3], prefix + offsets[4], null);
+      assertParsedTimestampCheckedAgainstJdk(inputs, "yyyy-MM-dd HH:mm:ss" + offsets[0],
+          ZoneOffset.UTC);
+    }
+  }
+
+  @Test
   void parseTimestampWithFormatChecked_coldTimezoneCache() {
     synchronized (GpuTimeZoneDB.class) {
       GpuTimeZoneDB.shutdown();
