@@ -703,17 +703,14 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
     arithmetic_overflow = std::make_unique<rmm::device_scalar<int32_t>>(stream, temp_mr);
     arithmetic_overflow->set_value_to_zero_async(stream);
   }
-  auto host_token_staging =
-    cudf::detail::make_pinned_vector_async<format_token>(host_tokens.size(), stream);
-  std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.begin());
-  auto device_tokens = cudf::detail::make_device_uvector_async(host_token_staging, stream, temp_mr);
-
-  auto host_legacy_token_staging =
-    cudf::detail::make_pinned_vector_async<format_token>(host_legacy_tokens.size(), stream);
-  std::copy(
-    host_legacy_tokens.begin(), host_legacy_tokens.end(), host_legacy_token_staging.begin());
-  auto device_legacy_tokens =
-    cudf::detail::make_device_uvector_async(host_legacy_token_staging, stream, temp_mr);
+  auto host_token_staging = cudf::detail::make_pinned_vector_async<format_token>(
+    host_tokens.size() + host_legacy_tokens.size(), stream);
+  auto const legacy_begin =
+    std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.begin());
+  std::copy(host_legacy_tokens.begin(), host_legacy_tokens.end(), legacy_begin);
+  // Complete the upload before a later allocation can throw and release pinned staging.
+  // Both dialects share one allocation and one synchronization.
+  auto device_tokens = cudf::detail::make_device_uvector(host_token_staging, stream, temp_mr);
 
   std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
   if (exception_policy) {
@@ -739,10 +736,10 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
       num_rows,
       parse_with_format_fn<decltype(region_tag)::value>{
         timezone_resolver.input_device_view(),
-        cudf::device_span<format_token const>{device_tokens.data(), device_tokens.size()},
+        cudf::device_span<format_token const>{device_tokens.data(), host_tokens.size()},
         legacy,
-        cudf::device_span<format_token const>{device_legacy_tokens.data(),
-                                              device_legacy_tokens.size()},
+        cudf::device_span<format_token const>{device_tokens.data() + host_tokens.size(),
+                                              host_legacy_tokens.size()},
         first_exception_row ? first_exception_row->data() : nullptr,
         validity.begin(),
         result->mutable_view().begin<cudf::timestamp_us>(),

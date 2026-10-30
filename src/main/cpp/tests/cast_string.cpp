@@ -17,6 +17,7 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/table_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
@@ -26,17 +27,24 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/cuda_stream.hpp>
 #include <rmm/device_uvector.hpp>
+#include <rmm/mr/callback_memory_resource.hpp>
+#include <rmm/mr/cuda_async_memory_resource.hpp>
 
 #include <cast_string.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -418,6 +426,55 @@ TEST_F(ParseTimestampWithFormatTests, ExplicitStreamAndResourceOverloads)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_stream->view(), expected);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_resource->view(), expected);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_options->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, TokenUploadCompletesBeforeOutputAllocationFailure)
+{
+  auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01"};
+  rmm::cuda_stream stream{rmm::cuda_stream::flags::non_blocking};
+  rmm::mr::cuda_async_memory_resource upstream;
+  std::atomic<int> completed{0};
+  int submitted                    = 0;
+  bool output_allocation_attempted = false;
+  rmm::mr::callback_memory_resource temporary_mr{
+    [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
+      auto* ptr = upstream.allocate(allocation_stream, bytes, alignment);
+      // Delay each upload without depending on the parser's allocation count. The final
+      // marker must finish before output allocation can unwind the pinned token staging.
+      auto const status = cudaLaunchHostFunc(
+        allocation_stream.get(),
+        [](void* state) {
+          std::this_thread::sleep_for(std::chrono::milliseconds{100});
+          static_cast<std::atomic<int>*>(state)->fetch_add(1);
+        },
+        &completed);
+      if (status != cudaSuccess) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }
+      CUDF_CUDA_TRY(status);
+      ++submitted;
+      return ptr;
+    },
+    [&](cuda::stream_ref allocation_stream,
+        void* ptr,
+        std::size_t bytes,
+        std::size_t alignment,
+        void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+  rmm::mr::callback_memory_resource output_mr{
+    [&](cuda::stream_ref, std::size_t, std::size_t, void*) -> void* {
+      output_allocation_attempted = true;
+      EXPECT_GT(submitted, 0);
+      EXPECT_EQ(completed.load(), submitted);
+      throw std::bad_alloc{};
+    },
+    [](cuda::stream_ref, void*, std::size_t, std::size_t, void*) {}};
+  {
+    test::scoped_current_device_resource current_scope{temporary_mr};
+    EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                   strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, {}, stream, output_mr)),
+                 std::bad_alloc);
+    // Keep callback state and resources alive even when an assertion fails.
+    stream.synchronize();
+  }
+  EXPECT_TRUE(output_allocation_attempted);
 }
 
 TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviation)
