@@ -428,6 +428,28 @@ TEST_F(ParseTimestampWithFormatTests, ExplicitStreamAndResourceOverloads)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_options->view(), expected);
 }
 
+TEST_F(ParseTimestampWithFormatTests, NonzeroOffsetInputView)
+{
+  auto const strings = test::strings_column_wrapper({"outside",
+                                                     "1970-01-01 00:00:01.123456Z",
+                                                     "ignored",
+                                                     "invalid",
+                                                     "1970-01-01 00:00:02.000001Z",
+                                                     "outside"},
+                                                    {true, true, false, true, true, true});
+  auto const sliced  = cudf::slice(strings, {1, 5}).front();
+  ASSERT_EQ(sliced.offset(), 1);
+  auto const input    = strings_column_view{sliced};
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>({1'123'456, 0, 0, 2'000'001},
+                                                                       {true, false, false, true});
+  auto const ordinary = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss.SSSSSSX", false, false);
+  auto const checked = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    input, "yyyy-MM-dd HH:mm:ss.SSSSSSX", {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+}
+
 TEST_F(ParseTimestampWithFormatTests, TokenUploadCompletesBeforeOutputAllocationFailure)
 {
   auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01"};
