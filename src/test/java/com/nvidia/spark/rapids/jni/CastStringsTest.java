@@ -1932,6 +1932,26 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_optionalOffsetComponentsLeaveLiteralSuffix() {
+    for (String[] example : new String[][]{
+        {"X1", "+011"}, {"X99", "+0199"},
+        {"XX1", "+01001"}, {"XX99", "+010099"},
+        {"XXX:", "+01:00:"}, {"XXX:1", "+01:00:1"}, {"XXX:99", "+01:00:99"}}) {
+      String format = "yyyy-MM-dd HH:mm:ss" + example[0];
+      String prefix = "1970-01-01 00:00:00";
+      String positive = prefix + example[1];
+      String negative = prefix + example[1].replace('+', '-');
+      DateTimeFormatter formatter = timestampFormatter(format);
+      // Require these samples to parse on the current JDK, rather than compare two nulls.
+      assertEquals(-3600L, OffsetDateTime.parse(positive, formatter).toEpochSecond());
+      assertEquals(3600L, OffsetDateTime.parse(negative, formatter).toEpochSecond());
+      List<String> inputs = Arrays.asList(positive, negative, null);
+      assertParsedTimestampAgainstJdk(inputs, format);
+      assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneOffset.UTC);
+    }
+  }
+
+  @Test
   void parseTimestampWithFormat_repeatedFractionsAndOffsets() {
     for (int width : new int[]{3, 9}) {
       String fraction = repeat('S', width);

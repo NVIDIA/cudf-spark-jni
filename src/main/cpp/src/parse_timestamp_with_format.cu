@@ -321,6 +321,18 @@ __device__ bool read_strict_year(date_parse::cursor<>& input, format_token token
   return true;
 }
 
+__device__ int read_optional_offset_component(date_parse::cursor<>& input, bool colon)
+{
+  auto probe = input;
+  int value  = 0;
+  if ((!colon || probe.consume(':')) && probe.read_digits(2, value) == 2 && value <= 59) {
+    input = probe;
+    return value;
+  }
+  // An incomplete or out-of-range optional component may belong to a following literal.
+  return 0;
+}
+
 __device__ bool read_offset(date_parse::cursor<>& input,
                             int width,
                             bool allow_seconds,
@@ -336,16 +348,14 @@ __device__ bool read_offset(date_parse::cursor<>& input,
   int minute = 0;
   if (input.read_digits(2, hour) != 2) { return false; }
   if (width == 3 && !input.consume(':')) { return false; }
-  // X has optional minutes; XX and XXX require them. A single minute digit is
-  // invalid.
-  if (width != 1 || (input.peek() >= '0' && input.peek() <= '9')) {
-    if (input.read_digits(2, minute) != 2) { return false; }
+  // X has optional minutes; XX and XXX require them.
+  if (width == 1) {
+    minute = read_optional_offset_component(input, false);
+  } else if (input.read_digits(2, minute) != 2) {
+    return false;
   }
-  int second = 0;
-  if (allow_seconds && width > 1 &&
-      (width == 3 ? input.consume(':') : (input.peek() >= '0' && input.peek() <= '9'))) {
-    if (input.read_digits(2, second) != 2) { return false; }
-  }
+  int const second =
+    allow_seconds && width > 1 ? read_optional_offset_component(input, width == 3) : 0;
   if (minute > 59 || second > 59 || hour > 18 || (hour == 18 && (minute != 0 || second != 0))) {
     return false;
   }
