@@ -450,6 +450,38 @@ TEST_F(ParseTimestampWithFormatTests, NonzeroOffsetInputView)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
 }
 
+TEST_F(ParseTimestampWithFormatTests, NonemptyNullRowsDoNotReportOverflow)
+{
+  std::vector<std::string> const values{"1970-01-01T00:00:01.123456Z",
+                                        "+294247-01-10T04:00:54.775808Z",
+                                        "2000-01-01T00:00:00.000000Z",
+                                        "1969-12-31T23:59:59.999999Z"};
+  auto const strings = test::strings_column_wrapper(values.begin(), values.end()).release();
+  auto const format  = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX";
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                 strings_column_view{*strings}, format, {}, {})),
+               spark_rapids_jni::timestamp_parse_overflow);
+
+  // Apply the mask after construction so null rows retain their original character ranges.
+  std::vector<bool> const valid{true, false, false, true};
+  auto [null_mask, null_count] = test::detail::make_null_mask(valid.begin(), valid.end());
+  strings->set_null_mask(std::move(null_mask), null_count);
+  auto const input           = strings_column_view{*strings};
+  std::size_t expected_chars = 0;
+  for (auto const& value : values) {
+    expected_chars += value.size();
+  }
+  ASSERT_EQ(input.chars_size(cudf::get_default_stream()), expected_chars);
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({1'123'456, 0, 0, -1}, valid.begin());
+  auto const ordinary =
+    spark_rapids_jni::parse_timestamp_strings_with_format(input, format, false, false);
+  auto const checked =
+    spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, format, {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+}
+
 TEST_F(ParseTimestampWithFormatTests, TokenUploadCompletesBeforeOutputAllocationFailure)
 {
   auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01"};
