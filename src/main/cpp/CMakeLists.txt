@@ -234,6 +234,7 @@ add_library(
   src/MapJni.cpp
   src/MapUtilsJni.cpp
   src/MapZipWithUtilsJNI.cpp
+  src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
@@ -289,6 +290,7 @@ add_library(
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
+  src/memory_utils.cu
   src/multiply.cu
   src/number_converter.cu
   src/parse_timestamp_with_format.cu
