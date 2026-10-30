@@ -487,7 +487,7 @@ class timestamp_timezone_resolver {
                               bool has_explicit_offset,
                               cuda::stream_ref stream,
                               rmm::device_async_resource_ref mr)
-    : view_{nullptr, timezone.index, timezone.offset_seconds, has_explicit_offset}
+    : _view{nullptr, timezone.index, timezone.offset_seconds, has_explicit_offset}
   {
     bool const use_region = timezone.transitions != nullptr && !has_explicit_offset;
     std::vector<cudf::column_view> views{input.parent()};
@@ -508,18 +508,18 @@ class timestamp_timezone_resolver {
       cudf::create_column_device_views<cudf::column_device_view,
                                        cudf::host_span<cudf::column_view const>>(
         {views.data(), views.size()}, stream, mr);
-    storage_ = std::move(storage);
-    columns_ = columns;
-    if (use_region) { view_.timezone_columns = columns_ + 1; }
+    _storage = std::move(storage);
+    _columns = columns;
+    if (use_region) { _view.timezone_columns = _columns + 1; }
   }
 
-  timestamp_timezone_view device_view() const { return view_; }
-  cudf::column_device_view const* input_device_view() const { return columns_; }
+  timestamp_timezone_view device_view() const { return _view; }
+  cudf::column_device_view const* input_device_view() const { return _columns; }
 
  private:
-  std::unique_ptr<cuda::device_buffer<std::byte>> storage_;
-  cudf::column_device_view const* columns_;
-  timestamp_timezone_view view_;
+  std::unique_ptr<cuda::device_buffer<std::byte>> _storage;
+  cudf::column_device_view const* _columns;
+  timestamp_timezone_view _view;
 };
 
 template <bool UseRegion>
