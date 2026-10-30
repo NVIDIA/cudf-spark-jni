@@ -33,8 +33,8 @@ import ai.rapids.cudf.NativeDepsLoader;
  * <p>
  * The copies are only queued, and they read the host buffers asynchronously: the host buffers must
  * stay open until the copies complete, which closing this waits for. The allocations are made on
- * the copy stream, and freed on the stream passed to {@link #waitOnEvent} if it was called, else on
- * the copy stream. The copies record the event the caller passes in.
+ * the copy stream, and freed on the stream passed to {@link #setFreeStream} if it was called, else
+ * on the copy stream. The copies record the event the caller passes in.
  */
 public final class PackedHostToDeviceCopy implements AutoCloseable {
   static {
@@ -119,26 +119,27 @@ public final class PackedHostToDeviceCopy implements AutoCloseable {
   }
 
   /**
-   * Make the stream that reads the device buffers wait for the copies, and free the allocations
-   * on it, behind those reads. Does not block the calling thread.
-   *
-   * @param decodeStream the stream that reads the device buffers
-   */
-  public synchronized void waitOnEvent(Cuda.Stream decodeStream) {
-    checkOpen();
-    decodeStream.waitOn(event);
-    setFreeStream(layout, decodeStream.getStream());
-  }
-
-  /**
-   * Make a stream that does not read the device buffers wait for the copies, e.g. to queue a
-   * later copy behind them. Does not block the calling thread.
+   * Make a stream wait for the copies, e.g. one that reads the device buffers or queues a later
+   * copy behind them. Does not block the calling thread.
    *
    * @param waiting the stream that waits
    */
   public synchronized void makeStreamWait(Cuda.Stream waiting) {
     checkOpen();
     waiting.waitOn(event);
+  }
+
+  /**
+   * Free the allocations on this stream when this is closed, instead of on the copy stream. The
+   * free is ordered only after work queued on this stream, so a caller reading the device buffers
+   * on another stream must free on the stream it reads them on, or order its other readers before
+   * this one.
+   *
+   * @param freeStream the stream to free the allocations on
+   */
+  public synchronized void setFreeStream(Cuda.Stream freeStream) {
+    checkOpen();
+    setFreeStream(layout, freeStream.getStream());
   }
 
   /** Wait for the copies to finish, then release the device allocations. */
