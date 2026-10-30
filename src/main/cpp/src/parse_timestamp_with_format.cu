@@ -23,6 +23,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
 #include <cudf/table/table_device_view.cuh>
@@ -47,6 +48,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <memory>
 #include <stdexcept>
 #include <string>
