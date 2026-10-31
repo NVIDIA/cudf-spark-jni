@@ -29,6 +29,14 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.ResolverStyle;
+import java.time.temporal.ChronoField;
+import java.time.DateTimeException;
+import java.util.Locale;
 
 import org.junit.jupiter.api.Test;
 
@@ -1866,6 +1874,353 @@ public class CastStringsTest {
         new String[]{"20241231 23:59:58", "20241231T23:59:58"},
         "yyyyMMdd HH:mm:ss", false,
         new Long[]{ts, null});
+  }
+
+  @Test
+  void parseTimestampWithFormat_correctedFractionsAndOffsets() {
+    String[] offsets = {"", "Z", "+08", "+0800", "+0830", "+08:30", "-05:30",
+        "+00", "-0000", "+00:00", "+18:00", "-18:00", "+18:01", "+19:00",
+        "+08:60", "+8:30", "+083", "+08:3", "+08:30:00", "+08:30:01", "+083001",
+        "+000001", "+18:00:01", "-18:00:01", "+08:30:60", "z", "UTC"};
+    for (String separator : new String[]{" ", "'T'"}) {
+      for (int width = 0; width <= 9; ++width) {
+        String fraction = width == 0 ? "" : "." + repeat('S', width);
+        for (String offset : new String[]{"", "X", "XX", "XXX"}) {
+          String format = "yyyy-MM-dd" + separator + "HH:mm:ss" + fraction + offset;
+          List<String> inputs = new ArrayList<>();
+          String dateTime = "1969-12-31" + (separator.equals(" ") ? " " : "T") + "23:59:59";
+          List<String> fractions = new ArrayList<>(Arrays.asList("", ".", ".-1"));
+          for (int digits = 1; digits <= 10; ++digits) {
+            fractions.add("." + repeat('1', digits));
+          }
+          for (String digits : fractions) {
+            for (String suffix : offsets) {
+              inputs.add(dateTime + digits + suffix);
+            }
+          }
+          // Calendar/time validity, full consumption, strict separators, and signed years.
+          String suffix = width == 0 ? "" : "." + "123456789".substring(0, width);
+          suffix += offset.isEmpty() ? "" : "Z";
+          for (String date : new String[]{"2024-02-29", "2023-02-29", "0000-01-01",
+              "-0001-01-01", "+10000-01-01", "10000-01-01", "+2024-01-01",
+              "2024-1-01", "2024-01-32"}) {
+            inputs.add(date + (separator.equals(" ") ? " " : "T") + "12:34:56" + suffix);
+          }
+          inputs.add(dateTime + suffix + "tail");
+          inputs.add(" " + dateTime + suffix);
+          inputs.add((dateTime + suffix).toLowerCase(Locale.ROOT));
+          String zone = offset.isEmpty() ? "" : "Z";
+          String literal = separator.equals(" ") ? " " : "T";
+          for (String boundary : new String[]{"+294247-01-10 04:00:54.775",
+              "+294247-01-10 04:00:54.776", "-290308-12-21 19:59:05.224",
+              "-290308-12-21 19:59:05.225"}) {
+            int dot = boundary.indexOf('.');
+            String fractionDigits = width == 0 ? ""
+                : "." + boundary.substring(dot + 1, dot + 1 + Math.min(width, 3));
+            inputs.add(boundary.substring(0, dot).replace(" ", literal) + fractionDigits + zone);
+          }
+          inputs.add("");
+          inputs.add(null);
+          // Existing second-only expressions retain their established four-digit year behavior.
+          if (format.equals("yyyy-MM-dd HH:mm:ss")) {
+            continue;
+          }
+          assertParsedTimestampAgainstJdk(inputs, format);
+        }
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_repeatedFractionsAndOffsets() {
+    for (int width : new int[]{3, 9}) {
+      String fraction = repeat('S', width);
+      String format = "yyyy-MM-dd HH:mm:ss." + fraction + "/" + fraction;
+      List<String> inputs = new ArrayList<>(Arrays.asList(
+          "2024-01-01 00:00:00.123/123", "2024-01-01 00:00:00.123/456",
+          "2024-01-01 00:00:00.123/123000", "2024-01-01 00:00:00.000/0", "", null));
+      if (width == 9) {
+        inputs.add("2024-01-01 00:00:00.1234567/1234567");
+        inputs.add("2024-01-01 00:00:00.1234567/1234568");
+        inputs.add("2024-01-01 00:00:00.123456789/1234567890");
+      }
+      assertParsedTimestampAgainstJdk(inputs, format);
+      assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneOffset.UTC);
+    }
+    for (String[] offset : new String[][]{
+        {"X", "+01", "+02", "+00"}, {"XX", "+0100", "+0200", "+0000"},
+        {"XXX", "+01:00", "+02:00", "+00:00"}}) {
+      String format = "yyyy-MM-dd HH:mm:ss" + offset[0] + " " + offset[0];
+      String prefix = "2024-01-01 00:00:00";
+      List<String> inputs = Arrays.asList(
+          prefix + offset[1] + " " + offset[1], prefix + offset[1] + " " + offset[2],
+          prefix + "Z " + offset[3], prefix + offset[3] + " Z", prefix + "Z Z", "", null);
+      assertParsedTimestampAgainstJdk(inputs, format);
+      assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneId.of("America/New_York"));
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_correctedPackedFractions() {
+    for (String fraction : new String[]{"S", "SS", "SSS"}) {
+      for (String separator : new String[]{"", "."}) {
+        for (String offset : new String[]{"", "XXX"}) {
+          String format = "yyyyMMddHHmmss" + separator + fraction + offset;
+          String suffix = offset.isEmpty() ? "" : "Z";
+          List<String> inputs = new ArrayList<>();
+          for (String digits : new String[]{"", "1", "12", "123", "1234"}) {
+            inputs.add("20240102030405" + separator + digits + suffix);
+          }
+          inputs.add("");
+          inputs.add(null);
+          assertParsedTimestampAgainstJdk(inputs, format);
+          assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneOffset.UTC);
+        }
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_correctedPackedOffsets() {
+    for (String[] offset : new String[][]{
+        {"X", "+08", "-0530", "+19"},
+        {"XX", "+0830", "-0530", "+1900"},
+        {"XXX", "+08:00", "-05:30", "+19:00"}}) {
+      String format = "yyyyMMddHHmmss" + offset[0];
+      List<String> inputs = Arrays.asList(
+          "20240102030405Z", "20240102030405" + offset[1],
+          "20240102030405" + offset[2],
+          "00000102030405Z", "-00010102030405Z", "+100000102030405Z",
+          // Each malformed row isolates an invalid year, date, or offset.
+          "+20240102030405Z", "100000102030405Z", "-00000102030405Z",
+          "20241302030405Z", "20240102030405" + offset[3],
+          "20240102030405+", "20240102030405", "20240102030405Ztail", "", null);
+      assertParsedTimestampAgainstJdk(inputs, format);
+      assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneOffset.UTC);
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_exactMicrosecondBoundsAndOffsets() {
+    // Spark checks epoch seconds * 1_000_000 before adding the fractional microseconds.
+    long minCheckedMicros = -9_223_372_036_854_000_000L;
+    assertParsedTimestamp(
+        new String[]{
+            "+294247-01-10T04:00:54.775806Z",
+            "+294247-01-10T04:00:54.775807Z",
+            "+294247-01-10T04:00:54.775808Z",
+            "-290308-12-21T19:59:05.224191Z",
+            "-290308-12-21T19:59:05.224192Z",
+            "-290308-12-21T19:59:05.224193Z",
+            "-290308-12-21T19:59:05.999999Z",
+            "-290308-12-21T19:59:06.000000Z",
+            "-290308-12-21T19:59:06.000001Z",
+            "+294247-01-10T05:00:54.775807+01:00",
+            "+294247-01-10T04:00:54.775807-01:00",
+            "-290308-12-21T18:59:06.000000-01:00",
+            "-290308-12-21T19:59:06.000000+01:00"},
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX", false,
+        new Long[]{Long.MAX_VALUE - 1, Long.MAX_VALUE, null, null, null, null, null,
+            minCheckedMicros, minCheckedMicros + 1, Long.MAX_VALUE, null, minCheckedMicros, null});
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_timezonesAndBounds() {
+    List<String> localInputs = Arrays.asList(null, "", "malformed",
+        "2023-02-29 12:00:00.123456", "2024-01-01 00:00:00.123456",
+        "1969-12-31 23:59:59.999999", "1965-04-25 01:59:59.999999",
+        "1965-04-25 02:00:00.000000", "2021-03-14 02:30:00.123456",
+        "2021-11-07 01:30:00.123456", "+294247-01-10 04:00:54.775807",
+        "+294247-01-10 04:00:54.775808", "-290308-12-21 19:59:05.225000",
+        "-290308-12-21 19:59:06.000000", "+300001-01-01 00:00:00.000000",
+        "-300001-01-01 00:00:00.000000", "+999999999-01-01 00:00:00.000000",
+        "-999999999-01-01 00:00:00.000000", "+1000000000-01-01 00:00:00.000000",
+        "+999999999-02-29 00:00:00.000000");
+    for (String zone : new String[]{"UTC", "+08:00", "-05:00", "America/New_York"}) {
+      assertParsedTimestampCheckedAgainstJdk(localInputs, "yyyy-MM-dd HH:mm:ss.SSSSSS",
+          ZoneId.of(zone));
+      assertParsedTimestampCheckedAgainstJdk(Arrays.asList(null, "malformed",
+          "2024-01-01T00:00:00.123456+08:30", "2024-01-01T00:00:00.123456Z",
+          "+294247-01-10T12:30:54.775807+08:30",
+          "+294247-01-10T04:00:54.775807-05:00",
+          "-290308-12-21T14:59:06.000000-05:00",
+          "-290308-12-21T19:59:05.225000Z"),
+          "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX", ZoneId.of(zone));
+    }
+    assertParsedTimestampCheckedAgainstJdk(new ArrayList<>(), "yyyy-MM-dd HH:mm:ss.SSS",
+        ZoneOffset.UTC);
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_coldTimezoneCache() {
+    synchronized (GpuTimeZoneDB.class) {
+      GpuTimeZoneDB.shutdown();
+      try {
+        assertParsedTimestampCheckedAgainstJdk(Arrays.asList(
+            "2024-01-01 00:00:00.123", "2021-03-14 02:30:00.123",
+            "2021-11-07 01:30:00.123"),
+            "yyyy-MM-dd HH:mm:ss.SSS", ZoneId.of("America/New_York"));
+      } finally {
+        // Leave a valid cache for other tests even when the cold-cache assertion fails.
+        GpuTimeZoneDB.shutdown();
+        GpuTimeZoneDB.cacheDatabase();
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_selectedTimezoneRow() {
+    GpuTimeZoneDB.cacheDatabase();
+    for (String zone : new String[]{"America/New_York", "Europe/Paris", "Asia/Kathmandu"}) {
+      Integer index = GpuTimeZoneDB.getIndexToTransitionTable(zone);
+      try (Table timezoneInfo = GpuTimeZoneDB.getTimezoneInfo(index)) {
+        assertEquals(1, timezoneInfo.getRowCount());
+      }
+      List<String> inputs = Arrays.asList(
+          "1900-01-01 00:00:00.123", "2021-03-14 02:30:00.123",
+          "2021-11-07 01:30:00.123", "2030-01-01 00:00:00.123", null);
+      assertParsedTimestampCheckedAgainstJdk(inputs, "yyyy-MM-dd HH:mm:ss.SSS", ZoneId.of(zone));
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_overflowInMixedBatch() {
+    String[] inputs = new String[4097];
+    Arrays.fill(inputs, "2024-01-01 00:00:00.123456");
+    inputs[0] = null;
+    inputs[1] = "malformed";
+    inputs[inputs.length - 1] = "+294247-01-10 04:00:54.775808";
+    try (ColumnVector column = ColumnVector.fromStrings(inputs)) {
+      ArithmeticException error = Assertions.assertThrows(ArithmeticException.class, () -> {
+        try (ColumnVector ignored = CastStrings.parseTimestampWithFormatChecked(column,
+            "yyyy-MM-dd HH:mm:ss.SSSSSS", ZoneOffset.UTC)) {
+          // The final row must report overflow even among valid and malformed rows.
+        }
+      });
+      assertEquals(ArithmeticException.class, error.getClass());
+      assertEquals("long overflow", error.getMessage());
+    }
+  }
+
+  private static void assertParsedTimestampCheckedAgainstJdk(List<String> inputs, String format,
+      ZoneId zoneId) {
+    DateTimeFormatter formatter = timestampFormatter(format);
+    List<String> nonOverflowInputs = new ArrayList<>();
+    List<Long> expectedValues = new ArrayList<>();
+    for (String input : inputs) {
+      Long expected = null;
+      try {
+        if (input != null) {
+          Instant parsed = format.contains("X")
+              ? OffsetDateTime.parse(input, formatter).toInstant()
+              : LocalDateTime.parse(input, formatter).atZone(zoneId).toInstant();
+          expected = Math.addExact(Math.multiplyExact(parsed.getEpochSecond(), 1_000_000L),
+              parsed.getNano() / 1000);
+        }
+      } catch (DateTimeException ignored) {
+        // Malformed rows remain null, independently of arithmetic-overflow handling.
+      } catch (ArithmeticException overflow) {
+        try (ColumnVector column = ColumnVector.fromStrings(input)) {
+          ArithmeticException error = Assertions.assertThrows(ArithmeticException.class, () -> {
+            try (ColumnVector ignored =
+                CastStrings.parseTimestampWithFormatChecked(column, format, zoneId)) {
+              // Close an unexpected result before the assertion fails.
+            }
+          });
+          assertEquals(ArithmeticException.class, error.getClass());
+          assertEquals("long overflow", error.getMessage());
+        }
+        continue;
+      }
+      nonOverflowInputs.add(input);
+      expectedValues.add(expected);
+    }
+    try (ColumnVector column = ColumnVector.fromStrings(nonOverflowInputs.toArray(new String[0]));
+        ColumnVector actual = CastStrings.parseTimestampWithFormatChecked(column, format, zoneId);
+        HostColumnVector host = actual.copyToHost()) {
+      assertEquals(expectedValues.size(), host.getRowCount());
+      for (int i = 0; i < expectedValues.size(); ++i) {
+        Long value = host.isNull(i) ? null : host.getLong(i);
+        assertEquals(expectedValues.get(i), value,
+            format + " zone: " + zoneId + " input: " + nonOverflowInputs.get(i));
+      }
+    }
+  }
+
+  private static DateTimeFormatter timestampFormatter(String format) {
+    // Spark replaces yyyy with proleptic uuuu before building its strict Java formatter.
+    String pattern = format.replace("yyyy", "uuuu");
+    DateTimeFormatterBuilder builder = new DateTimeFormatterBuilder().parseCaseInsensitive();
+    int previousEnd = 0;
+    for (int start = pattern.indexOf('S'); start >= 0;
+        start = pattern.indexOf('S', previousEnd)) {
+      int end = start;
+      while (end < pattern.length() && pattern.charAt(end) == 'S') {
+        ++end;
+      }
+      // Spark's DateTimeFormatterHelper accepts 1..N fractional digits, unlike the
+      // fixed width used by DateTimeFormatter.ofPattern under strict resolution.
+      builder.appendPattern(pattern.substring(previousEnd, start))
+          .appendFraction(ChronoField.NANO_OF_SECOND, 1, end - start, false);
+      previousEnd = end;
+    }
+    builder.appendPattern(pattern.substring(previousEnd));
+    return builder.toFormatter(Locale.US).withResolverStyle(ResolverStyle.STRICT);
+  }
+
+  private static void assertParsedTimestampAgainstJdk(List<String> inputs, String format) {
+    DateTimeFormatter formatter = timestampFormatter(format);
+    Long[] expected = inputs.stream().map(input -> {
+      if (input == null) {
+        return null;
+      }
+      try {
+        Instant parsed = format.contains("X")
+            ? OffsetDateTime.parse(input, formatter).toInstant()
+            : LocalDateTime.parse(input, formatter).toInstant(ZoneOffset.UTC);
+        return Math.addExact(Math.multiplyExact(parsed.getEpochSecond(), 1_000_000L),
+            parsed.getNano() / 1000);
+      } catch (DateTimeException | ArithmeticException e) {
+        return null;
+      }
+    }).toArray(Long[]::new);
+    try (ColumnVector input = ColumnVector.fromStrings(inputs.toArray(new String[0]));
+        ColumnVector actual = CastStrings.parseTimestampWithFormat(input, format, false);
+        HostColumnVector host = actual.copyToHost()) {
+      for (int i = 0; i < expected.length; ++i) {
+        Long value = host.isNull(i) ? null : host.getLong(i);
+        assertEquals(expected[i], value, format + " input: " + inputs.get(i));
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_extendedTokensRequireCorrected() {
+    for (String[] sample : new String[][]{
+        {"2024-01-01 00:00:00.123", "yyyy-MM-dd HH:mm:ss.SSS"},
+        {"2024-01-01 00:00:00Z", "yyyy-MM-dd HH:mm:ssXXX"},
+        {"2024-01-01T00:00:00", "yyyy-MM-dd'T'HH:mm:ss"}}) {
+      try (ColumnVector input = ColumnVector.fromStrings(sample[0])) {
+        for (int policy : new int[]{CastStrings.TIME_PARSER_POLICY_LEGACY,
+            CastStrings.TIME_PARSER_POLICY_EXCEPTION}) {
+          CudfException error = Assertions.assertThrows(CudfException.class, () -> {
+            try (ColumnVector ignored = CastStrings.parseTimestampWithFormat(input, sample[1],
+                policy)) {
+              // Close an unexpected successful result before assertThrows reports a failure.
+            }
+          });
+          assertEquals(CudfException.class, error.getClass());
+        }
+      }
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("2024-01-01 00:00:00.123")) {
+      for (String format : new String[]{"yyyy-MM-dd'T'HH:mm:ssXXXX",
+          "yyyy-MM-dd'Q'HH:mm:ss", "yyyy-MM-dd HH:mm:ss.SSSSSSSSSS"}) {
+        CudfException error = Assertions.assertThrows(CudfException.class,
+            () -> CastStrings.parseTimestampWithFormat(input, format, false));
+        assertEquals(CudfException.class, error.getClass());
+      }
+    }
   }
 
   @Test

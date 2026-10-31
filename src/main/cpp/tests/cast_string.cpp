@@ -396,8 +396,28 @@ TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
   auto const strings = test::strings_column_wrapper{"2024-05-06"};
   strings_column_view scv{strings};
 
-  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format(
+                 scv, "yyyy-MM-dd", true, true)),
                std::invalid_argument);
+}
+
+TEST_F(ParseTimestampWithFormatTests, ExplicitStreamAndResourceOverloads)
+{
+  auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01", "invalid"};
+  auto const input   = strings_column_view{strings};
+  auto const stream  = cudf::get_default_stream();
+  auto const mr      = cudf::get_current_device_resource_ref();
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({1'000'000, 0}, {true, false});
+  auto const with_stream = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, stream);
+  auto const with_resource = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, stream, mr);
+  auto const with_options = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, {}, stream, mr);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_stream->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_resource->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_options->view(), expected);
 }
 
 TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviation)

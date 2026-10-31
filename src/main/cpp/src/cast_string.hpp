@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace spark_rapids_jni {
@@ -245,29 +246,59 @@ std::unique_ptr<cudf::column> parse_strings_to_date(
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 /**
+ * @brief Caller-resolved JDK compatibility options for timestamp formats.
+ *
+ * All options default to false.
+ */
+struct timestamp_format_parse_options {
+  bool allow_offset_seconds     = false;  ///< Accept optional seconds for XX/XXX offsets only.
+  bool allow_empty_fraction     = false;  ///< Allow zero fraction digits when input remains.
+  bool adjacent_single_fraction = false;  ///< Include a single S in adjacent-value parsing.
+};
+
+/** @brief A valid formatted timestamp overflows Spark's checked microsecond conversion. */
+struct timestamp_parse_overflow : public std::runtime_error {
+  timestamp_parse_overflow() : std::runtime_error("long overflow") {}
+};
+
+/** @brief Session timezone used before converting parsed seconds to microseconds. */
+struct timestamp_parse_timezone {
+  cudf::table_view const* transitions = nullptr;  ///< Region transitions, or null for fixed offset.
+  cudf::size_type index               = 0;        ///< Region timezone row in the transition table.
+  int32_t offset_seconds              = 0;        ///< Fixed UTC offset when transitions is null.
+};
+
+/**
  * @brief Parse a string column into a `timestamp_us` column for a Spark date/timestamp
- *        format pattern. Sub-second digits are not parsed; the microsecond field of every
- *        successfully parsed row is zero.
+ *        format pattern, with optional fractional seconds and an explicit UTC offset.
  *
  * The pattern is compiled host-side into a token stream (mirroring how Spark's
  * `DateTimeFormatter`/`SimpleDateFormat` represent a parser internally), then a generic
  * device-side walker consumes the tokens against each row. Replaces the cuDF
  * regex-validate + regex-rewrite + asTimestamp chain previously used by
- * `GpuToTimestamp` for the 24 supported `LEGACY_COMPATIBLE_FORMATS` /
- * `CORRECTED_COMPATIBLE_FORMATS` patterns; the legacy `REMOVE_WHITESPACE_FROM_MONTH_DAY`
+ * `GpuToTimestamp` for compatible patterns; the legacy `REMOVE_WHITESPACE_FROM_MONTH_DAY`
  * rewrite is folded into the state machine.
  *
- * Pattern letters follow JDK conventions: `y`/`M`/`d`/`H`/`m`/`s`. Lowercase `m` is minute,
- * not month. Non-year letter runs must have length 2; longer runs (e.g. `MMM` for month
- * name) are rejected because this kernel does not implement text forms. A space in the
- * pattern matches exactly one ' ' in the input; 'T' is rejected as the date/time separator
- * under both policies (unlike the format-less cast). Quoted literals (`'T'`) are not
- * supported. Pattern literals must be ASCII. In LEGACY
- * mode, non-year digit fields are 1 or 2 digits unless adjacent to another digit field (in
- * which case widths are exact to disambiguate). Parsed values are wall-clock UTC; timezone
- * rebasing remains the caller's responsibility — in LEGACY mode the trailing non-digit rule
- * silently accepts (and discards) any non-digit suffix including 'Z', so callers must not
- * infer a UTC offset from a trailing 'Z'.
+ * Pattern letters follow JDK conventions: `y`/`M`/`d`/`H`/`m`/`s`. Lowercase
+ * `m` is minute, not month. Non-year letter runs must have length 2; longer
+ * runs (e.g. `MMM` for month name) are rejected because this kernel does not
+ * implement text forms. A space in the pattern matches exactly one ' ' in the
+ * input; 'T' is rejected as the date/time separator under both policies (unlike
+ * the format-less cast). CORRECTED additionally supports the quoted literal
+ * `'T'`, fractional seconds (`S` through nine `S`s), and offsets `X`, `XX`,
+ * `XXX`. By default, fractions accept 1 to the specified number of digits,
+ * truncated to microseconds. Compatibility options may relax the minimum width
+ * and permit offset seconds. X permits optional minutes, XX requires minutes
+ * without a colon, and XXX requires a colon. All accept Z for zero offset. These
+ * additional tokens require CORRECTED (not EXCEPTION) policy. With an offset
+ * token, the result is already UTC and must not be rebased by the caller.
+ * Pattern literals must be ASCII. In LEGACY
+ * mode, non-year digit fields are 1 or 2 digits unless adjacent to another
+ * digit field (in which case widths are exact to disambiguate). Parsed values
+ * are wall-clock UTC; timezone rebasing remains the caller's responsibility —
+ * in LEGACY mode the trailing non-digit rule silently accepts (and discards)
+ * any non-digit suffix including 'Z', so callers must not infer a UTC offset
+ * from a trailing 'Z'.
  *
  * @throws spark_rapids_jni::cast_error If CORRECTED rejects a row that LEGACY accepts while
  *                                       exception policy is enabled.
@@ -278,15 +309,54 @@ std::unique_ptr<cudf::column> parse_strings_to_date(
  * @param legacy True for `LegacyTimeParserPolicy`, false for CORRECTED/EXCEPTION.
  * @param exception_policy If true, throw `cast_error` when CORRECTED rejects a row that LEGACY
  *                         accepts.
+ * @param options Compatibility options resolved from the caller's JDK formatter behavior.
  * @param stream Stream on which to operate.
  * @param mr Memory resource for the returned column.
  * @return A timestamp_us column, with nulls for invalid inputs.
  */
-std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
+[[nodiscard]] std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   cudf::strings_column_view const& input,
   std::string const& format,
   bool legacy,
   bool exception_policy,
+  timestamp_format_parse_options options,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Compatibility overload using default timestamp format options.
+ *
+ * Retains the original explicit-stream and memory-resource call signatures.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
+  cudf::strings_column_view const& input,
+  std::string const& format,
+  bool legacy,
+  bool exception_policy,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Parse CORRECTED expression timestamps with checked arithmetic after timezone resolution.
+ *
+ * An explicit X/XX/XXX offset overrides the session timezone. Otherwise the session timezone
+ * resolves the local date/time at second precision before multiplying by one million and adding
+ * fractional microseconds. Malformed inputs produce nulls; arithmetic overflow throws.
+ *
+ * @param input The input string column.
+ * @param format Spark format pattern.
+ * @param options Caller-resolved JDK compatibility options.
+ * @param timezone Session timezone; its transition data must outlive the call's stream work.
+ * @param stream Stream on which to operate.
+ * @param mr Memory resource for the returned column.
+ * @throws timestamp_parse_overflow If a valid date/time overflows checked microsecond arithmetic.
+ * @return A UTC timestamp_us column, with nulls for malformed inputs.
+ */
+[[nodiscard]] std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_checked(
+  cudf::strings_column_view const& input,
+  std::string const& format,
+  timestamp_format_parse_options options,
+  timestamp_parse_timezone timezone,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

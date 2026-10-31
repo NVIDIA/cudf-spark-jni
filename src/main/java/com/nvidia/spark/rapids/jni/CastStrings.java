@@ -18,6 +18,12 @@ package com.nvidia.spark.rapids.jni;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.SignStyle;
+import java.time.temporal.ChronoField;
+import java.text.ParsePosition;
 
 import ai.rapids.cudf.*;
 
@@ -35,6 +41,33 @@ public class CastStrings {
 
   /** Exception time parser policy. */
   public static final int TIME_PARSER_POLICY_EXCEPTION = 2;
+
+  // Older JDKs also accept optional offset seconds for XX/XXX. Match the running
+  // formatter instead of assuming every supported Spark runtime has the same behavior.
+  private static final boolean OPTIONAL_OFFSET_SECONDS = acceptsOffsetSeconds();
+  private static final boolean EMPTY_FRACTION = acceptsEmptyFraction();
+  private static final boolean ADJACENT_SINGLE_FRACTION = acceptsAdjacentSingleFraction();
+
+  private static boolean acceptsOffsetSeconds() {
+    ParsePosition position = new ParsePosition(0);
+    DateTimeFormatter.ofPattern("XXX").parseUnresolved("+00:00:01", position);
+    return position.getIndex() == 9;
+  }
+
+  private static boolean acceptsEmptyFraction() {
+    ParsePosition position = new ParsePosition(0);
+    new DateTimeFormatterBuilder().appendFraction(ChronoField.NANO_OF_SECOND, 1, 3, false)
+        .appendLiteral('Z').toFormatter().parseUnresolved("Z", position);
+    return position.getIndex() == 1;
+  }
+
+  private static boolean acceptsAdjacentSingleFraction() {
+    ParsePosition position = new ParsePosition(0);
+    new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 4, 19, SignStyle.EXCEEDS_PAD)
+        .appendFraction(ChronoField.NANO_OF_SECOND, 1, 1, false)
+        .toFormatter().parseUnresolved("20241", position);
+    return position.getIndex() == 5;
+  }
 
   /**
    * Convert a string column to an integer column of a specified type stripping away leading and
@@ -373,8 +406,7 @@ public class CastStrings {
 
   /**
    * Parse a string column into a {@code timestamp_us} column for a Spark date/timestamp
-   * format pattern. Sub-second digits are not parsed; successfully parsed rows always have
-   * microsecond field zero. The pattern is compiled into a token stream on the host and
+   * format pattern. The pattern is compiled into a token stream on the host and
    * walked per-row on the device, mirroring how Spark's {@code DateTimeFormatter} /
    * {@code SimpleDateFormat} represent a parser internally.
    *
@@ -382,12 +414,20 @@ public class CastStrings {
    * {@code m}, {@code s}. Lowercase {@code m} is minute, not month. Non-year letter runs
    * must have length 2; longer runs (e.g. {@code MMM} for month name) are rejected because
    * this kernel does not implement text forms. Unsupported letters, including lowercase
-   * {@code h} for 12-hour clock, {@code S} for fractional seconds, and timezone pattern
-   * letters, are rejected. Space matches exactly one space; quoted literals ({@code 'T'}) are
-   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year
+   * {@code h} for 12-hour clock, are rejected. CORRECTED additionally supports fractional
+   * seconds ({@code S} through nine {@code S}s), the quoted literal {@code 'T'}, and
+   * offsets {@code X}, {@code XX}, {@code XXX}. Fractions accept one to the specified number
+   * of digits and truncate beyond microseconds. X accepts optional minutes, XX requires
+   * minutes without a colon, and XXX requires a colon; all three accept Z for UTC.
+   * Parsing T and Z is case-insensitive, as in Spark. XX/XXX also accept optional offset
+   * seconds when the running JDK's formatter does (including JDK 8).
+   * An empty fraction before an offset is likewise accepted on affected older JDKs.
+   * These additional tokens are rejected under LEGACY and EXCEPTION.
+   * Space matches exactly one space. Pattern literals must be ASCII. In LEGACY mode, non-year
    * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
    * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
-   * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
+   * Without an offset token, parsed values are wall-clock UTC and timezone rebasing remains
+   * the caller's responsibility. With an offset token, the result is already UTC.
    *
    * <p>This compatibility overload is retained for existing callers. New callers should use
    * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
@@ -413,6 +453,7 @@ public class CastStrings {
    *                         {@link #TIME_PARSER_POLICY_EXCEPTION}.
    * @throws CastException if CORRECTED rejects a row that LEGACY accepts under EXCEPTION policy.
    * @throws IllegalArgumentException if {@code timeParserPolicy} is invalid.
+   * @throws ai.rapids.cudf.CudfException if the format is unsupported for the selected policy.
    * @return a timestamp_us column where invalid rows have nulls.
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
@@ -422,7 +463,49 @@ public class CastStrings {
       throw new IllegalArgumentException("Invalid time parser policy: " + timeParserPolicy);
     }
     return new ColumnVector(
-        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy));
+        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy,
+            OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION));
+  }
+
+  /**
+   * Parse CORRECTED expression timestamps, resolving the timezone before checked arithmetic.
+   *
+   * <p>An explicit X/XX/XXX offset overrides {@code zoneId}. Otherwise local date/time fields
+   * are resolved in {@code zoneId} at second precision, before checked multiplication by one
+   * million and addition of fractional microseconds. Malformed rows produce nulls; valid dates
+   * that overflow that arithmetic throw regardless of the caller's ANSI setting.
+   * The timezone database is initialized on demand only for region timezones.
+   *
+   * @param input the input string column
+   * @param format Spark format pattern
+   * @param zoneId session timezone used when the pattern has no explicit offset
+   * @return UTC timestamps with nulls for malformed inputs
+   * @throws ArithmeticException if a valid timestamp overflows checked microsecond arithmetic
+   * @throws IllegalArgumentException if the region timezone is absent from the GPU database
+   * @throws ai.rapids.cudf.CudfException if the format is unsupported
+   */
+  public static ColumnVector parseTimestampWithFormatChecked(ColumnView input, String format,
+      ZoneId zoneId) {
+    if (format.indexOf('X') >= 0) {
+      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
+          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION, 0, 0, 0));
+    }
+    ZoneId normalized = zoneId.normalized();
+    if (normalized instanceof ZoneOffset) {
+      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
+          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION, 0, 0,
+          ((ZoneOffset) normalized).getTotalSeconds()));
+    }
+    GpuTimeZoneDB.cacheDatabase();
+    Integer timezoneIndex = GpuTimeZoneDB.getIndexToTransitionTable(normalized.getId());
+    if (timezoneIndex == null) {
+      throw new IllegalArgumentException("Timezone is absent from the GPU database: " + zoneId);
+    }
+    try (Table timezoneInfo = GpuTimeZoneDB.getTimezoneInfo(timezoneIndex)) {
+      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
+          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION,
+          timezoneInfo.getNativeView(), 0, 0));
+    }
   }
 
   /**
@@ -505,6 +588,12 @@ public class CastStrings {
   private static native long parseDateStringsToDate(long input);
 
   private static native long parseTimestampWithFormat(
-      long input, String format, int timeParserPolicy);
+      long input, String format, int timeParserPolicy, boolean allowOffsetSeconds,
+      boolean allowEmptyFraction, boolean adjacentSingleFraction);
+
+  private static native long parseTimestampWithFormatChecked(
+      long input, String format, boolean allowOffsetSeconds, boolean allowEmptyFraction,
+      boolean adjacentSingleFraction,
+      long timezoneInfo, int timezoneIndex, int defaultOffsetSeconds);
 
 }
