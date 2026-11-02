@@ -747,8 +747,8 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
       return extract_and_build_scalar_field_column<double>(
         field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
     default:
-      // Preserve protobuf-java-compatible null output when invalid input reaches this fallback.
-      return make_null_column(dt, num_items, stream, mr);
+      CUDF_FAIL("Protobuf decode internal error: unsupported scalar type id=" +
+                std::to_string(static_cast<int>(dt.id())));
   }
 }
 

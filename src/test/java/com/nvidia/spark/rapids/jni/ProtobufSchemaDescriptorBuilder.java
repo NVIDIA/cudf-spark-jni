@@ -157,7 +157,12 @@ public final class ProtobufSchemaDescriptorBuilder {
   }
 
   public ProtobufSchemaDescriptorBuilder required() {
-    current().isRequired = true;
+    return required(true);
+  }
+
+  /** Set whether the current field is required. */
+  public ProtobufSchemaDescriptorBuilder required(boolean value) {
+    current().isRequired = value;
     return this;
   }
 
