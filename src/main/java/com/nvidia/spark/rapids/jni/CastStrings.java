@@ -44,29 +44,18 @@ public class CastStrings {
 
   // Older JDKs also accept optional offset seconds for XX/XXX. Match the running
   // formatter instead of assuming every supported Spark runtime has the same behavior.
-  private static final boolean OPTIONAL_OFFSET_SECONDS = acceptsOffsetSeconds();
-  private static final boolean EMPTY_FRACTION = acceptsEmptyFraction();
-  private static final boolean ADJACENT_SINGLE_FRACTION = acceptsAdjacentSingleFraction();
+  private static final boolean OPTIONAL_OFFSET_SECONDS = accepts(
+      DateTimeFormatter.ofPattern("XXX"), "+00:00:01");
+  private static final boolean EMPTY_FRACTION = accepts(new DateTimeFormatterBuilder()
+      .appendFraction(ChronoField.NANO_OF_SECOND, 1, 3, false).appendLiteral('Z').toFormatter(), "Z");
+  private static final boolean ADJACENT_SINGLE_FRACTION = accepts(new DateTimeFormatterBuilder()
+      .appendValue(ChronoField.YEAR, 4, 19, SignStyle.EXCEEDS_PAD)
+      .appendFraction(ChronoField.NANO_OF_SECOND, 1, 1, false).toFormatter(), "20241");
 
-  private static boolean acceptsOffsetSeconds() {
+  private static boolean accepts(DateTimeFormatter formatter, String input) {
     ParsePosition position = new ParsePosition(0);
-    DateTimeFormatter.ofPattern("XXX").parseUnresolved("+00:00:01", position);
-    return position.getIndex() == 9;
-  }
-
-  private static boolean acceptsEmptyFraction() {
-    ParsePosition position = new ParsePosition(0);
-    new DateTimeFormatterBuilder().appendFraction(ChronoField.NANO_OF_SECOND, 1, 3, false)
-        .appendLiteral('Z').toFormatter().parseUnresolved("Z", position);
-    return position.getIndex() == 1;
-  }
-
-  private static boolean acceptsAdjacentSingleFraction() {
-    ParsePosition position = new ParsePosition(0);
-    new DateTimeFormatterBuilder().appendValue(ChronoField.YEAR, 4, 19, SignStyle.EXCEEDS_PAD)
-        .appendFraction(ChronoField.NANO_OF_SECOND, 1, 1, false)
-        .toFormatter().parseUnresolved("20241", position);
-    return position.getIndex() == 5;
+    formatter.parseUnresolved(input, position);
+    return position.getIndex() == input.length();
   }
 
   /**
@@ -498,11 +487,7 @@ public class CastStrings {
    */
   public static ColumnVector parseTimestampWithFormatChecked(ColumnView input, String format,
       ZoneId zoneId) {
-    if (format.indexOf('X') >= 0) {
-      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
-          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION, 0, 0, 0));
-    }
-    ZoneId normalized = zoneId.normalized();
+    ZoneId normalized = format.indexOf('X') >= 0 ? ZoneOffset.UTC : zoneId.normalized();
     if (normalized instanceof ZoneOffset) {
       return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
           OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION, 0, 0,
