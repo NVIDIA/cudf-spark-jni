@@ -292,6 +292,9 @@ struct timestamp_parse_timezone {
  * without a colon, and XXX requires a colon. All accept Z for zero offset. These
  * additional tokens require CORRECTED (not EXCEPTION) policy. With an offset
  * token, the result is already UTC and must not be rebased by the caller.
+ * Patterns containing additional tokens require every repeated field to agree; fractions
+ * are compared before truncating to microseconds. Patterns using only the original parts
+ * preserve their existing width and repeated-field behavior.
  * Pattern literals must be ASCII. In LEGACY
  * mode, non-year digit fields are 1 or 2 digits unless adjacent to another
  * digit field (in which case widths are exact to disambiguate). Parsed values
@@ -347,6 +350,8 @@ struct timestamp_parse_timezone {
  * Supports the numeric fields, fractions, offsets and literals of the non-checked CORRECTED
  * parser. Every year field must use exactly yyyy and supports signed/extended years with
  * DateTimeFormatter's EXCEEDS_PAD rules, including patterns without fractions or offsets.
+ * Month/day/hour/minute/second fields require exactly two digits, including slash-separated
+ * dates. Every repeated field must agree; fractions are compared before microsecond truncation.
  *
  * @param input The input string column.
  * @param format Spark format pattern.

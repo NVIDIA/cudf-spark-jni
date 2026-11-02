@@ -1981,6 +1981,74 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormat_repeatedNumericParts() {
+    String[][] fields = {{"yyyy", "2024", "2025"}, {"MM", "01", "02"},
+        {"dd", "02", "03"}, {"HH", "03", "04"}, {"mm", "04", "05"},
+        {"ss", "05", "06"}};
+    for (String[] syntax : new String[][]{
+        {"yyyy-MM-dd HH:mm:ss.SSS", "2024-01-02 03:04:05.123"},
+        {"yyyy-MM-dd HH:mm:ssXXX", "2024-01-02 03:04:05+00:00"},
+        {"yyyy-MM-dd'T'HH:mm:ss", "2024-01-02T03:04:05"},
+        {"yyyy-MM-dd HH:mm:ss", "2024-01-02 03:04:05"}}) {
+      for (String[] field : fields) {
+        String format = syntax[0] + "/" + field[0] + "/" + field[0];
+        List<String> inputs = Arrays.asList(
+            syntax[1] + "/" + field[1] + "/" + field[1],
+            syntax[1] + "/" + field[1] + "/" + field[2],
+            syntax[1] + "/" + field[2] + "/" + field[1], "", null);
+        // Plain formats retain the old API's compatibility behavior. Every part uses
+        // strict assignment in the new API, including patterns without S, X or 'T'.
+        if (!syntax[0].equals("yyyy-MM-dd HH:mm:ss")) {
+          assertParsedTimestampAgainstJdk(inputs, format);
+        }
+        assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneOffset.UTC);
+        assertParsedTimestampCheckedAgainstJdk(inputs, format, ZoneId.of("America/New_York"));
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormat_conflictBeforeResolution() {
+    // A later valid month cannot erase an earlier invalid value. Signed/padded year
+    // representations compare by value, whereas fractions compare before truncation.
+    assertParsedTimestampCheckedAgainstJdk(Arrays.asList(
+        "2024-01-02 03:04:05.123/01", "2024-13-02 03:04:05.123/01"),
+        "yyyy-MM-dd HH:mm:ss.SSS/MM", ZoneOffset.UTC);
+    List<String> years = Arrays.asList(
+        "2024-01-02 03:04:05.123/+02024", "+02024-01-02 03:04:05.123/2024",
+        "2024-01-02 03:04:05.123/+02025", "+300001-01-02 03:04:05.123/2024");
+    assertParsedTimestampAgainstJdk(years, "yyyy-MM-dd HH:mm:ss.SSS/yyyy");
+    assertParsedTimestampCheckedAgainstJdk(years, "yyyy-MM-dd HH:mm:ss.SSS/yyyy",
+        ZoneOffset.UTC);
+  }
+
+  @Test
+  void parseTimestampWithFormat_variablePartEndsAdjacency() {
+    for (String[] syntax : new String[][]{
+        {"yyyyMMddyyyy-MM-dd HH:mm:ss.SSS", "20240102+02024-01-02 03:04:05.123"},
+        {"yyyyMMddyyyy-MM-dd HH:mm:ss.SSS", "-00010102-0001-01-02 03:04:05.123"},
+        {"yyyyMMdd/yyyy-MM-dd HH:mm:ss.SSS", "20240102/2024-01-02 03:04:05.123"}}) {
+      List<String> inputs = Arrays.asList(syntax[1], null);
+      assertParsedTimestampAgainstJdk(inputs, syntax[0]);
+      assertParsedTimestampCheckedAgainstJdk(inputs, syntax[0], ZoneOffset.UTC);
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_strictSlashWidths() {
+    assertParsedTimestampCheckedAgainstJdk(Arrays.asList(
+        "2024/01/02 03:04:05", "2024/1/02 03:04:05", "2024/01/2 03:04:05"),
+        "yyyy/MM/dd HH:mm:ss", ZoneOffset.UTC);
+    try (ColumnVector input = ColumnVector.fromStrings(
+        "1970/01/01", "1970/1/01", "1970/01/1");
+        ColumnVector actual = CastStrings.parseTimestampWithFormatChecked(
+            input, "yyyy/MM/dd", ZoneOffset.UTC);
+        ColumnVector expected = ColumnVector.timestampMicroSecondsFromBoxedLongs(0L, null, null)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void parseTimestampWithFormat_correctedPackedFractions() {
     for (String fraction : new String[]{"S", "SS", "SSS"}) {
       for (String separator : new String[]{"", "."}) {
@@ -2355,6 +2423,10 @@ public class CastStringsTest {
         new Long[]{expectedUs(2024, 5, 6, 0, 0, 0), null, null,
                     expectedUs(2024, 5, 6, 0, 0, 0)});
 
+    // A packed run can start with a non-year field; its width still stays exact.
+    assertParsedTimestamp(new String[]{"05062024", " 05062024 ", null}, "MMddyyyy", true,
+        new Long[]{expectedUs(2024, 5, 6, 0, 0, 0), expectedUs(2024, 5, 6, 0, 0, 0), null});
+
     // yyyyMMdd HH:mm:ss: 'T' separator rejected (literal space matches only ' ').
     assertParsedTimestamp(
         new String[]{"20241231 23:59:58", "20241231T23:59:58", "20241231 23:59:58Z"},
@@ -2639,6 +2711,13 @@ public class CastStringsTest {
       // Unsupported letter.
       Assertions.assertThrows(CudfException.class,
           () -> CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd a", false));
+      // A valid numeric run length must still reject unsupported fields.
+      Assertions.assertThrows(CudfException.class, () -> {
+        try (ColumnVector ignored =
+            CastStrings.parseTimestampWithFormat(in, "yyyy-MM-dd QQ", false)) {
+          // Close an unexpected successful result before reporting the failure.
+        }
+      });
       // A format with no datetime field should not silently parse to default 1970-01-01.
       Assertions.assertThrows(CudfException.class,
           () -> CastStrings.parseTimestampWithFormat(in, "", false));

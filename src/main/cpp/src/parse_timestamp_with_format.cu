@@ -102,7 +102,7 @@ struct parsed_dt {
   int hour           = 0;
   int minute         = 0;
   int second         = 0;
-  int microsecond    = 0;
+  int nanosecond     = 0;
   int offset_seconds = 0;
 };
 
@@ -115,7 +115,7 @@ enum tok_kind : uint8_t {
   TOK_DIGITS,  // a = field, b = min_digits, c = max_digits
   // STRICT DateTimeFormatter year with SignStyle.EXCEEDS_PAD.
   TOK_STRICT_YEAR,      // a = reserved adjacent digits, b = min_digits, c = max_digits
-  TOK_FRACTION,         // b = allow empty fraction, c = max digits (1-9), converted to microseconds
+  TOK_FRACTION,         // a = fixed-width adjacency, b = allow empty, c = max digits (1-9)
   TOK_OFFSET,           // a = X run length (1-3), b = allow optional offset seconds
   TOK_LITERAL,          // a = literal char
   TOK_SKIP_HT_WS,       // skip [ \t]* (legacy whitespace fold)
@@ -124,7 +124,16 @@ enum tok_kind : uint8_t {
 };
 
 // `parsed_dt` slot for a digit token to write into.
-enum field : uint8_t { FLD_YEAR = 0, FLD_MONTH, FLD_DAY, FLD_HOUR, FLD_MINUTE, FLD_SECOND };
+enum field : uint8_t {
+  FLD_YEAR = 0,
+  FLD_MONTH,
+  FLD_DAY,
+  FLD_HOUR,
+  FLD_MINUTE,
+  FLD_SECOND,
+  FLD_NANOSECOND,
+  FLD_OFFSET
+};
 
 struct format_token {
   uint8_t kind;
@@ -170,81 +179,42 @@ uint8_t letter_to_field(char c)
 }
 
 enum class format_dialect {
+  compatible_expression,
   corrected_expression,
-  checked_expression,
   legacy_expression,
   exception_expression,
   csv_date
 };
 
-enum class timestamp_parse_mode { corrected, legacy, exception, checked };
-
-format_dialect dialect_for(timestamp_parse_mode mode)
-{
-  switch (mode) {
-    case timestamp_parse_mode::corrected: return format_dialect::corrected_expression;
-    case timestamp_parse_mode::checked: return format_dialect::checked_expression;
-    case timestamp_parse_mode::legacy: return format_dialect::legacy_expression;
-    case timestamp_parse_mode::exception: return format_dialect::exception_expression;
-  }
-  CUDF_FAIL("Unsupported timestamp parse mode");
-}
-
-format_token compile_strict_year(std::string const& format,
-                                 size_t next,
-                                 uint8_t width,
-                                 timestamp_format_parse_options options)
-{
-  CUDF_EXPECTS(width == 4, "strict year pattern must be yyyy", std::invalid_argument);
-  size_t reserved = 0;
-  // Reserve following fixed-width numeric fields, as DateTimeFormatter's adjacent-value parser
-  // does. This handles packed formats through the same tokens as separated numeric formats.
-  // Offsets and variable-width fractions end the adjacent digit run. A single S
-  // participates only on JDKs whose formatter supports fixed-width fraction adjacency.
-  while (next < format.size() && std::isalpha(static_cast<unsigned char>(format[next])) &&
-         format[next] != 'y' && format[next] != 'X') {
-    auto const letter = format[next];
-    if (letter == 'S' && (!options.adjacent_single_fraction ||
-                          (next + 1 < format.size() && format[next + 1] == 'S'))) {
-      break;
-    }
-    do {
-      ++reserved;
-      ++next;
-    } while (next < format.size() && format[next] == letter);
-  }
-  CUDF_EXPECTS(reserved <= 255, "too many adjacent datetime digits", std::invalid_argument);
-  return {TOK_STRICT_YEAR, static_cast<uint8_t>(reserved), 4, 19};
-}
+// Parsing semantics are independent of the caller's arithmetic-overflow handling.
+// The compatibility dialect preserves existing expression formats; new parts and the
+// CORRECTED entry point use one strict contract for every field.
+struct compiled_format {
+  std::vector<format_token> tokens;
+  bool check_conflicts     = false;
+  bool has_explicit_offset = false;
+};
 
 format_token compile_extended_timestamp_token(char letter,
                                               uint8_t width,
                                               timestamp_format_parse_options options)
 {
   if (letter == 'S') {
-    return {TOK_FRACTION, 0, static_cast<uint8_t>(options.allow_empty_fraction), width};
+    return {TOK_FRACTION,
+            static_cast<uint8_t>(width == 1 && options.adjacent_single_fraction),
+            static_cast<uint8_t>(options.allow_empty_fraction),
+            width};
   }
   CUDF_EXPECTS(width <= 3, "offset pattern must be X, XX or XXX", std::invalid_argument);
   return {TOK_OFFSET, width, static_cast<uint8_t>(options.allow_offset_seconds), 0};
 }
 
-std::vector<format_token> compile_format(std::string const& fmt,
-                                         format_dialect dialect,
-                                         timestamp_format_parse_options options = {})
+std::vector<format_token> parse_format_parts(std::string const& fmt,
+                                             timestamp_format_parse_options options)
 {
-  bool const legacy           = dialect == format_dialect::legacy_expression;
-  bool const csv_date         = dialect == format_dialect::csv_date;
-  bool const checked          = dialect == format_dialect::checked_expression;
-  bool const strict_corrected = csv_date || dialect == format_dialect::exception_expression;
   std::vector<format_token> out;
   size_t const n       = fmt.size();
   bool saw_digit_field = false;
-  bool const corrected_variable_width_slash_date =
-    !legacy && !strict_corrected && fmt == "yyyy/MM/dd";
-  bool const extended_timestamp = fmt.find_first_of("SX'") != std::string::npos;
-  CUDF_EXPECTS(!extended_timestamp || dialect == format_dialect::corrected_expression || checked,
-               "fractional seconds, offsets and quoted literals require CORRECTED policy",
-               std::invalid_argument);
   for (size_t i = 0; i < n;) {
     char const c = fmt[i];
     if (c == '\'') {
@@ -259,8 +229,6 @@ std::vector<format_token> compile_format(std::string const& fmt,
       while (j < n && fmt[j] == c) {
         ++j;
       }
-      bool const packed = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1]))) ||
-                          (j < n && std::isalpha(static_cast<unsigned char>(fmt[j])));
       if (j - i > 9) {
         throw std::invalid_argument(std::string("pattern letter run too long: ") + c);
       }
@@ -276,18 +244,8 @@ std::vector<format_token> compile_format(std::string const& fmt,
         throw std::invalid_argument(std::string("non-year pattern letter run must be length 2: ") +
                                     c);
       }
-      uint8_t const run         = static_cast<uint8_t>(j - i);
-      bool const variable_width = (legacy && !packed) || corrected_variable_width_slash_date;
-      uint8_t const min_d       = (c == 'y') ? run : (variable_width ? 1 : run);
-      uint8_t const max_d       = run;
-      // Skip [ \t] before each field, except inside a packed run which stays exact-width.
-      bool const abuts_prev_field = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1])));
-      if (legacy && !abuts_prev_field) { out.push_back({TOK_SKIP_HT_WS, 0, 0, 0}); }
-      if ((csv_date || extended_timestamp || checked) && c == 'y') {
-        out.push_back(compile_strict_year(fmt, j, run, options));
-      } else {
-        out.push_back({TOK_DIGITS, letter_to_field(c), min_d, max_d});
-      }
+      auto const run = static_cast<uint8_t>(j - i);
+      out.push_back({TOK_DIGITS, letter_to_field(c), run, run});
       saw_digit_field = true;
       i               = j;
     } else {
@@ -301,8 +259,96 @@ std::vector<format_token> compile_format(std::string const& fmt,
     }
   }
   if (!saw_digit_field) { throw std::invalid_argument("timestamp format has no datetime fields"); }
-  out.push_back({legacy ? TOK_TRAIL_NON_DIGIT : TOK_TRAIL_EOF, 0, 0, 0});
   return out;
+}
+
+// A part participates in adjacent-value parsing only when it is a fixed-width unsigned
+// number. Fraction adjacency is resolved once from the running JDK's capabilities.
+int adjacent_width(format_token part)
+{
+  if (part.kind == TOK_DIGITS && part.b == part.c) { return part.c; }
+  if (part.kind == TOK_FRACTION && part.a != 0) { return part.c; }
+  return 0;
+}
+
+uint8_t written_fields(format_token part)
+{
+  switch (part.kind) {
+    case TOK_DIGITS: return 1 << part.a;
+    case TOK_STRICT_YEAR: return 1 << FLD_YEAR;
+    case TOK_FRACTION: return 1 << FLD_NANOSECOND;
+    case TOK_OFFSET: return 1 << FLD_OFFSET;
+    default: return 0;
+  }
+}
+
+void compile_adjacent_widths(std::vector<format_token>& tokens)
+{
+  format_token* year = nullptr;
+  for (auto& part : tokens) {
+    if (part.kind == TOK_STRICT_YEAR) {
+      // A new variable-width numeric parser ends the preceding parser's reservation,
+      // just as DateTimeFormatterBuilder.appendValue does.
+      if (year != nullptr) { year->a = 0; }
+      year = &part;
+    } else if (auto const width = adjacent_width(part); width != 0) {
+      if (year != nullptr) {
+        int const reserved = year->a + width;
+        CUDF_EXPECTS(reserved <= 255, "too many adjacent datetime digits", std::invalid_argument);
+        year->a = static_cast<uint8_t>(reserved);
+      }
+    } else {
+      year = nullptr;
+    }
+  }
+}
+
+compiled_format compile_format(std::string const& fmt,
+                               format_dialect dialect,
+                               timestamp_format_parse_options options = {})
+{
+  auto const parts    = parse_format_parts(fmt, options);
+  bool const extended = std::any_of(parts.begin(), parts.end(), [](auto part) {
+    return part.kind == TOK_FRACTION || part.kind == TOK_OFFSET ||
+           (part.kind == TOK_LITERAL && part.a == 'T');
+  });
+  CUDF_EXPECTS(!extended || dialect == format_dialect::compatible_expression ||
+                 dialect == format_dialect::corrected_expression,
+               "fractional seconds, offsets and quoted literals require CORRECTED policy",
+               std::invalid_argument);
+  bool const legacy = dialect == format_dialect::legacy_expression;
+  bool const strict = extended || dialect == format_dialect::corrected_expression ||
+                      dialect == format_dialect::csv_date;
+  bool const compatible_slash_date =
+    dialect == format_dialect::compatible_expression && fmt == "yyyy/MM/dd";
+  compiled_format result;
+  auto& tokens        = result.tokens;
+  uint8_t seen_fields = 0;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    auto part = parts[i];
+    if (part.kind == TOK_DIGITS) {
+      bool const previous_numeric = i > 0 && parts[i - 1].kind == TOK_DIGITS;
+      bool const next_numeric     = i + 1 < parts.size() && parts[i + 1].kind == TOK_DIGITS;
+      if (legacy && !previous_numeric) { tokens.push_back({TOK_SKIP_HT_WS, 0, 0, 0}); }
+      if (part.a == FLD_YEAR && strict) {
+        CUDF_EXPECTS(part.b == 4, "strict year pattern must be yyyy", std::invalid_argument);
+        part = {TOK_STRICT_YEAR, 0, 4, 19};
+      } else if (part.a != FLD_YEAR &&
+                 ((legacy && !previous_numeric && !next_numeric) || compatible_slash_date)) {
+        part.b = 1;
+      }
+    }
+    // The contract applies to all fields, but formats without repetitions need no
+    // per-row bookkeeping. Select the walker specialization from these part traits.
+    auto const fields = written_fields(part);
+    result.check_conflicts |= strict && (seen_fields & fields) != 0;
+    seen_fields |= fields;
+    result.has_explicit_offset |= part.kind == TOK_OFFSET;
+    tokens.push_back(part);
+  }
+  if (strict) { compile_adjacent_widths(tokens); }
+  tokens.push_back({legacy ? TOK_TRAIL_NON_DIGIT : TOK_TRAIL_EOF, 0, 0, 0});
+  return result;
 }
 
 // ---- Device-side: per-row walker over the compiled token stream. --------------------------------
@@ -371,6 +417,17 @@ __device__ bool read_offset(date_parse::cursor<>& input,
   return true;
 }
 
+__device__ bool read_fraction(date_parse::cursor<>& input, format_token token, int& nanosecond)
+{
+  int digits = input.read_digits(token.c, nanosecond);
+  // Older JDKs allow an empty fraction only when another character follows.
+  if (digits == 0 && (!token.b || input.eof())) { return false; }
+  for (; digits < 9; ++digits) {
+    nanosecond *= 10;
+  }
+  return true;
+}
+
 template <bool CheckConflicts>
 __device__ bool store_field_value(int& target, int value, uint8_t mask, uint8_t& seen_fields)
 {
@@ -395,11 +452,15 @@ __device__ bool store_field(parsed_dt& d, uint8_t field, int v, uint8_t& seen_fi
       return store_field_value<CheckConflicts>(d.minute, v, 1 << FLD_MINUTE, seen_fields);
     case FLD_SECOND:
       return store_field_value<CheckConflicts>(d.second, v, 1 << FLD_SECOND, seen_fields);
+    case FLD_NANOSECOND:
+      return store_field_value<CheckConflicts>(d.nanosecond, v, 1 << FLD_NANOSECOND, seen_fields);
+    case FLD_OFFSET:
+      return store_field_value<CheckConflicts>(d.offset_seconds, v, 1 << FLD_OFFSET, seen_fields);
     default: return false;
   }
 }
 
-template <bool CheckConflicts = false>
+template <bool CheckConflicts>
 __device__ bool walk_tokens(unsigned char const* p,
                             int pos,
                             int end,
@@ -408,9 +469,9 @@ __device__ bool walk_tokens(unsigned char const* p,
                             parsed_dt& d)
 {
   date_parse::cursor<> input{p, pos, end};
-  // CSV checks numeric repetitions; the new fraction and offset tokens always reject conflicts.
+  // Every part uses the same assignment contract. Keep fractions at nanosecond precision
+  // until resolution: conflicting nanoseconds may truncate to identical microseconds.
   uint8_t seen_fields = 0;
-  int fraction_nanos  = 0;
   for (int i = 0; i < num_tokens; ++i) {
     auto const& t = tokens[i];
     bool ok       = true;
@@ -429,22 +490,14 @@ __device__ bool walk_tokens(unsigned char const* p,
       }
       case TOK_FRACTION: {
         int fraction = 0;
-        int digits   = input.read_digits(t.c, fraction);
-        // Older JDKs accept zero digits when another character follows, but still
-        // reject an empty fraction at EOF. The following tokens validate that tail.
-        ok = digits > 0 || (t.b && !input.eof());
-        for (; digits < 9; ++digits) {
-          fraction *= 10;
-        }
-        // Compare before truncation: distinct nanosecond values may have identical microseconds.
-        ok = ok && store_field_value<true>(fraction_nanos, fraction, 1 << 6, seen_fields);
-        d.microsecond = fraction_nanos / 1'000;
+        ok           = read_fraction(input, t, fraction) &&
+             store_field<CheckConflicts>(d, FLD_NANOSECOND, fraction, seen_fields);
         break;
       }
       case TOK_OFFSET: {
         int offset = 0;
         ok         = read_offset(input, t.a, t.b, offset) &&
-             store_field_value<true>(d.offset_seconds, offset, 1 << 7, seen_fields);
+             store_field<CheckConflicts>(d, FLD_OFFSET, offset, seen_fields);
         break;
       }
       case TOK_LITERAL: ok = input.consume(t.a) || (t.a == 'T' && input.consume('t')); break;
@@ -528,7 +581,7 @@ class timestamp_timezone_resolver {
   timestamp_timezone_view _view;
 };
 
-template <bool UseRegion>
+template <bool UseRegion, bool CheckConflicts>
 struct parse_with_format_fn {
   cudf::column_device_view const* d_strings;
   cudf::device_span<format_token const> tokens;
@@ -569,10 +622,11 @@ struct parse_with_format_fn {
     }
 
     parsed_dt d{};
-    if (!walk_tokens(p, pos, end, parse_tokens.data(), static_cast<int>(parse_tokens.size()), d) ||
+    if (!walk_tokens<CheckConflicts>(
+          p, pos, end, parse_tokens.data(), static_cast<int>(parse_tokens.size()), d) ||
         d.year < -999'999'999 || d.year > 999'999'999 ||
         !date_time_utils::is_valid_month_day(d.year, d.month, d.day) ||
-        !date_time_utils::is_valid_time(d.hour, d.minute, d.second, d.microsecond)) {
+        !date_time_utils::is_valid_time(d.hour, d.minute, d.second, d.nanosecond / 1'000)) {
       return false;
     }
     // A valid JDK date outside this coarse range cannot be rescued by any UTC offset.
@@ -587,11 +641,12 @@ struct parse_with_format_fn {
     constexpr auto min                  = cuda::std::numeric_limits<int64_t>::min();
     constexpr auto max                  = cuda::std::numeric_limits<int64_t>::max();
     constexpr auto min_seconds          = min / micros_per_second;
+    auto const microsecond              = d.nanosecond / 1'000;
     if (seconds < min_seconds || seconds > max / micros_per_second ||
-        (seconds == max / micros_per_second && d.microsecond > max % micros_per_second)) {
+        (seconds == max / micros_per_second && microsecond > max % micros_per_second)) {
       return set_overflow();
     }
-    int64_t const result_us = seconds * micros_per_second + d.microsecond;
+    int64_t const result_us = seconds * micros_per_second + microsecond;
     parsed                  = cudf::timestamp_us{cudf::duration_us{result_us}};
     return true;
   }
@@ -658,7 +713,7 @@ std::unique_ptr<cudf::column> parse_csv_date_strings(cudf::strings_column_view c
 {
   SRJ_FUNC_RANGE();
   auto const host_tokens =
-    format ? compile_format(*format, format_dialect::csv_date) : std::vector<format_token>{};
+    format ? compile_format(*format, format_dialect::csv_date).tokens : std::vector<format_token>{};
   if (input.size() == 0 || !format) {
     return date_parse::parse_dates(input, csv_date_parser{{}, options}, stream, mr);
   }
@@ -679,18 +734,19 @@ namespace {
 std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
   cudf::strings_column_view const& input,
   std::string const& format,
-  timestamp_parse_mode mode,
+  format_dialect dialect,
+  bool check_overflow,
   timestamp_format_parse_options options,
   timestamp_parse_timezone timezone,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
-  bool const legacy           = mode == timestamp_parse_mode::legacy;
-  bool const exception_policy = mode == timestamp_parse_mode::exception;
-  bool const check_overflow   = mode == timestamp_parse_mode::checked;
-  auto host_tokens            = compile_format(format, dialect_for(mode), options);
+  bool const legacy           = dialect == format_dialect::legacy_expression;
+  bool const exception_policy = dialect == format_dialect::exception_expression;
+  auto const compiled         = compile_format(format, dialect, options);
+  auto const& host_tokens     = compiled.tokens;
   auto host_legacy_tokens     = exception_policy
-                                  ? compile_format(format, format_dialect::legacy_expression)
+                                  ? compile_format(format, format_dialect::legacy_expression).tokens
                                   : std::vector<format_token>{};
   auto const num_rows         = input.size();
   if (num_rows == 0) {
@@ -698,12 +754,8 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
   }
 
   auto const temp_mr = cudf::get_current_device_resource_ref();
-  bool const has_explicit_offset =
-    std::any_of(host_tokens.begin(), host_tokens.end(), [](auto const& token) {
-      return token.kind == TOK_OFFSET;
-    });
   timestamp_timezone_resolver timezone_resolver{
-    input, timezone, has_explicit_offset, stream, temp_mr};
+    input, timezone, compiled.has_explicit_offset, stream, temp_mr};
   std::unique_ptr<rmm::device_scalar<int32_t>> arithmetic_overflow;
   if (check_overflow) {
     arithmetic_overflow = std::make_unique<rmm::device_scalar<int32_t>>(stream, temp_mr);
@@ -735,12 +787,12 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
   // buffer uninitialized is safe.
   auto validity = rmm::device_uvector<bool>(num_rows, stream, temp_mr);
 
-  auto launch = [&](auto region_tag) {
+  auto launch = [&](auto region_tag, auto conflicts_tag) {
     thrust::for_each_n(
       rmm::exec_policy_nosync(stream, temp_mr),
       thrust::make_counting_iterator(0),
       num_rows,
-      parse_with_format_fn<decltype(region_tag)::value>{
+      parse_with_format_fn<decltype(region_tag)::value, decltype(conflicts_tag)::value>{
         timezone_resolver.input_device_view(),
         cudf::device_span<format_token const>{device_tokens.data(), host_tokens.size()},
         legacy,
@@ -752,10 +804,17 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
         arithmetic_overflow ? arithmetic_overflow->data() : nullptr,
         timezone_resolver.device_view()});
   };
-  if (timezone_resolver.device_view().timezone_columns != nullptr) {
-    launch(std::true_type{});
+  auto dispatch = [&](auto conflicts_tag) {
+    if (timezone_resolver.device_view().timezone_columns != nullptr) {
+      launch(std::true_type{}, conflicts_tag);
+    } else {
+      launch(std::false_type{}, conflicts_tag);
+    }
+  };
+  if (compiled.check_conflicts) {
+    dispatch(std::true_type{});
   } else {
-    launch(std::false_type{});
+    dispatch(std::false_type{});
   }
 
   if (first_exception_row) {
@@ -794,10 +853,11 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
   CUDF_EXPECTS(!(legacy && exception_policy),
                "LEGACY and EXCEPTION policies cannot both be enabled",
                std::invalid_argument);
-  auto const mode =
-    legacy ? timestamp_parse_mode::legacy
-           : (exception_policy ? timestamp_parse_mode::exception : timestamp_parse_mode::corrected);
-  return parse_timestamp_strings_with_format_impl(input, format, mode, options, {}, stream, mr);
+  auto const dialect = legacy ? format_dialect::legacy_expression
+                              : (exception_policy ? format_dialect::exception_expression
+                                                  : format_dialect::compatible_expression);
+  return parse_timestamp_strings_with_format_impl(
+    input, format, dialect, false, options, {}, stream, mr);
 }
 
 std::unique_ptr<cudf::column> parse_timestamp_strings_with_format(
@@ -822,7 +882,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_checked(
 {
   SRJ_FUNC_RANGE();
   return parse_timestamp_strings_with_format_impl(
-    input, format, timestamp_parse_mode::checked, options, timezone, stream, mr);
+    input, format, format_dialect::corrected_expression, true, options, timezone, stream, mr);
 }
 
 }  // namespace spark_rapids_jni

@@ -597,6 +597,82 @@ TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviatio
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(exception_result->view(), expected);
 }
 
+TEST_F(ParseTimestampWithFormatTests, StrictPartsRequireMatchingRepeatedFields)
+{
+  struct repeated_field {
+    char const* pattern;
+    char const* matching;
+    char const* conflicting;
+  };
+  // First occurrences equal the default values, so the walker must track presence,
+  // rather than infer it from a nondefault field value.
+  repeated_field const fields[] = {{"yyyy", "1970", "1971"},
+                                   {"MM", "01", "02"},
+                                   {"dd", "01", "02"},
+                                   {"HH", "00", "01"},
+                                   {"mm", "00", "01"},
+                                   {"ss", "00", "01"}};
+  struct layout {
+    std::string pattern;
+    std::string input;
+    int64_t micros;
+    bool extended;
+  };
+  layout const layouts[] = {{"yyyy-MM-dd HH:mm:ss.SSS", "1970-01-01 00:00:00.123", 123'000, true},
+                            {"yyyy-MM-dd HH:mm:ssX", "1970-01-01 00:00:00Z", 0, true},
+                            {"yyyy-MM-dd'T'HH:mm:ss", "1970-01-01T00:00:00", 0, true},
+                            {"yyyy-MM-dd HH:mm:ss", "1970-01-01 00:00:00", 0, false}};
+  for (auto const& syntax : layouts) {
+    for (auto const& field : fields) {
+      auto const pattern = syntax.pattern + "/" + field.pattern + "/" + field.pattern;
+      SCOPED_TRACE(pattern);
+      auto const strings =
+        test::strings_column_wrapper{syntax.input + "/" + field.matching + "/" + field.matching,
+                                     syntax.input + "/" + field.matching + "/" + field.conflicting,
+                                     syntax.input + "/" + field.conflicting + "/" + field.matching};
+      auto const input    = strings_column_view{strings};
+      auto const expected = test::fixed_width_column_wrapper<timestamp_us>(
+        {syntax.micros, int64_t{0}, int64_t{0}}, {true, false, false});
+      auto const checked =
+        spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, pattern, {}, {});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+      if (syntax.extended) {
+        auto const ordinary =
+          spark_rapids_jni::parse_timestamp_strings_with_format(input, pattern, false, false);
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+      }
+    }
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, StrictSlashDateUsesExactWidths)
+{
+  auto const strings = test::strings_column_wrapper{"1970/01/01", "1970/1/01", "1970/01/1"};
+  auto const result  = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    strings_column_view{strings}, "yyyy/MM/dd", {}, {});
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({0, 0, 0}, {true, false, false});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, AdjacentPartReservationIsBounded)
+{
+  std::string format = "yyyy";
+  std::string value  = "1970";
+  for (int i = 0; i < 63; ++i) {
+    format += "MMdd";
+    value += "0101";
+  }
+  auto const strings = test::strings_column_wrapper{value + "01"};
+  auto const result  = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    strings_column_view{strings}, format + "MM", {}, {});
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>{0};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                 strings_column_view{strings}, format + "MMdd", {}, {})),
+               std::invalid_argument);
+}
+
 TEST_F(ParseCsvDateWithFormatTests, StrictInput)
 {
   auto const strings = test::strings_column_wrapper({"2020-05-01",

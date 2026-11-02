@@ -423,6 +423,10 @@ public class CastStrings {
    * seconds when the running JDK's formatter does (including JDK 8).
    * An empty fraction before an offset is likewise accepted on affected older JDKs.
    * These additional tokens are rejected under LEGACY and EXCEPTION.
+   * Patterns containing these tokens use strict field assignment: repeated year, month,
+   * day, time, fraction or offset fields must agree. Fractions are compared before
+   * truncation to microseconds. Patterns using only the original parts retain their
+   * existing width and repeated-field behavior.
    * Space matches exactly one space. Pattern literals must be ASCII. In LEGACY mode, non-year
    * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
    * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
@@ -480,7 +484,9 @@ public class CastStrings {
    * {@link #parseTimestampWithFormat(ColumnView, String, boolean)} under CORRECTED.
    * Every year field must use exactly {@code yyyy} and supports signed/extended years
    * with {@code DateTimeFormatter}'s {@code EXCEEDS_PAD} rules, including patterns without
-   * fractions or offsets.
+   * fractions or offsets. Month/day/hour/minute/second fields require exactly two digits,
+   * including slash-separated dates. Repeated fields must agree, with fractions compared
+   * before truncation to microseconds.
    *
    * @param input the input string column
    * @param format Spark format pattern
