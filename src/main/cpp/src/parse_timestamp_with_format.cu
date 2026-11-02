@@ -313,8 +313,10 @@ __device__ bool read_strict_year(date_parse::cursor<>& input, format_token token
     ++digits;
     ++probe.pos;
   }
-  digits -= token.a;
-  if (digits < token.b || input.read_digits(digits, year) != digits) { return false; }
+  // Preserve the minimum year width when an adjacent single S may be empty (JDK 11).
+  // Following tokens still reject genuinely truncated numeric fields.
+  digits = digits - token.a < token.b ? token.b : digits - token.a;
+  if (input.read_digits(digits, year) != digits) { return false; }
   // Spark converts yyyy to proleptic uuuu. EXCEEDS_PAD requires '+' beyond four positive
   // digits, forbids it for four digits, and rejects negative zero.
   if (positive ? digits <= token.b : (!negative && digits != token.b)) { return false; }
