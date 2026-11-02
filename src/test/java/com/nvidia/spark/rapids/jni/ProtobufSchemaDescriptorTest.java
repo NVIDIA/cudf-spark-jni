@@ -347,22 +347,24 @@ public class ProtobufSchemaDescriptorTest {
   }
 
   @Test
-  void testNestedFieldMustShareOutputFlagWithParent() {
-    // Hidden parent struct with a visible child -> illegal.
+  void testVisibleFieldUnderHiddenParentIsRejected() {
     assertThrows(IllegalArgumentException.class, () ->
         new ProtobufSchemaDescriptorBuilder()
             .addField(1, DType.STRUCT).isOutput(false).down()
                 .addField(1, DType.INT32).isOutput(true)
             .up()
             .build());
+  }
 
-    // Reverse direction: visible parent struct with a hidden child -> also illegal.
-    assertThrows(IllegalArgumentException.class, () ->
-        new ProtobufSchemaDescriptorBuilder()
-            .addField(1, DType.STRUCT).isOutput(true).down()
-                .addField(1, DType.INT32).isOutput(false)
-            .up()
-            .build());
+  @Test
+  void testVisibleParentMayHideChildren() {
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).isOutput(true).down()
+            .addField(1, DType.INT32).isOutput(false)
+            .addField(2, DType.INT32)
+        .up()
+        .build();
+    assertArrayEquals(new boolean[]{true, false, true}, schema.isOutput);
   }
 
   @Test

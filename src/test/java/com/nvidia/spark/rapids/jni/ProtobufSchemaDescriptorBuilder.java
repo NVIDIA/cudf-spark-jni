@@ -161,7 +161,7 @@ public final class ProtobufSchemaDescriptorBuilder {
     return this;
   }
 
-  /** Mark the current field hidden: decoded for validation but dropped from the output struct. */
+  /** Mark the current field hidden: validated but returned as an all-null column. */
   public ProtobufSchemaDescriptorBuilder isOutput(boolean isOutput) {
     current().isOutput = isOutput;
     return this;
