@@ -2243,13 +2243,7 @@ public class CastStringsTest {
     for (String input : inputs) {
       Long expected = null;
       try {
-        if (input != null) {
-          Instant parsed = format.contains("X")
-              ? OffsetDateTime.parse(input, formatter).toInstant()
-              : LocalDateTime.parse(input, formatter).atZone(zoneId).toInstant();
-          expected = Math.addExact(Math.multiplyExact(parsed.getEpochSecond(), 1_000_000L),
-              parsed.getNano() / 1000);
-        }
+        expected = timestampMicrosFromJdk(input, format, formatter, zoneId);
       } catch (DateTimeException ignored) {
         // Malformed rows remain null, independently of arithmetic-overflow handling.
       } catch (ArithmeticException overflow) {
@@ -2304,15 +2298,8 @@ public class CastStringsTest {
   private static void assertParsedTimestampAgainstJdk(List<String> inputs, String format) {
     DateTimeFormatter formatter = timestampFormatter(format);
     Long[] expected = inputs.stream().map(input -> {
-      if (input == null) {
-        return null;
-      }
       try {
-        Instant parsed = format.contains("X")
-            ? OffsetDateTime.parse(input, formatter).toInstant()
-            : LocalDateTime.parse(input, formatter).toInstant(ZoneOffset.UTC);
-        return Math.addExact(Math.multiplyExact(parsed.getEpochSecond(), 1_000_000L),
-            parsed.getNano() / 1000);
+        return timestampMicrosFromJdk(input, format, formatter, ZoneOffset.UTC);
       } catch (DateTimeException | ArithmeticException e) {
         return null;
       }
@@ -2320,11 +2307,24 @@ public class CastStringsTest {
     try (ColumnVector input = ColumnVector.fromStrings(inputs.toArray(new String[0]));
         ColumnVector actual = CastStrings.parseTimestampWithFormat(input, format, false);
         HostColumnVector host = actual.copyToHost()) {
+      assertEquals(expected.length, host.getRowCount());
       for (int i = 0; i < expected.length; ++i) {
         Long value = host.isNull(i) ? null : host.getLong(i);
         assertEquals(expected[i], value, format + " input: " + inputs.get(i));
       }
     }
+  }
+
+  private static Long timestampMicrosFromJdk(String input, String format,
+      DateTimeFormatter formatter, ZoneId zoneId) {
+    if (input == null) {
+      return null;
+    }
+    Instant parsed = format.contains("X")
+        ? OffsetDateTime.parse(input, formatter).toInstant()
+        : LocalDateTime.parse(input, formatter).atZone(zoneId).toInstant();
+    return Math.addExact(Math.multiplyExact(parsed.getEpochSecond(), 1_000_000L),
+        parsed.getNano() / 1000);
   }
 
   @Test
