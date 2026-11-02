@@ -476,6 +476,12 @@ public class CastStrings {
    * that overflow that arithmetic throw regardless of the caller's ANSI setting.
    * The timezone database is initialized on demand only for region timezones.
    *
+   * <p>Supports the numeric fields, fractions, offsets and literals documented by
+   * {@link #parseTimestampWithFormat(ColumnView, String, boolean)} under CORRECTED.
+   * Every year field must use exactly {@code yyyy} and supports signed/extended years
+   * with {@code DateTimeFormatter}'s {@code EXCEEDS_PAD} rules, including patterns without
+   * fractions or offsets.
+   *
    * @param input the input string column
    * @param format Spark format pattern
    * @param zoneId session timezone used when the pattern has no explicit offset

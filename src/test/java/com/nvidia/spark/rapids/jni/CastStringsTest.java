@@ -2045,6 +2045,36 @@ public class CastStringsTest {
   }
 
   @Test
+  void parseTimestampWithFormatChecked_plainSignedYears() {
+    for (String[] syntax : new String[][]{
+        {"yyyy-MM-dd HH:mm:ss", "-01-02 03:04:05"}, {"yyyyMMddHHmmss", "0102030405"}}) {
+      List<String> inputs = new ArrayList<>(Arrays.asList(null, ""));
+      // Normal years, invalid sign/width combinations, and valid years whose timestamps overflow.
+      for (String year : new String[]{"2024", "0000", "-0001", "+10000",
+          "+2024", "10000", "-0000", "+300001", "-300001"}) {
+        inputs.add(year + syntax[1]);
+      }
+      for (String zone : new String[]{"UTC", "+08:00", "America/New_York"}) {
+        assertParsedTimestampCheckedAgainstJdk(inputs, syntax[0], ZoneId.of(zone));
+      }
+    }
+  }
+
+  @Test
+  void parseTimestampWithFormatChecked_requiresFourYearLetters() {
+    try (ColumnVector input = ColumnVector.fromStrings(new String[0])) {
+      for (String format : new String[]{"yy-MM-dd HH:mm:ss", "yyyyy-MM-dd HH:mm:ss"}) {
+        Assertions.assertThrows(CudfException.class, () -> {
+          try (ColumnVector ignored =
+              CastStrings.parseTimestampWithFormatChecked(input, format, ZoneOffset.UTC)) {
+            // Unsupported patterns must be rejected even when there are no rows to parse.
+          }
+        });
+      }
+    }
+  }
+
+  @Test
   void parseTimestampWithFormatChecked_timezonesAndBounds() {
     List<String> localInputs = Arrays.asList(null, "", "malformed",
         "2023-02-29 12:00:00.123456", "2024-01-01 00:00:00.123456",

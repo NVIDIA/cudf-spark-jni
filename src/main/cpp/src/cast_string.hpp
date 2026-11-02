@@ -343,6 +343,10 @@ struct timestamp_parse_timezone {
  * resolves the local date/time at second precision before multiplying by one million and adding
  * fractional microseconds. Malformed inputs produce nulls; arithmetic overflow throws.
  *
+ * Supports the numeric fields, fractions, offsets and literals of the non-checked CORRECTED
+ * parser. Every year field must use exactly yyyy and supports signed/extended years with
+ * DateTimeFormatter's EXCEEDS_PAD rules, including patterns without fractions or offsets.
+ *
  * @param input The input string column.
  * @param format Spark format pattern.
  * @param options Caller-resolved JDK compatibility options.

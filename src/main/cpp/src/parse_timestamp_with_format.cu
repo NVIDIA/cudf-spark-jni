@@ -171,6 +171,7 @@ uint8_t letter_to_field(char c)
 
 enum class format_dialect {
   corrected_expression,
+  checked_expression,
   legacy_expression,
   exception_expression,
   csv_date
@@ -181,10 +182,12 @@ enum class timestamp_parse_mode { corrected, legacy, exception, checked };
 format_dialect dialect_for(timestamp_parse_mode mode)
 {
   switch (mode) {
+    case timestamp_parse_mode::corrected: return format_dialect::corrected_expression;
+    case timestamp_parse_mode::checked: return format_dialect::checked_expression;
     case timestamp_parse_mode::legacy: return format_dialect::legacy_expression;
     case timestamp_parse_mode::exception: return format_dialect::exception_expression;
-    default: return format_dialect::corrected_expression;
   }
+  CUDF_FAIL("Unsupported timestamp parse mode");
 }
 
 format_token compile_strict_year(std::string const& format,
@@ -231,6 +234,7 @@ std::vector<format_token> compile_format(std::string const& fmt,
 {
   bool const legacy           = dialect == format_dialect::legacy_expression;
   bool const csv_date         = dialect == format_dialect::csv_date;
+  bool const checked          = dialect == format_dialect::checked_expression;
   bool const strict_corrected = csv_date || dialect == format_dialect::exception_expression;
   std::vector<format_token> out;
   size_t const n       = fmt.size();
@@ -238,7 +242,7 @@ std::vector<format_token> compile_format(std::string const& fmt,
   bool const corrected_variable_width_slash_date =
     !legacy && !strict_corrected && fmt == "yyyy/MM/dd";
   bool const extended_timestamp = fmt.find_first_of("SX'") != std::string::npos;
-  CUDF_EXPECTS(!extended_timestamp || dialect == format_dialect::corrected_expression,
+  CUDF_EXPECTS(!extended_timestamp || dialect == format_dialect::corrected_expression || checked,
                "fractional seconds, offsets and quoted literals require CORRECTED policy",
                std::invalid_argument);
   for (size_t i = 0; i < n;) {
@@ -279,7 +283,7 @@ std::vector<format_token> compile_format(std::string const& fmt,
       // Skip [ \t] before each field, except inside a packed run which stays exact-width.
       bool const abuts_prev_field = (i > 0 && std::isalpha(static_cast<unsigned char>(fmt[i - 1])));
       if (legacy && !abuts_prev_field) { out.push_back({TOK_SKIP_HT_WS, 0, 0, 0}); }
-      if ((csv_date || extended_timestamp) && c == 'y') {
+      if ((csv_date || extended_timestamp || checked) && c == 'y') {
         out.push_back(compile_strict_year(fmt, j, run, options));
       } else {
         out.push_back({TOK_DIGITS, letter_to_field(c), min_d, max_d});
