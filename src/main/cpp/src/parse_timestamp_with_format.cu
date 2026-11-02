@@ -423,7 +423,7 @@ __device__ bool read_offset(date_parse::cursor<>& input,
 __device__ bool read_fraction(date_parse::cursor<>& input, format_token token, int& nanosecond)
 {
   int digits = input.read_digits(token.c, nanosecond);
-  // Older JDKs allow an empty fraction only when another character follows.
+  // JDK 8 and 11 allow an empty fraction only when another character follows.
   if (digits == 0 && (!token.b || input.eof())) { return false; }
   for (; digits < 9; ++digits) {
     nanosecond *= 10;

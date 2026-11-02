@@ -421,7 +421,7 @@ public class CastStrings {
    * minutes without a colon, and XXX requires a colon; all three accept Z for UTC.
    * Parsing T and Z is case-insensitive, as in Spark. XX/XXX also accept optional offset
    * seconds when the running JDK's formatter does (including JDK 8).
-   * An empty fraction before an offset is likewise accepted on affected older JDKs.
+   * An empty fraction before an offset is likewise accepted on JDK 8 and 11.
    * These additional tokens are rejected under LEGACY and EXCEPTION.
    * Patterns containing these tokens use strict field assignment: repeated year, month,
    * day, time, fraction or offset fields must agree. Fractions are compared before
