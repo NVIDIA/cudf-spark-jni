@@ -312,10 +312,13 @@ compiled_format compile_format(std::string const& fmt,
     return part.kind == TOK_FRACTION || part.kind == TOK_OFFSET ||
            (part.kind == TOK_LITERAL && part.a == 'T');
   });
-  CUDF_EXPECTS(!extended || dialect == format_dialect::compatible_expression ||
-                 dialect == format_dialect::corrected_expression,
-               "fractional seconds, offsets and quoted literals require CORRECTED policy",
-               std::invalid_argument);
+  CUDF_EXPECTS(
+    !extended || dialect == format_dialect::compatible_expression ||
+      dialect == format_dialect::corrected_expression,
+    dialect == format_dialect::csv_date
+      ? "fractional seconds, offsets and quoted literals are unsupported in CSV date formats"
+      : "fractional seconds, offsets and quoted literals require CORRECTED policy",
+    std::invalid_argument);
   bool const legacy = dialect == format_dialect::legacy_expression;
   bool const strict = extended || dialect == format_dialect::corrected_expression ||
                       dialect == format_dialect::csv_date;

@@ -1270,6 +1270,25 @@ TEST_F(ParseCsvDateWithFormatTests, RejectsUnsupportedFormatsEvenForEmptyInput)
   }
 }
 
+TEST_F(ParseCsvDateWithFormatTests, ExpressionOnlyPartsReportCsvDiagnostic)
+{
+  auto const strings = test::strings_column_wrapper{"2024-01-02"};
+  for (auto const* format : {"yyyy-MM-dd HH:mm:SS", "yyyy-MM-ddXXX", "yyyy-MM-dd'T'HH:mm:ss"}) {
+    SCOPED_TRACE(format);
+    try {
+      static_cast<void>(spark_rapids_jni::parse_csv_date_strings(
+        strings_column_view{strings},
+        format,
+        {.enable_fallback = false, .trim_control_characters = true}));
+      FAIL() << "Expression-only parts must be rejected by the CSV date parser";
+    } catch (std::invalid_argument const& error) {
+      std::string const message = error.what();
+      EXPECT_NE(message.find("unsupported in CSV date formats"), std::string::npos);
+      EXPECT_EQ(message.find("CORRECTED"), std::string::npos);
+    }
+  }
+}
+
 TYPED_TEST(StringToIntegerTests, Simple)
 {
   auto const strings = test::strings_column_wrapper{"1", "0", "42", "null"};
