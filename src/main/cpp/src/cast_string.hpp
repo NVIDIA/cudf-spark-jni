@@ -302,7 +302,8 @@ struct timestamp_parse_timezone {
  *
  * @throws spark_rapids_jni::cast_error If CORRECTED rejects a row that LEGACY accepts while
  *                                       exception policy is enabled.
- * @throws std::invalid_argument If legacy and exception policies are both enabled.
+ * @throws std::invalid_argument If legacy and exception policies are both enabled, or the
+ *                              format is unsupported for the selected policy.
  *
  * @param input The input string column.
  * @param format Spark format pattern (e.g. `"yyyy-MM-dd HH:mm:ss"`).
@@ -353,6 +354,10 @@ struct timestamp_parse_timezone {
  * @param timezone Session timezone; its transition data must outlive the call's stream work.
  * @param stream Stream on which to operate.
  * @param mr Memory resource for the returned column.
+ * @throws std::invalid_argument If the format uses unsupported tokens, field widths or literals,
+ *                              including year fields other than yyyy, even for empty input.
+ * @throws cudf::logic_error If a nonempty input without an explicit offset uses a region timezone
+ *                           table with other than two LIST columns or an out-of-range row index.
  * @throws timestamp_parse_overflow If a valid date/time overflows checked microsecond arithmetic.
  * @return A UTC timestamp_us column, with nulls for malformed inputs.
  */
