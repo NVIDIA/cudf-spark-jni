@@ -428,6 +428,53 @@ TEST_F(ParseTimestampWithFormatTests, ExplicitStreamAndResourceOverloads)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_options->view(), expected);
 }
 
+TEST_F(ParseTimestampWithFormatTests, ExplicitJdkCompatibilityOptions)
+{
+  // Observed formatter options on JDK 8, 11 and 17, respectively. Keep every combination
+  // covered independently of the JVM used for the Java tests.
+  spark_rapids_jni::timestamp_format_parse_options const options[] = {
+    {true, true, false}, {false, true, true}, {false, false, true}};
+  struct sample {
+    char const* format;
+    char const* input;
+    int64_t micros;
+    bool valid[3];
+  };
+  // Expected values and nulls come from Spark's formatter recipe on those JDKs.
+  sample const samples[] = {
+    {"yyyyMMddHHmmssSXXX", "202401020304051Z", 1'704'164'645'100'000, {false, true, true}},
+    {"yyyyMMddHHmmssSXXX", "20240102030405Z", 1'704'164'645'000'000, {true, true, false}},
+    {"yyyy-MM-dd HH:mm:ss.SXXX",
+     "2024-01-02 03:04:05.Z",
+     1'704'164'645'000'000,
+     {true, true, false}},
+    {"yyyy-MM-dd HH:mm:ss.SSSXX",
+     "2024-01-02 03:04:05.123+083001",
+     1'704'134'044'123'000,
+     {true, false, false}},
+    {"yyyy-MM-dd HH:mm:ss.SSSXXX",
+     "2024-01-02 03:04:05.123+08:30:01",
+     1'704'134'044'123'000,
+     {true, false, false}},
+    {"yyyyMMddHHmmssS", "20240102030405", 0, {false, false, false}}};
+  for (int jdk = 0; jdk < 3; ++jdk) {
+    for (auto const& item : samples) {
+      SCOPED_TRACE(::testing::Message()
+                   << "JDK option index " << jdk << ": " << item.format << ", " << item.input);
+      auto const strings = test::strings_column_wrapper{item.input};
+      auto const input   = strings_column_view{strings};
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_us>({item.micros}, {item.valid[jdk]});
+      auto const ordinary = spark_rapids_jni::parse_timestamp_strings_with_format(
+        input, item.format, false, false, options[jdk]);
+      auto const checked = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+        input, item.format, options[jdk], {});
+      CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(ordinary->view(), expected);
+      CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(checked->view(), expected);
+    }
+  }
+}
+
 TEST_F(ParseTimestampWithFormatTests, NonzeroOffsetInputView)
 {
   auto const strings = test::strings_column_wrapper({"outside",
