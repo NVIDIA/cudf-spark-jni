@@ -96,9 +96,10 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   }
 
   /**
-   * @param isOutput per-field flag; if {@code false}, the field is decoded for validation but
-   *        dropped from the returned struct. Hidden fields must agree with their parent — a
-   *        visible STRUCT cannot have hidden children and vice versa.
+   * @param isOutput per-field flag; if {@code false}, the field is still validated like any
+   *        other field but is returned as an all-null column, so the result keeps the full
+   *        schema. Children of a hidden STRUCT must be hidden too; a visible STRUCT may hide
+   *        individual children.
    * @throws IllegalArgumentException if any array is null, arrays have mismatched lengths,
    *         field numbers are out of range, or encoding values are invalid.
    */
@@ -276,11 +277,10 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
             "Parent at index " + parentIndex + " for field " + index +
             " must be STRUCT, got type id " + outputTypeIds[parentIndex]);
       }
-      // A field and its parent must share an output flag: a hidden STRUCT cannot expose
-      // visible children, and a visible STRUCT cannot hide individual children.
-      if (isOutput[index] != isOutput[parentIndex]) {
+      // A hidden STRUCT is returned as all nulls, so it cannot expose visible children.
+      if (isOutput[index] && !isOutput[parentIndex]) {
         throw new IllegalArgumentException(
-            "Nested field at index " + index + " must use the same output flag as parent " +
+            "Nested field at index " + index + " cannot be output under hidden parent " +
             parentIndex);
       }
       if (depthLevels[index] != depthLevels[parentIndex] + 1) {

@@ -560,12 +560,6 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
                                                            cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> make_null_list_column_with_child(
-  std::unique_ptr<cudf::column> child_col,
-  cudf::size_type num_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr);
-
 std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
                                                        rmm::device_uvector<bool>& valid,
                                                        protobuf_field_decode_request request,

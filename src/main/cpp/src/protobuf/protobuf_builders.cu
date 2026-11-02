@@ -302,20 +302,6 @@ std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
   }
 }
 
-std::unique_ptr<cudf::column> make_null_list_column_with_child(
-  std::unique_ptr<cudf::column> child_col,
-  cudf::size_type num_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
-{
-  rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
-  thrust::fill(rmm::exec_policy_nosync(stream, mr), offsets.begin(), offsets.end(), 0);
-  auto offsets_col = make_offsets_column(num_rows, std::move(offsets));
-  auto null_mask   = cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(child_col), num_rows, std::move(null_mask));
-}
-
 std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::column> element_col,
                                                      cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
@@ -733,12 +719,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   repeated_child_positions.reserve(num_child_fields);
   repeated_work_positions.reserve(num_child_fields);
   singular_message_positions.reserve(num_child_fields);
+  auto const child_output = [&](int child_idx) {
+    return materialize_output && schema_context.is_output(child_idx);
+  };
 
   for (int i = 0; i < num_child_fields; i++) {
     int child_idx = child_field_indices[i];
     if (schema[child_idx].is_repeated) {
       repeated_child_positions.push_back(i);
-      if (materialize_output || schema[child_idx].output_type == cudf::type_id::STRUCT) {
+      // Hidden repeated scalars were validated by the count scan; hidden messages still recurse.
+      if (child_output(child_idx) || schema[child_idx].output_type == cudf::type_id::STRUCT) {
         repeated_work_positions.push_back(i);
       }
     } else if (schema[child_idx].output_type == cudf::type_id::STRUCT) {
@@ -844,22 +834,28 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     });
 
   std::vector<std::unique_ptr<cudf::column>> struct_children;
+  // Hidden children of an output struct keep their position as all-null columns.
+  auto add_child = [&](int child_schema_idx, std::unique_ptr<cudf::column> child) {
+    if (!materialize_output) { return; }
+    struct_children.push_back(child != nullptr
+                                ? std::move(child)
+                                : make_null_column_with_schema(
+                                    schema_context, child_schema_idx, input.num_rows, stream, mr));
+  };
   for (int ci = 0; ci < num_child_fields; ci++) {
     int child_schema_idx = child_field_indices[ci];
     auto const dt        = cudf::data_type{schema[child_schema_idx].output_type};
     bool has_def         = schema[child_schema_idx].has_default_value;
     bool is_repeated     = schema[child_schema_idx].is_repeated;
+    bool const output    = child_output(child_schema_idx);
 
     if (is_repeated) {
-      if (!repeated_work.fields[ci].has_value()) { continue; }
-      auto child = build_repeated_child_list_column(input,
-                                                    parent,
-                                                    context,
-                                                    std::move(repeated_work.fields[ci].value()),
-                                                    materialize_output,
-                                                    stream,
-                                                    mr);
-      if (child != nullptr) { struct_children.push_back(std::move(child)); }
+      std::unique_ptr<cudf::column> child;
+      if (repeated_work.fields[ci].has_value()) {
+        child = build_repeated_child_list_column(
+          input, parent, context, std::move(repeated_work.fields[ci].value()), output, stream, mr);
+      }
+      add_child(child_schema_idx, std::move(child));
       continue;
     }
 
@@ -872,10 +868,10 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
                                                          context,
                                                          std::move(*message_merge_work[ci]),
                                                          depth + 1,
-                                                         materialize_output,
+                                                         output,
                                                          stream,
                                                          mr);
-        if (child != nullptr) { struct_children.push_back(std::move(child)); }
+        add_child(child_schema_idx, std::move(child));
         continue;
       }
 
@@ -894,14 +890,17 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
         gc_indices,
         context,
         depth + 1,
-        materialize_output,
+        output,
         stream,
         mr);
-      if (child != nullptr) { struct_children.push_back(std::move(child)); }
+      add_child(child_schema_idx, std::move(child));
       continue;
     }
 
-    if (!materialize_output) { continue; }
+    if (!output) {
+      add_child(child_schema_idx, nullptr);
+      continue;
+    }
 
     nested_location_provider loc_provider{input.row_offsets,
                                           input.base_offset,
@@ -915,9 +914,8 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     };
     auto const request =
       protobuf_field_decode_request{context, input.message_data, child_schema_idx, input.num_rows};
-    auto child = build_protobuf_field_values_column(
-      request, loc_provider, valid_fn, stream, materialize_output ? mr : scratch_mr);
-    if (child != nullptr) { struct_children.push_back(std::move(child)); }
+    add_child(child_schema_idx,
+              build_protobuf_field_values_column(request, loc_provider, valid_fn, stream, mr));
   }
 
   if (!materialize_output) { return nullptr; }

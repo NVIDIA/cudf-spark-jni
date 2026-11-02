@@ -93,8 +93,9 @@ struct protobuf_decode_context {
   std::vector<cudf::detail::host_vector<int32_t>> enum_valid_values;
   std::vector<std::vector<cudf::detail::host_vector<uint8_t>>> enum_names;
   bool fail_on_errors;
-  // Hidden fields are still decoded so required/enum/wire validation runs. An empty vector means
-  // all fields are included in the returned struct.
+  // Hidden fields are still validated (required/enum/wire checks) but are returned as all-null
+  // columns, so the result keeps the full schema. A hidden field's descendants must be hidden too.
+  // An empty vector means every field is output.
   std::vector<bool> output_fields;
 
  private:
