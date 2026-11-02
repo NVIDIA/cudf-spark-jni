@@ -129,7 +129,7 @@ JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_PackedHostToDeviceCopy_f
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    delete std::bit_cast<rmm::device_buffer*>(j_handle);
+    cudf::jni::safe_delete<rmm::device_buffer>(j_handle);
   }
   JNI_CATCH(env, );
 }
