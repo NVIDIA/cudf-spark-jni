@@ -261,7 +261,16 @@ struct timestamp_parse_overflow : public std::runtime_error {
   timestamp_parse_overflow() : std::runtime_error("long overflow") {}
 };
 
-/** @brief Session timezone used before converting parsed seconds to microseconds. */
+/**
+ * @brief Session timezone used before converting parsed seconds to microseconds.
+ *
+ * Region tables use the GpuTimeZoneDB layout: LIST<STRUCT<INT64, INT64, INT32>> for
+ * UTC seconds, local seconds and offsets, followed by LIST<INT32> for DST rules.
+ * The selected transition list is nonempty and ordered; its first entry covers all earlier
+ * times. The DST list contains zero values or two six-integer rules. Nested types, non-null
+ * contents and valid transition/rule values are caller preconditions. Fixed offsets are
+ * within [-64800, 64800] seconds, as in java.time.ZoneOffset.
+ */
 struct timestamp_parse_timezone {
   cudf::table_view const* transitions = nullptr;  ///< Region transitions, or null for fixed offset.
   cudf::size_type index               = 0;        ///< Region timezone row in the transition table.

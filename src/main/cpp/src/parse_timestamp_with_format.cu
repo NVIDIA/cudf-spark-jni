@@ -22,7 +22,6 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
-#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
@@ -34,7 +33,6 @@
 #include <cudf/utilities/span.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
-#include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
@@ -43,12 +41,14 @@
 #include <cuda/std/bit>
 #include <cuda/std/limits>
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -354,6 +354,21 @@ compiled_format compile_format(std::string const& fmt,
   return result;
 }
 
+rmm::device_uvector<format_token> upload_tokens(std::vector<format_token> const& tokens,
+                                                cuda::stream_ref stream,
+                                                rmm::device_async_resource_ref mr)
+{
+  rmm::device_uvector<format_token> device_tokens(tokens.size(), stream, mr);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
+                                tokens.data(),
+                                tokens.size() * sizeof(format_token),
+                                cudaMemcpyDefault,
+                                stream.get()));
+  // Complete the host read before a later allocation can throw and release the source.
+  stream.sync();
+  return device_tokens;
+}
+
 // ---- Device-side: per-row walker over the compiled token stream. --------------------------------
 
 __device__ bool read_strict_year(date_parse::cursor<>& input, format_token token, int& year)
@@ -542,47 +557,43 @@ struct timestamp_timezone_view {
   }
 };
 
-class timestamp_timezone_resolver {
- public:
-  timestamp_timezone_resolver(cudf::strings_column_view const& input,
-                              timestamp_parse_timezone timezone,
-                              bool has_explicit_offset,
-                              cuda::stream_ref stream,
-                              rmm::device_async_resource_ref mr)
-    : _view{nullptr, timezone.index, timezone.offset_seconds, has_explicit_offset}
-  {
-    bool const use_region = timezone.transitions != nullptr && !has_explicit_offset;
-    std::vector<cudf::column_view> views{input.parent()};
-    if (use_region) {
-      CUDF_EXPECTS(timezone.transitions->num_columns() == 2,
-                   "timezone table must have two columns");
-      CUDF_EXPECTS(timezone.transitions->column(0).type().id() == cudf::type_id::LIST &&
-                     timezone.transitions->column(1).type().id() == cudf::type_id::LIST,
-                   "timezone table columns must be LIST columns");
-      CUDF_EXPECTS(timezone.index >= 0 && timezone.index < timezone.transitions->num_rows(),
-                   "timezone index is out of range");
-      views.push_back(timezone.transitions->column(0));
-      views.push_back(timezone.transitions->column(1));
-    }
-    // A span permits the input and timezone columns to have different row counts.
-    // The synchronous helper completes the single metadata upload before staging is released.
-    auto [storage, columns] =
-      cudf::create_column_device_views<cudf::column_device_view,
-                                       cudf::host_span<cudf::column_view const>>(
-        {views.data(), views.size()}, stream, mr);
-    _storage = std::move(storage);
-    _columns = columns;
-    if (use_region) { _view.timezone_columns = _columns + 1; }
-  }
-
-  timestamp_timezone_view device_view() const { return _view; }
-  cudf::column_device_view const* input_device_view() const { return _columns; }
-
- private:
-  std::unique_ptr<cuda::device_buffer<std::byte>> _storage;
-  cudf::column_device_view const* _columns;
-  timestamp_timezone_view _view;
+struct timestamp_device_views {
+  std::unique_ptr<cuda::device_buffer<std::byte>> storage;
+  cudf::column_device_view const* input;
+  timestamp_timezone_view timezone;
 };
+
+timestamp_device_views make_timestamp_device_views(cudf::strings_column_view const& input,
+                                                   timestamp_parse_timezone timezone,
+                                                   bool has_explicit_offset,
+                                                   cuda::stream_ref stream,
+                                                   rmm::device_async_resource_ref mr)
+{
+  bool const use_region = timezone.transitions != nullptr && !has_explicit_offset;
+  std::vector<cudf::column_view> views{input.parent()};
+  if (use_region) {
+    CUDF_EXPECTS(timezone.transitions->num_columns() == 2, "timezone table must have two columns");
+    CUDF_EXPECTS(timezone.transitions->column(0).type().id() == cudf::type_id::LIST &&
+                   timezone.transitions->column(1).type().id() == cudf::type_id::LIST,
+                 "timezone table columns must be LIST columns");
+    CUDF_EXPECTS(timezone.index >= 0 && timezone.index < timezone.transitions->num_rows(),
+                 "timezone index is out of range");
+    views.push_back(timezone.transitions->column(0));
+    views.push_back(timezone.transitions->column(1));
+  }
+  // A span permits the input and timezone columns to have different row counts.
+  // The synchronous helper completes the single metadata upload before staging is released.
+  auto [storage, columns] =
+    cudf::create_column_device_views<cudf::column_device_view,
+                                     cudf::host_span<cudf::column_view const>>(
+      {views.data(), views.size()}, stream, mr);
+  return {std::move(storage),
+          columns,
+          {use_region ? columns + 1 : nullptr,
+           timezone.index,
+           timezone.offset_seconds,
+           has_explicit_offset}};
+}
 
 template <bool UseRegion, bool CheckConflicts>
 struct parse_with_format_fn {
@@ -590,10 +601,10 @@ struct parse_with_format_fn {
   cudf::device_span<format_token const> tokens;
   bool legacy;
   cudf::device_span<format_token const> legacy_tokens;
-  cudf::size_type* first_exception_row;
+  uint32_t* first_exception_row;
   bool* validity;
   cudf::timestamp_us* output;
-  int32_t* arithmetic_overflow;
+  uint32_t* arithmetic_overflow;
   timestamp_timezone_view timezone;
 
   // Sets the row's null bit. The output value is left uninitialized — under cuDF's null mask
@@ -603,8 +614,8 @@ struct parse_with_format_fn {
   __device__ bool set_overflow() const
   {
     if (arithmetic_overflow != nullptr) {
-      cuda::atomic_ref<int32_t, cuda::thread_scope_device>{*arithmetic_overflow}.store(
-        1, cuda::memory_order_relaxed);
+      cuda::atomic_ref<uint32_t, cuda::thread_scope_device>{*arithmetic_overflow}.store(
+        0, cuda::memory_order_relaxed);
     }
     return false;
   }
@@ -673,8 +684,8 @@ struct parse_with_format_fn {
     set_invalid(idx);
     if (first_exception_row != nullptr && parse(p, sv.size_bytes(), legacy_tokens, true, parsed)) {
       auto first_exception_row_ref =
-        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*first_exception_row};
-      first_exception_row_ref.fetch_min(idx, cuda::memory_order_relaxed);
+        cuda::atomic_ref<uint32_t, cuda::thread_scope_device>{*first_exception_row};
+      first_exception_row_ref.fetch_min(static_cast<uint32_t>(idx), cuda::memory_order_relaxed);
     }
   }
 };
@@ -721,10 +732,7 @@ std::unique_ptr<cudf::column> parse_csv_date_strings(cudf::strings_column_view c
     return date_parse::parse_dates(input, csv_date_parser{{}, options}, stream, mr);
   }
 
-  auto const temp_mr = cudf::get_current_device_resource_ref();
-  auto staging = cudf::detail::make_pinned_vector_async<format_token>(host_tokens.size(), stream);
-  std::copy(host_tokens.begin(), host_tokens.end(), staging.begin());
-  auto tokens = cudf::detail::make_device_uvector_async(staging, stream, temp_mr);
+  auto tokens = upload_tokens(host_tokens, stream, cudf::get_current_device_resource_ref());
   return date_parse::parse_dates(
     input,
     csv_date_parser{cudf::device_span<format_token const>{tokens.data(), tokens.size()}, options},
@@ -746,46 +754,34 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
 {
   bool const legacy           = dialect == format_dialect::legacy_expression;
   bool const exception_policy = dialect == format_dialect::exception_expression;
-  auto const compiled         = compile_format(format, dialect, options);
-  auto const& host_tokens     = compiled.tokens;
-  auto host_legacy_tokens     = exception_policy
-                                  ? compile_format(format, format_dialect::legacy_expression).tokens
-                                  : std::vector<format_token>{};
-  auto const num_rows         = input.size();
+  auto compiled               = compile_format(format, dialect, options);
+  auto const num_tokens       = compiled.tokens.size();
+  if (exception_policy) {
+    auto const legacy_tokens = compile_format(format, format_dialect::legacy_expression).tokens;
+    compiled.tokens.insert(compiled.tokens.end(), legacy_tokens.begin(), legacy_tokens.end());
+  }
+  auto const num_rows = input.size();
   if (num_rows == 0) {
     return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()});
   }
 
   auto const temp_mr = cudf::get_current_device_resource_ref();
-  timestamp_timezone_resolver timezone_resolver{
-    input, timezone, compiled.has_explicit_offset, stream, temp_mr};
-  std::unique_ptr<rmm::device_scalar<int32_t>> arithmetic_overflow;
-  if (check_overflow) {
-    arithmetic_overflow = std::make_unique<rmm::device_scalar<int32_t>>(stream, temp_mr);
-    arithmetic_overflow->set_value_to_zero_async(stream);
+  auto const views =
+    make_timestamp_device_views(input, timezone, compiled.has_explicit_offset, stream, temp_mr);
+  // The error modes are exclusive. All-ones means no error; checked overflow stores zero,
+  // while EXCEPTION records the first row. Device initialization needs no host source.
+  constexpr auto no_error = cuda::std::numeric_limits<uint32_t>::max();
+  rmm::device_uvector<uint32_t> error(check_overflow || exception_policy ? 1 : 0, stream, temp_mr);
+  if (!error.is_empty()) {
+    CUDF_CUDA_TRY(cudaMemsetAsync(error.data(), 0xff, sizeof(uint32_t), stream.get()));
   }
-  auto host_token_staging = cudf::detail::make_pinned_vector_async<format_token>(
-    host_tokens.size() + host_legacy_tokens.size(), stream);
-  auto const legacy_begin =
-    std::copy(host_tokens.begin(), host_tokens.end(), host_token_staging.begin());
-  std::copy(host_legacy_tokens.begin(), host_legacy_tokens.end(), legacy_begin);
-  // Complete the upload before a later allocation can throw and release pinned staging.
-  // Both dialects share one allocation and one synchronization.
-  auto device_tokens = cudf::detail::make_device_uvector(host_token_staging, stream, temp_mr);
+  auto device_tokens = upload_tokens(compiled.tokens, stream, temp_mr);
 
-  std::unique_ptr<rmm::device_scalar<cudf::size_type>> first_exception_row;
-  if (exception_policy) {
-    first_exception_row =
-      std::make_unique<rmm::device_scalar<cudf::size_type>>(num_rows, stream, temp_mr);
-  }
-
-  auto result =
-    cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
-                                num_rows,
-                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                0,
-                                stream,
-                                mr);
+  auto result = cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_us>()},
+                                            num_rows,
+                                            cudf::mask_state::UNALLOCATED,
+                                            stream,
+                                            mr);
   // Every code path in parse_with_format_fn::operator() writes validity[idx], so leaving the
   // buffer uninitialized is safe.
   auto validity = rmm::device_uvector<bool>(num_rows, stream, temp_mr);
@@ -796,19 +792,19 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
       thrust::make_counting_iterator(0),
       num_rows,
       parse_with_format_fn<decltype(region_tag)::value, decltype(conflicts_tag)::value>{
-        timezone_resolver.input_device_view(),
-        cudf::device_span<format_token const>{device_tokens.data(), host_tokens.size()},
+        views.input,
+        cudf::device_span<format_token const>{device_tokens.data(), num_tokens},
         legacy,
-        cudf::device_span<format_token const>{device_tokens.data() + host_tokens.size(),
-                                              host_legacy_tokens.size()},
-        first_exception_row ? first_exception_row->data() : nullptr,
+        cudf::device_span<format_token const>{device_tokens.data() + num_tokens,
+                                              device_tokens.size() - num_tokens},
+        exception_policy ? error.data() : nullptr,
         validity.begin(),
         result->mutable_view().begin<cudf::timestamp_us>(),
-        arithmetic_overflow ? arithmetic_overflow->data() : nullptr,
-        timezone_resolver.device_view()});
+        check_overflow ? error.data() : nullptr,
+        views.timezone});
   };
   auto dispatch = [&](auto conflicts_tag) {
-    if (timezone_resolver.device_view().timezone_columns != nullptr) {
+    if (views.timezone.timezone_columns != nullptr) {
       launch(std::true_type{}, conflicts_tag);
     } else {
       launch(std::false_type{}, conflicts_tag);
@@ -820,12 +816,12 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
     dispatch(std::false_type{});
   }
 
-  if (first_exception_row) {
-    // value(stream) synchronizes the stream before returning the device value to the host.
-    auto const row = first_exception_row->value(stream);
-    if (row < num_rows) {
-      auto const error         = cudf::get_element(input.parent(), row, stream, temp_mr);
-      auto const& string_error = static_cast<cudf::string_scalar const&>(*error);
+  if (exception_policy) {
+    auto const error_row = error.front_element(stream);
+    if (error_row != no_error) {
+      auto const row           = static_cast<cudf::size_type>(error_row);
+      auto const bad_value     = cudf::get_element(input.parent(), row, stream, temp_mr);
+      auto const& string_error = static_cast<cudf::string_scalar const&>(*bad_value);
       throw cast_error(row, string_error.to_string(stream));
     }
   }
@@ -834,7 +830,7 @@ std::unique_ptr<cudf::column> parse_timestamp_strings_with_format_impl(
     cudf::bools_to_mask(cudf::device_span<bool const>(validity), stream, mr);
   if (null_count) { result->set_null_mask(std::move(*output_bitmask), null_count); }
   // Overflow always marks a row invalid; a fully valid batch needs no flag readback.
-  if (arithmetic_overflow && null_count != 0 && arithmetic_overflow->value(stream) != 0) {
+  if (check_overflow && null_count != 0 && error.front_element(stream) != no_error) {
     throw timestamp_parse_overflow{};
   }
 

@@ -40,6 +40,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -61,6 +62,34 @@ struct ParseTimestampWithFormatTests : public test::BaseFixture {};
 struct HexToBytesTests : public test::BaseFixture {};
 
 struct ParseCsvDateWithFormatTests : public test::BaseFixture {};
+
+enum class timestamp_test_api { corrected, legacy, exception, checked, csv };
+constexpr timestamp_test_api timestamp_test_apis[] = {timestamp_test_api::corrected,
+                                                      timestamp_test_api::legacy,
+                                                      timestamp_test_api::exception,
+                                                      timestamp_test_api::checked,
+                                                      timestamp_test_api::csv};
+
+std::unique_ptr<column> parse_timestamp_for_test(timestamp_test_api api,
+                                                 strings_column_view input,
+                                                 cuda::stream_ref stream,
+                                                 rmm::device_async_resource_ref mr)
+{
+  auto const format = "yyyy-MM-dd HH:mm:ss";
+  if (api == timestamp_test_api::checked) {
+    return spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      input, format, {}, {}, stream, mr);
+  }
+  if (api == timestamp_test_api::csv) {
+    return spark_rapids_jni::parse_csv_date_strings(input, format, {}, stream, mr);
+  }
+  return spark_rapids_jni::parse_timestamp_strings_with_format(input,
+                                                               format,
+                                                               api == timestamp_test_api::legacy,
+                                                               api == timestamp_test_api::exception,
+                                                               stream,
+                                                               mr);
+}
 
 template <typename T>
 struct StringToFloatTests : public test::BaseFixture {};
@@ -532,50 +561,137 @@ TEST_F(ParseTimestampWithFormatTests, NonemptyNullRowsDoNotReportOverflow)
 TEST_F(ParseTimestampWithFormatTests, TokenUploadCompletesBeforeOutputAllocationFailure)
 {
   auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01"};
+  cudf::get_default_stream().sync();
   rmm::cuda_stream stream{rmm::cuda_stream::flags::non_blocking};
   rmm::mr::cuda_async_memory_resource upstream;
-  std::atomic<int> completed{0};
-  int submitted                    = 0;
-  bool output_allocation_attempted = false;
-  rmm::mr::callback_memory_resource temporary_mr{
-    [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
-      auto* ptr = upstream.allocate(allocation_stream, bytes, alignment);
-      // Delay each upload without depending on the parser's allocation count. The final
-      // marker must finish before output allocation can unwind the pinned token staging.
-      auto const status = cudaLaunchHostFunc(
-        allocation_stream.get(),
-        [](void* state) {
-          std::this_thread::sleep_for(std::chrono::milliseconds{100});
-          static_cast<std::atomic<int>*>(state)->fetch_add(1);
-        },
-        &completed);
-      if (status != cudaSuccess) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }
-      CUDF_CUDA_TRY(status);
-      ++submitted;
-      return ptr;
-    },
-    [&](cuda::stream_ref allocation_stream,
-        void* ptr,
-        std::size_t bytes,
-        std::size_t alignment,
-        void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
-  rmm::mr::callback_memory_resource output_mr{
-    [&](cuda::stream_ref, std::size_t, std::size_t, void*) -> void* {
-      output_allocation_attempted = true;
-      EXPECT_GT(submitted, 0);
-      EXPECT_EQ(completed.load(), submitted);
-      throw std::bad_alloc{};
-    },
-    [](cuda::stream_ref, void*, std::size_t, std::size_t, void*) {}};
-  {
-    test::scoped_current_device_resource current_scope{temporary_mr};
-    EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
-                   strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, {}, stream, output_mr)),
-                 std::bad_alloc);
-    // Keep callback state and resources alive even when an assertion fails.
-    stream.synchronize();
+  for (auto const api : timestamp_test_apis) {
+    SCOPED_TRACE(static_cast<int>(api));
+    std::atomic<int> completed{0};
+    int submitted                    = 0;
+    bool output_allocation_attempted = false;
+    rmm::mr::callback_memory_resource temporary_mr{
+      [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
+        auto* ptr = upstream.allocate(allocation_stream, bytes, alignment);
+        // Delay each upload without depending on the parser's allocation count. The final
+        // marker must finish before output allocation can unwind host token storage.
+        auto const status = cudaLaunchHostFunc(
+          allocation_stream.get(),
+          [](void* state) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            static_cast<std::atomic<int>*>(state)->fetch_add(1);
+          },
+          &completed);
+        if (status != cudaSuccess) {
+          upstream.deallocate(allocation_stream, ptr, bytes, alignment);
+        }
+        CUDF_CUDA_TRY(status);
+        ++submitted;
+        return ptr;
+      },
+      [&](cuda::stream_ref allocation_stream,
+          void* ptr,
+          std::size_t bytes,
+          std::size_t alignment,
+          void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+    rmm::mr::callback_memory_resource output_mr{
+      [&](cuda::stream_ref, std::size_t, std::size_t, void*) -> void* {
+        output_allocation_attempted = true;
+        EXPECT_GT(submitted, 0);
+        EXPECT_EQ(completed.load(), submitted);
+        throw std::bad_alloc{};
+      },
+      [](cuda::stream_ref, void*, std::size_t, std::size_t, void*) {}};
+    {
+      test::scoped_current_device_resource current_scope{temporary_mr};
+      EXPECT_THROW(static_cast<void>(parse_timestamp_for_test(
+                     api, strings_column_view{strings}, stream, output_mr)),
+                   std::bad_alloc);
+      // Keep callback state and resources alive even when an assertion fails.
+      stream.synchronize();
+    }
+    EXPECT_TRUE(output_allocation_attempted);
   }
-  EXPECT_TRUE(output_allocation_attempted);
+}
+
+TEST_F(ParseTimestampWithFormatTests, NonDefaultStreamUsesOutputResource)
+{
+  auto const strings = test::strings_column_wrapper(
+    {"1970-01-01 00:00:01", "invalid", "1970-01-01 00:00:01"}, {true, true, false});
+  cudf::get_default_stream().sync();
+  rmm::cuda_stream stream{rmm::cuda_stream::flags::non_blocking};
+  rmm::mr::cuda_async_memory_resource upstream;
+  for (auto const api : timestamp_test_apis) {
+    SCOPED_TRACE(static_cast<int>(api));
+    bool output_allocated = false;
+    rmm::mr::callback_memory_resource output_mr{
+      [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
+        EXPECT_EQ(allocation_stream.get(), stream.value());
+        output_allocated = true;
+        return upstream.allocate(allocation_stream, bytes, alignment);
+      },
+      [&](cuda::stream_ref allocation_stream,
+          void* ptr,
+          std::size_t bytes,
+          std::size_t alignment,
+          void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+    auto const result =
+      parse_timestamp_for_test(api, strings_column_view{strings}, stream, output_mr);
+    stream.synchronize();
+    EXPECT_TRUE(output_allocated);
+    if (api == timestamp_test_api::csv) {
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_D>({0, 0, 0}, {true, false, false});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+    } else {
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_us>({1'000'000, 0, 0}, {true, false, false});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+    }
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, RegionTableValidationAndBypass)
+{
+  auto times   = test::fixed_width_column_wrapper<int64_t>{std::numeric_limits<int64_t>::min()};
+  auto offset  = test::fixed_width_column_wrapper<int32_t>{0};
+  auto entries = test::structs_column_wrapper{{times, times, offset}};
+  auto offsets = test::fixed_width_column_wrapper<size_type>{0, 1};
+  auto fixed   = make_lists_column(
+    1, offsets.release(), entries.release(), 0, create_null_mask(0, mask_state::UNALLOCATED));
+  auto empty_offsets = test::fixed_width_column_wrapper<size_type>{0, 0};
+  auto rules         = make_lists_column(1,
+                                 empty_offsets.release(),
+                                 make_empty_column(data_type{type_id::INT32}),
+                                 0,
+                                 create_null_mask(0, mask_state::UNALLOCATED));
+  table_view const timezone{{fixed->view(), rules->view()}};
+  auto const strings  = test::strings_column_wrapper{"1970-01-01 00:00:01"};
+  auto const zoned    = test::strings_column_wrapper{"1970-01-01 00:00:01Z"};
+  auto const empty    = make_empty_column(data_type{type_id::STRING});
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>{1'000'000};
+  auto const normal   = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, {&timezone, 0, 0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(normal->view(), expected);
+
+  for (auto const& [table, index] :
+       std::vector<std::pair<table_view, size_type>>{{table_view{{fixed->view()}}, 0},
+                                                     {table_view{{offset, rules->view()}}, 0},
+                                                     {table_view{{fixed->view(), offset}}, 0},
+                                                     {timezone, -1},
+                                                     {timezone, 1}}) {
+    SCOPED_TRACE(::testing::Message() << "columns=" << table.num_columns() << ", row=" << index);
+    spark_rapids_jni::timestamp_parse_timezone const invalid{&table, index, 0};
+    EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                   strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, invalid)),
+                 cudf::logic_error);
+    auto const explicit_offset = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      strings_column_view{zoned}, "yyyy-MM-dd HH:mm:ssX", {}, invalid);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(explicit_offset->view(), expected);
+    auto const no_rows = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      strings_column_view{*empty}, "yyyy-MM-dd HH:mm:ss", {}, invalid);
+    EXPECT_EQ(no_rows->size(), 0);
+    EXPECT_EQ(no_rows->type(), data_type{type_id::TIMESTAMP_MICROSECONDS});
+  }
 }
 
 TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviation)
