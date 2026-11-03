@@ -18,10 +18,12 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.Scalar;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -222,5 +224,42 @@ public class BloomFilterTest {
            ColumnVector premerge = ColumnVector.concatenate(bloomA, bloomB);
            Scalar merged = BloomFilter.merge(premerge)) {}
     });
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {BloomFilter.VERSION_1, BloomFilter.VERSION_2})
+  void testPutRejectsNonInt64(int version) {
+    try (Scalar bloomFilter = BloomFilter.create(version, 3, 1024, 0);
+         ColumnVector ints = ColumnVector.fromInts(20, 80, 100);
+         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a")) {
+      for (ColumnVector bad : new ColumnVector[]{ints, strings}) {
+        CudfException e = assertThrows(CudfException.class,
+            () -> BloomFilter.put(bloomFilter, bad));
+        assertTrue(e.getMessage().contains("requires an INT64 input column"), e.getMessage());
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {BloomFilter.VERSION_1, BloomFilter.VERSION_2})
+  void testProbeRejectsNonInt64(int version) {
+    try (Scalar bloomFilter = BloomFilter.create(version, 3, 1024, 0);
+         ColumnVector input = ColumnVector.fromLongs(20, 80, 100);
+         ColumnVector ints = ColumnVector.fromInts(20, 80, 100);
+         ColumnVector strings = ColumnVector.fromStrings("a", "b", "a")) {
+      BloomFilter.put(bloomFilter, input);
+      try (ColumnView bloomList = bloomFilter.getListAsColumnView()) {
+        for (ColumnVector bad : new ColumnVector[]{ints, strings}) {
+          CudfException e = assertThrows(CudfException.class, () -> {
+            try (ColumnVector result = BloomFilter.probe(bloomFilter, bad)) {}
+          });
+          assertTrue(e.getMessage().contains("requires an INT64 input column"), e.getMessage());
+          e = assertThrows(CudfException.class, () -> {
+            try (ColumnVector result = BloomFilter.probe(bloomList.getData(), bad)) {}
+          });
+          assertTrue(e.getMessage().contains("requires an INT64 input column"), e.getMessage());
+        }
+      }
+    }
   }
 }
