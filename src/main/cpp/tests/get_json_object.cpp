@@ -1119,6 +1119,102 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
   }
 }
 
+// parallel_override == 1 puts each path in its own batch, so every path takes the general route.
+void run_retry_row_rejected_after_match(int32_t parallel_override)
+{
+  auto const bomb      = std::string(30, '"');
+  auto const expanding = R"({"k":{"a":')" + bomb + R"('},"u":{"v":"U"}})";  // 58 B; $.k -> 68 B
+  auto const malformed = R"({"k":{"a":')" + bomb + R"('},"u":{"v":"U"},"z":x})";  // fails after $.k
+  ASSERT_EQ(malformed.size(), 64u);
+  std::vector<std::string> rows(33, R"({"k":"s","u":{"v":"U"}})");
+  rows[0]  = expanding;  // overflows its slot, so $.k is retried
+  rows[32] = malformed;  // last row: its retry slot ends the exact-size retry buffer
+
+  // 16 NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass.
+  std::vector<std::vector<path_spec>> paths{{named_path("k")}, {named_path("u"), named_path("v")}};
+  for (int i = 2; i < 16; ++i) {
+    paths.push_back({named_path("missing" + std::to_string(i))});
+  }
+  cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
+
+  std::vector<std::string> k_values(rows.size(), "s");
+  std::vector<bool> k_valid(rows.size(), true);
+  k_values[0]  = quote_bomb_value(30);
+  k_values[32] = "";
+  k_valid[32]  = false;
+  cudf::test::strings_column_wrapper k_expected(k_values.begin(), k_values.end(), k_valid.begin());
+
+  auto const out = spark_rapids_jni::get_json_object_multiple_paths(
+    cudf::strings_column_view{input}, paths, -1, parallel_override);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(k_expected, *out[0]);
+}
+
+TEST_F(GetJsonObjectTest, MergedRetryRowRejectedAfterMatch)
+{
+  run_retry_row_rejected_after_match(-1);
+}
+
+TEST_F(GetJsonObjectTest, MergedRetryRowRejectedAfterMatchGeneralControl)
+{
+  run_retry_row_rejected_after_match(1);
+}
+
+// Two flagged merged-routed paths with different footprints both retry. Each retry descriptor
+// owns its offsets column and output buffer, so the merged kernel must read per-path offsets;
+// reading only the first descriptor's offsets corrupts the second path's slots and pairs.
+void run_retry_multiple_paths_after_match(int32_t parallel_override)
+{
+  // Row 0 overflows only $.k (write 68 B > 58 B row); row 1 overflows only $.u.v (write 48 B >
+  // 41 B row). Raw quotes re-emit escaped, expanding the subtree write past the row size.
+  auto const k_expand = R"({"k":{"a":')" + std::string(30, '"') + R"('},"u":{"v":"U"}})";
+  auto const u_expand = R"({"u":{"v":{"a":')" + std::string(20, '"') + R"('}}}})";
+  auto const malformed =
+    R"({"k":{"a":')" + std::string(30, '"') + R"('},"u":{"v":"U"},"z":x})";  // 64 B per helper
+  ASSERT_EQ(k_expand.size(), 58u);
+  ASSERT_EQ(u_expand.size(), 41u);
+  ASSERT_EQ(malformed.size(), 64u);
+  std::vector<std::string> rows(33, R"({"k":"s","u":{"v":"U"}})");
+  rows[0]  = k_expand;   // $.k overflows its slot, so $.k is retried
+  rows[1]  = u_expand;   // $.u.v overflows its slot, so $.u.v is retried too
+  rows[32] = malformed;  // last row: matches both paths, then fails and nulls them
+
+  // 16 NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass, so both
+  // flagged paths retry through one merged kernel with independent offsets columns.
+  std::vector<std::vector<path_spec>> paths{{named_path("k")}, {named_path("u"), named_path("v")}};
+  for (int i = 2; i < 16; ++i) {
+    paths.push_back({named_path("missing" + std::to_string(i))});
+  }
+  cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
+
+  std::vector<std::string> k_values(rows.size(), "s");
+  std::vector<bool> k_valid(rows.size(), true);
+  k_values[0]  = quote_bomb_value(30);
+  k_valid[1]   = false;  // row 1 has no "k" member
+  k_values[32] = "";
+  k_valid[32]  = false;
+  cudf::test::strings_column_wrapper k_expected(k_values.begin(), k_values.end(), k_valid.begin());
+
+  std::vector<std::string> u_values(rows.size(), "U");
+  std::vector<bool> u_valid(rows.size(), true);
+  u_values[1] = R"({"a":")";
+  for (int i = 0; i < 20; ++i) {
+    u_values[1] += R"(\")";
+  }
+  u_values[1] += R"("})";
+  u_valid[32] = false;
+  cudf::test::strings_column_wrapper u_expected(u_values.begin(), u_values.end(), u_valid.begin());
+
+  auto const out = spark_rapids_jni::get_json_object_multiple_paths(
+    cudf::strings_column_view{input}, paths, -1, parallel_override);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(k_expected, *out[0]);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(u_expected, *out[1]);
+}
+
+TEST_F(GetJsonObjectTest, MergedRetryMultiplePathsAfterMatch)
+{
+  run_retry_multiple_paths_after_match(-1);
+}
+
 TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
 {
   auto const expanding = R"({"k":{"a":')" + std::string(30, '"') + R"('},"u":{"v":"U"}})";
