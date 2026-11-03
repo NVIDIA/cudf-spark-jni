@@ -657,8 +657,8 @@ bool row_valid(cudf::column const& col, std::vector<cudf::bitmask_type> const& m
   return col.null_count() == 0 || (!mask.empty() && cudf::bit_is_set(mask.data(), row));
 }
 
-/// The first `n` paths of `paths` (a deliberately general-routed oracle batch
-/// when `n` < the merged route's >= 8 path floor).
+/// The first `n` paths of `paths` as a general-routed oracle batch (`n` is below the merged
+/// route's path floors).
 multi_paths first_n(multi_paths const& paths, std::size_t n)
 {
   return multi_paths(paths.begin(), paths.begin() + n);
@@ -734,7 +734,8 @@ TEST_F(GetJsonObjectTest, MergedRouteEmptyRowsParity)
 
 TEST_F(GetJsonObjectTest, MergedRouteSortBeforeFlattenParity)
 {
-  // An unsorted flat child blob would lose late short key `z` during binary search.
+  // Children are flat and length-sorted, so equal-length candidates stay contiguous; a late
+  // short key like `z` must still match after longer siblings.
   auto const rows =
     same_rows(64, R"({"a":{"v":"A"},"bbb":{"v":"B"},"seven0":{"v":"w"},"z":{"v":"Z"}})");
 
@@ -944,9 +945,9 @@ TEST_F(GetJsonObjectTest, GeneralGroupMoreThan32Paths)
 
 TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
 {
-  // Oversized subtree retries while companion outputs retain their values.
-  // Row anatomy: `{"k":{"a":'<30 quotes>'},"u":{"v":"U"}}` = 58 bytes;
-  // output for `$.k` = `{"a":"` + 30x`\"` + `"}` = 68 bytes.
+  // An oversized subtree retries while companion outputs keep their values.
+  // Anatomy (asserted below): the 58-byte row `{"k":{"a":'<30 quotes>'},"u":{"v":"U"}}` writes a
+  // 68-byte `$.k` subtree.
   auto const bomb   = std::string(30, '"');
   auto const row    = R"({"k":{"a":')" + bomb + R"('},"u":{"v":"U"}})";
   auto const rows   = same_rows(64, row);
@@ -1019,9 +1020,9 @@ TEST_F(GetJsonObjectTest, MergedRouteRejectsDepthErrors)
 
 TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
 {
-  // Enter the merged evaluator (>= k_merged_min_paths shallow NAMED paths, rows >= 32) and check
-  // every output column against a separate single-path evaluation of the same query. Covers:
-  // duplicate keys (first wins), escaped name, shared prefixes, depth-2 paths, nulls.
+  // Admits the merged evaluator (>= k_merged_min_paths shallow NAMED paths, rows >= 32) and
+  // checks every column against a single-path evaluation. Covers duplicate keys (first wins),
+  // escaped names, shared prefixes, depth-2 paths, nulls.
   auto const rows = same_rows(64,
                               R"({"a":"A","ab":"AB","abc":"ABC","dup":"first","dup":"second",)"
                               R"("key\"q":"escaped","n":null,"plain":"P",)"
@@ -1119,7 +1120,8 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
   }
 }
 
-// parallel_override == 1 puts each path in its own batch, so every path takes the general route.
+// `parallel_override == 1` puts each path in its own batch, so every path takes the general
+// route; `parallel_override == -1` admits the merged route.
 void run_retry_row_rejected_after_match(int32_t parallel_override)
 {
   auto const bomb      = std::string(30, '"');
@@ -1160,8 +1162,8 @@ TEST_F(GetJsonObjectTest, MergedRetryRowRejectedAfterMatchGeneralControl)
 }
 
 // Two flagged merged-routed paths with different footprints both retry. Each retry descriptor
-// owns its offsets column and output buffer, so the merged kernel must read per-path offsets;
-// reading only the first descriptor's offsets corrupts the second path's slots and pairs.
+// owns its offsets column and output buffer, so reading only the first descriptor's offsets
+// corrupts the second path's slots and pairs.
 void run_retry_multiple_paths_after_match(int32_t parallel_override)
 {
   // Row 0 overflows only $.k (write 68 B > 58 B row); row 1 overflows only $.u.v (write 48 B >
@@ -1179,7 +1181,7 @@ void run_retry_multiple_paths_after_match(int32_t parallel_override)
   rows[32] = malformed;  // last row: matches both paths, then fails and nulls them
 
   // 16 NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass, so both
-  // flagged paths retry through one merged kernel with independent offsets columns.
+  // flagged paths retry through one merged kernel with per-path offsets.
   std::vector<std::vector<path_spec>> paths{{named_path("k")}, {named_path("u"), named_path("v")}};
   for (int i = 2; i < 16; ++i) {
     paths.push_back({named_path("missing" + std::to_string(i))});
@@ -1249,7 +1251,7 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
   auto const missing_expected =
     expected_column(std::vector<std::string>(rows.size()), std::vector<bool>(rows.size(), false));
 
-  // Sixteen NAMED paths, a depth-two member and at least 32 rows admit the merged first pass.
+  // Sixteen NAMED paths, a depth-2 member and at least 32 rows admit the merged first pass.
   std::vector<std::vector<path_spec>> paths{
     {named_path("k")}, {named_path("u"), named_path("v")}, {named_path("e")}};
   for (int i = 3; i < 16; ++i) {
@@ -1263,7 +1265,7 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
                               cudf::slice(u_expected, {offset, input_col->size()}).front(),
                               cudf::slice(empty_expected, {offset, input_col->size()}).front(),
                               cudf::slice(missing_expected, {offset, input_col->size()}).front()};
-    // Expanding k retries through the general kernel, which must not overwrite merged nulls.
+    // Expanding k retries through the general evaluator, which must not overwrite merged nulls.
     auto const output = spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1);
     ASSERT_EQ(output.size(), paths.size());
     for (std::size_t i = 0; i < output.size(); ++i) {
