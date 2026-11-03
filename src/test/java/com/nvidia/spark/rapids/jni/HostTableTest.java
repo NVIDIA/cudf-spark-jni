@@ -28,6 +28,7 @@ import ai.rapids.cudf.HostColumnVector.DataType;
 import ai.rapids.cudf.HostColumnVector.ListType;
 import ai.rapids.cudf.HostColumnVector.StructData;
 import ai.rapids.cudf.HostColumnVector.StructType;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 public class HostTableTest {
@@ -96,6 +97,26 @@ public class HostTableTest {
     }
   }
 
+  // TODO: Enable once thirdparty/cudf has the fix for cudf::detail::slice, which counts a slice's
+  // nulls without its input's offset (mythrocks/cudf branch fix-slice-null-count-offset). Copying
+  // this struct reslices its children, so their null counts come back wrong until then.
+  @Disabled("Needs the cudf fix for detail::slice null counts of inputs with an offset")
+  @Test
+  public void testRoundTripSlicedChildren() {
+    // A STRUCT with offset 0 whose children are slices, so every offset is below the top level.
+    // The children are sliced fixed-width, STRING, LIST, map and STRUCT columns, with nulls.
+    try (Table full = buildTable();
+         Table slicedChildren = sliceTable(3, 17, columnsOf(full));
+         Table expectedChildren = subTable(full, 3, 17);
+         ColumnVector expectedStruct = ColumnVector.makeStruct(columnsOf(expectedChildren));
+         Table expected = new Table(expectedStruct);
+         Table input = structTable(columnsOf(slicedChildren));
+         HostTable ht = HostTable.fromTable(input);
+         Table actual = ht.toTable()) {
+      AssertUtils.assertTablesAreEqual(expected, actual);
+    }
+  }
+
   private static ColumnVector[] columnsOf(Table table) {
     ColumnVector[] columns = new ColumnVector[table.getNumberOfColumns()];
     for (int i = 0; i < columns.length; i++) {
@@ -150,6 +171,30 @@ public class HostTableTest {
         if (c != null) {
           c.close();
         }
+      }
+    }
+  }
+
+  /**
+   * Returns a single-column table holding a zero-copy STRUCT view of the given columns. The
+   * STRUCT itself has offset 0. The table does not own the data: the given columns must outlive
+   * it.
+   */
+  private static Table structTable(ColumnVector... children) {
+    // As in sliceTable, the view handle is handed to a ColumnVector so it can go in a Table.
+    try (DeviceMemoryBuffer placeholder = DeviceMemoryBuffer.allocate(1)) {
+      ColumnView struct = ColumnView.makeStructView(children);
+      ColumnVector structVector;
+      try {
+        structVector = ColumnVector.fromViewWithContiguousAllocation(struct.getNativeView(),
+            placeholder);
+      } catch (Throwable t) {
+        struct.close();
+        throw t;
+      }
+      // structVector now owns the view handle, so struct must not be closed.
+      try (ColumnVector v = structVector) {
+        return new Table(v);
       }
     }
   }
