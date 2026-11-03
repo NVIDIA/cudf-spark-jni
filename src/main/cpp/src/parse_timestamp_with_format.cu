@@ -22,6 +22,7 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/string_view.hpp>
@@ -358,15 +359,8 @@ rmm::device_uvector<format_token> upload_tokens(std::vector<format_token> const&
                                                 cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
-  rmm::device_uvector<format_token> device_tokens(tokens.size(), stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(device_tokens.data(),
-                                tokens.data(),
-                                tokens.size() * sizeof(format_token),
-                                cudaMemcpyDefault,
-                                stream.get()));
   // Complete the host read before a later allocation can throw and release the source.
-  stream.sync();
-  return device_tokens;
+  return cudf::detail::make_device_uvector(tokens, stream, mr);
 }
 
 // ---- Device-side: per-row walker over the compiled token stream. --------------------------------
