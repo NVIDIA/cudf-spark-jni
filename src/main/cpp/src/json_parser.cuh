@@ -884,7 +884,10 @@ class json_parser {
     // byte and return at the first mismatch instead of decoding the whole token. Engagement
     // requires a same-quote wrapped token whose content holds neither a backslash nor the
     // quote byte: then the decoded content is exactly the raw content, and a byte compare
-    // decides the match without the decoder.
+    // decides the match without the decoder. Coupling: this compare must mirror whatever
+    // equivalence try_parse_string applies to escape-free content — if matching gains a
+    // normalization step (e.g. malformed UTF-8 mapped to a replacement character), the
+    // escape-free branch must adopt it too or it will disagree with the delegated result.
     if (raw.size() >= 2 && raw.data()[0] == raw.data()[raw.size() - 1]) {
       char const quote_char       = raw.data()[0];
       cudf::size_type const clen  = raw.size() - 2;
