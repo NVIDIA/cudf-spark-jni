@@ -18,7 +18,9 @@
 #include "host_table_view.hpp"
 #include "jni_utils.hpp"
 
+#include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/traits.hpp>
 
@@ -73,7 +75,43 @@ std::size_t column_size(cudf::column_view const& c, cudaStream_t stream)
                          });
 }
 
-// Determine the size of buffer needed to hold all of the data for a table.
+// True if this column or any of its descendants is a slice, i.e. has a non-zero offset.
+bool has_offset(cudf::column_view const& c)
+{
+  return c.offset() != 0 || std::any_of(c.child_begin(), c.child_end(), has_offset);
+}
+
+// A table view whose columns all have offset 0 at every level, plus the columns materialized to
+// make it so.
+struct unsliced_table {
+  std::vector<std::unique_ptr<cudf::column>> materialized;
+  cudf::table_view view;
+};
+
+// The host copy has no offsets: data and null masks are copied from the start of each column's
+// buffers, children are copied whole, and the device views are rebuilt with offset 0. A sliced
+// column breaks this (its parent offset would be dropped, while compound children are not
+// sliced), so it is materialized on `stream` into a column with offset 0. Unsliced columns are not
+// copied. Freeing the materialized columns after the async host copy has been enqueued is safe
+// because they are deallocated on the same stream.
+unsliced_table unslice(cudf::table_view const& t, cudaStream_t stream)
+{
+  unsliced_table result;
+  std::vector<cudf::column_view> cols;
+  cols.reserve(t.num_columns());
+  std::transform(t.begin(),
+                 t.end(),
+                 std::back_inserter(cols),
+                 [&](cudf::column_view const& c) -> cudf::column_view {
+                   if (!has_offset(c)) { return c; }
+                   result.materialized.push_back(std::make_unique<cudf::column>(c, stream));
+                   return result.materialized.back()->view();
+                 });
+  result.view = cudf::table_view(cols);
+  return result;
+}
+
+// Determine the size of buffer needed to hold all of the data for a table with no sliced columns.
 std::size_t host_buffer_size(cudf::table_view const& t, cudaStream_t stream)
 {
   std::size_t s = 0;
@@ -186,7 +224,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_bufferSize(JN
     cudf::jni::auto_set_device(env);
     auto t      = std::bit_cast<cudf::table_view const*>(table_handle);
     auto stream = std::bit_cast<cudaStream_t>(jstream);
-    return static_cast<jlong>(host_buffer_size(*t, stream));
+    return static_cast<jlong>(host_buffer_size(unslice(*t, stream).view, stream));
   }
   JNI_CATCH(env, 0);
 }
@@ -198,11 +236,13 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_HostTable_copyFromTable
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-    auto table           = std::bit_cast<cudf::table_view const*>(table_handle);
-    auto buffer          = std::bit_cast<uint8_t*>(host_address);
-    auto buffer_size     = static_cast<std::size_t>(host_size);
-    auto stream          = std::bit_cast<cudaStream_t>(jstream);
-    auto host_table_view = to_host_table_async(*table, buffer, buffer_size, stream);
+    auto table       = std::bit_cast<cudf::table_view const*>(table_handle);
+    auto buffer      = std::bit_cast<uint8_t*>(host_address);
+    auto buffer_size = static_cast<std::size_t>(host_size);
+    auto stream      = std::bit_cast<cudaStream_t>(jstream);
+    // The materialized columns of a sliced table are freed on `stream` after the copy is enqueued.
+    auto unsliced        = unslice(*table, stream);
+    auto host_table_view = to_host_table_async(unsliced.view, buffer, buffer_size, stream);
     return std::bit_cast<jlong>(host_table_view.release());
   }
   JNI_CATCH(env, 0);
