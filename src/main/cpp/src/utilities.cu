@@ -37,7 +37,7 @@ bool is_basic_spark_numeric(cudf::data_type type)
          type.id() == cudf::type_id::FLOAT32 || type.id() == cudf::type_id::FLOAT64;
 }
 
-std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
+std::unique_ptr<cuda::device_buffer<cudf::bitmask_type>> bitmask_bitwise_or(
   std::vector<cudf::device_span<cudf::bitmask_type const>> const& input,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -49,7 +49,7 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
       input.begin(), input.end(), [mask_size](auto mask) { return mask.size() == mask_size; }),
     "Encountered size mismatch in inputs");
   if (mask_size == 0) {
-    return std::make_unique<cuda::device_buffer<std::byte>>(
+    return std::make_unique<cuda::device_buffer<cudf::bitmask_type>>(
       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr));
   }
 
@@ -60,13 +60,12 @@ std::unique_ptr<cuda::device_buffer<std::byte>> bitmask_bitwise_or(
   auto d_input = cudf::detail::make_device_uvector_async(
     h_input, stream, rmm::mr::get_current_device_resource_ref());
 
-  std::unique_ptr<cuda::device_buffer<std::byte>> out =
-    std::make_unique<cuda::device_buffer<std::byte>>(
-      stream, mr, mask_size * sizeof(cudf::bitmask_type), cuda::no_init);
+  std::unique_ptr<cuda::device_buffer<cudf::bitmask_type>> out =
+    std::make_unique<cuda::device_buffer<cudf::bitmask_type>>(stream, mr, mask_size, cuda::no_init);
   thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                     thrust::make_counting_iterator(0),
                     thrust::make_counting_iterator(0) + mask_size,
-                    reinterpret_cast<cudf::bitmask_type*>(out->data()),
+                    out->data(),
                     cuda::proclaim_return_type<cudf::bitmask_type>(
                       [buffers     = d_input.data(),
                        num_buffers = input.size()] __device__(cudf::size_type word_index) {

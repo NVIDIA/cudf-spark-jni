@@ -1,5 +1,5 @@
 #=============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -113,6 +113,9 @@ ConfigureTest(PROTOBUF_HELPERS
 ConfigureTest(LIST_SLICE
     list_slice.cpp)
 
+ConfigureTest(RANGE_SEQUENCE
+    range_sequence.cpp)
+
 ConfigureTest(MAP_ZIP_WITH
     map_zip_with_utils.cpp)
 
@@ -139,6 +142,9 @@ ConfigureTest(MULTIPLY
 
 ConfigureTest(FROM_JSON
     from_json.cpp)
+
+ConfigureTest(PAGEABLE_POOL
+    pageable_pool.cpp)
 
 ConfigureTest(GET_JSON_OBJECT
     get_json_object.cpp)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,9 @@
 
 #include <cuda/stream>
 
+#include <cstdint>
 #include <memory>
+#include <span>
 
 namespace spark_rapids_jni {
 
@@ -73,6 +75,10 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
  * @brief Parse JSON strings into a struct column followed by a given data schema.
  *
  * The data schema is specified as data arrays flattened by depth-first-search order.
+ *
+ * @param decimal_digit_values Digit value for every UTF-16 code unit (65,536 entries), or a
+ *                             negative value for a code unit rejected by the active JVM. The
+ *                             values must remain stable for the process lifetime.
  */
 std::unique_ptr<cudf::column> from_json_to_structs(
   cudf::strings_column_view const& input,
@@ -86,6 +92,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(
   bool allow_nonnumeric_numbers,
   bool allow_unquoted_control,
   bool is_us_locale,
+  std::span<int8_t const> decimal_digit_values,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
@@ -93,6 +100,10 @@ std::unique_ptr<cudf::column> from_json_to_structs(
  * @brief Convert from a strings column to a column with the desired type given by a data schema.
  *
  * The given column schema is specified as data arrays flattened by depth-first-search order.
+ *
+ * @param decimal_digit_values Digit value for every UTF-16 code unit (65,536 entries), or a
+ *                             negative value for a code unit rejected by the active JVM. The
+ *                             values must remain stable for the process lifetime.
  */
 std::unique_ptr<cudf::column> convert_from_strings(
   cudf::strings_column_view const& input,
@@ -102,6 +113,7 @@ std::unique_ptr<cudf::column> convert_from_strings(
   std::vector<int> const& precisions,
   bool allow_nonnumeric_numbers,
   bool is_us_locale,
+  std::span<int8_t const> decimal_digit_values,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

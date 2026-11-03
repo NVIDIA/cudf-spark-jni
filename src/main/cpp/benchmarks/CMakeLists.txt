@@ -1,5 +1,5 @@
 #=============================================================================
-# Copyright (c) 2022-2026, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,6 +75,9 @@ ConfigureBench(ROW_CONVERSION_BENCH
 ConfigureBench(STRING_TO_FLOAT_BENCH
   cast_string_to_float.cpp)
 
+ConfigureBench(UNHEX_BENCH
+  unhex.cpp)
+
 ConfigureBench(LONG_TO_BINARY_STRING_BENCH
   cast_long_to_binary_string.cpp)
 
@@ -82,7 +85,9 @@ ConfigureBench(BLOOM_FILTER_BENCH
   bloom_filter.cu)
 
 ConfigureBench(GET_JSON_OBJECT_BENCH
-  get_json_object.cu)
+  get_json_object.cpp
+  get_json_object_path_types.cpp
+  gjo_input_cache.cpp)
 
 ConfigureBench(FROM_JSON_TO_STRUCTS_BENCH
   from_json_to_structs.cu)

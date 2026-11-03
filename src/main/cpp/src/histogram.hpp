@@ -36,13 +36,23 @@ namespace spark_rapids_jni {
 enum class percentile_interpolation : int32_t { WEIGHTED_ENDPOINTS = 0, ENDPOINT_DELTA = 1 };
 
 /**
+ * @brief Ordering direction for histogram values during percentile evaluation.
+ *
+ * The numeric values must remain aligned with
+ * `com.nvidia.spark.rapids.jni.Histogram.ValueOrder`.
+ */
+enum class value_order : int32_t { ASCENDING = 0, DESCENDING = 1 };
+
+/**
  * @brief Check the input if they are valid and create a histogram from them.
  *
  * Validity of the input columns are defined as following:
  *  - Values and frequencies columns must have the same size.
- *  - Frequencies column must be of type INT64, must not have nulls, and must not contain
- *    negative numbers.
+ *  - Frequencies column must be of type INT64.
+ *  - A negative frequency is invalid only when its corresponding value and frequency are
+ *    non-null.
  *
+ * Rows with a null value, null frequency, or zero frequency are excluded from the histogram.
  * If the input columns are valid, a histogram will be created from them. Otherwise, an exception
  * will be thrown.
  *
@@ -86,5 +96,29 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
   percentile_interpolation interpolation = percentile_interpolation::WEIGHTED_ENDPOINTS,
   cuda::stream_ref stream                = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr      = rmm::mr::get_current_device_resource_ref());
+
+/**
+ * @brief Compute percentiles from the given histograms using the specified value ordering.
+ *
+ * The input histograms must be given in the form of `LIST<STRUCT<ElementType, long>>`.
+ *
+ * @param input The lists of input histograms
+ * @param percentages The input percentage values
+ * @param output_as_lists Specify whether the output percentiles will be wrapped in a list
+ * @param interpolation The algorithm used to interpolate between adjacent values
+ * @param order The ordering direction to use for histogram values
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Device memory resource used to allocate the returned column's device memory
+ * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
+ * input column
+ */
+std::unique_ptr<cudf::column> percentile_from_histogram(
+  cudf::column_view const& input,
+  std::vector<double> const& percentages,
+  bool output_as_lists,
+  percentile_interpolation interpolation,
+  value_order order,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni
