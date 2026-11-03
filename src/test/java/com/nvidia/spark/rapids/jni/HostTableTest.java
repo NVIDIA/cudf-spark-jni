@@ -97,10 +97,10 @@ public class HostTableTest {
     }
   }
 
-  // TODO: Enable once thirdparty/cudf has the fix for cudf::detail::slice, which counts a slice's
-  // nulls without its input's offset (mythrocks/cudf branch fix-slice-null-count-offset). Copying
-  // this struct reslices its children, so their null counts come back wrong until then.
-  @Disabled("Needs the cudf fix for detail::slice null counts of inputs with an offset")
+  // TODO: Enable once thirdparty/cudf includes https://github.com/NVIDIA/cudf/pull/25054.
+  // Without it, cudf::detail::slice counts a slice's nulls without its input's offset. Copying
+  // this struct reslices its children, so their null counts come back wrong.
+  @Disabled("Needs NVIDIA/cudf#25054: detail::slice null counts of inputs with an offset")
   @Test
   public void testRoundTripSlicedChildren() {
     // A STRUCT with offset 0 whose children are slices, so every offset is below the top level.
