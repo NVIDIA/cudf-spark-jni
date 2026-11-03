@@ -977,6 +977,11 @@ namespace {
 // Parse errors null all paths; depth overflow throws only if a path is not already dead.
 
 // Shallow admission: depth <= 2 and >= 16 paths (depth 1 requires >= 124).
+// The path floors match the benchmark's 33- and 135-path layouts; the 32-row floor is below.
+// Production hit rate under the plugin's 4 GiB budget: the caller batches paths by scratch size,
+// so an all-depth-1 batch reaches 124 paths only for columns of roughly <= 33 MiB (4 GiB / 124),
+// and a batch never reaches 16 paths for columns above ~256 MiB (4 GiB / 16) - bigger columns
+// pay the general route. The global record fallback is allocated outside memory_budget_bytes.
 inline constexpr std::size_t k_merged_max_depth        = 2;
 inline constexpr std::size_t k_merged_min_paths        = 16;
 inline constexpr std::size_t k_merged_min_depth1_paths = 124;
@@ -1008,7 +1013,8 @@ struct merged_trie_view {
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
- * Row lanes publish the same selection atomically; initialize/reset only outside those accesses.
+ * Only the row's lane 0 reads or writes records; the post-walk barrier orders those plain
+ * accesses before the other lanes read them.
  */
 struct alignas(8) merged_path_out {
   int32_t val_begin;
@@ -1024,7 +1030,8 @@ constexpr int8_t k_merged_kind_terminal = 2;
 // Dead unset paths never resurrect on later duplicate keys.
 constexpr int8_t k_merged_kind_dead = 3;
 
-// Row barriers bracket initialization/reset; these ordinary stores must not race atomic reads.
+// Row barriers bracket initialization/reset; these stores are visible to the other lanes
+// through the barriers, not through atomics.
 __device__ __forceinline__ void merged_rec_init(merged_path_out& r)
 {
   r = merged_path_out{-1, -1, 0};
@@ -1034,51 +1041,25 @@ __device__ __forceinline__ void merged_rec_set(merged_path_out& r,
                                                int32_t end,
                                                int8_t kind)
 {
-  // Redundant row lanes publish identical values to each path's distinct record.
-  // Keep begin/end in one atomic 8-byte head and kind in a separate atomic 4-byte word.
-  // Publish kind first, fence, then publish head; readers access both words atomically.
-  // Folding kind into the head would overwrite val_end's high byte.
+  // Only row_lane 0 publishes, so plain stores suffice; the post-walk __syncwarp makes
+  // both fields visible to the other lanes before materialization.
   static_assert(offsetof(merged_path_out, val_begin) == 0 &&
                   offsetof(merged_path_out, val_end) == 4 &&
                   offsetof(merged_path_out, val_kind) == 8,
                 "12-byte record active layout changed");
-  uint64_t const image = static_cast<uint64_t>(static_cast<uint32_t>(begin)) |
-                         (static_cast<uint64_t>(static_cast<uint32_t>(end)) << 32);
-  unsigned int* const kind_word = reinterpret_cast<unsigned int*>(&r.val_kind);
-  (void)atomicExch(kind_word, static_cast<unsigned int>(static_cast<unsigned char>(kind)));
-  __threadfence_block();
-  (void)atomicExch(reinterpret_cast<unsigned long long*>(&r.val_begin), image);
+  r.val_kind = kind;
+  reinterpret_cast<uint64_t&>(r.val_begin) =
+    static_cast<uint64_t>(static_cast<uint32_t>(begin)) |
+    (static_cast<uint64_t>(static_cast<uint32_t>(end)) << 32);
 }
 
-// Record reads must be atomic while other row lanes can publish the same fields.
 __device__ __forceinline__ uint64_t merged_rec_head(merged_path_out const& r)
 {
-  return cuda::atomic_ref<unsigned long long, cuda::thread_scope_device>(
-           *reinterpret_cast<unsigned long long*>(const_cast<int32_t*>(&r.val_begin)))
-    .load(cuda::std::memory_order_relaxed);
+  return reinterpret_cast<uint64_t const&>(r.val_begin);
 }
 __device__ __forceinline__ unsigned int merged_rec_kind_word(merged_path_out const& r)
 {
-  return cuda::atomic_ref<unsigned int, cuda::thread_scope_device>(
-           *reinterpret_cast<unsigned int*>(const_cast<int8_t*>(&r.val_kind)))
-    .load(cuda::std::memory_order_relaxed);
-}
-
-__device__ __forceinline__ void merged_rec_mark_dead(merged_path_out& r)
-{
-  // The set predicate reads an atomic head while other row lanes can publish it.
-  if (static_cast<int32_t>(static_cast<uint32_t>(merged_rec_head(r))) < 0) {
-    // Mark kind before republishing the atomic head, matching normal publication order.
-    unsigned int* const kind_word = reinterpret_cast<unsigned int*>(&r.val_kind);
-    (void)atomicExch(kind_word,
-                     static_cast<unsigned int>(static_cast<unsigned char>(k_merged_kind_dead)));
-    // An atomic head read keeps begin/end from different exchanges from being mixed.
-    uint64_t const head  = merged_rec_head(r);
-    uint64_t const image = (static_cast<uint64_t>(static_cast<uint32_t>(head)) |
-                            (static_cast<uint64_t>(static_cast<uint32_t>(head >> 32)) << 32));
-    __threadfence_block();
-    (void)atomicExch(reinterpret_cast<unsigned long long*>(&r.val_begin), image);
-  }
+  return static_cast<unsigned int>(static_cast<unsigned char>(r.val_kind));
 }
 
 __device__ __forceinline__ bool merged_rec_is_set(merged_path_out const& r)
@@ -1089,24 +1070,12 @@ __device__ __forceinline__ int8_t merged_rec_kind(merged_path_out const& r)
 {
   return static_cast<int8_t>(merged_rec_kind_word(r) & 0xffu);
 }
-// R=1 uses separate atomic loads for head and kind, not one atomic record snapshot.
-// Redundant row lanes publish identical values during the walk; the post-walk barrier
-// makes both fields stable before materialization.
-struct merged_rec_view {
-  int32_t begin;
-  int32_t end;
-  int8_t kind;
-  bool is_set;
-};
-__device__ __forceinline__ merged_rec_view merged_rec_load(merged_path_out const& r)
+
+// Unset records become dead; records set by an earlier match are left alone, because the
+// walk only ever marks unmatched subtrees.
+__device__ __forceinline__ void merged_rec_mark_dead(merged_path_out& r)
 {
-  merged_rec_view v{};
-  uint64_t const head = merged_rec_head(r);
-  v.begin             = static_cast<int32_t>(static_cast<uint32_t>(head));
-  v.end               = static_cast<int32_t>(head >> 32);
-  v.is_set            = v.begin >= 0;
-  v.kind              = static_cast<int8_t>(merged_rec_kind_word(r) & 0xffu);
-  return v;
+  if (!merged_rec_is_set(r)) { merged_rec_set(r, -1, -1, k_merged_kind_dead); }
 }
 
 template <int R>
@@ -1117,99 +1086,6 @@ inline constexpr int k_merged_min_blocks_per_sm = 8;
 // Shallow admission bounds the live trie descent stack.
 constexpr int k_merged_max_trie_depth = static_cast<int>(k_merged_max_depth);
 
-/**
- * Compares a validated quoted field name with decoded candidate bytes, without moving parser state.
- * Requires the whole raw token, including both quotes; escaped names and surrogate pairs compare
- * by decoded bytes, and a successful match consumes the complete candidate and raw spelling.
- */
-// try_skip_unicode's contract; both handle surrogate pairs and exact closing quotes.
-__device__ inline bool merged_name_matches(char_range raw, cudf::string_view candidate)
-{
-  if (raw.is_empty()) { return false; }
-  char_range_reader r(raw);
-  char const quote_char = r.current_char();
-  r.next();  // skip opening quote
-  for (cudf::size_type ci = 0; ci < candidate.size_bytes(); /* incremented in body */) {
-    if (r.is_empty()) { return false; }
-    char const c = r.current_char();
-    if (c == quote_char) { return false; }  // name ended before candidate consumed
-    if (c == '\\') {
-      r.next();
-      if (r.is_empty()) { return false; }
-      char const e = r.current_char();
-      switch (e) {
-        case '"':
-        case '\'':
-        case '\\':
-        case '/':
-          r.next();
-          if (e != candidate.data()[ci]) { return false; }
-          ++ci;
-          continue;
-        case 'b':
-        case 'f':
-        case 'n':
-        case 'r':
-        case 't': {
-          char const decoded = json_parser::simple_escape(e);
-          r.next();
-          if (decoded != candidate.data()[ci]) { return false; }
-          ++ci;
-          continue;
-        }
-
-        case 'u': {
-          r.next();
-          if (r.size() < 4) { return false; }
-          uint32_t cp = 0;
-          for (int h = 0; h < 4; ++h) {
-            char const hc = r.current_char();
-            if (!json_parser::is_hex_digit(hc)) { return false; }
-            cp = (cp << 4) | json_parser::hex_value(hc);
-            r.next();
-          }
-          // Pair only a valid low surrogate; otherwise encode the high value alone.
-          if (cp >= 0xD800 && cp <= 0xDBFF && r.size() >= 6 && r[0] == '\\' && r[1] == 'u') {
-            uint32_t low = 0;
-            bool ok      = true;
-            for (int h = 2; h < 6; ++h) {
-              char const hc = r[h];
-              if (!json_parser::is_hex_digit(hc)) {
-                ok = false;
-                break;
-              }
-              low = (low << 4) | json_parser::hex_value(hc);
-            }
-            if (ok && low >= 0xDC00 && low <= 0xDFFF) {
-              cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-              for (int h = 0; h < 6; ++h) {
-                r.next();
-              }
-            }
-          }
-          char buff[4];
-          cudf::size_type const w =
-            json_parser::from_char_utf8(json_parser::codepoint_to_utf8(cp), buff);
-          // Compare decoded bytes to the candidate without advancing the raw reader again.
-          if (candidate.size_bytes() - ci < w) { return false; }
-          for (cudf::size_type b = 0; b < w; ++b) {
-            if (candidate.data()[ci + b] != buff[b]) { return false; }
-          }
-          ci += w;
-          continue;
-        }
-        default: return false;  // unreachable: main parse validated the escape
-      }
-    }
-    if (c != candidate.data()[ci]) { return false; }
-    r.next();
-    ++ci;
-  }
-  if (r.is_empty() || r.current_char() != quote_char) { return false; }
-  r.next();
-  return r.is_empty();  // no trailing raw content
-}
-
 // Returns the matching slot ID, not the flat child position, or -1 within the supplied child range.
 __device__ __forceinline__ int32_t merged_exact_scan(merged_trie_view const& trie,
                                                      char_range const& raw,
@@ -1219,7 +1095,7 @@ __device__ __forceinline__ int32_t merged_exact_scan(merged_trie_view const& tri
   for (int32_t c = from; c < to; ++c) {
     int32_t const slot = trie.flat_children[c];
     cudf::string_view const cand(trie.names + trie.flat_name_off[c], trie.flat_name_len[c]);
-    if (merged_name_matches(raw, cand)) { return slot; }
+    if (json_parser::match_decoded_name(raw, cand)) { return slot; }
   }
   return -1;
 }
@@ -1260,14 +1136,14 @@ __device__ __forceinline__ void kill_subtree_unmatched(merged_trie_view const& t
   int32_t const sc = trie.subtree_cnt[slot];
   for (int32_t t = 0; t < sc; ++t) {
     auto const pid = trie.subtree_pids[sb + t];
-    if (!merged_rec_is_set(row_out[pid])) { merged_rec_mark_dead(row_out[pid]); }
+    merged_rec_mark_dead(row_out[pid]);
   }
 }
 
 /**
  * Evaluates a pure-NAMED group by walking one shared prefix trie per row; the launcher uses R=1.
- * Every row lane repeats the same parse and atomically records selections, then a row barrier
- * separates that walk from lane-strided output writing. Unselected records produce null views.
+ * Every row lane repeats the same parse, but only row_lane 0 records selections; a row barrier
+ * separates the walk from lane-strided output writing. Unselected records produce null views.
  *
  * The first matching key owns its entire path subtree, even for null or a missing deeper member.
  * A path ending at an object can coexist with paths below it; its range completes on object close.
@@ -1303,8 +1179,13 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
   auto const warp_in_block = threadIdx.x / warp_lanes;
   rec_t* row_out = row_scratch == nullptr ? smem_row_out + (warp_in_block * R + half) * num_paths
                                           : row_scratch + static_cast<int64_t>(row_idx) * num_paths;
-  for (int32_t i = row_lane; i < num_paths; i += row_lanes) {
-    merged_rec_init(row_out[i]);
+  // All lanes walk the row (the cooperative skip depends on it), but only row_lane 0
+  // touches the records; __syncwarp(row_mask) hands its results to the other lanes.
+  bool const records_owner = row_lane == 0;
+  if (records_owner) {
+    for (int32_t i = 0; i < num_paths; ++i) {
+      merged_rec_init(row_out[i]);
+    }
   }
   __syncwarp(row_mask);
 
@@ -1345,10 +1226,14 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
       int32_t const vc = trie.paths_cnt[slot];
       for (int32_t t = 0; t < vc; ++t) {
         auto const pid = trie.terminal_ids[vb + t];
-        // First duplicate wins; unset dead paths never resurrect.
-        merged_rec_view const cur = merged_rec_load(row_out[pid]);
-        if (!cur.is_set && cur.kind != k_merged_kind_dead) {
-          merged_rec_set(row_out[pid], begin, end, kind);
+        // First duplicate wins; unset dead paths never resurrect. The merged route keeps
+        // first-match-wins like the general route; scan-all alignment is a pending upstream
+        // semantic change (see k_merged_kind_dead).
+        if (records_owner) {
+          merged_path_out const& rec = row_out[pid];
+          if (!merged_rec_is_set(rec) && merged_rec_kind(rec) != k_merged_kind_dead) {
+            merged_rec_set(row_out[pid], begin, end, kind);
+          }
         }
       }
     };
@@ -1373,7 +1258,7 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
         }
         // Exhausted child namespace kills only its own unmatched subtree; sibling paths survive.
         // subtree_pids covers all descendants, so direct-child kills need no DFS.
-        {
+        if (records_owner) {
           int32_t const cb = trie.children_beg[node];
           int32_t const cc = trie.children_cnt[node];
           for (int32_t c = 0; c < cc; ++c) {
@@ -1406,7 +1291,7 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
 
       if (json_token::VALUE_NULL == vt) {
         // Matched null kills its path permanently, including future duplicate keys.
-        kill_subtree_unmatched(trie, slot, row_out);
+        if (records_owner) { kill_subtree_unmatched(trie, slot, row_out); }
         continue;
       }
       if (json_token::START_OBJECT == vt || json_token::START_ARRAY == vt) {
@@ -1422,8 +1307,10 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
             break;
           }
           int32_t const end = static_cast<int32_t>(p.current_range().data() - str.data()) + 1;
-          record_subtree(slot, begin, end);
-          kill_subtree_unmatched(trie, slot, row_out);
+          if (records_owner) {
+            record_subtree(slot, begin, end);
+            kill_subtree_unmatched(trie, slot, row_out);
+          }
         } else if (can_descend) {
           if (sp > MaxTrieDepth - 1) {
             parse_ok = false;
@@ -1440,7 +1327,7 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
             parse_ok = false;
             break;
           }
-          kill_subtree_unmatched(trie, slot, row_out);
+          if (records_owner) { kill_subtree_unmatched(trie, slot, row_out); }
         }
         continue;
       }
@@ -1451,10 +1338,12 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
         int32_t const end   = begin + static_cast<int32_t>(p.current_range().size());
         int8_t kind;
         kind = json_token::VALUE_STRING == vt ? k_merged_kind_string : k_merged_kind_terminal;
-        record_slot(slot, begin, end, kind);
+        if (records_owner) { record_slot(slot, begin, end, kind); }
       }
       // A scalar kills deeper chains; a childless slot has no descendants to kill.
-      if (trie.child_node[slot] >= 0) { kill_subtree_unmatched(trie, slot, row_out); }
+      if (records_owner && trie.child_node[slot] >= 0) {
+        kill_subtree_unmatched(trie, slot, row_out);
+      }
     }
   }
   // Depth flags cover spine and root-validation paths, including nested skips.
@@ -1482,37 +1371,43 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     // All-dead paths may still emit null views without throwing.
   }
   if (!parse_ok) {
-    // Ordinary resets must follow every row lane's atomic record accesses.
+    // Resets must follow the lane that published records; the barrier makes that ordering hold.
     __syncwarp(row_mask);
     // Validation failure nulls every path regardless of prior records.
-    for (int32_t i = row_lane; i < num_paths; i += row_lanes) {
-      merged_rec_init(row_out[i]);
+    if (records_owner) {
+      for (int32_t i = 0; i < num_paths; ++i) {
+        merged_rec_init(row_out[i]);
+      }
     }
   }
   __syncwarp(row_mask);
 
-  auto const row_beg = static_cast<int64_t>(path_data[0].offsets[row_idx]);
-  auto const row_end = static_cast<int64_t>(path_data[0].offsets[row_idx + 1]);
-  auto const row_max = row_end - row_beg;  // int64: base compared the raw offsets difference
-  // Slice offsets are absolute, but scratch owns only the selected bytes.
-  auto const row_scratch_beg = row_beg - path_data[0].base_offset;
   for (int32_t i = row_lane; i < num_paths; i += row_lanes) {
     auto const& path         = path_data[i];
     auto const& po           = row_out[i];
     bool is_valid            = false;
     cudf::size_type out_size = 0;
-    char const* out_ptr      = path.out_buf + row_scratch_beg;
-    // Row records are stable after the barrier; R=1 still reads head and kind separately.
-    merged_rec_view const rec = merged_rec_load(po);
-    if (rec.is_set) {
-      char* const dst = path.out_buf + row_scratch_beg;
-      if (rec.kind == k_merged_kind_string) {
+    // Retry descriptors give each path its own offsets column; read per path, not path_data[0].
+    auto const row_beg = static_cast<int64_t>(path.offsets[row_idx]);
+    auto const row_max = static_cast<int64_t>(path.offsets[row_idx + 1]) - row_beg;
+    // Slice offsets are absolute, but scratch owns only the selected bytes.
+    auto const row_scratch_beg = row_beg - path.base_offset;
+    char const* out_ptr        = path.out_buf + row_scratch_beg;
+    // Row records are stable after the barrier; head and kind are read separately. The head
+    // packs [val_begin, val_end) as low/high 32 bits (see merged_rec_set).
+    merged_path_out const& rec = po;
+    if (merged_rec_is_set(rec)) {
+      uint64_t const head = merged_rec_head(rec);
+      int32_t const begin = static_cast<int32_t>(static_cast<uint32_t>(head));
+      int32_t const end   = static_cast<int32_t>(head >> 32);
+      char* const dst     = path.out_buf + row_scratch_beg;
+      if (merged_rec_kind(rec) == k_merged_kind_string) {
         // Decode validated escapes through the parser's writer seam.
-        char_range_reader r(char_range(str.data() + rec.begin, rec.end - rec.begin));
+        char_range_reader r(char_range(str.data() + begin, end - begin));
         out_size = json_parser::write_string(r, dst, escape_style::UNESCAPED);
         is_valid = true;
       } else {
-        char_range const value_range(str.data() + rec.begin, rec.end - rec.begin);
+        char_range const value_range(str.data() + begin, end - begin);
         json_parser vp{value_range};
         vp.next_token();
         if (json_token::ERROR != vp.get_current_token() && !vp.max_nesting_depth_exceeded()) {
@@ -1736,8 +1631,8 @@ void launch_merged_named(cudf::column_device_view const& input,
     static_cast<std::size_t>(warps_per_block) * plan.num_paths * sizeof(merged_path_out);
   auto constexpr k_smem_cap = 48 * 1024;  // default dynamic smem per block
   bool const row_scratch    = smem_r1 > k_smem_cap;
-  auto const num_blocks     = cudf::util::div_rounding_up_safe(rows * cudf::detail::warp_size,
-                                                           static_cast<std::size_t>(block_size));
+  auto const num_blocks     = cudf::detail::div_rounding_up_safe(rows * cudf::detail::warp_size,
+                                                             static_cast<std::size_t>(block_size));
   if (row_scratch) {
     plan.row_scratch =
       rmm::device_uvector<merged_path_out>(static_cast<int64_t>(input.size()) * plan.num_paths,
@@ -1769,37 +1664,53 @@ struct launch_grouped_staging {
   rmm::device_buffer d_prewalk_pack;
   std::vector<std::vector<json_path_processing_data>> group_staging;
   std::vector<merged_group_plan> merged_plans;
+  // Per batch position, 1 when the path launched through the merged kernel. A retry call
+  // seeds this vector per flagged path from the first pass's record: the two evaluators
+  // write different per-row extents, so a retry must reuse the kernel that measured its slots.
+  std::vector<char> merged_routed;
+  // Snapshot of the first pass's `merged_routed`, kept across the first pass so the retry
+  // can read the route before the retry call resets the record.
+  std::vector<char> merged_routed_prev;
 };
 
 /**
- * Partitions a first-match batch into one eligible pure-NAMED trie and remaining independent paths.
+ * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
  * Shallow admission requires 32 rows and sixteen paths; all-depth-one groups also need 124 paths.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
  * Host/device paths share batch order; zeroed error storage has path flags plus one depth flag.
- * Pass fresh caller-owned staging for upload lifetimes. Mixed groups fork after upload and join on
- * stream before return; the join orders later readback, but does not synchronize the host.
+ * Reuses caller-owned staging for upload lifetimes: a retry call passes the same object, and
+ * `is_retry` routes each path by its recorded first-pass route instead of re-deciding admission.
+ * Mixed groups fork after upload and join on stream before return; the join orders later
+ * readback, but does not synchronize the host.
  */
 void launch_grouped(
   cudf::column_device_view const& input,
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
-  rmm::device_uvector<int8_t>& d_error_check,
+  int8_t* d_max_path_depth_exceeded,
   std::vector<json_path_processing_data> const& h_path_data,
   cudf::device_span<json_path_processing_data> d_path_data,
   bool use_last_non_null,
+  bool is_retry,
   launch_grouped_staging& staging,
   cuda::stream_ref stream)
 {
   auto const num_outputs = json_paths.size();
   if (num_outputs == 0) { return; }
 
-  int8_t* const d_max_path_depth_exceeded = d_error_check.data() + num_outputs;
-
   // The merged walk keeps the first duplicate; last-non-null selection needs the general scan.
   if (use_last_non_null) {
     kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, true, stream);
+    // Nothing is merged-routed, but the retry reads the record for every flagged path.
+    staging.merged_routed_prev.assign(num_outputs, 0);
     return;
   }
+
+  // Fresh state per call: the first pass clears the routing record; a retry keeps it as the
+  // per-retry-batch-position hint the caller seeded from the first pass.
+  staging.merged_plans.clear();
+  staging.group_staging.clear();
+  if (!is_retry) { staging.merged_routed.assign(num_outputs, 0); }
 
   // Depth-1 groups need 124 paths; depth-2 keeps the merged route.
   std::vector<std::size_t> general_indices;
@@ -1844,7 +1755,31 @@ void launch_grouped(
     return group_staging.size() - 1;
   };
 
-  if (merged_plans.empty() && !merged_shallow_indices.empty()) {
+  if (is_retry) {
+    // The hint records the first pass's route per retry batch position; honor it exactly.
+    // A merged-admitted retry rebuilds the trie over the flagged merged-eligible paths and
+    // reuses the merged launcher, so retry sizing matches the first pass.
+    std::vector<std::size_t> hint_merged;
+    std::vector<std::size_t> hint_general;
+    for (std::size_t idx = 0; idx < num_outputs; ++idx) {
+      if (staging.merged_routed[idx] != 0) {
+        hint_merged.push_back(idx);
+      } else {
+        hint_general.push_back(idx);
+      }
+    }
+    // Fall back to admission when no flagged path was merged-routed (general-only retry).
+    if (!hint_merged.empty()) {
+      merged_plans.emplace_back(
+        build_merged_named_plan(json_paths, hint_merged, k_merged_max_trie_depth, stream));
+      merged_shallow_indices = std::move(hint_merged);
+      general_indices        = std::move(hint_general);
+    } else {
+      general_indices.insert(
+        general_indices.end(), merged_shallow_indices.begin(), merged_shallow_indices.end());
+      merged_shallow_indices.clear();
+    }
+  } else if (merged_plans.empty() && !merged_shallow_indices.empty()) {
     std::size_t max_inst_count = 0;
     for (auto idx : merged_shallow_indices) {
       max_inst_count = std::max(max_inst_count, json_paths[idx].size());
@@ -1864,7 +1799,11 @@ void launch_grouped(
   // No merged plan: launch all paths from the existing device view on the caller's stream.
   if (merged_plans.empty()) {
     kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
+    if (!is_retry) { staging.merged_routed_prev = staging.merged_routed; }
     return;
+  }
+  for (auto const idx : merged_shallow_indices) {
+    staging.merged_routed[idx] = 1;
   }
 
   // Pack at most one merged view and one general view.
@@ -1934,6 +1873,8 @@ void launch_grouped(
     kernel_launcher::exec(
       input, span_of(general_group), d_max_path_depth_exceeded, use_last_non_null, stream);
   }
+  // A retry re-partitions the flagged paths by this first-pass route record.
+  if (!is_retry) { staging.merged_routed_prev = staging.merged_routed; }
 }
 
 }  // namespace
@@ -1995,10 +1936,11 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   launch_grouped_staging launch_staging;
   launch_grouped(input,
                  json_paths,
-                 d_error_check,
+                 d_max_path_depth_exceeded,
                  h_path_data,
                  d_path_data,
                  use_last_non_null,
+                 /* is_retry */ false,
                  launch_staging,
                  stream);
 
@@ -2016,16 +1958,27 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     }
     return cudf::make_strings_column_batch(batch_stringviews, stream, mr);
   }
-  // Retry flagged paths using the first pass's lengths; unflagged paths keep their existing views.
-
+  // The retry runs the flagged paths as its own batch: retry-ordered path spans, a retry-order
+  // flag vector, and each path's first-pass route as the launch hint. The two evaluators write
+  // different per-row extents, so a retry must use the kernel that measured its slots.
   std::vector<std::pair<std::unique_ptr<cudf::column>, int64_t>> out_offsets_and_sizes;
   std::vector<rmm::device_uvector<char>> out_char_buffers;
   std::vector<std::size_t> oob_indices;
   std::vector<std::size_t> no_oob_indices;
+  auto const oob_count = static_cast<std::size_t>(
+    std::count_if(h_error_check.begin(), h_error_check.begin() + num_outputs, [](int8_t flag) {
+      return flag != 0;
+    }));
 
   // Rebuild only paths that had out-of-bound writes; retry slots are sized
   // max(stored size, input row size).
   h_path_data.clear();
+  std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>>
+    json_paths_retry;
+  json_paths_retry.reserve(oob_count);
+  launch_staging.merged_routed.clear();
+  launch_staging.merged_routed.reserve(oob_count);
+  rmm::device_uvector<int8_t> d_retry_error_check(oob_count + 1, stream);
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
     auto& out_sview = out_stringviews[idx];
 
@@ -2045,6 +1998,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
       out_char_buffers.emplace_back(
         rmm::device_uvector<char>(out_offsets_and_sizes.back().second, stream, mr));
 
+      json_paths_retry.emplace_back(json_paths[idx]);
+      launch_staging.merged_routed.push_back(launch_staging.merged_routed_prev[idx]);
       h_path_data.emplace_back(
         json_path_processing_data{d_json_paths[idx],
                                   cudf::detail::offsetalator_factory::make_input_iterator(
@@ -2052,7 +2007,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                   0,
                                   out_sview.data(),
                                   out_char_buffers.back().data(),
-                                  d_error_check.data() + idx});
+                                  d_retry_error_check.data() + (oob_indices.size() - 1)});
     } else {
       no_oob_indices.emplace_back(idx);
       batch_stringviews.emplace_back(out_sview);
@@ -2070,17 +2025,28 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
-  // validity.
+  // validity. A retry must use the same evaluator as the first pass: the general evaluator
+  // writes more per row than the merged one, so its rows would overflow the exact-size retry
+  // slots that the merged route sized from its own write footprints.
   d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, cudf::get_current_device_resource_ref());
   thrust::uninitialized_fill(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-    d_error_check.begin(),
-    d_error_check.end(),
+    d_retry_error_check.begin(),
+    d_retry_error_check.end(),
     0);
-  kernel_launcher::exec(input, d_path_data, d_max_path_depth_exceeded, use_last_non_null, stream);
-  h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
-  has_no_oob    = check_error(h_error_check);
+  launch_grouped(input,
+                 json_paths_retry,
+                 d_retry_error_check.data() + oob_count,
+                 h_path_data,
+                 d_path_data,
+                 use_last_non_null,
+                 /* is_retry */ true,
+                 launch_staging,
+                 stream);
+  // The retry's flag vector carries its own depth slot, so the same check applies to it.
+  auto h_retry_error_check = cudf::detail::make_host_vector(d_retry_error_check, stream);
+  has_no_oob               = check_error(h_retry_error_check);
 
   // Identical input and paths must reproduce measured lengths; still check the retry for overflow.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
