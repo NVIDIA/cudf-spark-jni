@@ -872,10 +872,10 @@ class json_parser {
    * state. `raw` must be the whole raw token including both quotes, as current_range returns for
    * a FIELD_NAME token; `candidate` holds already-decoded bytes. Escape-free names decode to
    * their own bytes and match by plain byte compare that returns at the first mismatch; names
-   * containing an escape delegate to try_parse_string, the single decoder for simple escapes,
-   * \u including surrogate pairs, whose decoded bytes are never re-escaped. Returns false when
-   * the raw name ends before the candidate is consumed, when an escape is invalid, or when bytes
-   * follow the closing quote.
+   * containing an escape delegate to try_parse_string — the single decoder for simple escapes
+   * and \u including surrogate pairs — whose decoded bytes are never re-escaped. Returns false
+   * when the raw name ends before the candidate is consumed, when an escape is invalid, or when
+   * bytes follow the closing quote.
    */
   static __device__ bool match_decoded_name(char_range raw, cudf::string_view candidate)
   {
