@@ -223,19 +223,6 @@ class json_parser {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
   }
 
-  // Decodes b/f/n/r/t for validated names; other bytes pass through and are not validated here.
-  static __device__ inline char simple_escape(char c)
-  {
-    switch (c) {
-      case 'b': return '\b';
-      case 'f': return '\f';
-      case 'n': return '\n';
-      case 'r': return '\r';
-      case 't': return '\t';
-      default: return c;
-    }
-  }
-
   // A null destination counts bytes; a non-null destination copies the literal.
   static __device__ inline int write_lit(char* destination, char const* text, int len)
   {
@@ -883,95 +870,17 @@ class json_parser {
   /**
    * Compares a validated quoted field name with decoded candidate bytes, without moving parser
    * state. `raw` must be the whole raw token including both quotes, as current_range returns for
-   * a FIELD_NAME token; `candidate` holds already-decoded bytes. Escapes decode exactly as
-   * try_skip_escape_part and try_skip_unicode do: simple escapes, \u including surrogate pairs,
-   * and decoded bytes are never re-escaped. Returns false when the raw name ends before the
-   * candidate is consumed or when bytes follow the closing quote.
+   * a FIELD_NAME token; `candidate` holds already-decoded bytes. Both call paths share one
+   * decoder by delegating to try_parse_string: simple escapes, \u including surrogate pairs, and
+   * decoded bytes are never re-escaped. Returns false when the raw name ends before the
+   * candidate is consumed, when an escape is invalid, or when bytes follow the closing quote.
    */
   static __device__ bool match_decoded_name(char_range raw, cudf::string_view candidate)
   {
     if (raw.is_empty()) { return false; }
-    char_range_reader r(raw);
-    char const quote_char = r.current_char();
-    r.next();  // skip opening quote
-    for (cudf::size_type ci = 0; ci < candidate.size_bytes(); /* incremented in body */) {
-      if (r.is_empty()) { return false; }
-      char const c = r.current_char();
-      if (c == quote_char) { return false; }  // name ended before candidate consumed
-      if (c == '\\') {
-        r.next();
-        if (r.is_empty()) { return false; }
-        char const e = r.current_char();
-        switch (e) {
-          case '"':
-          case '\'':
-          case '\\':
-          case '/':
-            r.next();
-            if (e != candidate.data()[ci]) { return false; }
-            ++ci;
-            continue;
-          case 'b':
-          case 'f':
-          case 'n':
-          case 'r':
-          case 't': {
-            char const decoded = simple_escape(e);
-            r.next();
-            if (decoded != candidate.data()[ci]) { return false; }
-            ++ci;
-            continue;
-          }
-
-          case 'u': {
-            r.next();
-            if (r.size() < 4) { return false; }
-            uint32_t cp = 0;
-            for (int h = 0; h < 4; ++h) {
-              char const hc = r.current_char();
-              if (!is_hex_digit(hc)) { return false; }
-              cp = (cp << 4) | hex_value(hc);
-              r.next();
-            }
-            // Pair only a valid low surrogate; otherwise encode the high value alone.
-            if (cp >= 0xD800 && cp <= 0xDBFF && r.size() >= 6 && r[0] == '\\' && r[1] == 'u') {
-              uint32_t low = 0;
-              bool ok      = true;
-              for (int h = 2; h < 6; ++h) {
-                char const hc = r[h];
-                if (!is_hex_digit(hc)) {
-                  ok = false;
-                  break;
-                }
-                low = (low << 4) | hex_value(hc);
-              }
-              if (ok && low >= 0xDC00 && low <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                for (int h = 0; h < 6; ++h) {
-                  r.next();
-                }
-              }
-            }
-            char buff[4];
-            cudf::size_type const w = from_char_utf8(codepoint_to_utf8(cp), buff);
-            // Compare decoded bytes to the candidate without advancing the raw reader again.
-            if (candidate.size_bytes() - ci < w) { return false; }
-            for (cudf::size_type b = 0; b < w; ++b) {
-              if (candidate.data()[ci + b] != buff[b]) { return false; }
-            }
-            ci += w;
-            continue;
-          }
-          default: return false;  // unreachable: main parse validated the escape
-        }
-      }
-      if (c != candidate.data()[ci]) { return false; }
-      r.next();
-      ++ci;
-    }
-    if (r.is_empty() || r.current_char() != quote_char) { return false; }
-    r.next();
-    return r.is_empty();  // no trailing raw content
+    auto const [success, matched, end] =
+      try_parse_string(char_range_reader(raw), char_range_reader(candidate));
+    return success && matched && end == raw.data() + raw.size();
   }
 
  private:
