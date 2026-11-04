@@ -86,8 +86,10 @@ field_descriptor_bundle make_field_descriptors(std::vector<int> const& field_ind
     enum_offset += enum_size;
   }
   if (!h_enum_values.empty()) {
-    CUDF_CUDA_TRY(cudf::detail::memcpy_async(
-      d_enum_values.data(), h_enum_values.data(), h_enum_values.size() * sizeof(int32_t), stream));
+    // Unlike h_descriptors, this staging is released on return, so finish its upload first.
+    cudf::detail::cuda_memcpy(cudf::device_span<int32_t>{d_enum_values},
+                              cudf::host_span<int32_t const>{h_enum_values},
+                              stream);
   }
 
   auto d_descriptors = cudf::detail::make_device_uvector_async(h_descriptors, stream, mr);
@@ -351,7 +353,6 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto d_valid_enums    = cudf::detail::make_device_uvector_async(valid_enums, stream, scratch_mr);
 
-  // Stream-ordered pinned deallocation keeps these staging buffers safe without a local sync.
   auto h_name_offsets =
     cudf::detail::make_pinned_vector_async<int32_t>(valid_enums.size() + 1, stream);
   h_name_offsets[0]       = 0;
@@ -371,8 +372,10 @@ enum_string_lookup_tables make_enum_string_lookup_tables(
     cursor += name.size();
   }
 
-  auto d_name_offsets = cudf::detail::make_device_uvector_async(h_name_offsets, stream, scratch_mr);
-  auto d_name_chars   = cudf::detail::make_device_uvector_async(h_name_chars, stream, scratch_mr);
+  // The pinned pool may be shared with Java allocations that reuse freed blocks without
+  // synchronizing, so finish these uploads before the staging is released on return.
+  auto d_name_offsets = cudf::detail::make_device_uvector(h_name_offsets, stream, scratch_mr);
+  auto d_name_chars   = cudf::detail::make_device_uvector(h_name_chars, stream, scratch_mr);
 
   return {std::move(d_valid_enums), std::move(d_name_offsets), std::move(d_name_chars)};
 }
