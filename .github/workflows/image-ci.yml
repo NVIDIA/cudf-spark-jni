@@ -1,0 +1,150 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Image CI
+
+# copy-pr-bot copies the exact head approved by /ok to test <full-head-SHA>.
+# No auto-sync: new commits need new approval. Unaffected PRs skip image builds.
+# This validates the toolchain images only, not the JNI GPU premerge tests.
+# After merge, install/enable the bot before using this workflow; do not require
+# the gate until both affected/unaffected paths have been validated on GHA.
+on:
+  push:
+    branches:
+      - 'pull-request/[0-9]+'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: image-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select image checks
+    if: github.repository == 'NVIDIA/cudf-spark-jni'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.select.outputs.suites }}
+      required-jobs: ${{ steps.select.outputs.required-jobs }}
+      images: ${{ steps.catalog.outputs.images || '[]' }}
+      base-branch: ${{ steps.target.outputs.base-branch }}
+    steps:
+      - name: Checkout approved source
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Determine supported PR target
+        id: target
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (!match) throw new Error('Expected a copied PR head');
+            const {data: pr} = await github.rest.pulls.get({
+              ...context.repo, pull_number: Number(match[1])
+            });
+            if (pr.base.ref !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(pr.base.ref)) {
+              throw new Error('Image CI supports main and release/YY.MM targets only');
+            }
+            core.setOutput('base-branch', pr.base.ref);
+      - name: Select checks from the full PR diff
+        id: select
+        uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
+        with:
+          catalog-path: .github/image-ci-suites.json
+          base-branch: ${{ steps.target.outputs.base-branch }}
+          selector-job: select
+      - name: Read project version
+        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        id: version
+        shell: bash
+        env:
+          BASE_BRANCH: ${{ steps.target.outputs.base-branch }}
+        run: |
+          set -euo pipefail
+          metadata=$(bash ci/image-config.sh version)
+          line=$(jq -r '."release-line"' <<< "$metadata")
+          [[ "$BASE_BRANCH" == main || "$BASE_BRANCH" == "release/$line" ]]
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+      - name: Resolve project toolchains
+        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        id: toolchains
+        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
+        with:
+          config: ci/toolchains.json
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+          allow-default: ${{ steps.target.outputs.base-branch == 'main' }}
+      - name: Read the checked-out project's image catalog
+        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        id: catalog
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+        run: |
+          set -euo pipefail
+          images=$(bash ci/image-config.sh list)
+          while IFS= read -r image; do
+            bash ci/image-config.sh describe "$image"
+          done < <(jq -r '.[]' <<< "$images")
+          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+
+  images:
+    name: Validate ${{ matrix.image }}
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.suites), 'images')
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.images) }}
+        base-branch: ['${{ needs.select.outputs.base-branch }}']
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # The coordinator only invokes common; PR build scripts run in a read-only worker.
+      - name: Validate image with CPU queue fallback
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+        with:
+          workflow: image-ci-worker.yml
+          # Full-SHA approval covers this worker definition as well as image inputs.
+          workflow-ref: ${{ github.ref_name }}
+          source-ref: ${{ github.ref }}
+          source-sha: ${{ github.sha }}
+          workload: ${{ toJSON(matrix) }}
+          runner-type: cpu-amd64
+          queue-policy: extended
+          queue-timeout-minutes: '10'
+          execution-timeout-minutes: '60'
+
+  gate:
+    name: Image CI gate
+    if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
+    needs: [select, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check selected image results
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.required-jobs }}

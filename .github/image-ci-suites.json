@@ -1,0 +1,26 @@
+{
+  "shared_paths": [
+    ".github/image-ci-suites.json",
+    ".github/workflows/image-ci.yml",
+    ".github/workflows/image-ci-worker.yml"
+  ],
+  "suites": {
+    "images": {
+      "enabled": true,
+      "comment": "Validate image inputs on approved PRs; existing JNI build/test coverage stays in Jenkins.",
+      "paths": [
+        "pom.xml",
+        "ci/Dockerfile",
+        "ci/image-config.sh",
+        "ci/image-smoke.sh",
+        "ci/toolchains.json",
+        ".github/image-builds.json",
+        ".github/workflows/image-build.yml",
+        ".github/workflows/image-build-worker.yml"
+      ],
+      "jobs": [
+        "images"
+      ]
+    }
+  }
+}

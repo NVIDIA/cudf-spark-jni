@@ -1,0 +1,26 @@
+{
+  "premerge-cuda12": {
+    "image": "jni-build",
+    "toolchain": "cuda12",
+    "context": ".",
+    "dockerfile": "ci/Dockerfile",
+    "platform": "linux/amd64",
+    "build-args": {
+      "OS_RELEASE": "8",
+      "CMAKE_ARCH": "x86_64"
+    },
+    "smoke-test": "ci/image-smoke.sh"
+  },
+  "premerge-cuda13": {
+    "image": "jni-build",
+    "toolchain": "cuda13",
+    "context": ".",
+    "dockerfile": "ci/Dockerfile",
+    "platform": "linux/amd64",
+    "build-args": {
+      "OS_RELEASE": "8",
+      "CMAKE_ARCH": "x86_64"
+    },
+    "smoke-test": "ci/image-smoke.sh"
+  }
+}

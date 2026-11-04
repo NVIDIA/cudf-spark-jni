@@ -1,0 +1,116 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Daily image build
+
+on:
+  # Daily builds are main-only. Image-input pushes and manual dispatches also
+  # publish release images; approved PR validation is separate in image-ci.yml.
+  schedule:
+    - cron: '47 2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'pom.xml'
+      - 'ci/Dockerfile'
+      - 'ci/image-config.sh'
+      - 'ci/image-smoke.sh'
+      - 'ci/toolchains.json'
+      - '.github/image-builds.json'
+      - '.github/workflows/image-build*.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      (github.event_name != 'schedule' || github.ref == 'refs/heads/main') &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.catalog.outputs.images }}
+    steps:
+      - name: Checkout image catalog
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read project version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(bash ci/image-config.sh version)
+          line=$(jq -r '."release-line"' <<< "$metadata")
+          [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == "refs/heads/release/$line" ]]
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+      - name: Resolve project toolchains
+        id: toolchains
+        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
+        with:
+          config: ci/toolchains.json
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+          allow-default: ${{ github.ref == 'refs/heads/main' }}
+      - name: Validate configured images and versioned tags
+        id: catalog
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+        run: |
+          set -euo pipefail
+          # Main may use default for a new YY.MM. Pin that line before release branch-out.
+          images=$(bash ci/image-config.sh list)
+          while IFS= read -r image; do
+            bash ci/image-config.sh describe "$image"
+          done < <(jq -r '.[]' <<< "$images")
+          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+
+  images:
+    name: Build ${{ matrix.image }}
+    needs: configure
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        image: ${{ fromJSON(needs.configure.outputs.images) }}
+    runs-on: ubuntu-latest
+    # Three 10-minute queues, a final 60-minute queue, one build, and API overhead.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # Common deliberately cancels if the source branch advances, even for an
+      # unrelated commit. Use Run workflow on that branch to dispatch its new head;
+      # rerunning the old run keeps its stale SHA and cannot recover publication.
+      - name: Build image with CPU queue fallback
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+        with:
+          workflow: image-build-worker.yml
+          workflow-ref: ${{ github.ref_name }}
+          source-ref: ${{ github.ref }}
+          source-sha: ${{ github.sha }}
+          workload: ${{ toJSON(matrix) }}
+          runner-type: cpu-amd64
+          queue-policy: extended
+          queue-timeout-minutes: '10'
+          execution-timeout-minutes: '60'

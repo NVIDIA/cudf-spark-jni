@@ -1,0 +1,133 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Image CI worker
+run-name: ${{ inputs.request-id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request-id:
+        required: true
+        type: string
+      parent-run-id:
+        required: true
+        type: string
+      parent-run-attempt:
+        required: true
+        type: string
+      source-ref:
+        required: true
+        type: string
+      source-sha:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      workload:
+        required: true
+        type: string
+
+# Keep this separate from the publisher: PR code never receives package write access.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  worker:
+    name: worker
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 60
+    steps:
+      - name: Check coordinator and approved source
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
+        with:
+          request-id: ${{ inputs.request-id }}
+          parent-run-id: ${{ inputs.parent-run-id }}
+          parent-run-attempt: ${{ inputs.parent-run-attempt }}
+          source-ref: ${{ inputs.source-ref }}
+          source-sha: ${{ inputs.source-sha }}
+      - name: Check approved worker and runner
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          SELECTED_RUNNER: ${{ inputs.runner }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == NVIDIA/cudf-spark-jni ]]
+          [[ "$SOURCE_REF" =~ ^refs/heads/pull-request/[1-9][0-9]*$ ]]
+          [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          jq -e '.group == "nv-cpu-general" and
+            (.labels | test("^linux-amd64-cpu(8|16|32)$"))' <<< "$SELECTED_RUNNER"
+      - name: Checkout approved source
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - name: Verify PR target
+        id: target
+        uses: actions/github-script@v8
+        env:
+          EXPECTED_BASE: ${{ fromJSON(inputs.workload).base-branch }}
+        with:
+          script: |
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (!match) throw new Error('Expected a copied PR head');
+            const {data: pr} = await github.rest.pulls.get({
+              ...context.repo, pull_number: Number(match[1])
+            });
+            if (pr.state !== 'open' || pr.base.ref !== process.env.EXPECTED_BASE) {
+              throw new Error('PR closed or target changed since selection; rerun validation');
+            }
+            if (pr.base.ref !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(pr.base.ref)) {
+              throw new Error('Unsupported PR target');
+            }
+            core.setOutput('base-branch', pr.base.ref);
+      - name: Read project version
+        id: version
+        shell: bash
+        env:
+          BASE_BRANCH: ${{ steps.target.outputs.base-branch }}
+        run: |
+          set -euo pipefail
+          metadata=$(bash ci/image-config.sh version)
+          line=$(jq -r '."release-line"' <<< "$metadata")
+          [[ "$BASE_BRANCH" == main || "$BASE_BRANCH" == "release/$line" ]]
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+      - name: Resolve project toolchains
+        id: toolchains
+        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
+        with:
+          config: ci/toolchains.json
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+          allow-default: ${{ steps.target.outputs.base-branch == 'main' }}
+      - name: Prepare image configuration
+        id: image
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+          IMAGE_NAME: ${{ fromJSON(inputs.workload).image }}
+        run: |
+          config=$(bash ci/image-config.sh describe "$IMAGE_NAME")
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build and smoke-test without publishing
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ steps.image.outputs.config }}
