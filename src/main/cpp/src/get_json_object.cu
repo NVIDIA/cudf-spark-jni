@@ -981,10 +981,15 @@ namespace {
 // under the plugin's 4 GiB budget: the caller batches paths by scratch size, so an all-depth-1
 // batch reaches 124 paths only for columns of roughly <= 33 MiB (4 GiB / 124), and a batch never
 // reaches 16 paths for columns above ~256 MiB (4 GiB / 16) - bigger columns pay the general
-// route. The global record fallback is allocated outside memory_budget_bytes.
+// route. The k_merged_max_paths cap keeps admitted groups' records within the 48 KiB
+// shared-memory bound, so the global record fallback (allocated outside memory_budget_bytes) is
+// unreachable via admission and remains only as a defensive fallback in launch_merged_named.
 inline constexpr std::size_t k_merged_max_depth        = 2;
 inline constexpr std::size_t k_merged_min_paths        = 16;
 inline constexpr std::size_t k_merged_min_depth1_paths = 124;
+// 48 KiB of shared memory holds 4 warps/block x 16 B per record = 768 paths; admission caps a
+// group at this many paths so every admitted group's records stay in shared memory.
+inline constexpr std::size_t k_merged_max_paths = 768;
 
 /**
  * Borrowed trie for one pure-NAMED group. Nodes are object scopes; slots are their named edges.
@@ -1617,7 +1622,8 @@ void bind_merged_plan_view(merged_group_plan& plan, uint8_t const* pack_base)
 
 /**
  * Launches the bound shallow trie with one warp per row; path_data must match plan path order.
- * Records use shared memory up to 48 KiB per block, otherwise plan owns the global record fallback.
+ * Records use shared memory up to 48 KiB per block; admission caps groups at k_merged_max_paths
+ * paths, so the plan's global record fallback is defensive only (mirrors max_trie_depth EXPECTS).
  * Retain the bound pack, path buffers and plan through completion; the caller owns error readback.
  */
 void launch_merged_named(cudf::column_device_view const& input,
@@ -1677,7 +1683,8 @@ struct launch_grouped_staging {
 
 /**
  * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
- * Shallow admission requires 32 rows and 16 paths; all-depth-one groups also need 124 paths.
+ * Shallow admission requires 32 rows and 16 paths; all-depth-one groups also need 124 paths, and
+ * a group caps at k_merged_max_paths paths with the overflow staying general.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
  * Host/device paths share batch order; zeroed error storage has path flags plus one depth flag.
  * Reuses caller-owned staging for upload lifetimes: a retry call passes the same object, and
@@ -1714,7 +1721,8 @@ void launch_grouped(
   staging.group_staging.clear();
   if (!is_retry) { staging.merged_routed.assign(num_outputs, 0); }
 
-  // Depth-1 groups need 124 paths; depth-2 keeps the merged route.
+  // Depth-1 groups need 124 paths; depth-2 keeps the merged route; both cap at k_merged_max_paths
+  // (capped overflow keeps its batch order among the general paths).
   std::vector<std::size_t> general_indices;
   std::vector<std::size_t> merged_shallow_indices;
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
@@ -1728,7 +1736,7 @@ void launch_grouped(
     }
     if (!has_wc && !has_index && has_named) {
       auto const depth = json_paths[idx].size();
-      if (depth <= k_merged_max_depth) {
+      if (depth <= k_merged_max_depth && merged_shallow_indices.size() < k_merged_max_paths) {
         merged_shallow_indices.push_back(idx);
       } else {
         general_indices.push_back(idx);
