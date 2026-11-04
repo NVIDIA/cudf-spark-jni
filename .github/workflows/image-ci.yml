@@ -15,13 +15,25 @@
 name: Image CI
 
 # PRs run on hosted runners with read-only permissions; no bot approval is needed.
-# Always run selection and the gate; unaffected PRs skip only the image builds.
+# Start only for image-related file changes, not PR title/description edits.
 # This validates the toolchain images only, not the JNI GPU premerge tests.
-# After validating affected/unaffected paths, require only Image CI gate.
+# Do not require this path-filtered workflow's gate for every PR.
 on:
   pull_request:
     branches: [main, 'release/**']
-    types: [opened, synchronize, reopened, edited]
+    # After retargeting a PR, push or reopen it to validate the new base.
+    types: [opened, synchronize, reopened]
+    # Keep in sync with image-ci-suites.json, including its shared paths.
+    paths:
+      - 'pom.xml'
+      - 'ci/Dockerfile'
+      - 'ci/image-config.sh'
+      - 'ci/image-smoke.sh'
+      - 'ci/toolchains.json'
+      - '.github/image-builds.json'
+      - '.github/image-ci-suites.json'
+      - '.github/workflows/image-build.yml'
+      - '.github/workflows/image-ci.yml'
 
 permissions:
   contents: read
