@@ -1,8 +1,7 @@
 {
   "shared_paths": [
     ".github/image-ci-suites.json",
-    ".github/workflows/image-ci.yml",
-    ".github/workflows/image-ci-worker.yml"
+    ".github/workflows/image-ci.yml"
   ],
   "suites": {
     "images": {
@@ -15,8 +14,7 @@
         "ci/image-smoke.sh",
         "ci/toolchains.json",
         ".github/image-builds.json",
-        ".github/workflows/image-build.yml",
-        ".github/workflows/image-build-worker.yml"
+        ".github/workflows/image-build.yml"
       ],
       "jobs": [
         "images"

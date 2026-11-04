@@ -43,6 +43,7 @@ jobs:
       required-jobs: ${{ steps.select.outputs.required-jobs }}
       images: ${{ steps.catalog.outputs.images || '[]' }}
       base-branch: ${{ steps.target.outputs.base-branch }}
+      toolchains: ${{ steps.toolchains.outputs.toolchains }}
     steps:
       - name: Checkout approved source
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -113,27 +114,48 @@ jobs:
       max-parallel: 1
       matrix:
         image: ${{ fromJSON(needs.select.outputs.images) }}
-        base-branch: ['${{ needs.select.outputs.base-branch }}']
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     permissions:
       contents: read
-      actions: write
+      pull-requests: read
     steps:
-      # The coordinator only invokes common; PR build scripts run in a read-only worker.
-      - name: Validate image with CPU queue fallback
-        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+      # PR code runs directly on a hosted runner, without package write access.
+      - name: Checkout approved source
+        uses: NVIDIA/spark-rapids-common/checkout@main
         with:
-          workflow: image-ci-worker.yml
-          # Full-SHA approval covers this worker definition as well as image inputs.
-          workflow-ref: ${{ github.ref_name }}
-          source-ref: ${{ github.ref }}
-          source-sha: ${{ github.sha }}
-          workload: ${{ toJSON(matrix) }}
-          runner-type: cpu-amd64
-          queue-policy: extended
-          queue-timeout-minutes: '10'
-          execution-timeout-minutes: '60'
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify PR is still current
+        uses: actions/github-script@v8
+        env:
+          EXPECTED_BASE: ${{ needs.select.outputs.base-branch }}
+        with:
+          script: |
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (!match) throw new Error('Expected a copied PR head');
+            const {data: pr} = await github.rest.pulls.get({
+              ...context.repo, pull_number: Number(match[1])
+            });
+            if (pr.state !== 'open' || pr.head.sha !== context.sha ||
+                pr.base.ref !== process.env.EXPECTED_BASE) {
+              throw new Error('PR closed, updated or retargeted since selection; approve the current head again');
+            }
+      - name: Prepare image configuration
+        id: image
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ needs.select.outputs.toolchains }}
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          config=$(bash ci/image-config.sh describe "$IMAGE_NAME")
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build and smoke-test without publishing
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ steps.image.outputs.config }}
 
   gate:
     name: Image CI gate

@@ -29,7 +29,7 @@ on:
       - 'ci/image-smoke.sh'
       - 'ci/toolchains.json'
       - '.github/image-builds.json'
-      - '.github/workflows/image-build*.yml'
+      - '.github/workflows/image-build.yml'
 
 permissions:
   contents: read
@@ -48,6 +48,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       images: ${{ steps.catalog.outputs.images }}
+      toolchains: ${{ steps.toolchains.outputs.toolchains }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -93,24 +94,33 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.configure.outputs.images) }}
     runs-on: ubuntu-latest
-    # Three 10-minute queues, a final 60-minute queue, one build, and API overhead.
-    timeout-minutes: 180
+    timeout-minutes: 60
     permissions:
       contents: read
-      actions: write
+      packages: write
     steps:
-      # Common deliberately cancels if the source branch advances, even for an
-      # unrelated commit. Use Run workflow on that branch to dispatch its new head;
-      # rerunning the old run keeps its stale SHA and cannot recover publication.
-      - name: Build image with CPU queue fallback
-        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+      # These toolchain builds need no GPU or dedicated CPU runner pool.
+      - name: Checkout trusted image source
+        uses: NVIDIA/spark-rapids-common/checkout@main
         with:
-          workflow: image-build-worker.yml
-          workflow-ref: ${{ github.ref_name }}
-          source-ref: ${{ github.ref }}
-          source-sha: ${{ github.sha }}
-          workload: ${{ toJSON(matrix) }}
-          runner-type: cpu-amd64
-          queue-policy: extended
-          queue-timeout-minutes: '10'
-          execution-timeout-minutes: '60'
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare image configuration
+        id: image
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ needs.configure.outputs.toolchains }}
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          config=$(bash ci/image-config.sh describe "$IMAGE_NAME")
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build, verify, and publish
+        # The first GHCR package may need a one-time public visibility setting.
+        # Common promotes the versioned tag only after anonymous pull and smoke pass.
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ steps.image.outputs.config }}
+          publish: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }}
