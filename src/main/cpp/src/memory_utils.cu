@@ -17,6 +17,7 @@
 #include "memory_utils.hpp"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
+#include <cudf/logger.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
 
@@ -120,7 +121,12 @@ std::vector<std::unique_ptr<rmm::device_buffer>> copy_packed_async(
     } catch (...) {
       // On error, block until any copies already queued finish, since the caller may then free
       // their buffers
-      cudaStreamSynchronize(stream.get());
+      if (auto const status = cudaStreamSynchronize(stream.get()); status != cudaSuccess) {
+        // Clear it, so a later unrelated check doesn't report it
+        cudaGetLastError();
+        CUDF_LOG_ERROR("Failed to wait for copies after a copy error: %s",
+                       cudaGetErrorString(status));
+      }
       throw;
     }
   }
