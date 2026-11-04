@@ -14,22 +14,20 @@
 
 name: Image CI
 
-# copy-pr-bot copies the exact head approved by /ok to test <full-head-SHA>.
-# No auto-sync: new commits need new approval. Unaffected PRs skip image builds.
+# PRs run on hosted runners with read-only permissions; no bot approval is needed.
+# Always run selection and the gate; unaffected PRs skip only the image builds.
 # This validates the toolchain images only, not the JNI GPU premerge tests.
-# After merge, install/enable the bot before using this workflow; do not require
-# the gate until both affected/unaffected paths have been validated on GHA.
+# After validating affected/unaffected paths, require only Image CI gate.
 on:
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
+  pull_request:
+    branches: [main, 'release/**']
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
-  group: image-ci-${{ github.ref }}
+  group: image-ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -38,45 +36,33 @@ jobs:
     if: github.repository == 'NVIDIA/cudf-spark-jni'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       suites: ${{ steps.select.outputs.suites }}
       required-jobs: ${{ steps.select.outputs.required-jobs }}
       images: ${{ steps.catalog.outputs.images || '[]' }}
-      base-branch: ${{ steps.target.outputs.base-branch }}
       toolchains: ${{ steps.toolchains.outputs.toolchains }}
     steps:
-      - name: Checkout approved source
+      - name: Checkout PR merge commit
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Determine supported PR target
-        id: target
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
-            if (!match) throw new Error('Expected a copied PR head');
-            const {data: pr} = await github.rest.pulls.get({
-              ...context.repo, pull_number: Number(match[1])
-            });
-            if (pr.base.ref !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(pr.base.ref)) {
-              throw new Error('Image CI supports main and release/YY.MM targets only');
-            }
-            core.setOutput('base-branch', pr.base.ref);
       - name: Select checks from the full PR diff
         id: select
         uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
         with:
           catalog-path: .github/image-ci-suites.json
-          base-branch: ${{ steps.target.outputs.base-branch }}
+          base-branch: ${{ github.base_ref }}
           selector-job: select
       - name: Read project version
         if: contains(fromJSON(steps.select.outputs.suites), 'images')
         id: version
         shell: bash
         env:
-          BASE_BRANCH: ${{ steps.target.outputs.base-branch }}
+          BASE_BRANCH: ${{ github.base_ref }}
         run: |
           set -euo pipefail
           metadata=$(bash ci/image-config.sh version)
@@ -90,7 +76,7 @@ jobs:
         with:
           config: ci/toolchains.json
           version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
-          allow-default: ${{ steps.target.outputs.base-branch == 'main' }}
+          allow-default: ${{ github.base_ref == 'main' }}
       - name: Read the checked-out project's image catalog
         if: contains(fromJSON(steps.select.outputs.suites), 'images')
         id: catalog
@@ -116,31 +102,13 @@ jobs:
         image: ${{ fromJSON(needs.select.outputs.images) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
       # PR code runs directly on a hosted runner, without package write access.
-      - name: Checkout approved source
+      - name: Checkout PR merge commit
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify PR is still current
-        uses: actions/github-script@v8
-        env:
-          EXPECTED_BASE: ${{ needs.select.outputs.base-branch }}
-        with:
-          script: |
-            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
-            if (!match) throw new Error('Expected a copied PR head');
-            const {data: pr} = await github.rest.pulls.get({
-              ...context.repo, pull_number: Number(match[1])
-            });
-            if (pr.state !== 'open' || pr.head.sha !== context.sha ||
-                pr.base.ref !== process.env.EXPECTED_BASE) {
-              throw new Error('PR closed, updated or retargeted since selection; approve the current head again');
-            }
       - name: Prepare image configuration
         id: image
         shell: bash

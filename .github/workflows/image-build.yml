@@ -16,7 +16,7 @@ name: Daily image build
 
 on:
   # Daily builds are main-only. Image-input pushes and manual dispatches also
-  # publish release images; approved PR validation is separate in image-ci.yml.
+  # publish release images; PR validation is separate in image-ci.yml.
   schedule:
     - cron: '47 2 * * *'
   workflow_dispatch:

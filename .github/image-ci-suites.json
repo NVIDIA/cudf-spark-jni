@@ -6,7 +6,7 @@
   "suites": {
     "images": {
       "enabled": true,
-      "comment": "Validate image inputs on approved PRs; existing JNI build/test coverage stays in Jenkins.",
+      "comment": "Validate image inputs on PRs; existing JNI build/test coverage stays in Jenkins.",
       "paths": [
         "pom.xml",
         "ci/Dockerfile",
