@@ -298,10 +298,10 @@ class pageable_pool_resource_t
   pageable_pool_resource_t(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible> upstream,
                            std::size_t size,
                            int pretouch_threads,
-                           int numa_node            = -1,
-                           bool populate_write      = true,
-                           bool thp_deny            = false,
-                           bool memset_pretouch     = false)
+                           int numa_node        = -1,
+                           bool populate_write  = true,
+                           bool thp_deny        = false,
+                           bool memset_pretouch = false)
     : upstream_(std::move(upstream)),
       pool_size_(size),
       base_(detail::prepare_backing_region(
