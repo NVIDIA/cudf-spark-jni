@@ -65,6 +65,15 @@ public class PageableMemoryPoolTest {
   }
 
   @Test
+  public void numaBindExplicitDeviceInitialization() {
+    PageableMemoryPool.initialize(1024 * 1024, 2, true, Cuda.getDevice());
+    assertTrue(PageableMemoryPool.isInitialized());
+    try (HostMemoryBuffer buffer = PageableMemoryPool.tryAllocate(1024)) {
+      assertNotNull(buffer);
+    }
+  }
+
+  @Test
   public void rejectsInvalidAllocationSize() {
     assertThrows(IllegalArgumentException.class, () -> PageableMemoryPool.tryAllocate(0));
     assertThrows(IllegalArgumentException.class, () -> PageableMemoryPool.tryAllocate(-1));

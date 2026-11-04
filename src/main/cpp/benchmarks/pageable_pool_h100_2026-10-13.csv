@@ -8,12 +8,6 @@ alloc_indexed,3,chunk=65536;threads=16,15,1.921682,1.907836
 alloc_list,1,chunk=65536;threads=16,15,0.957159,0.94423
 alloc_list,2,chunk=65536;threads=16,15,0.942012,0.928478
 alloc_list,3,chunk=65536;threads=16,15,0.941327,0.928612
-cache,1,cache=off,15,0.012751,0.001604
-cache,1,cache=on,15,0.013229,0.001481
-cache,2,cache=off,15,0.012607,0.001617
-cache,2,cache=on,15,0.012946,0.001536
-cache,3,cache=off,15,0.012545,0.001619
-cache,3,cache=on,15,0.013327,0.001517
 dtoh,1,size=268435456;thp=default;numa=default,15,11.934056,11.91818
 dtoh,1,size=268435456;thp=deny;numa=default,15,11.940779,11.9246
 dtoh,1,size=268435456;thp=default;numa=gpu_local,15,11.793989,11.778012

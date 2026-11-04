@@ -147,12 +147,35 @@ public final class PageableMemoryPool implements AutoCloseable {
    *                        node cannot be resolved or restricted by the environment.
    */
   public static synchronized void initialize(long poolSize, int pretouchThreads, boolean numaBind) {
+    int gpuDevice = -1;
+    if (numaBind) {
+      try {
+        gpuDevice = Cuda.getDevice();
+      } catch (CudaException e) {
+        log.warn("Could not identify the current GPU for pageable pool NUMA placement", e);
+      }
+    }
+    initialize(poolSize, pretouchThreads, numaBind, gpuDevice);
+  }
+
+  /**
+   * Initialize the pool using the specified GPU to choose the preferred NUMA node.
+   * The GPU must be selected on the pool initialization thread before native code
+   * resolves its NUMA node.
+   */
+  public static synchronized void initialize(long poolSize, int pretouchThreads,
+      boolean numaBind, int gpuDevice) {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
     boolean thpDeny = "deny".equals(System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP"));
-    FutureTask<PageableMemoryPool> task =
-        new FutureTask<>(() -> new PageableMemoryPool(poolSize, pretouchThreads, numaBind, thpDeny));
+    boolean bindToGpu = numaBind && gpuDevice >= 0;
+    FutureTask<PageableMemoryPool> task = new FutureTask<>(() -> {
+      if (bindToGpu) {
+        Cuda.setDevice(gpuDevice);
+      }
+      return new PageableMemoryPool(poolSize, pretouchThreads, bindToGpu, thpDeny);
+    });
     Thread initThread = new Thread(task, "pageable pool init");
     initThread.setDaemon(true);
     initThread.start();

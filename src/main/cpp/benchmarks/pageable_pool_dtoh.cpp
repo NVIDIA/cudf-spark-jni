@@ -18,7 +18,7 @@
 // nvbench, no device code. Each optimization technique gets its own axis:
 //   - init bench:    pretouch method (MADV_POPULATE_WRITE, manual loop, memset)
 //   - dtoh bench:    THP policy and GPU-local NUMA placement
-//   - alloc bench:   free-list/allocator variant (list, list+cache, indexed, arena)
+//   - alloc bench:   free-list/allocator variant (list, indexed, arena)
 //   - fragment bench: O(F) list vs O(log F) indexed under heavy fragmentation
 
 #include "pageable_arena_pool_resource.hpp"
@@ -28,7 +28,6 @@
 
 #include <nvbench/nvbench.cuh>
 
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -67,7 +66,6 @@ void pool_init(nvbench::state& state)
       size,
       pretouch_threads,
       /*numa_node=*/-1,
-      /*use_remainder_cache=*/false,
       populate,
       /*thp_deny=*/false,
       /*memset_pretouch=*/method == "memset");
@@ -89,7 +87,6 @@ void dtoh_pool(nvbench::state& state)
     size,
     /*pretouch_threads=*/8,
     numa_node,
-    /*use_remainder_cache=*/false,
     /*populate_write=*/true,
     thp_deny);
   void* dst = pool.allocate_sync(size);
@@ -244,18 +241,6 @@ void alloc_free_list(nvbench::state& state)
   alloc_free_impl(state, pool);
 }
 
-void alloc_free_list_cache(nvbench::state& state)
-{
-  auto pool = spark_rapids_jni::pageable_pool_resource(
-    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-      spark_rapids_jni::pageable_memory_resource{}),
-    4 * kGiB,
-    /*pretouch_threads=*/8,
-    /*numa_node=*/-1,
-    /*use_remainder_cache=*/true);
-  alloc_free_impl(state, pool);
-}
-
 void alloc_free_indexed(nvbench::state& state)
 {
   auto pool =
@@ -279,32 +264,6 @@ void alloc_free_arena(nvbench::state& state)
     /*thp_deny=*/false,
     /*arena_count=*/16);
   alloc_free_impl(state, pool);
-}
-
-// Keep the split tail below the 4 MiB cache threshold and allocate several
-// blocks before freeing any. The ordinary alloc/free benchmark flushes the
-// cache on every free, so it cannot measure the cache's intended hot path.
-void remainder_cache_burst(nvbench::state& state)
-{
-  constexpr std::size_t chunk = 64 * 1'024;
-  constexpr std::size_t count = 32;
-  bool const cache            = state.get_string("cache") == "on";
-  auto pool                   = spark_rapids_jni::pageable_pool_resource(
-    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-      spark_rapids_jni::pageable_memory_resource{}),
-    4 * kMiB,
-    /*pretouch_threads=*/1,
-    /*numa_node=*/-1,
-    cache);
-  std::array<void*, count> blocks{};
-  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-    for (auto& block : blocks) {
-      block = pool.allocate_sync(chunk);
-    }
-    for (auto* block : blocks) {
-      pool.deallocate_sync(block, chunk);
-    }
-  });
 }
 
 // --- fragmentation: O(F) list vs O(log F) indexed ---------------------------
@@ -388,11 +347,6 @@ NVBENCH_BENCH(alloc_free_list)
   .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
   .add_int64_axis("threads", {1, 4, 16, 32});
 
-NVBENCH_BENCH(alloc_free_list_cache)
-  .set_name("PageablePool AllocFree ListCache")
-  .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
-  .add_int64_axis("threads", {1, 4, 16, 32});
-
 NVBENCH_BENCH(alloc_free_indexed)
   .set_name("PageablePool AllocFree Indexed")
   .add_int64_axis("chunk", {64 * 1'024, 64 * kMiB})
@@ -405,7 +359,3 @@ NVBENCH_BENCH(alloc_free_arena)
 
 NVBENCH_BENCH(fragment_list).set_name("PageablePool Fragmented List");
 NVBENCH_BENCH(fragment_indexed).set_name("PageablePool Fragmented Indexed");
-
-NVBENCH_BENCH(remainder_cache_burst)
-  .set_name("PageablePool Remainder Cache Burst")
-  .add_string_axis("cache", {"off", "on"});

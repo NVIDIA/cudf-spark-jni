@@ -20,7 +20,6 @@ one technique.
 | GPU-local placement | `PageablePool DtoH Copy`, `thp=default` | `numa=default`, `gpu_local` |
 | Contended allocator | `PageablePool AllocFree *`, `chunk=65536`, `threads=16` | list, indexed, arena |
 | Fragmentation | `PageablePool Fragmented *` | list, indexed |
-| Cached split tail | `PageablePool Remainder Cache Burst` | `cache=off`, `on` |
 
 For example:
 
@@ -42,7 +41,7 @@ large allocations as the unsharded pool.
 
 Host: Threadripper PRO 5975WX, one NUMA node, Linux 6.17, NVIDIA driver
 590.48.01. The GPU PCI sysfs `numa_node` is `-1`, and THP is set to
-`[madvise]`. Initialization, allocator, fragmentation, and cache results are
+`[madvise]`. Initialization, allocator, and fragmentation results are
 ranges from two runs. The THP and DtoH-reference checks were run once.
 
 | Comparison | CPU time | Observation |
@@ -50,7 +49,6 @@ ranges from two runs. The THP and DtoH-reference checks were run once.
 | 1 GiB init, 8 workers: populate / manual / memset | 63–64 / 73–74 / 459–461 ms | Populate is ~14% faster than manual; memset is ~7× slower. |
 | 64 KiB alloc/free, 16 workers: list / indexed / arena | 473–485 / 1060–1126 / 104–106 µs per 64 operations per worker | Arena is ~4.5× faster than list; indexed is slower without fragmentation. |
 | Fragmented list / indexed | 27.1–27.4 / 12.1–12.3 µs per allocation/free | Indexed is ~2.2× faster under ~2048 separated holes. |
-| Remainder cache burst: off / on | 11.66–11.69 / 11.66–11.75 µs per 32-allocation burst | No measurable gain. |
 
 At 1 GiB, THP deny was about 1% faster than default (67.9 versus 68.7 ms),
 which is too small to establish a benefit here. With THP set to `madvise`,
@@ -76,7 +74,6 @@ reported times. Raw results are in
 | 1 GiB init, 8 workers: populate / manual / memset | 51.9 / 78.7 / 492.1 ms CPU | Populate is 34% faster than manual; memset is 9.5x slower than populate. |
 | 64 KiB alloc/free, 16 workers: list / indexed / arena | 942 / 1904 / 201 µs CPU per 64 operations per worker | Arena is 4.7x faster than list; indexed loses without fragmentation. |
 | Fragmented list / indexed | 29.3 / 12.8 µs CPU per allocation/free | Indexed is 2.3x faster with separated holes. |
-| Remainder cache burst: off / on | 12.6 / 13.2 µs CPU per burst | No gain. |
 | 256 MiB DtoH: default / THP deny | 11.835 / 11.892 ms GPU | Difference is below 1%. |
 | 256 MiB DtoH: default / GPU-local NUMA | 11.835 / 11.754 ms GPU | Difference is below 1%. `mbind(MPOL_PREFERRED, node 1)` succeeded in a separate trace. |
 | 256 MiB DtoH: pool / fresh malloc / pinned | 11.835 / 137.592 / 5.029 ms GPU | Pre-touched pool is much faster than fresh pageable memory. |
@@ -99,6 +96,5 @@ GPU-local NUMA placement was omitted because this instance has one NUMA node.
 | 1 GiB init, 8 workers: populate / manual / memset | 58.9 / 73.4 / 471.8 ms CPU | Populate is 20% faster than manual; memset is 8.0x slower than populate. |
 | 64 KiB alloc/free, 16 workers: list / indexed / arena | 410 / 1019 / 123 µs CPU per 64 operations per worker | Arena is 3.3x faster than list; indexed loses without fragmentation. |
 | Fragmented list / indexed | 33.5 / 14.9 µs CPU per allocation/free | Indexed is 2.2x faster with separated holes. |
-| Remainder cache burst: off / on | 14.5 / 14.2 µs CPU per burst | No convincing gain. |
 | 256 MiB DtoH: default / THP deny | 20.697 / 20.696 ms GPU | Effectively identical. |
 | 256 MiB DtoH: pool / fresh malloc / pinned | 20.697 / 155.882 / 20.319 ms GPU | Pre-touched pool is much faster than fresh pageable memory. |

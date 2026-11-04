@@ -284,10 +284,6 @@ class pageable_pool_resource_t
    *                       binding; binding is best-effort and silently skipped on
    *                       failure). The intended value is the GPU-local node so
    *                       DtoH copies avoid cross-socket traffic.
-   * @param use_remainder_cache  When true, the tail remainder of a split is served
-   *                       directly to the next allocation instead of being re-inserted
-   *                       into the free list (skips the O(F) best-fit scan on the hot
-   *                       path; slightly deviates from strict best-fit order).
    * @param populate_write Use madvise(MADV_POPULATE_WRITE) to fault pages in (kernel
    *                       5.14+; falls back to the manual byte-touch loop otherwise).
    *                       Faulting via madvise amortizes syscall overhead vs one trap
@@ -303,15 +299,13 @@ class pageable_pool_resource_t
                            std::size_t size,
                            int pretouch_threads,
                            int numa_node            = -1,
-                           bool use_remainder_cache = false,
                            bool populate_write      = true,
                            bool thp_deny            = false,
                            bool memset_pretouch     = false)
     : upstream_(std::move(upstream)),
       pool_size_(size),
       base_(detail::prepare_backing_region(
-        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny, memset_pretouch)),
-      use_remainder_cache_(use_remainder_cache)
+        upstream_, size, pretouch_threads, numa_node, populate_write, thp_deny, memset_pretouch))
   {
     try {
       // is_head=false: all sub-blocks live within one contiguous upstream
@@ -347,35 +341,11 @@ class pageable_pool_resource_t
     bytes = detail::pool_align_up(bytes);
     if (bytes == 0 || bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     std::lock_guard<std::mutex> lock(mtx_);
-    if (use_remainder_cache_) {
-      // The cached split tail is the most-recently carved free range; serving it
-      // directly skips the O(F) best-fit scan. Flush it back to the free list when it
-      // cannot serve the request so best-fit still sees it.
-      if (cached_remainder_.pointer() != nullptr && cached_remainder_.size() >= bytes) {
-        void* cached = cached_remainder_.pointer();
-        // An exact-fit serve leaves nothing cached — never store a zero-size block.
-        auto const leftover = cached_remainder_.size() - bytes;
-        cached_remainder_ =
-          leftover > 0 ? rmm::mr::detail::block{static_cast<char*>(cached) + bytes, leftover, false}
-                       : rmm::mr::detail::block{};
-        return cached;
-      }
-      if (cached_remainder_.pointer() != nullptr && cached_remainder_.size() > 0) {
-        free_list_.insert(cached_remainder_);
-        cached_remainder_ = rmm::mr::detail::block{};
-      }
-    }
     auto blk = free_list_.get_block(bytes);
     if (!blk.is_valid()) { throw pageable_pool_exhausted{}; }
     if (blk.size() > bytes) {
       rmm::mr::detail::block const remainder{blk.pointer() + bytes, blk.size() - bytes, false};
-      // Only cache small tails: a large remainder stays address-ordered in the free
-      // list so later large allocations can still find and coalesce it.
-      if (use_remainder_cache_ && remainder.size() <= kRemainderCacheMax) {
-        cached_remainder_ = remainder;
-      } else {
-        free_list_.insert(remainder);
-      }
+      free_list_.insert(remainder);
     }
     return blk.pointer();
   }
@@ -390,12 +360,6 @@ class pageable_pool_resource_t
   {
     if (bytes == 0) { return; }
     std::lock_guard<std::mutex> lock(mtx_);
-    if (use_remainder_cache_ && cached_remainder_.pointer() != nullptr) {
-      // Return the cached tail to the free list BEFORE coalescing the freed block, so
-      // a free adjacent to the cached tail still merges correctly.
-      free_list_.insert(cached_remainder_);
-      cached_remainder_ = rmm::mr::detail::block{};
-    }
     free_list_.insert(
       rmm::mr::detail::block{static_cast<char*>(ptr), detail::pool_align_up(bytes), false});
   }
@@ -415,12 +379,6 @@ class pageable_pool_resource_t
   void* base_;
   std::mutex mtx_;
   FreeList free_list_;
-  // Remainder cache: the most recently carved split tail, held OUT of the free
-  // list so the next allocation can reuse it without an O(F) scan. Not address-stable
-  // across frees — deallocate_sync flushes it before coalescing.
-  static constexpr std::size_t kRemainderCacheMax = 4 * 1024 * 1024;
-  rmm::mr::detail::block cached_remainder_{};
-  bool use_remainder_cache_;
 };
 
 static_assert(cuda::mr::synchronous_resource_with<

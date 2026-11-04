@@ -42,7 +42,6 @@ constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 [[nodiscard]] pageable_pool_resource make_pool(std::size_t size     = kPoolSize,
                                                int threads          = 1,
                                                int numa_node        = -1,
-                                               bool cache           = false,
                                                bool populate        = true,
                                                bool thp_deny        = false,
                                                bool memset_pretouch = false)
@@ -54,7 +53,6 @@ constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
     size,
     threads,
     numa_node,
-    cache,
     populate,
     thp_deny,
     memset_pretouch);
@@ -240,51 +238,6 @@ TEST(PageablePool, ParseCpuList)
 }
 
 // ---------------------------------------------------------------------------
-// Remainder cache: the split tail serves the next allocation directly
-// ---------------------------------------------------------------------------
-TEST(PageablePool, RemainderCacheServesNextAlloc)
-{
-  auto pool = make_pool(kPoolSize, 1, -1, /*cache=*/true);
-  void* a   = pool.allocate_sync(1024 * 1024);
-  ASSERT_NE(a, nullptr);
-  void* b = pool.allocate_sync(512 * 1024);
-  ASSERT_NE(b, nullptr);
-  // b must come from the cached tail of a's split, i.e. immediately after a.
-  EXPECT_EQ(static_cast<char*>(b), static_cast<char*>(a) + 1024 * 1024);
-  void* c = pool.allocate_sync(256 * 1024);
-  ASSERT_NE(c, nullptr);
-  EXPECT_EQ(static_cast<char*>(c), static_cast<char*>(b) + 512 * 1024);
-
-  // Freeing everything (which flushes the cache) must recover the full pool.
-  pool.deallocate_sync(c, 256 * 1024);
-  pool.deallocate_sync(b, 512 * 1024);
-  pool.deallocate_sync(a, 1024 * 1024);
-  void* full = pool.allocate_sync(kPoolSize);
-  ASSERT_NE(full, nullptr);
-  pool.deallocate_sync(full, kPoolSize);
-}
-
-TEST(PageablePool, RemainderCacheExactFitServesClean)
-{
-  // An exact-fit serve must leave NOTHING cached (no zero-size block may reach the
-  // free list through the flush path) and the pool must still fully recover.
-  auto pool = make_pool(kPoolSize, 1, -1, /*cache=*/true);
-  void* a   = pool.allocate_sync(1024 * 1024);
-  ASSERT_NE(a, nullptr);
-  void* b = pool.allocate_sync(1024 * 1024);
-  ASSERT_NE(b, nullptr);
-  void* c = pool.allocate_sync(2 * 1024 * 1024);  // exactly consumes the cached tail
-  ASSERT_NE(c, nullptr);
-  EXPECT_EQ(static_cast<char*>(c), static_cast<char*>(b) + 1024 * 1024);
-  pool.deallocate_sync(c, 2 * 1024 * 1024);
-  pool.deallocate_sync(b, 1024 * 1024);
-  pool.deallocate_sync(a, 1024 * 1024);
-  void* full = pool.allocate_sync(kPoolSize);
-  ASSERT_NE(full, nullptr);
-  pool.deallocate_sync(full, kPoolSize);
-}
-
-// ---------------------------------------------------------------------------
 // Policy parity: the indexed free list must make IDENTICAL allocation decisions
 // ---------------------------------------------------------------------------
 TEST(PageablePool, DecisionParityListVsIndexed)
@@ -357,7 +310,7 @@ TEST(PageablePool, ManualPretouchCoversPages)
 {
   auto const page_size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
   auto const bytes     = page_size + rmm::CUDA_ALLOCATION_ALIGNMENT;
-  auto pool            = make_pool(bytes, 1, -1, /*cache=*/false, /*populate=*/false);
+  auto pool            = make_pool(bytes, 1, -1, /*populate=*/false);
   void* p              = pool.allocate_sync(bytes);
   ASSERT_NE(p, nullptr);
   for (std::size_t page = 0; page < 2; ++page) {
@@ -370,7 +323,7 @@ TEST(PageablePool, ManualPretouchCoversPages)
 
 TEST(PageablePool, MemsetPretouchInitializesEntireBacking)
 {
-  auto pool = make_pool(kPoolSize, 1, -1, false, false, false, true);
+  auto pool = make_pool(kPoolSize, 1, -1, false, false, true);
   void* p   = pool.allocate_sync(kPoolSize);
   ASSERT_NE(p, nullptr);
   EXPECT_TRUE(all_eq(static_cast<unsigned char const*>(p), kPoolSize, 0));
@@ -389,7 +342,7 @@ TEST(PageablePool, ThpDenyKeepsBasePages)
   if (!thp_possible) { GTEST_SKIP() << "transparent huge pages disabled on host"; }
 
   auto const page_size = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
-  auto pool            = make_pool(64 * page_size, 1, -1, false, true, /*thp_deny=*/true);
+  auto pool            = make_pool(64 * page_size, 1, -1, true, /*thp_deny=*/true);
   void* p              = pool.allocate_sync(4096);
   ASSERT_NE(p, nullptr);
   std::memset(p, 0, 4096);

@@ -8,12 +8,6 @@ alloc_indexed,3,chunk=65536;threads=16,15,1.002369,0.984777
 alloc_list,1,chunk=65536;threads=16,15,0.393109,0.377877
 alloc_list,2,chunk=65536;threads=16,15,0.409793,0.394108
 alloc_list,3,chunk=65536;threads=16,15,0.412572,0.397333
-cache,1,cache=off,15,0.014156,0.00157
-cache,1,cache=on,15,0.01415,0.001613
-cache,2,cache=off,15,0.01558,0.001839
-cache,2,cache=on,15,0.01417,0.001357
-cache,3,cache=off,15,0.014514,0.00185
-cache,3,cache=on,15,0.014256,0.001483
 dtoh,1,size=268435456;thp=default;numa=default,15,20.714927,20.696772
 dtoh,1,size=268435456;thp=deny;numa=default,15,20.71268,20.695464
 dtoh,2,size=268435456;thp=default;numa=default,15,20.715195,20.697971
