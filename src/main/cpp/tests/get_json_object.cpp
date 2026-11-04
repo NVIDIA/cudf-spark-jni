@@ -1076,6 +1076,54 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[5], "escaped", true));
 }
 
+TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
+{
+  // Admission caps a merged group at k_merged_max_paths paths (the 48 KiB shared-memory record
+  // bound): a batch of exactly the cap stays one merged group; overflow paths route through the
+  // general evaluator and must keep correct values.
+  std::string row = "{";
+  for (int p = 0; p <= 769; ++p) {
+    if (p > 0) { row += ","; }
+    row += R"("p)" + std::to_string(p) + R"(":"V)" + std::to_string(p) + R"(")";
+  }
+  row += "}";
+  auto const rows = same_rows(64, row);
+
+  auto build = [](int count) {
+    multi_paths paths;
+    paths.reserve(count);
+    for (int p = 0; p < count; ++p) {
+      paths.push_back(named({"p" + std::to_string(p)}));
+    }
+    return paths;
+  };
+  // 768 = the cap exactly: one merged group. 769/770: the last paths spill to general.
+  auto const capped_out  = run_fused(cudf::strings_column_view{col_from(rows)}, build(768));
+  auto const over_out    = run_fused(cudf::strings_column_view{col_from(rows)}, build(769));
+  auto const over2_out   = run_fused(cudf::strings_column_view{col_from(rows)}, build(770));
+  auto const expect_cols = [&](multi_outputs const& out, std::size_t count, char const* label) {
+    ASSERT_EQ(out.size(), count);
+    for (std::size_t col = 0; col < count; ++col) {
+      SCOPED_TRACE(testing::Message() << label << "path " << col);
+      ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[col], "V" + std::to_string(col), true));
+    }
+  };
+  expect_cols(capped_out, 768, "capped ");
+  expect_cols(over_out, 769, "over ");
+  expect_cols(over2_out, 770, "over2 ");
+
+  // The spilled columns must match the single-path (pre-existing per-path engine) oracle.
+  // Keep the wrapper alive: the view must not outlive the wrapper it was built from.
+  auto const input_col = col_from(rows);
+  auto const input     = cudf::strings_column_view{input_col};
+  SCOPED_TRACE("spilled path 768");
+  auto const spill768 = spark_rapids_jni::get_json_object(input, {named({"p768"})});
+  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over_out[768], spill768));
+  SCOPED_TRACE("spilled path 769");
+  auto const spill769 = spark_rapids_jni::get_json_object(input, {named({"p769"})});
+  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[769], spill769));
+}
+
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
 {
   auto const expanding = R"({"k":{"a":')" + std::string(30, '"') + R"('}})";
@@ -1265,7 +1313,7 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
                               cudf::slice(u_expected, {offset, input_col->size()}).front(),
                               cudf::slice(empty_expected, {offset, input_col->size()}).front(),
                               cudf::slice(missing_expected, {offset, input_col->size()}).front()};
-    // Expanding k retries through the general evaluator, which must not overwrite merged nulls.
+    // Expanding k retries through the merged kernel, which must not overwrite the merged nulls.
     auto const output = spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1);
     ASSERT_EQ(output.size(), paths.size());
     for (std::size_t i = 0; i < output.size(); ++i) {
