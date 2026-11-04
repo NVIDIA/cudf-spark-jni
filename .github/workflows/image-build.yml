@@ -112,7 +112,8 @@ jobs:
           CI_TOOLCHAINS: ${{ needs.configure.outputs.toolchains }}
           IMAGE_NAME: ${{ matrix.image }}
         run: |
-          config=$(bash ci/image-config.sh describe "$IMAGE_NAME")
+          # Publish freshly built layers; only export a baseline for later PR builds.
+          config=$(bash ci/image-config.sh describe "$IMAGE_NAME" | jq -c 'del(."cache-from")')
           printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1

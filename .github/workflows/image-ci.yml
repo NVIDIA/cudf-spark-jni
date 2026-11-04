@@ -109,7 +109,7 @@ jobs:
     if: contains(fromJSON(needs.select.outputs.suites), 'images')
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         image: ${{ fromJSON(needs.select.outputs.images) }}
     runs-on: ubuntu-latest
@@ -133,6 +133,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build and smoke-test without publishing
+        # Optional layer caching requires spark-rapids-common#72 to be merged.
+        # Branch-scoped PR caches can reuse the fresh baseline exported from main.
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
           config: ${{ steps.image.outputs.config }}

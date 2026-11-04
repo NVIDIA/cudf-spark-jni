@@ -9,7 +9,13 @@
       "OS_RELEASE": "8",
       "CMAKE_ARCH": "x86_64"
     },
-    "smoke-test": "ci/image-smoke.sh"
+    "smoke-test": "ci/image-smoke.sh",
+    "cache-from": [
+      "type=gha,version=2,scope=jni-cuda12-rockylinux8-amd64,timeout=2m"
+    ],
+    "cache-to": [
+      "type=gha,version=2,scope=jni-cuda12-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
+    ]
   },
   "premerge-cuda13": {
     "image": "jni-build",
@@ -21,6 +27,12 @@
       "OS_RELEASE": "8",
       "CMAKE_ARCH": "x86_64"
     },
-    "smoke-test": "ci/image-smoke.sh"
+    "smoke-test": "ci/image-smoke.sh",
+    "cache-from": [
+      "type=gha,version=2,scope=jni-cuda13-rockylinux8-amd64,timeout=2m"
+    ],
+    "cache-to": [
+      "type=gha,version=2,scope=jni-cuda13-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
+    ]
   }
 }
