@@ -1459,7 +1459,10 @@ merged_group_plan build_merged_named_plan(
 {
   auto const num_paths = static_cast<int32_t>(indices.size());
 
-  // Defend the kernel's max_trie_depth stack even if a caller bypasses admission.
+  // Defend the kernel's max_trie_depth stack and the shared-memory record bound even if a caller
+  // bypasses admission.
+  CUDF_EXPECTS(static_cast<std::size_t>(indices.size()) <= k_merged_max_paths,
+               "merged walk requires a group of at most k_merged_max_paths paths");
   for (auto const idx : indices) {
     CUDF_EXPECTS(static_cast<int>(json_paths[idx].size()) <= max_trie_depth,
                  "merged walk requires paths of depth <= the group's max trie depth");
@@ -1634,7 +1637,13 @@ void launch_merged_named(cudf::column_device_view const& input,
 {
   constexpr int block_size       = 128;
   auto constexpr warps_per_block = block_size / cudf::detail::warp_size;
-  auto const rows                = static_cast<std::size_t>(input.size());
+  // Ties the cap constant to the launcher geometry so a record-layout change cannot silently
+  // reopen the global record fallback.
+  static_assert(
+    static_cast<std::size_t>(warps_per_block) * k_merged_max_paths * sizeof(merged_path_out) <=
+      48 * 1024,
+    "k_merged_max_paths must keep merged records within the shared-memory bound");
+  auto const rows = static_cast<std::size_t>(input.size());
   auto const smem_r1 =
     static_cast<std::size_t>(warps_per_block) * plan.num_paths * sizeof(merged_path_out);
   auto constexpr k_smem_cap = 48 * 1024;  // default dynamic smem per block
