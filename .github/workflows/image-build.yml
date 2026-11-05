@@ -90,7 +90,6 @@ jobs:
     needs: configure
     strategy:
       fail-fast: false
-      # Requires common#72: unique publication candidates for each CUDA variant.
       max-parallel: 2
       matrix:
         image: ${{ fromJSON(needs.configure.outputs.images) }}
