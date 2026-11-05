@@ -112,7 +112,7 @@ class pageable_arena_pool_resource_t
     for (std::size_t k = 0; k < arena_count_; ++k) {
       auto const idx = (start + k) % arena_count_;
       auto& arena    = *arenas_[idx];
-      std::scoped_lock lock(arena.mtx);
+      std::lock_guard<std::mutex> lock(arena.mtx);
       auto blk = arena.list.get_block(bytes);
       if (!blk.is_valid()) { continue; }
       if (blk.size() > bytes) {
@@ -135,7 +135,7 @@ class pageable_arena_pool_resource_t
     // arena's head: is_head prevents coalescing into the previous arena.
     bool const is_boundary_head =
       (idx > 0) && (static_cast<char*>(ptr) == static_cast<char*>(base_) + idx * arena_capacity_);
-    std::scoped_lock lock(arenas_[idx]->mtx);
+    std::lock_guard<std::mutex> lock(arenas_[idx]->mtx);
     arenas_[idx]->list.insert(rmm::mr::detail::block{
       static_cast<char*>(ptr), detail::pool_align_up(bytes), is_boundary_head});
   }
