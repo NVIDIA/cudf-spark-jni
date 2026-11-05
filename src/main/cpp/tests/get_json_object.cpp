@@ -29,6 +29,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -539,6 +540,9 @@ using path_tuple  = std::tuple<path_instruction_type, std::string, int32_t>;
 using path_list   = std::vector<path_tuple>;
 using multi_paths = std::vector<path_list>;
 
+// The merged route's shallow admission floor (paths >= 16) as the test helper's pad target.
+inline constexpr std::size_t k_merged_min_test_paths = 16;
+
 // Parity helpers compare raw validity, offsets, and chars bytes.
 std::vector<cudf::bitmask_type> host_null_mask(cudf::column_view const& col)
 {
@@ -669,10 +673,30 @@ using multi_outputs = std::vector<std::unique_ptr<cudf::column>>;
 std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::string> const& rows,
                                                               multi_paths const& merged_paths)
 {
+  // The merged route admits only groups of >= 16 shallow paths and >= 32 rows; the 8-path
+  // test groups would otherwise run BOTH sides on the general kernel. Pad the merged side
+  // with distinct depth-2 paths whose keys match no tested key or row key; they only add
+  // null columns. Shallow admission counts only all-NAMED paths of depth <= 2, so pad until
+  // the eligible count reaches the floor (a depth-3 call-site path stays general and does
+  // not count). The oracle stays the original first 7 paths on the general route. Every
+  // call site passes 64 rows (>= the 32-row admission floor).
   auto const general_paths = first_n(merged_paths, 7);
-  auto merged_out          = run_fused(cudf::strings_column_view{col_from(rows)}, merged_paths);
-  auto general_out         = run_fused(cudf::strings_column_view{col_from(rows)}, general_paths);
-  CUDF_EXPECTS(merged_out.size() == merged_paths.size() && general_out.size() == 7,
+  auto padded              = merged_paths;
+  auto const eligible      = [](path_list const& path) {
+    return path.size() <= 2 && std::all_of(path.begin(), path.end(), [](path_tuple const& t) {
+             return std::get<0>(t) == path_instruction_type::NAMED;
+           });
+  };
+  int eligible_count = static_cast<int>(std::count_if(
+    padded.begin(), padded.end(), [&](path_list const& path) { return eligible(path); }));
+  int const deficit  = std::max(0, static_cast<int>(k_merged_min_test_paths) - eligible_count);
+  padded.reserve(padded.size() + deficit);
+  for (int p = 0; p < deficit; ++p) {
+    padded.push_back(named({"mpad" + std::to_string(p), "v"}));
+  }
+  auto merged_out  = run_fused(cudf::strings_column_view{col_from(rows)}, padded);
+  auto general_out = run_fused(cudf::strings_column_view{col_from(rows)}, general_paths);
+  CUDF_EXPECTS(merged_out.size() == padded.size() && general_out.size() == 7,
                "merged-vs-general output shape mismatch");
   return {std::move(merged_out), std::move(general_out)};
 }
@@ -1080,7 +1104,8 @@ TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
 {
   // Admission caps a merged group at k_merged_max_paths paths (the 48 KiB shared-memory record
   // bound): a batch of exactly the cap stays one merged group; overflow paths route through the
-  // general evaluator and must keep correct values.
+  // general evaluator and must keep correct values. Paths sort lexicographically before batching
+  // and the batch keeps the first N, so the lexicographically last names spill: p99, then p98.
   std::string row = "{";
   for (int p = 0; p <= 769; ++p) {
     if (p > 0) { row += ","; }
@@ -1113,15 +1138,19 @@ TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
   expect_cols(over2_out, 770, "over2 ");
 
   // The spilled columns must match the single-path (pre-existing per-path engine) oracle.
+  // The merged batch keeps the first k_merged_max_paths of the sorted order, so the
+  // lexicographically last names spill: 769 paths spill p99 (output slot 99), 770 paths
+  // spill p98 and p99 (slots 98, 99).
   // Keep the wrapper alive: the view must not outlive the wrapper it was built from.
   auto const input_col = col_from(rows);
   auto const input     = cudf::strings_column_view{input_col};
-  SCOPED_TRACE("spilled path 768");
-  auto const spill768 = spark_rapids_jni::get_json_object(input, {named({"p768"})});
-  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over_out[768], spill768));
-  SCOPED_TRACE("spilled path 769");
-  auto const spill769 = spark_rapids_jni::get_json_object(input, {named({"p769"})});
-  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[769], spill769));
+  SCOPED_TRACE("spilled path p99");
+  auto const spill_p99 = spark_rapids_jni::get_json_object(input, {named({"p99"})});
+  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over_out[99], spill_p99));
+  SCOPED_TRACE("spilled paths p98, p99");
+  auto const spill_p98 = spark_rapids_jni::get_json_object(input, {named({"p98"})});
+  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[98], spill_p98));
+  ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[99], spill_p99));
 }
 
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
