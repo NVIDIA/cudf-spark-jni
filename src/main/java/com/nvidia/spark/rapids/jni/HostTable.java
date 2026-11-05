@@ -39,6 +39,11 @@ public class HostTable implements AutoCloseable {
   /**
    * Copies a device table to a host table asynchronously.
    * NOTE: The caller must synchronize on the stream before examining the data on the host.
+   * <p>
+   * Only the rows of each column are copied, so sliced columns are not copied whole. Sizing the
+   * host buffer and copying each read the offsets bounds of STRING columns, and of sliced LIST
+   * columns, back from the device, which synchronizes the stream. A sliced column may also need
+   * small temporary device buffers: a shifted null mask, or offsets rebased to start at 0.
    * @param table device table to copy
    * @param stream stream to use for the copy
    * @return host table

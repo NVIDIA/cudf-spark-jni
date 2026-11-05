@@ -28,7 +28,6 @@ import ai.rapids.cudf.HostColumnVector.DataType;
 import ai.rapids.cudf.HostColumnVector.ListType;
 import ai.rapids.cudf.HostColumnVector.StructData;
 import ai.rapids.cudf.HostColumnVector.StructType;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 public class HostTableTest {
@@ -97,10 +96,23 @@ public class HostTableTest {
     }
   }
 
-  // TODO: Enable once thirdparty/cudf includes https://github.com/NVIDIA/cudf/pull/25054.
-  // Without it, cudf::detail::slice counts a slice's nulls without its input's offset. Copying
-  // this struct reslices its children, so their null counts come back wrong.
-  @Disabled("Needs NVIDIA/cudf#25054: detail::slice null counts of inputs with an offset")
+  @Test
+  public void testRoundTripSlicedBoundaries() {
+    // A prefix (offset 0 but fewer rows than its buffers and children hold), an empty slice, and
+    // the last row.
+    int[][] ranges = {{0, 9}, {7, 7}, {20, 21}};
+    try (Table full = buildTable()) {
+      for (int[] range : ranges) {
+        try (Table sliced = sliceTable(range[0], range[1], columnsOf(full));
+             Table expected = subTable(full, range[0], range[1]);
+             HostTable ht = HostTable.fromTable(sliced);
+             Table actual = ht.toTable()) {
+          AssertUtils.assertTablesAreEqual(expected, actual);
+        }
+      }
+    }
+  }
+
   @Test
   public void testRoundTripSlicedChildren() {
     // A STRUCT with offset 0 whose children are slices, so every offset is below the top level.
