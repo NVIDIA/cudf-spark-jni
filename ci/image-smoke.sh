@@ -18,8 +18,17 @@ set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}
 cuda=${3:?CUDA version required}
+fingerprint=${4:?Expected recipe fingerprint required}
+[[ "$fingerprint" =~ ^recipe-[0-9a-f]{64}$ ]]
+if ! image_id=$(docker image inspect "$image" | jq -er --arg expected "$fingerprint" '
+  .[0] | select(.Config.Labels["org.opencontainers.image.version"] == $expected) |
+  .Id | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))'); then
+  echo "::error::Unable to verify expected toolchain recipe $fingerprint for $image" >&2
+  exit 1
+fi
+echo "Verified toolchain recipe $fingerprint for $image_id"
 docker run --rm -i --platform "$platform" --network none \
-  -e "EXPECTED_CUDA_VERSION=$cuda" --entrypoint /bin/bash "$image" -s <<'SMOKE'
+  -e "EXPECTED_CUDA_VERSION=$cuda" --entrypoint /bin/bash "$image_id" -s <<'SMOKE'
 set -euo pipefail
 source /opt/rh/gcc-toolset-14/enable
 gcc --version

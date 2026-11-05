@@ -65,8 +65,15 @@ os_release=$(jq -er '."build-args".OS_RELEASE' <<< "$config")
 parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 [[ "$parallel" =~ ^[1-9][0-9]*$ ]]
 (( parallel <= 8 )) || parallel=8
-# Reuse toolchains across patches and snapshots within the same major.minor line.
-tag="${release_line}-cuda${cuda}-rockylinux${os_release}-amd64"
-jq -c --arg version "$version" --arg tag "$tag" --arg cuda "$cuda" --arg parallel "$parallel" \
-  '. + {version: $version, tag: $tag, "smoke-args": [$cuda]} |
-   ."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel}' <<< "$config"
+tag="cuda${cuda}-rockylinux${os_release}-amd64"
+config=$(jq -c --arg cuda "$cuda" --arg parallel "$parallel" \
+  '."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel}' <<< "$config")
+dockerfile=$(jq -er '.dockerfile' <<< "$config")
+checksum=$(sha256sum "$dockerfile" | cut -d ' ' -f 1)
+# This toolchain has no COPY/ADD inputs. Parallelism changes build speed, not the recipe.
+recipe=$(jq -cS --arg dockerfile "$checksum" \
+  '{dockerfile: $dockerfile, platform, "build-args": (."build-args" | del(.PARALLEL_LEVEL))}' \
+  <<< "$config")
+fingerprint="recipe-$(printf '%s' "$recipe" | sha256sum | cut -d ' ' -f 1)"
+jq -c --arg fingerprint "$fingerprint" --arg tag "$tag" --arg cuda "$cuda" \
+  '. + {version: $fingerprint, tag: $tag, "smoke-args": [$cuda, $fingerprint]}' <<< "$config"

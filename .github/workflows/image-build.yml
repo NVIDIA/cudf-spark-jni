@@ -49,7 +49,7 @@ jobs:
     outputs:
       images: ${{ steps.catalog.outputs.images }}
       toolchains: ${{ steps.toolchains.outputs.toolchains }}
-      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+      tags: ${{ steps.catalog.outputs.tags }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -72,7 +72,7 @@ jobs:
           config: ci/toolchains.json
           version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
           allow-default: ${{ github.ref == 'refs/heads/main' }}
-      - name: Validate configured images and versioned tags
+      - name: Validate configured images and toolchain tags
         id: catalog
         shell: bash
         env:
@@ -81,17 +81,21 @@ jobs:
           set -euo pipefail
           # Main may use default for a new YY.MM. Pin that line before release branch-out.
           images=$(bash ci/image-config.sh list)
+          tags='{}'
           while IFS= read -r image; do
-            bash ci/image-config.sh describe "$image"
+            config=$(bash ci/image-config.sh describe "$image")
+            tags=$(jq -c --arg name "$image" --argjson config "$config" \
+              '. + {($name): ($config.image + ":" + $config.tag)}' <<< "$tags")
           done < <(jq -r '.[]' <<< "$images")
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+          printf 'tags=%s\n' "$tags" >> "$GITHUB_OUTPUT"
 
   images:
     name: Build ${{ matrix.image }}
     needs: configure
-    # Branches with the same major.minor version share consumer tags.
+    # Every branch publishing the same toolchain tag shares one promotion lock.
     concurrency:
-      group: image-publish-${{ needs.configure.outputs.release-line }}-${{ matrix.image }}
+      group: image-publish-${{ fromJSON(needs.configure.outputs.tags)[matrix.image] }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -125,7 +129,7 @@ jobs:
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build, verify, and publish
         # The first GHCR package may need a one-time public visibility setting.
-        # Common promotes the versioned tag only after anonymous pull and smoke pass.
+        # Common promotes the toolchain tag only after anonymous pull and smoke pass.
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
           config: ${{ steps.image.outputs.config }}
