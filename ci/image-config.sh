@@ -31,8 +31,9 @@ print(version)
 PY
 )
 [[ "$version" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
+release_line=${version:0:5}
 if [[ "$operation" == version ]]; then
-  jq -cn --arg version "$version" --arg line "${version:0:5}" \
+  jq -cn --arg version "$version" --arg line "$release_line" \
     '{version: $version, "release-line": $line}'
   exit 0
 fi
@@ -64,8 +65,8 @@ os_release=$(jq -er '."build-args".OS_RELEASE' <<< "$config")
 parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 [[ "$parallel" =~ ^[1-9][0-9]*$ ]]
 (( parallel <= 8 )) || parallel=8
-tag="${version}-cuda${cuda}-rockylinux${os_release}-amd64"
-# The POM version identifies the release line; tags intentionally omit the Git branch.
+# Reuse toolchains across patches and snapshots within the same major.minor line.
+tag="${release_line}-cuda${cuda}-rockylinux${os_release}-amd64"
 jq -c --arg version "$version" --arg tag "$tag" --arg cuda "$cuda" --arg parallel "$parallel" \
   '. + {version: $version, tag: $tag, "smoke-args": [$cuda]} |
    ."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel}' <<< "$config"

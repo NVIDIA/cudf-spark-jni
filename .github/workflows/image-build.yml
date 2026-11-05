@@ -49,6 +49,7 @@ jobs:
     outputs:
       images: ${{ steps.catalog.outputs.images }}
       toolchains: ${{ steps.toolchains.outputs.toolchains }}
+      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -88,6 +89,10 @@ jobs:
   images:
     name: Build ${{ matrix.image }}
     needs: configure
+    # Branches with the same major.minor version share consumer tags.
+    concurrency:
+      group: image-publish-${{ needs.configure.outputs.release-line }}-${{ matrix.image }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 2
