@@ -1643,6 +1643,8 @@ void launch_merged_named(cudf::column_device_view const& input,
     static_cast<std::size_t>(warps_per_block) * k_merged_max_paths * sizeof(merged_path_out) <=
       48 * 1024,
     "k_merged_max_paths must keep merged records within the shared-memory bound");
+  CUDF_EXPECTS(plan.max_trie_depth == k_merged_max_trie_depth,
+               "merged walk supports only the maximum trie depth");
   auto const rows = static_cast<std::size_t>(input.size());
   auto const smem_r1 =
     static_cast<std::size_t>(warps_per_block) * plan.num_paths * sizeof(merged_path_out);
