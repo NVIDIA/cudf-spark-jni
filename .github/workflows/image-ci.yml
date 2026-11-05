@@ -113,7 +113,8 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.select.outputs.images) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Allow slow cold downloads, compilation, image loading and cache export.
+    timeout-minutes: 120
     steps:
       # PR code runs directly on a hosted runner, without package write access.
       - name: Checkout PR merge commit

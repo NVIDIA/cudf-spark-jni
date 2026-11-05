@@ -94,7 +94,8 @@ jobs:
       matrix:
         image: ${{ fromJSON(needs.configure.outputs.images) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Fresh builds also need time for cache export, registry transfers and smoke checks.
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write
