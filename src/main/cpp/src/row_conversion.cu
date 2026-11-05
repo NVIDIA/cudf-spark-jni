@@ -16,12 +16,12 @@
 
 #include "nvtx_ranges.hpp"
 #include "row_conversion.hpp"
+#include "utilities/integer_utils.hpp"
 #include "utilities/iterator.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/filling.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
@@ -53,6 +53,7 @@
 #include <thrust/scan.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdarg>
 #include <cstdint>
 #include <iostream>
@@ -756,7 +757,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const num_tile_rows = tile.num_rows();
 
   auto const threads_per_warp = static_cast<size_type>(warp.size());
-  auto const rows_per_read    = static_cast<size_type>(cudf::detail::size_in_bits<bitmask_type>());
+  auto const rows_per_read    = static_cast<size_type>(sizeof(bitmask_type) * CHAR_BIT);
 
   auto const num_sections_x = cuda::ceil_div(num_tile_cols, threads_per_warp);
   auto const num_sections_y = cuda::ceil_div(num_tile_rows, rows_per_read);
@@ -1036,8 +1037,6 @@ __launch_bounds__(block_size) CUDF_KERNEL
 {
   extern __shared__ int8_t shared[];
 
-  using cudf::detail::warp_size;
-
   // each thread of warp reads a single byte of validity - so we read 32 bytes then ballot_sync the
   // bits and write the result to shmem after we fill shared mem memcpy it out in a blob. Probably
   // need knobs for number of rows vs columns to balance read/write
@@ -1069,9 +1068,9 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const threads_per_warp = warp.size();
   auto const cols_per_read    = CHAR_BIT;
 
-  auto const rows_per_read  = static_cast<size_type>(threads_per_warp);
-  auto const num_sections_x = cudf::util::div_rounding_up_safe(num_tile_cols, cols_per_read);
-  auto const num_sections_y = cudf::util::div_rounding_up_safe(num_tile_rows, rows_per_read);
+  auto const rows_per_read            = static_cast<size_type>(threads_per_warp);
+  auto const num_sections_x           = cuda::ceil_div(num_tile_cols, cols_per_read);
+  auto const num_sections_y           = cuda::ceil_div(num_tile_rows, rows_per_read);
   auto const validity_data_col_length = num_sections_y * 4;  // words to bytes
   auto const total_sections           = num_sections_x * num_sections_y;
 
@@ -1219,7 +1218,7 @@ static int calc_fixed_width_kernel_dims(size_type const num_columns,
   // in the x dimension because we use atomic operations at the block
   // level when writing validity data out to main memory, and that would
   // need to change if we split a word of validity data between blocks.
-  int const y_block_size          = min(cudf::util::div_rounding_up_safe(num_columns, 4), 32);
+  int const y_block_size          = min(cuda::ceil_div(num_columns, 4), 32);
   int const x_possible_block_size = 1024 / y_block_size;
   // 48KB is the default setting for shared memory per block according to the cuda tutorials
   // If someone configures the GPU to only have 16 KB this might not work.
@@ -1338,8 +1337,7 @@ static inline int32_t compute_fixed_width_layout(std::vector<data_type> const& s
   // Now we need to add in space for validity
   // Eventually we can think about nullable vs not nullable, but for now we will just always add
   // it in
-  int32_t const validity_bytes_needed =
-    cudf::util::div_rounding_up_safe<int32_t>(schema.size(), CHAR_BIT);
+  int32_t const validity_bytes_needed = cuda::ceil_div<int32_t>(schema.size(), CHAR_BIT);
   // validity comes at the end and is byte aligned so we can pack more in.
   at_offset += validity_bytes_needed;
   // Now we need to pad the end so all rows are 64 bit aligned
@@ -1401,8 +1399,7 @@ column_info_s compute_column_information(iterator begin, iterator end)
   column_starts.push_back(validity_offset);
 
   // validity is byte-aligned in the JCUDF format
-  size_per_row +=
-    cudf::util::div_rounding_up_safe(static_cast<size_type>(std::distance(begin, end)), CHAR_BIT);
+  size_per_row += cuda::ceil_div(static_cast<size_type>(std::distance(begin, end)), CHAR_BIT);
 
   return {size_per_row,
           std::move(column_starts),
@@ -1438,8 +1435,8 @@ std::vector<detail::tile_info> build_validity_tile_infos(size_type const& num_co
 
   // we fit as much as we can given the column stride note that an element in the table takes just 1
   // bit, but a row with a single element still takes 8 bytes!
-  auto const bytes_per_row =
-    cudf::util::round_up_safe(cuda::ceil_div(column_stride, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
+  auto const bytes_per_row = spark_rapids_jni::util::round_up_safe(
+    cuda::ceil_div(column_stride, CHAR_BIT), JCUDF_ROW_ALIGNMENT);
   auto const row_stride =
     std::min(num_rows, cuda::round_down(shmem_limit_per_tile / bytes_per_row, 64));
   std::vector<detail::tile_info> validity_tile_infos;
@@ -1514,8 +1511,8 @@ batch_data build_batches(size_type num_rows,
     thrust::reduce(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    row_sizes,
                    row_sizes + num_rows);
-  auto const num_batches = static_cast<int32_t>(
-    cudf::util::div_rounding_up_safe(total_size, static_cast<uint64_t>(MAX_BATCH_SIZE)));
+  auto const num_batches =
+    static_cast<int32_t>(cuda::ceil_div(total_size, static_cast<uint64_t>(MAX_BATCH_SIZE)));
   auto const num_offsets = num_batches + 1;
   std::vector<row_batch> row_batches;
   std::vector<size_type> batch_row_boundaries;
@@ -1771,7 +1768,7 @@ void determine_tiles(std::vector<size_type> const& column_sizes,
   // or columns.
   auto const square_bias         = 32;  // bias towards columns for performance reasons
   auto const optimal_square_len  = static_cast<size_type>(sqrt(shmem_limit_per_tile));
-  auto const desired_tile_height = cudf::util::round_up_safe<int>(
+  auto const desired_tile_height = spark_rapids_jni::util::round_up_safe<int>(
     std::min(optimal_square_len / square_bias, total_number_of_rows), cudf::detail::warp_size);
   auto const tile_height = std::clamp(desired_tile_height, 1, first_row_batch_size);
 

@@ -240,6 +240,7 @@ add_library(
   src/PageablePoolJni.cpp
   src/ParseURIJni.cpp
   src/ProtobufJni.cpp
+  src/RangeSequenceJni.cpp
   src/RegexRewriteUtilsJni.cpp
   src/RowConversionJni.cpp
   src/SparkResourceAdaptorJni.cpp
@@ -295,6 +296,7 @@ add_library(
   src/protobuf/protobuf.cu
   src/protobuf/protobuf_builders.cu
   src/protobuf/protobuf_kernels.cu
+  src/range_sequence.cu
   src/regex_rewrite_utils.cu
   src/reverse_strings.cu
   src/row_conversion.cu

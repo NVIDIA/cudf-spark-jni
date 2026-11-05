@@ -17,12 +17,12 @@
 #pragma once
 
 #include "protobuf/protobuf_types.cuh"
+#include "utilities/integer_utils.hpp"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
@@ -126,7 +126,7 @@ inline rmm::device_buffer make_zeroed_atomic_flag_buffer(std::size_t num_rows,
 {
   static_assert(sizeof(bool) == 1);
   // Subword atomics access the containing 32-bit word, including the allocation tail.
-  auto const padded_size = cudf::util::round_up_safe(num_rows, sizeof(uint32_t));
+  auto const padded_size = spark_rapids_jni::util::round_up_safe(num_rows, sizeof(uint32_t));
   rmm::device_buffer flags(padded_size, alignof(uint32_t), stream, mr);
   if (padded_size != 0) {
     CUDF_CUDA_TRY(cudaMemsetAsync(flags.data(), 0, padded_size, stream.get()));

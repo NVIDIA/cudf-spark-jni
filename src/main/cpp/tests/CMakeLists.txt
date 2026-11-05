@@ -113,6 +113,9 @@ ConfigureTest(PROTOBUF_HELPERS
 ConfigureTest(LIST_SLICE
     list_slice.cpp)
 
+ConfigureTest(RANGE_SEQUENCE
+    range_sequence.cpp)
+
 ConfigureTest(MAP_ZIP_WITH
     map_zip_with_utils.cpp)
 

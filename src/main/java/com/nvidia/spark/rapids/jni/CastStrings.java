@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,12 @@ package com.nvidia.spark.rapids.jni;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.SignStyle;
+import java.time.temporal.ChronoField;
+import java.text.ParsePosition;
 
 import ai.rapids.cudf.*;
 
@@ -35,6 +41,22 @@ public class CastStrings {
 
   /** Exception time parser policy. */
   public static final int TIME_PARSER_POLICY_EXCEPTION = 2;
+
+  // Older JDKs also accept optional offset seconds for XX/XXX. Match the running
+  // formatter instead of assuming every supported Spark runtime has the same behavior.
+  private static final boolean OPTIONAL_OFFSET_SECONDS = accepts(
+      DateTimeFormatter.ofPattern("XXX"), "+00:00:01");
+  private static final boolean EMPTY_FRACTION = accepts(new DateTimeFormatterBuilder()
+      .appendFraction(ChronoField.NANO_OF_SECOND, 1, 3, false).appendLiteral('Z').toFormatter(), "Z");
+  private static final boolean ADJACENT_SINGLE_FRACTION = accepts(new DateTimeFormatterBuilder()
+      .appendValue(ChronoField.YEAR, 4, 19, SignStyle.EXCEEDS_PAD)
+      .appendFraction(ChronoField.NANO_OF_SECOND, 1, 1, false).toFormatter(), "20241");
+
+  private static boolean accepts(DateTimeFormatter formatter, String input) {
+    ParsePosition position = new ParsePosition(0);
+    formatter.parseUnresolved(input, position);
+    return position.getIndex() == input.length();
+  }
 
   /**
    * Convert a string column to an integer column of a specified type stripping away leading and
@@ -189,6 +211,16 @@ public class CastStrings {
    */
   public static ColumnVector bytesToHex(ColumnView cv) {
     return new ColumnVector(bytesToHex(cv.getNativeView()));
+  }
+
+  /**
+   * Decode hexadecimal strings into binary values. Invalid strings become null.
+   *
+   * @param cv The input strings column
+   * @return a new LIST<UINT8> ColumnVector containing the decoded bytes
+   */
+  public static ColumnVector hexToBytes(ColumnView cv) {
+    return new ColumnVector(hexToBytes(cv.getNativeView()));
   }
 
   /**
@@ -363,8 +395,7 @@ public class CastStrings {
 
   /**
    * Parse a string column into a {@code timestamp_us} column for a Spark date/timestamp
-   * format pattern. Sub-second digits are not parsed; successfully parsed rows always have
-   * microsecond field zero. The pattern is compiled into a token stream on the host and
+   * format pattern. The pattern is compiled into a token stream on the host and
    * walked per-row on the device, mirroring how Spark's {@code DateTimeFormatter} /
    * {@code SimpleDateFormat} represent a parser internally.
    *
@@ -372,12 +403,24 @@ public class CastStrings {
    * {@code m}, {@code s}. Lowercase {@code m} is minute, not month. Non-year letter runs
    * must have length 2; longer runs (e.g. {@code MMM} for month name) are rejected because
    * this kernel does not implement text forms. Unsupported letters, including lowercase
-   * {@code h} for 12-hour clock, {@code S} for fractional seconds, and timezone pattern
-   * letters, are rejected. Space matches exactly one space; quoted literals ({@code 'T'}) are
-   * not supported; use a space instead. Pattern literals must be ASCII. In LEGACY mode, non-year
+   * {@code h} for 12-hour clock, are rejected. CORRECTED additionally supports fractional
+   * seconds ({@code S} through nine {@code S}s), the quoted literal {@code 'T'}, and
+   * offsets {@code X}, {@code XX}, {@code XXX}. Fractions accept one to the specified number
+   * of digits and truncate beyond microseconds. X accepts optional minutes, XX requires
+   * minutes without a colon, and XXX requires a colon; all three accept Z for UTC.
+   * Parsing T and Z is case-insensitive, as in Spark. XX/XXX also accept optional offset
+   * seconds when the running JDK's formatter does (including JDK 8).
+   * An empty fraction before an offset is likewise accepted on JDK 8 and 11.
+   * These additional tokens are rejected under LEGACY and EXCEPTION.
+   * Patterns containing these tokens use strict field assignment: repeated year, month,
+   * day, time, fraction or offset fields must agree. Fractions are compared before
+   * truncation to microseconds. Patterns using only the original parts retain their
+   * existing width and repeated-field behavior.
+   * Space matches exactly one space. Pattern literals must be ASCII. In LEGACY mode, non-year
    * digit fields accept 1 or 2 digits unless adjacent to another digit field (which forces
    * exact width for boundary disambiguation), and the trailing tail accepts EOF or any non-digit.
-   * Parsed values are wall-clock UTC; timezone rebasing remains the caller's responsibility.
+   * Without an offset token, parsed values are wall-clock UTC and timezone rebasing remains
+   * the caller's responsibility. With an offset token, the result is already UTC.
    *
    * <p>This compatibility overload is retained for existing callers. New callers should use
    * {@link #parseTimestampWithFormat(ColumnView, String, int)}.
@@ -403,6 +446,7 @@ public class CastStrings {
    *                         {@link #TIME_PARSER_POLICY_EXCEPTION}.
    * @throws CastException if CORRECTED rejects a row that LEGACY accepts under EXCEPTION policy.
    * @throws IllegalArgumentException if {@code timeParserPolicy} is invalid.
+   * @throws ai.rapids.cudf.CudfException if the format is unsupported for the selected policy.
    * @return a timestamp_us column where invalid rows have nulls.
    */
   public static ColumnVector parseTimestampWithFormat(ColumnView input, String format,
@@ -412,8 +456,111 @@ public class CastStrings {
       throw new IllegalArgumentException("Invalid time parser policy: " + timeParserPolicy);
     }
     return new ColumnVector(
-        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy));
+        parseTimestampWithFormat(input.getNativeView(), format, timeParserPolicy,
+            OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION));
   }
+
+  /**
+   * Parse CORRECTED expression timestamps, resolving the timezone before checked arithmetic.
+   *
+   * <p>An explicit X/XX/XXX offset overrides {@code zoneId}. Otherwise local date/time fields
+   * are resolved in {@code zoneId} at second precision, before checked multiplication by one
+   * million and addition of fractional microseconds. Malformed rows produce nulls; valid dates
+   * that overflow that arithmetic throw regardless of the caller's ANSI setting.
+   * The timezone database is initialized on demand only for region timezones.
+   *
+   * <p>Supports the numeric fields, fractions, offsets and literals documented by
+   * {@link #parseTimestampWithFormat(ColumnView, String, boolean)} under CORRECTED.
+   * Every year field must use exactly {@code yyyy} and supports signed/extended years
+   * with {@code DateTimeFormatter}'s {@code EXCEEDS_PAD} rules, including patterns without
+   * fractions or offsets. Month/day/hour/minute/second fields require exactly two digits,
+   * including slash-separated dates. Repeated fields must agree, with fractions compared
+   * before truncation to microseconds.
+   *
+   * @param input the input string column
+   * @param format Spark format pattern
+   * @param zoneId session timezone used when the pattern has no explicit offset
+   * @return UTC timestamps with nulls for malformed inputs
+   * @throws ArithmeticException if a valid timestamp overflows checked microsecond arithmetic
+   * @throws IllegalArgumentException if the region timezone is absent from the GPU database
+   * @throws ai.rapids.cudf.CudfException if the format is unsupported
+   */
+  public static ColumnVector parseTimestampWithFormatChecked(ColumnView input, String format,
+      ZoneId zoneId) {
+    ZoneId normalized = format.indexOf('X') >= 0 ? ZoneOffset.UTC : zoneId.normalized();
+    if (normalized instanceof ZoneOffset) {
+      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
+          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION, 0, 0,
+          ((ZoneOffset) normalized).getTotalSeconds()));
+    }
+    GpuTimeZoneDB.cacheDatabase();
+    Integer timezoneIndex = GpuTimeZoneDB.getIndexToTransitionTable(normalized.getId());
+    if (timezoneIndex == null) {
+      throw new IllegalArgumentException("Timezone is absent from the GPU database: " + zoneId);
+    }
+    try (Table timezoneInfo = GpuTimeZoneDB.getTimezoneInfo(timezoneIndex)) {
+      return new ColumnVector(parseTimestampWithFormatChecked(input.getNativeView(), format,
+          OPTIONAL_OFFSET_SECONDS, EMPTY_FRACTION, ADJACENT_SINGLE_FRACTION,
+          timezoneInfo.getNativeView(), 0, 0));
+    }
+  }
+
+  /**
+   * Parse CORRECTED CSV dates with an optional numeric Spark pattern using yyyy, MM, dd, HH,
+   * mm and ss. With an explicit pattern, the first attempt requires exact field widths and
+   * complete input consumption without trimming whitespace. The yyyy field supports signed
+   * and extended years using {@code DateTimeFormatter}'s {@code EXCEEDS_PAD} sign rules.
+   * Missing date fields default to 1970/1/1.
+   *
+   * <p>The explicit-format attempt range-checks all parsed time fields, including incomplete
+   * patterns such as {@code HH:ss}. Spark may accept out-of-range values for these patterns.
+   * The plugin excludes them from GPU CSV parsing and falls back to CPU; their behavior is
+   * outside this API's Spark compatibility guarantee.
+   *
+   * <p>If {@code format} is null, the first attempt uses Spark's CAST-style
+   * {@code DefaultDateFormatter} grammar. It trims surrounding whitespace and accepts partial
+   * dates such as {@code 2020} and {@code 2020-05}. For example, {@code 2020} directly produces
+   * {@code 2020-01-01}; that success does not require a fallback retry.
+   *
+   * <p>If the first attempt fails and {@code enableFallback} is true, remove all original
+   * {@code GMT} occurrences, as {@code DateTimeUtils.cleanLegacyTimestampStr} does, and retry
+   * with the shared CAST-style {@code stringToDate} grammar. For example, an explicit
+   * {@code yyyy/MM/dd} pattern rejects {@code 2020-05-01}, but the retry accepts it. This is
+   * Spark's backward-compatible parsing retry: it does not switch execution to CPU, change
+   * {@code timeParserPolicy} to {@code LEGACY}, or invoke the LEGACY date formatter. Both
+   * attempts run on the GPU in the same device pass.
+   *
+   * <p>The caller resolves {@code enableFallback} from Spark's version and CSV options.
+   * Spark 3.3 always enables the retry. Under CORRECTED in Spark 3.4+, the read option
+   * {@code enableDateTimeParsingFallback} takes precedence over
+   * {@code spark.sql.legacy.csv.enableDateTimeParsingFallback}; if neither is set, enable it
+   * when the CSV {@code dateFormat} option is absent and disable it when that option is present.
+   *
+   * <p>Input nulls, dates outside the epoch-day range, and values rejected by all applicable
+   * parsing attempts produce null elements. This API does not implement CSV record-handling
+   * modes. Spark's {@code PERMISSIVE} mode retains a malformed record with null for the invalid
+   * date field, {@code DROPMALFORMED} drops the record, and {@code FAILFAST} throws a parsing
+   * exception. Parsing retry enablement is independent of these modes: even {@code FAILFAST}
+   * does not fail if a configured retry succeeds. The caller must enforce the required
+   * record-level behavior.
+   *
+   * @param input the input string column
+   * @param format the CSV date format, or null for DefaultDateFormatter
+   * @param enableFallback caller-resolved flag for Spark's CAST-style parsing retry after the
+   *                       first attempt fails; this does not control CPU execution fallback
+   * @param trimControlCharacters whether UTF8String.trimAll also trims ISO control characters
+   *                              during default-format parsing and the optional retry
+   * @throws CudfException if the format pattern is unsupported.
+   * @return a TIMESTAMP_DAYS column, with nulls for invalid inputs
+   */
+  public static ColumnVector parseCsvDate(ColumnView input, String format,
+      boolean enableFallback, boolean trimControlCharacters) {
+    return new ColumnVector(parseCsvDate(
+        input.getNativeView(), format, enableFallback, trimControlCharacters));
+  }
+
+  private static native long parseCsvDate(long input, String format,
+      boolean enableFallback, boolean trimControlCharacters);
 
   private static native long toInteger(long nativeColumnView, boolean ansi_enabled, boolean strip,
       int dtype);
@@ -428,6 +575,7 @@ public class CastStrings {
     boolean ansiEnabled, int dtype);
   private static native long fromIntegersWithBase(long nativeColumnView, int base);
   private static native long bytesToHex(long nativeColumnView);
+  private static native long hexToBytes(long nativeColumnView);
 
   private static native long parseTimestampStringsToIntermediate(
       long input, int defaultTimezoneIndex,
@@ -437,6 +585,12 @@ public class CastStrings {
   private static native long parseDateStringsToDate(long input);
 
   private static native long parseTimestampWithFormat(
-      long input, String format, int timeParserPolicy);
+      long input, String format, int timeParserPolicy, boolean allowOffsetSeconds,
+      boolean allowEmptyFraction, boolean adjacentSingleFraction);
+
+  private static native long parseTimestampWithFormatChecked(
+      long input, String format, boolean allowOffsetSeconds, boolean allowEmptyFraction,
+      boolean adjacentSingleFraction,
+      long timezoneInfo, int timezoneIndex, int defaultOffsetSeconds);
 
 }

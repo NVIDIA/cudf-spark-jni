@@ -17,14 +17,13 @@
 #include "nvtx_ranges.hpp"
 #include "shuffle_split.hpp"
 #include "shuffle_split_detail.hpp"
+#include "utilities/integer_utils.hpp"
 #include "utilities/iterator.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/grid_1d.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/structs/structs_column_view.hpp>
@@ -36,6 +35,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_memcpy.cuh>
+#include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/std/bit>
 #include <cuda/stream>
@@ -640,9 +640,9 @@ __global__ void pack_per_partition_metadata_kernel(uint8_t* out_buffer,
 {
   constexpr uint32_t magic = 0x4b554430;
 
-  int const tid = threadIdx.x + (blockIdx.x * blockDim.x);
-  auto const threads_per_partition =
-    cudf::util::round_up_safe(columns_per_partition, static_cast<size_t>(cudf::detail::warp_size));
+  int const tid                    = threadIdx.x + (blockIdx.x * blockDim.x);
+  auto const threads_per_partition = spark_rapids_jni::util::round_up_safe(
+    columns_per_partition, static_cast<size_t>(cudf::detail::warp_size));
   auto const partition_index = tid / threads_per_partition;
   if (partition_index >= num_partitions) { return; }
   auto const col_index = tid % threads_per_partition;
@@ -846,9 +846,9 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
 
   // packed block of memory 1. split indices and src_buf_info structs
   size_t const indices_size =
-    cudf::util::round_up_safe((num_partitions + 1) * sizeof(size_type), split_align);
+    spark_rapids_jni::util::round_up_safe((num_partitions + 1) * sizeof(size_type), split_align);
   size_t const src_buf_info_size =
-    cudf::util::round_up_safe(num_src_bufs * sizeof(src_buf_info), split_align);
+    spark_rapids_jni::util::round_up_safe(num_src_bufs * sizeof(src_buf_info), split_align);
   // host-side
   std::vector<uint8_t> h_indices_and_source_info(indices_size + src_buf_info_size);
   size_type* h_indices = reinterpret_cast<size_type*>(h_indices_and_source_info.data());
@@ -895,12 +895,12 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
 
   // packed block of memory 2. partition buffer sizes, dst_buf_info structs and per-partition
   // has-validity buffer
-  size_t const partition_sizes_size =
-    cudf::util::round_up_safe(num_partitions * sizeof(partition_size_info) * 2, split_align);
+  size_t const partition_sizes_size = spark_rapids_jni::util::round_up_safe(
+    num_partitions * sizeof(partition_size_info) * 2, split_align);
   size_t const dst_buf_info_size =
-    cudf::util::round_up_safe(num_bufs * sizeof(dst_buf_info), split_align);
-  size_t const partition_has_validity_size =
-    cudf::util::round_up_safe(total_flattened_columns * num_partitions * sizeof(bool), split_align);
+    spark_rapids_jni::util::round_up_safe(num_bufs * sizeof(dst_buf_info), split_align);
+  size_t const partition_has_validity_size = spark_rapids_jni::util::round_up_safe(
+    total_flattened_columns * num_partitions * sizeof(bool), split_align);
   // device-side
   rmm::device_buffer d_buf_sizes_and_dst_info(
     partition_sizes_size + dst_buf_info_size + partition_has_validity_size, stream, temp_mr);
@@ -1054,10 +1054,11 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
       [per_partition_metadata_size] __device__(partition_size_info const& pinfo) {
         auto const validity_begin = per_partition_metadata_size;
         auto const offsets_begin =
-          cudf::util::round_up_safe(validity_begin + pinfo.validity_size, validity_pad);
+          spark_rapids_jni::util::round_up_safe(validity_begin + pinfo.validity_size, validity_pad);
         auto const data_begin =
-          cudf::util::round_up_safe(offsets_begin + pinfo.offset_size, offset_pad);
-        auto const data_end = cudf::util::round_up_safe(data_begin + pinfo.data_size, data_pad);
+          spark_rapids_jni::util::round_up_safe(offsets_begin + pinfo.offset_size, offset_pad);
+        auto const data_end =
+          spark_rapids_jni::util::round_up_safe(data_begin + pinfo.data_size, data_pad);
 
         return partition_size_info{
           offsets_begin - validity_begin, data_begin - offsets_begin, data_end - data_begin};
@@ -1141,20 +1142,20 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
   rmm::device_buffer dst_buf(dst_buf_total_size, stream, mr);
 
   // pack per-partition data. one thread per (flattened) column.
-  size_type const thread_count_per_partition = cudf::util::round_up_safe(
+  size_type const thread_count_per_partition = spark_rapids_jni::util::round_up_safe(
     total_flattened_columns, static_cast<size_t>(cudf::detail::warp_size));
-  cudf::detail::grid_1d const grid{
-    thread_count_per_partition * static_cast<size_type>(num_partitions), 128};
-  pack_per_partition_metadata_kernel<<<grid.num_blocks,
-                                       grid.num_threads_per_block,
-                                       0,
-                                       stream.get()>>>(static_cast<uint8_t*>(dst_buf.data()),
-                                                       d_partition_offsets.data(),
-                                                       num_partitions,
-                                                       total_flattened_columns,
-                                                       d_indices,
-                                                       d_flattened_col_inst_has_validity,
-                                                       d_partition_sizes);
+  constexpr cudf::thread_index_type block_size = 128;
+  auto const num_threads = static_cast<cudf::thread_index_type>(thread_count_per_partition) *
+                           static_cast<cudf::thread_index_type>(num_partitions);
+  auto const num_blocks = cuda::ceil_div(num_threads, block_size);
+  pack_per_partition_metadata_kernel<<<num_blocks, block_size, 0, stream.get()>>>(
+    static_cast<uint8_t*>(dst_buf.data()),
+    d_partition_offsets.data(),
+    num_partitions,
+    total_flattened_columns,
+    d_indices,
+    d_flattened_col_inst_has_validity,
+    d_partition_sizes);
 
   // perform the copy.
   split_copy(
