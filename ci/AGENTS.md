@@ -1,0 +1,46 @@
+# Updating CI Toolchain Images
+
+Read [README.md](README.md) before changing image configuration. Keep edits scoped
+to the requested toolchain or release; do not change Jenkins or product coverage
+as part of an image update.
+
+## Configuration Ownership
+
+- `toolchains.json`: CUDA requirements keyed by the POM's major.minor version.
+  Update the target release entry only. Change `default` deliberately for future
+  main versions; do not overwrite it with an older release's requirements.
+  Preserve other release entries so release-to-main merges retain their pins.
+- `Dockerfile`: branch-local image recipe, including CMake and compiler defaults.
+  Do not duplicate these defaults in `toolchains.json` without a requested design
+  change. Dockerfile/build-argument changes must still affect the recipe fingerprint.
+- `../.github/image-builds.json`: image definitions, platform, arguments and cache
+  scopes. CUDA is resolved from `toolchains.json`, not hardcoded again here.
+
+## Contracts To Preserve
+
+- Main publishes only `default-*`; `release/YY.MM` publishes only `YY.MM-*`.
+  A release branch must match the POM version and have explicit toolchain pins.
+  Main alone may use the configuration's default when its version entry is absent.
+- Consumer lookup is different: both main and release GPU CI should try the POM's
+  major.minor image first, then the matching default image. The CUDA, OS and
+  architecture must match. Do not use the publishing prefix as the first-choice
+  consumer tag. Consumer lookup is not implemented by the image-build workflows.
+- Keep daily publication main-only, release publication push/manual-only, PR jobs
+  read-only, and publishing jobs separate from PR execution. Preserve anonymous
+  pull and smoke checks before promotion, branch concurrency and worker limits.
+- Cache failures must not hide or replace build/smoke failures. Keep metadata and
+  fingerprint checks; never treat registry authorization/network errors as a missing tag.
+
+## Validation And Documentation
+
+Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
+`git diff --check`. Exercise `image-config.sh matrix` with the selected
+`CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=default` and the POM's major.minor
+prefix. Check main's missing-version default, release explicit-pin requirements,
+branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
+must affect the actual generated build arguments, not only documentation.
+
+Update README examples and the PR description for changed tags, ownership or
+fallback behavior. Keep the scenario table current. Distinguish local checks, PR
+build/smoke validation, actual GHCR publication and future consumer validation;
+do not claim that a successful image build proves consumer fallback works.

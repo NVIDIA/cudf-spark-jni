@@ -69,6 +69,9 @@ jobs:
           line=$(jq -r '."release-line"' <<< "$metadata")
           [[ "$BASE_BRANCH" == main || "$BASE_BRANCH" == "release/$line" ]]
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+          prefix=$line
+          [[ "$BASE_BRANCH" != main ]] || prefix=default
+          printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         if: contains(fromJSON(steps.select.outputs.suites), 'images')
         id: toolchains
@@ -82,14 +85,11 @@ jobs:
         id: catalog
         shell: bash
         env:
-          BASE_BRANCH: ${{ github.base_ref }}
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+          IMAGE_TAG_PREFIX: ${{ steps.version.outputs.tag-prefix }}
         run: |
           set -euo pipefail
-          mode=selected
-          # Main owns publication for every supported release's toolchain.
-          [[ "$BASE_BRANCH" != main ]] || mode=all
-          images=$(bash ci/image-config.sh matrix "$mode")
+          images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
 
   images:

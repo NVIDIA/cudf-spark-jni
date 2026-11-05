@@ -19,7 +19,7 @@ operation=${1:-}
 image_name=${2:-}
 case "$operation" in
   version|list|describe|matrix) ;;
-  *) echo "Usage: $0 version | list | describe <catalog-entry> | matrix {all|selected}" >&2; exit 2 ;;
+  *) echo "Usage: $0 version | list | describe <catalog-entry> | matrix" >&2; exit 2 ;;
 esac
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 version=$(python3 - <<'PY'
@@ -39,30 +39,19 @@ if [[ "$operation" == version ]]; then
 fi
 
 catalog=.github/image-builds.json
+: "${CI_TOOLCHAINS:?Pass the selected resolve-toolchain-config output}"
 if [[ "$operation" == matrix ]]; then
-  case "$image_name" in
-    all)
-      requirements=$(jq -ce '
-        select(type == "object" and length > 0 and has("default") and
-          all(keys[]; . == "default" or test("^[0-9]{2}\\.[0-9]{2}$"))) |
-        [.[]] | unique' ci/toolchains.json)
-      ;;
-    selected) requirements=$(jq -cn --argjson selected "${CI_TOOLCHAINS:?Selected toolchains required}" '[$selected]') ;;
-    *) echo "Matrix mode must be all or selected" >&2; exit 2 ;;
-  esac
   names=$(jq -ce 'select(type == "object") | keys | select(length > 0)' "$catalog")
   families=$(jq -ce '[.[].toolchain] | unique' "$catalog")
+  jq -e --argjson families "$families" 'type == "object" and keys == $families and
+    all(to_entries[]; (.key | test("^cuda[0-9]+$")) and
+      (.value | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))' \
+    <<< "$CI_TOOLCHAINS" >/dev/null
   configs='[]'
-  while IFS= read -r selected; do
-    jq -e --argjson families "$families" 'type == "object" and keys == $families and
-      all(to_entries[]; (.key | test("^cuda[0-9]+$")) and
-        (.value | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))' \
-      <<< "$selected" >/dev/null
-    while IFS= read -r name; do
-      config=$(CI_TOOLCHAINS="$selected" bash ci/image-config.sh describe "$name")
-      configs=$(jq -c --argjson config "$config" '. + [$config]' <<< "$configs")
-    done < <(jq -r '.[]' <<< "$names")
-  done < <(jq -c '.[]' <<< "$requirements")
+  while IFS= read -r name; do
+    config=$(bash ci/image-config.sh describe "$name")
+    configs=$(jq -c --argjson config "$config" '. + [$config]' <<< "$configs")
+  done < <(jq -r '.[]' <<< "$names")
   # Build each shared tag once; incompatible recipes must not compete for a tag.
   jq -ce 'group_by(.image + ":" + .tag) | map(
     if ([.[].version] | unique | length) == 1 then .[0]
@@ -71,7 +60,6 @@ if [[ "$operation" == matrix ]]; then
   exit 0
 fi
 
-: "${CI_TOOLCHAINS:?Pass the selected resolve-toolchain-config output}"
 if [[ "$operation" == list ]]; then
   jq -ce 'select(type == "object") | keys | select(length > 0)' "$catalog"
   exit 0
@@ -97,7 +85,12 @@ os_release=$(jq -er '."build-args".OS_RELEASE' <<< "$config")
 parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 [[ "$parallel" =~ ^[1-9][0-9]*$ ]]
 (( parallel <= 8 )) || parallel=8
-tag="cuda${cuda}-rockylinux${os_release}-amd64"
+tag_prefix=${IMAGE_TAG_PREFIX:-$release_line}
+if [[ "$tag_prefix" != default && ! "$tag_prefix" =~ ^[0-9]{2}\.[0-9]{2}$ ]]; then
+  echo "Image tag prefix must be default or a major.minor project version" >&2
+  exit 1
+fi
+tag="${tag_prefix}-cuda${cuda}-rockylinux${os_release}-amd64"
 config=$(jq -c --arg cuda "$cuda" --arg parallel "$parallel" \
   '."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel} |
    ."cache-from" |= map(gsub("\\$\\{CUDA_VERSION\\}"; $cuda)) |
