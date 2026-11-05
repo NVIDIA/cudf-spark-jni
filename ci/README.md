@@ -7,7 +7,7 @@ branch's image tags:
 
 | Source branch | Published tag prefix | Publication triggers |
 | --- | --- | --- |
-| `main` | `default-` | Daily schedule, image-input push, manual dispatch |
+| `main` | `main-` | Daily schedule, image-input push, manual dispatch |
 | `release/YY.MM` | `YY.MM-` | Image-input push, manual dispatch |
 
 Other branches cannot publish. A release branch must match the POM's major.minor
@@ -33,8 +33,8 @@ Images live under `ghcr.io/nvidia/cudf-spark-jni/jni-build`, with tags such as:
 ```text
 26.10-cuda13.3.0-rockylinux8-amd64
 26.12-cuda13.4.3-rockylinux8-amd64
-default-cuda13.4.3-rockylinux8-amd64
-default-cuda13.4.3-rockylinux8-arm64
+main-cuda13.4.3-rockylinux8-amd64
+main-cuda13.4.3-rockylinux8-arm64
 ```
 
 Versioned tags use only major.minor: `26.12.0-SNAPSHOT` and `26.12.1` both use
@@ -49,9 +49,9 @@ images; there is no combined amd64/arm64 consumer tag.
 
 Publishing ownership is separate from image selection. **GPU CI on both main and
 release branches should try its own POM major.minor tag first**, then the matching
-`default-` tag if the first image is absent or its recipe is incompatible. For
+`main-` tag if the first image is absent or its recipe is incompatible. For
 example, main at `26.12.0-SNAPSHOT` tries `26.12-cuda13.4.3-rockylinux8-amd64` before
-`default-cuda13.4.3-rockylinux8-amd64`; it does not go directly to default because
+`main-cuda13.4.3-rockylinux8-amd64`; it does not go directly to the main image because
 the source branch is main. Keep the same CUDA, OS and architecture suffix. This
 covers branch-out and a main version bump before a versioned image is published.
 Do not treat registry authentication or network errors as proof that a tag is absent.
@@ -65,7 +65,7 @@ that consumer lookup: image CI always builds and smoke-tests from its checkout.
   its own pinned configuration and Dockerfile; later release updates publish only
   that release's versioned tags.
 - Main may use `default` for a new project version without an explicit entry.
-  This configuration fallback is separate from the `default-` image tag prefix,
+  This configuration fallback is separate from the `main-` image tag prefix,
   which is always owned by main, even when main selected an explicit version entry.
 - Changing CUDA creates a new tag suffix. Changing the Dockerfile/build arguments
   changes the fingerprint even when the tag remains the same. CMake stays in the
@@ -93,24 +93,53 @@ architecture. The existing amd64 PR builds can also import earlier major-series
 caches during migration. Cache export failure is non-fatal; build,
 recipe-verification and smoke-test failures remain failures.
 
-## Internal Mirrors
+## Internal Registry Cache
 
-The standard Linux toolchain images may be mirrored to an internal OCI registry
-without rebuilding. Copy the **published digest** from the successful publisher's
-summary, preserving its manifest and all referenced content, for example with
-`skopeo copy --all --preserve-digests`. Verify the destination digest, architecture,
-recipe label and smoke check before switching a consumer. Keep registry credentials
-in the trusted internal mirror job, never in public PR validation.
+Use a GHCR remote cache in the internal registry rather than building or publishing
+the same image again. The repository path after the registry prefix, tag and digest
+stay the same. For example:
 
-Use distinct versioned/default and architecture tags in the mirror. Do not overwrite
-legacy shared aliases while existing consumers still require them. For an RC or
-release build, record and pin the verified mirror digest so a later default-tag
-refresh cannot silently change its toolchain. Copying the final image does not
-mirror the Dockerfile's base image or build-time download dependencies.
+```text
+ghcr.io/nvidia/cudf-spark-jni/jni-build:main-cuda13.4.3-rockylinux8-arm64
+<internal-registry>/<virtual-repository>/nvidia/cudf-spark-jni/jni-build:main-cuda13.4.3-rockylinux8-arm64
+```
+
+The upstream GHCR package must allow anonymous pulls. Internal jobs retain their
+existing registry authentication; no GitHub token is needed to pull a public image.
+Verify full layer pulls with the internal CI service account, not only manifest
+access with a developer's account. Remote caching is on demand; mutable-tag refresh
+depends on the registry's metadata-cache policy. Prewarming must fetch the required
+platform's layers, not only its manifest.
+
+Use the same consumer selection rules externally and internally:
+
+| Source used by the job | First image | Fallback image |
+| --- | --- | --- |
+| Main/dev at `26.12.0-SNAPSHOT` | `26.12-cudaX-rockylinux8-ARCH` | `main-cudaX-rockylinux8-ARCH` |
+| Pre-release at `26.10.2-SNAPSHOT` | `26.10-cudaX-rockylinux8-ARCH` | Matching `main-*` only if compatible |
+| Release/RC at `26.10.x` | Verified `26.10-cudaX-rockylinux8-ARCH` digest | Only a separately verified compatible image |
+
+Resolve `X`, `ARCH` and the recipe from the checked-out source, not the job name or
+the current main configuration. A new main image must not substitute a different
+CUDA version or compiler recipe for a release. RC/release jobs should pin and record
+the approved digest so subsequent tag refreshes cannot silently change their build.
+Do not introduce a moving `pre-release-*` alias or overwrite legacy shared tags.
+These are adoption rules, not changes to existing Jenkins consumers in this PR.
+Release-roll automation may copy a dev pipeline into its pre-release counterpart
+unchanged. A future consumer must therefore resolve the actual source ref and its
+metadata before selecting the build-agent image; hardcoding `main-*` in the dev
+pipeline would also send the copied pre-release pipeline to the main image. Keep
+source-branch routing and image-tag selection separate.
+
+For an explicit retained mirror instead of an on-demand cache, copy the published
+digest with all referenced content (for example, `skopeo copy --all
+--preserve-digests`), then verify the destination digest, architecture, recipe and
+smoke checks. Caching the final image does not mirror its base image or build-time
+download dependencies.
 
 This producer does not replace every internal image: older CUDA/GCC, CentOS,
 customer/private variants, signing/deployment images and product integration-test
 images keep their existing paths until separately validated. A CUDA version still
-required by a consumer must remain available even when main advances its default.
+required by a consumer must remain available even when main advances its toolchains.
 Existing release branches need to adopt the publisher before their versioned tags
 exist; merging this PR into main does not publish their images automatically.

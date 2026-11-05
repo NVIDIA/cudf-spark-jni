@@ -97,8 +97,8 @@ parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 [[ "$parallel" =~ ^[1-9][0-9]*$ ]]
 (( parallel <= 8 )) || parallel=8
 tag_prefix=${IMAGE_TAG_PREFIX:-$release_line}
-if [[ "$tag_prefix" != default && ! "$tag_prefix" =~ ^[0-9]{2}\.[0-9]{2}$ ]]; then
-  echo "Image tag prefix must be default or a major.minor project version" >&2
+if [[ "$tag_prefix" != main && ! "$tag_prefix" =~ ^[0-9]{2}\.[0-9]{2}$ ]]; then
+  echo "Image tag prefix must be main or a major.minor project version" >&2
   exit 1
 fi
 tag="${tag_prefix}-cuda${cuda}-rockylinux${os_release}-${arch}"

@@ -70,7 +70,7 @@ jobs:
           [[ "$BASE_BRANCH" == main || "$BASE_BRANCH" == "release/$line" ]]
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
           prefix=$line
-          [[ "$BASE_BRANCH" != main ]] || prefix=default
+          [[ "$BASE_BRANCH" != main ]] || prefix=main
           printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         if: contains(fromJSON(steps.select.outputs.suites), 'images')

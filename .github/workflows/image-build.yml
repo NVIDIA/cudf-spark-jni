@@ -15,7 +15,7 @@
 name: Daily image build
 
 on:
-  # Main owns default-* tags; release/YY.MM owns YY.MM-* tags. See ci/README.md.
+  # Main owns main-* tags; release/YY.MM owns YY.MM-* tags. See ci/README.md.
   # The daily schedule runs only on main. Release publication is push/manual only.
   schedule:
     - cron: '47 2 * * *'
@@ -66,7 +66,7 @@ jobs:
           [[ "$SOURCE_BRANCH" == main || "$SOURCE_BRANCH" == "release/$line" ]]
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
           prefix=$line
-          [[ "$SOURCE_BRANCH" != main ]] || prefix=default
+          [[ "$SOURCE_BRANCH" != main ]] || prefix=main
           printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         id: toolchains

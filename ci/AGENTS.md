@@ -21,11 +21,11 @@ as part of an image update.
 
 ## Contracts To Preserve
 
-- Main publishes only `default-*`; `release/YY.MM` publishes only `YY.MM-*`.
+- Main publishes only `main-*`; `release/YY.MM` publishes only `YY.MM-*`.
   A release branch must match the POM version and have explicit toolchain pins.
   Main alone may use the configuration's default when its version entry is absent.
 - Consumer lookup is different: both main and release GPU CI should try the POM's
-  major.minor image first, then the matching default image. The CUDA, OS and
+  major.minor image first, then the matching `main-*` image. The CUDA, OS and
   architecture must match. Do not use the publishing prefix as the first-choice
   consumer tag. Consumer lookup is not implemented by the image-build workflows.
 - Keep daily publication main-only, release publication push/manual-only, PR jobs
@@ -36,12 +36,19 @@ as part of an image update.
   actual worker. Do not move unapproved fork PR code onto a shared runner pool.
 - Cache failures must not hide or replace build/smoke failures. Keep metadata and
   fingerprint checks; never treat registry authorization/network errors as a missing tag.
+- Internal consumers use the same repository suffix, tags and digests through the
+  GHCR remote cache, with their existing registry credentials. Do not add another
+  publisher or a moving pre-release alias. Resolve source POM/toolchains, not job
+  names; verify service-account layer pulls and pin approved release/RC digests.
+  Exercise the dev-to-pre-release pipeline copy during adoption: copied code must
+  resolve the actual source ref before allocating image-backed build agents, not
+  retain a hardcoded `main-*` image or CUDA version from the dev job.
 
 ## Validation And Documentation
 
 Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
 `git diff --check`. Exercise `image-config.sh matrix` with the selected
-`CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=default` and the POM's major.minor
+`CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=main` and the POM's major.minor
 prefix. Check main's missing-version default, release explicit-pin requirements,
 branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
 must affect the actual generated build arguments, not only documentation.
