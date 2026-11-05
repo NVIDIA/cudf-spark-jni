@@ -12,6 +12,3 @@ Apache Spark.  The RAPIDS name will be sunset over time.  This repository now us
 ## Building From Source
 
 See the [build instructions in the contributing guide](CONTRIBUTING.md#building-from-source).
-
-See [CI toolchain images](ci/README.md) for GitHub Actions validation, publishing
-ownership and release-branch behavior.
