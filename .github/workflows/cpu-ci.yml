@@ -44,7 +44,6 @@ jobs:
       suites: ${{ steps.select.outputs.suites }}
       required-jobs: ${{ steps.select.outputs.required-jobs }}
       images: ${{ steps.catalog.outputs.images || '[]' }}
-      toolchains: ${{ steps.toolchains.outputs.toolchains }}
     steps:
       - name: Checkout PR merge commit
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -83,17 +82,18 @@ jobs:
         id: catalog
         shell: bash
         env:
+          BASE_BRANCH: ${{ github.base_ref }}
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
         run: |
           set -euo pipefail
-          images=$(bash ci/image-config.sh list)
-          while IFS= read -r image; do
-            bash ci/image-config.sh describe "$image"
-          done < <(jq -r '.[]' <<< "$images")
+          mode=selected
+          # Main owns publication for every supported release's toolchain.
+          [[ "$BASE_BRANCH" != main ]] || mode=all
+          images=$(bash ci/image-config.sh matrix "$mode")
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
 
   images:
-    name: Validate ${{ matrix.image }}
+    name: Validate ${{ matrix.image.tag }}
     needs: select
     if: contains(fromJSON(needs.select.outputs.suites), 'images')
     strategy:
@@ -111,22 +111,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Prepare image configuration
-        id: image
-        shell: bash
-        env:
-          CI_TOOLCHAINS: ${{ needs.select.outputs.toolchains }}
-          IMAGE_NAME: ${{ matrix.image }}
-        run: |
-          config=$(bash ci/image-config.sh describe "$IMAGE_NAME")
-          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build and smoke-test without publishing
         # Branch-scoped PR caches can reuse the fresh baseline exported from main.
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
-          config: ${{ steps.image.outputs.config }}
+          config: ${{ toJSON(matrix.image) }}
 
   gate:
     name: CPU CI gate

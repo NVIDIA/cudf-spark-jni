@@ -18,8 +18,8 @@ set -euo pipefail
 operation=${1:-}
 image_name=${2:-}
 case "$operation" in
-  version|list|describe) ;;
-  *) echo "Usage: $0 version | list | describe <catalog-entry>" >&2; exit 2 ;;
+  version|list|describe|matrix) ;;
+  *) echo "Usage: $0 version | list | describe <catalog-entry> | matrix {all|selected}" >&2; exit 2 ;;
 esac
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 version=$(python3 - <<'PY'
@@ -38,8 +38,40 @@ if [[ "$operation" == version ]]; then
   exit 0
 fi
 
-: "${CI_TOOLCHAINS:?Pass the selected resolve-toolchain-config output}"
 catalog=.github/image-builds.json
+if [[ "$operation" == matrix ]]; then
+  case "$image_name" in
+    all)
+      requirements=$(jq -ce '
+        select(type == "object" and length > 0 and has("default") and
+          all(keys[]; . == "default" or test("^[0-9]{2}\\.[0-9]{2}$"))) |
+        [.[]] | unique' ci/toolchains.json)
+      ;;
+    selected) requirements=$(jq -cn --argjson selected "${CI_TOOLCHAINS:?Selected toolchains required}" '[$selected]') ;;
+    *) echo "Matrix mode must be all or selected" >&2; exit 2 ;;
+  esac
+  names=$(jq -ce 'select(type == "object") | keys | select(length > 0)' "$catalog")
+  families=$(jq -ce '[.[].toolchain] | unique' "$catalog")
+  configs='[]'
+  while IFS= read -r selected; do
+    jq -e --argjson families "$families" 'type == "object" and keys == $families and
+      all(to_entries[]; (.key | test("^cuda[0-9]+$")) and
+        (.value | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))' \
+      <<< "$selected" >/dev/null
+    while IFS= read -r name; do
+      config=$(CI_TOOLCHAINS="$selected" bash ci/image-config.sh describe "$name")
+      configs=$(jq -c --argjson config "$config" '. + [$config]' <<< "$configs")
+    done < <(jq -r '.[]' <<< "$names")
+  done < <(jq -c '.[]' <<< "$requirements")
+  # Build each shared tag once; incompatible recipes must not compete for a tag.
+  jq -ce 'group_by(.image + ":" + .tag) | map(
+    if ([.[].version] | unique | length) == 1 then .[0]
+    else error("Conflicting recipes for " + .[0].image + ":" + .[0].tag) end) |
+    select(length > 0 and length <= 256)' <<< "$configs"
+  exit 0
+fi
+
+: "${CI_TOOLCHAINS:?Pass the selected resolve-toolchain-config output}"
 if [[ "$operation" == list ]]; then
   jq -ce 'select(type == "object") | keys | select(length > 0)' "$catalog"
   exit 0
@@ -67,7 +99,9 @@ parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 (( parallel <= 8 )) || parallel=8
 tag="cuda${cuda}-rockylinux${os_release}-amd64"
 config=$(jq -c --arg cuda "$cuda" --arg parallel "$parallel" \
-  '."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel}' <<< "$config")
+  '."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel} |
+   ."cache-from" |= map(gsub("\\$\\{CUDA_VERSION\\}"; $cuda)) |
+   ."cache-to" |= map(gsub("\\$\\{CUDA_VERSION\\}"; $cuda))' <<< "$config")
 dockerfile=$(jq -er '.dockerfile' <<< "$config")
 checksum=$(sha256sum "$dockerfile" | cut -d ' ' -f 1)
 # This toolchain has no COPY/ADD inputs. Parallelism changes build speed, not the recipe.

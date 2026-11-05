@@ -15,13 +15,13 @@
 name: Daily image build
 
 on:
-  # Daily builds are main-only. Image-input pushes and manual dispatches also
-  # publish release images; PR validation is separate in cpu-ci.yml.
+  # Main alone owns the shared tags, including toolchains pinned by release lines.
+  # Release PRs validate in cpu-ci.yml but never publish. See ci/README.md.
   schedule:
     - cron: '47 2 * * *'
   workflow_dispatch:
   push:
-    branches: [main, 'release/**']
+    branches: [main]
     paths:
       - 'pom.xml'
       - 'ci/Dockerfile'
@@ -35,6 +35,7 @@ permissions:
   contents: read
 
 concurrency:
+  # Non-main dispatches are skipped below and cannot replace a pending main run.
   group: image-build-${{ github.ref }}
   cancel-in-progress: false
 
@@ -42,61 +43,28 @@ jobs:
   configure:
     if: >-
       github.repository == 'NVIDIA/cudf-spark-jni' &&
-      (github.event_name != 'schedule' || github.ref == 'refs/heads/main') &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       images: ${{ steps.catalog.outputs.images }}
-      toolchains: ${{ steps.toolchains.outputs.toolchains }}
-      tags: ${{ steps.catalog.outputs.tags }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Read project version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-          metadata=$(bash ci/image-config.sh version)
-          line=$(jq -r '."release-line"' <<< "$metadata")
-          [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == "refs/heads/release/$line" ]]
-          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
-      - name: Resolve project toolchains
-        id: toolchains
-        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
-        with:
-          config: ci/toolchains.json
-          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
-          allow-default: ${{ github.ref == 'refs/heads/main' }}
-      - name: Validate configured images and toolchain tags
+      - name: Resolve all supported toolchain images
         id: catalog
         shell: bash
-        env:
-          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
         run: |
           set -euo pipefail
-          # Main may use default for a new YY.MM. Pin that line before release branch-out.
-          images=$(bash ci/image-config.sh list)
-          tags='{}'
-          while IFS= read -r image; do
-            config=$(bash ci/image-config.sh describe "$image")
-            tags=$(jq -c --arg name "$image" --argjson config "$config" \
-              '. + {($name): ($config.image + ":" + $config.tag)}' <<< "$tags")
-          done < <(jq -r '.[]' <<< "$images")
+          images=$(bash ci/image-config.sh matrix all)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
-          printf 'tags=%s\n' "$tags" >> "$GITHUB_OUTPUT"
 
   images:
-    name: Build ${{ matrix.image }}
+    name: Build ${{ matrix.image.tag }}
     needs: configure
-    # Every branch publishing the same toolchain tag shares one promotion lock.
-    concurrency:
-      group: image-publish-${{ fromJSON(needs.configure.outputs.tags)[matrix.image] }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -119,11 +87,10 @@ jobs:
         id: image
         shell: bash
         env:
-          CI_TOOLCHAINS: ${{ needs.configure.outputs.toolchains }}
-          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_CONFIG: ${{ toJSON(matrix.image) }}
         run: |
           # Publish freshly built layers; only export a baseline for later PR builds.
-          config=$(bash ci/image-config.sh describe "$IMAGE_NAME" | jq -c 'del(."cache-from")')
+          config=$(jq -c 'del(."cache-from")' <<< "$IMAGE_CONFIG")
           printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
