@@ -74,6 +74,29 @@ public class PageableMemoryPoolTest {
   }
 
   @Test
+  public void allocationStrategies() {
+    for (PageableMemoryPool.AllocationStrategy strategy :
+        PageableMemoryPool.AllocationStrategy.values()) {
+      PageableMemoryPool.initialize(1024 * 1024, 2, false, -1, strategy, 4, false);
+      try (HostMemoryBuffer buffer = PageableMemoryPool.tryAllocate(128 * 1024)) {
+        assertNotNull(buffer, strategy.toString());
+      }
+      PageableMemoryPool.shutdown();
+    }
+  }
+
+  @Test
+  public void arenaCapacityAndInvalidOptions() {
+    assertThrows(IllegalArgumentException.class,
+        () -> PageableMemoryPool.initialize(1024 * 1024, 2, false, -1,
+            PageableMemoryPool.AllocationStrategy.ARENA, 0, false));
+    PageableMemoryPool.initialize(1024 * 1024, 2, false, -1,
+        PageableMemoryPool.AllocationStrategy.ARENA, 4, false);
+    assertTrue(PageableMemoryPool.isInitialized());
+    assertNull(PageableMemoryPool.tryAllocate(512 * 1024));
+  }
+
+  @Test
   public void rejectsInvalidAllocationSize() {
     assertThrows(IllegalArgumentException.class, () -> PageableMemoryPool.tryAllocate(0));
     assertThrows(IllegalArgumentException.class, () -> PageableMemoryPool.tryAllocate(-1));

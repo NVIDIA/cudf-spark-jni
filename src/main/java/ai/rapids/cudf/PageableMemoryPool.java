@@ -25,6 +25,12 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public final class PageableMemoryPool implements AutoCloseable {
   private static final Logger log = LoggerFactory.getLogger(PageableMemoryPool.class);
 
+  public enum AllocationStrategy {
+    LIST,
+    INDEXED,
+    ARENA
+  }
+
   // These static fields should only ever be accessed when class-synchronized.
   // Do NOT use singleton_ directly!  Use the getSingleton accessor instead.
   private static volatile PageableMemoryPool singleton_ = null;
@@ -41,7 +47,8 @@ public final class PageableMemoryPool implements AutoCloseable {
   }
 
   private static native long newPageablePoolMemoryResource(
-      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny);
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny,
+      int allocationStrategy, int arenaCount);
 
   private static native void releasePageablePoolMemoryResource(long poolPtr);
 
@@ -165,16 +172,34 @@ public final class PageableMemoryPool implements AutoCloseable {
    */
   public static synchronized void initialize(long poolSize, int pretouchThreads,
       boolean numaBind, int gpuDevice) {
+    initialize(poolSize, pretouchThreads, numaBind, gpuDevice, AllocationStrategy.LIST, 8,
+        "deny".equals(System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP")));
+  }
+
+  /**
+   * Initialize the pool with an allocation strategy. ARENA partitions capacity across
+   * independent arenas, so allocations larger than one arena can fall back even when
+   * aggregate pool space remains available.
+   */
+  public static synchronized void initialize(long poolSize, int pretouchThreads,
+      boolean numaBind, int gpuDevice, AllocationStrategy allocationStrategy,
+      int arenaCount, boolean thpDeny) {
     if (isInitialized()) {
       throw new IllegalStateException("Can only initialize the pageable pool once.");
     }
-    boolean thpDeny = "deny".equals(System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP"));
+    if (allocationStrategy == null) {
+      throw new IllegalArgumentException("allocationStrategy must not be null");
+    }
+    if (arenaCount <= 0) {
+      throw new IllegalArgumentException("arenaCount must be positive");
+    }
     boolean bindToGpu = numaBind && gpuDevice >= 0;
     FutureTask<PageableMemoryPool> task = new FutureTask<>(() -> {
       if (bindToGpu) {
         Cuda.setDevice(gpuDevice);
       }
-      return new PageableMemoryPool(poolSize, pretouchThreads, bindToGpu, thpDeny);
+      return new PageableMemoryPool(poolSize, pretouchThreads, bindToGpu, thpDeny,
+          allocationStrategy, arenaCount);
     });
     Thread initThread = new Thread(task, "pageable pool init");
     initThread.setDaemon(true);
@@ -234,9 +259,11 @@ public final class PageableMemoryPool implements AutoCloseable {
   }
 
   private PageableMemoryPool(
-      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny) {
+      long poolSize, int pretouchThreads, boolean numaBind, boolean thpDeny,
+      AllocationStrategy allocationStrategy, int arenaCount) {
     this.poolHandle =
-        newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind, thpDeny);
+        newPageablePoolMemoryResource(poolSize, pretouchThreads, numaBind, thpDeny,
+            allocationStrategy.ordinal(), arenaCount);
     this.poolSize = poolSize;
   }
 

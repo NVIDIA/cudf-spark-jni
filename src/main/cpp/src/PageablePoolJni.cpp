@@ -16,11 +16,70 @@
 
 #include "cudf_jni_apis.hpp"
 #include "jni_utils.hpp"
+#include "pageable_arena_pool_resource.hpp"
 #include "pageable_pool_resource.hpp"
 
 #include <cuda/memory_resource>
 
 #include <memory>
+#include <stdexcept>
+
+namespace {
+
+using list_pool = spark_rapids_jni::pageable_pool_resource;
+using indexed_pool =
+  spark_rapids_jni::pageable_pool_resource_t<spark_rapids_jni::detail::indexed_free_list>;
+using arena_pool = spark_rapids_jni::pageable_arena_pool_resource;
+
+struct pageable_pool_handle {
+  std::unique_ptr<list_pool> list;
+  std::unique_ptr<indexed_pool> indexed;
+  std::unique_ptr<arena_pool> arena;
+
+  pageable_pool_handle(std::size_t size,
+                       int pretouch_threads,
+                       int numa_node,
+                       bool thp_deny,
+                       int allocation_strategy,
+                       int arena_count)
+  {
+    auto upstream = [] {
+      return cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
+        spark_rapids_jni::pageable_memory_resource{});
+    };
+    switch (allocation_strategy) {
+      case 0:
+        list = std::make_unique<list_pool>(
+          upstream(), size, pretouch_threads, numa_node, true, thp_deny);
+        break;
+      case 1:
+        indexed = std::make_unique<indexed_pool>(
+          upstream(), size, pretouch_threads, numa_node, true, thp_deny);
+        break;
+      case 2:
+        arena = std::make_unique<arena_pool>(
+          upstream(), size, pretouch_threads, numa_node, true, thp_deny, arena_count);
+        break;
+      default: throw std::invalid_argument("Invalid pageable pool allocation strategy");
+    }
+  }
+
+  void* allocate(std::size_t size)
+  {
+    if (list) { return list->allocate_sync(size); }
+    if (indexed) { return indexed->allocate_sync(size); }
+    return arena->allocate_sync(size);
+  }
+
+  void deallocate(void* ptr, std::size_t size)
+  {
+    if (list) { return list->deallocate_sync(ptr, size); }
+    if (indexed) { return indexed->deallocate_sync(ptr, size); }
+    arena->deallocate_sync(ptr, size);
+  }
+};
+
+}  // namespace
 
 #define CATCH_PAGEABLE_POOL_EXHAUSTED(env, ret_val)                        \
   JNI_CATCH_BEGIN(env, ret_val)                                            \
@@ -39,20 +98,20 @@ Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(JNIEnv* env
                                                                      jlong pool_size,
                                                                      jint pretouch_threads,
                                                                      jboolean numa_bind,
-                                                                     jboolean thp_deny)
+                                                                     jboolean thp_deny,
+                                                                     jint allocation_strategy,
+                                                                     jint arena_count)
 {
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
     int const numa_node = (numa_bind != JNI_FALSE) ? spark_rapids_jni::detail::gpu_numa_node() : -1;
-    auto pool           = std::make_unique<spark_rapids_jni::pageable_pool_resource>(
-      cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(
-        spark_rapids_jni::pageable_memory_resource{}),
-      static_cast<std::size_t>(pool_size),
-      static_cast<int>(pretouch_threads),
-      numa_node,
-      /*populate_write=*/true,
-      /*thp_deny=*/(thp_deny != JNI_FALSE));
+    auto pool = std::make_unique<pageable_pool_handle>(static_cast<std::size_t>(pool_size),
+                                                       static_cast<int>(pretouch_threads),
+                                                       numa_node,
+                                                       thp_deny != JNI_FALSE,
+                                                       static_cast<int>(allocation_strategy),
+                                                       static_cast<int>(arena_count));
     return reinterpret_cast<jlong>(pool.release());
   }
   JNI_CATCH(env, 0);
@@ -61,7 +120,7 @@ Java_ai_rapids_cudf_PageableMemoryPool_newPageablePoolMemoryResource(JNIEnv* env
 JNIEXPORT void JNICALL Java_ai_rapids_cudf_PageableMemoryPool_releasePageablePoolMemoryResource(
   JNIEnv* env, jclass, jlong pool_ptr)
 {
-  JNI_TRY { cudf::jni::safe_delete<spark_rapids_jni::pageable_pool_resource>(pool_ptr); }
+  JNI_TRY { cudf::jni::safe_delete<pageable_pool_handle>(pool_ptr); }
   JNI_CATCH(env, );
 }
 
@@ -72,8 +131,8 @@ JNIEXPORT jlong JNICALL Java_ai_rapids_cudf_PageableMemoryPool_allocFromPageable
 {
   JNI_TRY
   {
-    auto* pool = reinterpret_cast<spark_rapids_jni::pageable_pool_resource*>(pool_ptr);
-    void* ret  = pool->allocate_sync(static_cast<std::size_t>(size));
+    auto* pool = reinterpret_cast<pageable_pool_handle*>(pool_ptr);
+    void* ret  = pool->allocate(static_cast<std::size_t>(size));
     return reinterpret_cast<jlong>(ret);
   }
   CATCH_PAGEABLE_POOL_EXHAUSTED(env, 0);
@@ -84,8 +143,8 @@ JNIEXPORT void JNICALL Java_ai_rapids_cudf_PageableMemoryPool_freeFromPageablePo
 {
   JNI_TRY
   {
-    auto* pool = reinterpret_cast<spark_rapids_jni::pageable_pool_resource*>(pool_ptr);
-    pool->deallocate_sync(reinterpret_cast<void*>(ptr), static_cast<std::size_t>(size));
+    auto* pool = reinterpret_cast<pageable_pool_handle*>(pool_ptr);
+    pool->deallocate(reinterpret_cast<void*>(ptr), static_cast<std::size_t>(size));
   }
   JNI_CATCH(env, );
 }
