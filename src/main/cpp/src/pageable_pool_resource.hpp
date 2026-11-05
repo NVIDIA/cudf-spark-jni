@@ -102,8 +102,8 @@ inline void populate_or_touch_pages(char* chunk,
 inline void pretouch_parallel(
   void* base, std::size_t bytes, int threads, int numa_node, bool populate_write)
 {
-  std::size_t const page_size  = system_page_size();
-  std::size_t const page_count = bytes / page_size + (bytes % page_size != 0);
+  auto const page_size  = system_page_size();
+  auto const page_count = bytes / page_size + static_cast<std::size_t>(bytes % page_size != 0);
   if (page_count == 0) { return; }
   std::size_t const requested_threads = static_cast<std::size_t>(std::max(1, threads));
   std::size_t const hardware_threads  = std::thread::hardware_concurrency();
@@ -111,10 +111,9 @@ inline void pretouch_parallel(
     {requested_threads, page_count, hardware_threads == 0 ? requested_threads : hardware_threads});
   // Resolve the node's CPU list once so pre-touch faults (and thus page placement
   // latency) happen on CPUs local to the bound node.
-  bool bind_cpus = false;
   cpu_set_t cpus{};
-  if (numa_node >= 0) { bind_cpus = node_cpu_set(numa_node, &cpus); }
-  std::vector<std::thread> workers;
+  bool const bind_cpus = numa_node >= 0 && node_cpu_set(numa_node, &cpus);
+  std::vector<std::jthread> workers;
   workers.reserve(worker_count);
   std::atomic<bool> start_workers{false};
   auto* const pages     = static_cast<char*>(base);

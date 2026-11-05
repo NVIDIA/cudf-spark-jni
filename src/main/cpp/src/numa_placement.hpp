@@ -23,6 +23,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -65,12 +66,13 @@ inline bool parse_cpu_list(char const* path, cpu_set_t* out)
   if (fp == nullptr) { return false; }
   CPU_ZERO(out);
   bool any = false;
-  char line[8192];
-  while (std::fgets(line, sizeof(line), fp) != nullptr) {
+  std::array<char, 8192> line{};
+  while (std::fgets(line.data(), line.size(), fp) != nullptr) {
     char* saveptr = nullptr;
-    for (char* tok = ::strtok_r(line, ",\n", &saveptr); tok != nullptr;
-         tok       = ::strtok_r(nullptr, ",\n", &saveptr)) {
-      unsigned int lo = 0, hi = 0;
+    for (char const* tok = ::strtok_r(line.data(), ",\n", &saveptr); tok != nullptr;
+         tok             = ::strtok_r(nullptr, ",\n", &saveptr)) {
+      unsigned int lo   = 0;
+      unsigned int hi   = 0;
       int const matched = std::sscanf(tok, "%u-%u", &lo, &hi);
       if (matched <= 0) { continue; }
       if (matched == 1) { hi = lo; }
@@ -92,11 +94,8 @@ inline bool parse_cpu_list(char const* path, cpu_set_t* out)
 inline bool node_cpu_set(int node, cpu_set_t* out)
 {
   if (node < 0) { return false; }
-  char path[64];
-  int const written =
-    std::snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", node);
-  if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(path)) { return false; }
-  return parse_cpu_list(path, out);
+  std::string const path = "/sys/devices/system/node/node" + std::to_string(node) + "/cpulist";
+  return parse_cpu_list(path.c_str(), out);
 }
 
 /**
@@ -124,15 +123,15 @@ inline int gpu_numa_node()
     cudaGetLastError();  // clear the error state so later CUDA calls are unaffected
     return -1;
   }
-  char bus_id[16];  // fits any PCI bus id "0000:1B:00.0" (12 chars) + NUL
-  if (cudaDeviceGetPCIBusId(bus_id, sizeof(bus_id), device) != cudaSuccess) {
+  std::array<char, 16> bus_id{};  // fits any PCI bus id "0000:1B:00.0" (12 chars) + NUL
+  if (cudaDeviceGetPCIBusId(bus_id.data(), bus_id.size(), device) != cudaSuccess) {
     cudaGetLastError();
     return -1;
   }
-  for (char* c = bus_id; *c != '\0'; ++c) {
+  for (char* c = bus_id.data(); *c != '\0'; ++c) {
     *c = static_cast<char>(std::tolower(static_cast<unsigned char>(*c)));
   }
-  std::string const path = std::string("/sys/bus/pci/devices/") + bus_id + "/numa_node";
+  std::string const path = std::string("/sys/bus/pci/devices/") + bus_id.data() + "/numa_node";
   FILE* fp               = std::fopen(path.c_str(), "r");
   if (fp == nullptr) { return -1; }
   int node = -1;
