@@ -761,14 +761,22 @@ TEST_F(ParseTimestampWithFormatTests, StrictPartsRequireMatchingRepeatedFields)
   }
 }
 
-TEST_F(ParseTimestampWithFormatTests, StrictSlashDateUsesExactWidths)
+TEST_F(ParseTimestampWithFormatTests, SlashDateUsesExactWidths)
 {
   auto const strings = test::strings_column_wrapper{"1970/01/01", "1970/1/01", "1970/01/1"};
-  auto const result  = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
-    strings_column_view{strings}, "yyyy/MM/dd", {}, {});
+  auto const input   = strings_column_view{strings};
   auto const expected =
     test::fixed_width_column_wrapper<timestamp_us>({0, 0, 0}, {true, false, false});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  auto const checked =
+    spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, "yyyy/MM/dd", {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+  auto const corrected =
+    spark_rapids_jni::parse_timestamp_strings_with_format(input, "yyyy/MM/dd", false, false);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(corrected->view(), expected);
+  // LEGACY accepts the unpadded rows, so EXCEPTION reports a parser disagreement.
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format(
+                 input, "yyyy/MM/dd", false, true)),
+               spark_rapids_jni::cast_error);
 }
 
 TEST_F(ParseTimestampWithFormatTests, AdjacentPartReservationIsBounded)

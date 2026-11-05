@@ -1820,11 +1820,12 @@ public class CastStringsTest {
         "yyyy-MM", false,
         new Long[]{y2024_05_01, null, null});
 
-    // yyyy/MM/dd corrected: preserves the old compatible regex's 1-2 digit month/day fields.
+    // yyyy/MM/dd corrected: strict 2-digit fields, like the other separators.
     assertParsedTimestamp(
-        new String[]{"2024/05/06", "2024/5/6", "2024/005/06", "2024/05/006"},
+        new String[]{"2024/05/06", "2024/5/6", "2024/5/06", "2024/05/6", "2024/005/06",
+                     "2024/05/006"},
         "yyyy/MM/dd", false,
-        new Long[]{y2024_05_06, y2024_05_06, null, null});
+        new Long[]{y2024_05_06, null, null, null, null, null});
 
     // MM-dd corrected: no year, defaults to 1970.
     assertParsedTimestamp(
@@ -2563,19 +2564,6 @@ public class CastStringsTest {
                      "\n1999-12-31 11:59:59", " 1999-12-31 11:59:59"},
         "yyyy-MM-dd HH:mm:ss", false,
         new Long[]{ts, null, null, null, null});
-  }
-
-  @Test
-  void parseTimestampWithFormat_correctedSlashDateDeviation() {
-    // CORRECTED yyyy/MM/dd accepts 1-2 digit month/day to preserve the pre-existing cudf-spark
-    // compatibility contract. This DEVIATES from Spark CPU, whose STRICT DateTimeFormatter rejects
-    // single-digit fields ("2024/5/6" is null on CPU). This test pins the deviation so a future
-    // refactor of compile_format's corrected_variable_width_slash_date cannot silently change it.
-    long y2024_05_06 = expectedUs(2024, 5, 6, 0, 0, 0);
-    assertParsedTimestamp(
-        new String[]{"2024/05/06", "2024/5/6", "2024/5/06", "2024/05/6"},
-        "yyyy/MM/dd", false,
-        new Long[]{y2024_05_06, y2024_05_06, y2024_05_06, y2024_05_06});
   }
 
   @Test

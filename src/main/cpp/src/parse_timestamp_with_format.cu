@@ -155,10 +155,6 @@ struct format_token {
 //   - "Packed" runs (a digit field abutting another digit field without a literal between them,
 //     e.g. yyyyMMdd) get exact width — otherwise the boundary is ambiguous.
 //   - Otherwise CORRECTED uses exact width and LEGACY uses [1, 2].
-//   - CORRECTED `yyyy/MM/dd` keeps the existing cudf-spark compatibility contract and accepts
-//     1-2 digit month/day fields. This intentionally DEVIATES from Spark CPU, whose STRICT
-//     DateTimeFormatter rejects single-digit fields ("2024/5/6" is null on CPU); the GPU
-//     over-accepts. Pinned by parseTimestampWithFormat_correctedSlashDateDeviation.
 // Literal handling:
 //   - A space matches exactly one ' '. Spark rejects 'T' as the separator for a space pattern
 //     under both policies (unlike the format-less cast, which accepts 'T').
@@ -323,8 +319,6 @@ compiled_format compile_format(std::string const& fmt,
   bool const legacy = dialect == format_dialect::legacy_expression;
   bool const strict = extended || dialect == format_dialect::corrected_expression ||
                       dialect == format_dialect::csv_date;
-  bool const compatible_slash_date =
-    dialect == format_dialect::compatible_expression && fmt == "yyyy/MM/dd";
   compiled_format result;
   auto& tokens        = result.tokens;
   uint8_t seen_fields = 0;
@@ -337,8 +331,7 @@ compiled_format compile_format(std::string const& fmt,
       if (part.a == FLD_YEAR && strict) {
         CUDF_EXPECTS(part.b == 4, "strict year pattern must be yyyy", std::invalid_argument);
         part = {TOK_STRICT_YEAR, 0, 4, 19};
-      } else if (part.a != FLD_YEAR &&
-                 ((legacy && !previous_numeric && !next_numeric) || compatible_slash_date)) {
+      } else if (part.a != FLD_YEAR && legacy && !previous_numeric && !next_numeric) {
         part.b = 1;
       }
     }

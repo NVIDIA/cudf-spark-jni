@@ -304,7 +304,8 @@ struct timestamp_parse_timezone {
  * Patterns containing additional tokens require every repeated field to agree; fractions
  * are compared before truncating to microseconds. Patterns using only the original parts
  * preserve their existing width and repeated-field behavior.
- * Pattern literals must be ASCII. In LEGACY
+ * Pattern literals must be ASCII. Under CORRECTED and EXCEPTION, non-year digit
+ * fields require exactly two digits. In LEGACY
  * mode, non-year digit fields are 1 or 2 digits unless adjacent to another
  * digit field (in which case widths are exact to disambiguate). Parsed values
  * are wall-clock UTC; timezone rebasing remains the caller's responsibility —
@@ -359,8 +360,8 @@ struct timestamp_parse_timezone {
  * Supports the numeric fields, fractions, offsets and literals of the non-checked CORRECTED
  * parser. Every year field must use exactly yyyy and supports signed/extended years with
  * DateTimeFormatter's EXCEEDS_PAD rules, including patterns without fractions or offsets.
- * Month/day/hour/minute/second fields require exactly two digits, including slash-separated
- * dates. Every repeated field must agree; fractions are compared before microsecond truncation.
+ * Month/day/hour/minute/second fields require exactly two digits. Every repeated field must
+ * agree; fractions are compared before microsecond truncation.
  *
  * @param input The input string column.
  * @param format Spark format pattern.
