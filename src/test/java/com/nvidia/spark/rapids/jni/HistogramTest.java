@@ -30,6 +30,8 @@ import java.util.List;
 
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.ENDPOINT_DELTA;
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.WEIGHTED_ENDPOINTS;
+import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.ASCENDING;
+import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.DESCENDING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -154,6 +156,47 @@ public class HistogramTest {
       assertDoubleColumnExactly(defaultResult, Double.NEGATIVE_INFINITY);
       assertDoubleColumnExactly(weightedResult, Double.NEGATIVE_INFINITY);
       assertDoubleColumnExactly(deltaResult, Double.NaN);
+    }
+  }
+
+  @Test
+  void testDescendingOrder() {
+    List<HostColumnVector.StructData> finiteWithNull =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 1L), entry(null, 10L));
+    List<HostColumnVector.StructData> weighted =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 2L), entry(null, 10L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, finiteWithNull, weighted);
+         ColumnVector ascendingResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 1.0}, false, WEIGHTED_ENDPOINTS, ASCENDING);
+         ColumnVector weightedResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, WEIGHTED_ENDPOINTS, DESCENDING);
+         ColumnVector deltaResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, ENDPOINT_DELTA, DESCENDING)) {
+      assertDoubleColumnExactly(ascendingResult, 0.0, 100.0, 0.0, 100.0);
+      assertDoubleColumnExactly(weightedResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+      assertDoubleColumnExactly(deltaResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+    }
+  }
+
+  @Test
+  void testDescendingOrderSpecialValues() {
+    List<HostColumnVector.StructData> negativeInfinity =
+        Arrays.asList(entry(Double.NEGATIVE_INFINITY, 1L), entry(10.0, 1L));
+    List<HostColumnVector.StructData> positiveInfinity =
+        Arrays.asList(entry(10.0, 1L), entry(Double.POSITIVE_INFINITY, 1L));
+    List<HostColumnVector.StructData> nan =
+        Arrays.asList(entry(1.0, 1L), entry(Double.NaN, 1L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, negativeInfinity, positiveInfinity, nan);
+         ColumnVector weightedResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.2}, false, WEIGHTED_ENDPOINTS, DESCENDING);
+         ColumnVector deltaResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.2}, false, ENDPOINT_DELTA, DESCENDING)) {
+      assertDoubleColumnExactly(
+          weightedResult, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, Double.NaN);
+      assertDoubleColumnExactly(
+          deltaResult, Double.NEGATIVE_INFINITY, Double.NaN, Double.NaN);
     }
   }
 

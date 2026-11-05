@@ -161,8 +161,8 @@ struct percentile_dispatcher {
   //  1. The output percentile values,
   //  2. Null mask to apply for the final output column containing percentile values, and
   //  3. Null count corresponding to that null mask.
-  using output_type =
-    std::tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<std::byte>, cudf::size_type>;
+  using output_type = std::
+    tuple<std::unique_ptr<cudf::column>, cuda::device_buffer<cudf::bitmask_type>, cudf::size_type>;
 
   template <typename T, typename... Args>
   std::enable_if_t<!is_supported<T>(), output_type> operator()(Args&&...) const
@@ -283,7 +283,7 @@ void check_input(cudf::column_view const& input, std::vector<double> const& perc
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
-                                           cuda::device_buffer<std::byte>&& null_mask,
+                                           cuda::device_buffer<cudf::bitmask_type>&& null_mask,
                                            cudf::size_type null_count,
                                            cudf::size_type num_histograms,
                                            cudf::size_type num_percentages,
@@ -369,7 +369,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
                "The input frequencies must not contain negative values.",
                std::invalid_argument);
 
-  auto const make_structs_histogram = [&](cuda::device_buffer<std::byte>&& null_mask,
+  auto const make_structs_histogram = [&](cuda::device_buffer<cudf::bitmask_type>&& null_mask,
                                           cudf::size_type null_count) {
     // Copy values and frequencies into a new structs column.
     std::vector<std::unique_ptr<cudf::column>> values_and_frequencies;
@@ -475,11 +475,27 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
+  return percentile_from_histogram(
+    input, percentages, output_as_list, interpolation, value_order::ASCENDING, stream, mr);
+}
+
+std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const& input,
+                                                        std::vector<double> const& percentages,
+                                                        bool output_as_list,
+                                                        percentile_interpolation interpolation,
+                                                        value_order order,
+                                                        cuda::stream_ref stream,
+                                                        rmm::device_async_resource_ref mr)
+{
   check_input(input, percentages);
   CUDF_EXPECTS(interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS ||
                  interpolation == percentile_interpolation::ENDPOINT_DELTA,
                "Unsupported percentile interpolation algorithm.",
                std::invalid_argument);
+  CUDF_EXPECTS(order == value_order::ASCENDING || order == value_order::DESCENDING,
+               "Unsupported histogram value order.",
+               std::invalid_argument);
+  auto const is_descending = order == value_order::DESCENDING;
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
@@ -505,11 +521,14 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                            0};
   auto const labeled_histograms = cudf::table_view{{labels_cv, histograms}};
   // Find the order of segmented sort elements within each histogram list.
-  // The null order must be `AFTER`.
+  // Nulls must physically sort after valid values so they can be excluded below. cuDF reverses
+  // null precedence along with value order, so descending values require null_order::BEFORE.
   auto const ordered_indices = cudf::sorted_order(
     labeled_histograms,
-    std::vector<cudf::order>{cudf::order::ASCENDING, cudf::order::ASCENDING},
-    std::vector<cudf::null_order>{cudf::null_order::AFTER, cudf::null_order::AFTER},
+    std::vector<cudf::order>{cudf::order::ASCENDING,
+                             is_descending ? cudf::order::DESCENDING : cudf::order::ASCENDING},
+    std::vector<cudf::null_order>{
+      cudf::null_order::AFTER, is_descending ? cudf::null_order::BEFORE : cudf::null_order::AFTER},
     stream,
     default_mr);
 

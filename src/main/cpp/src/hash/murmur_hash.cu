@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/numeric>
 #include <cuda/std/type_traits>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
@@ -76,7 +77,7 @@ class murmur_device_row_hasher {
    */
   __device__ auto operator()(cudf::size_type row_index) const noexcept
   {
-    return cudf::detail::accumulate(
+    return cuda::std::accumulate(
       _table.begin(),
       _table.end(),
       _seed,
@@ -133,7 +134,7 @@ class murmur_device_row_hasher {
         }
       }
 
-      return cudf::detail::accumulate(
+      return cuda::std::accumulate(
         thrust::counting_iterator(0),
         thrust::counting_iterator(curr_col.size()),
         _seed,

@@ -44,6 +44,147 @@
 
 struct FromJsonTest : public cudf::test::BaseFixture {};
 
+TEST_F(FromJsonTest, ConvertFromStringsPreservesSlicedIntegerNulls)
+{
+  for (cudf::size_type const offset : {1, 33}) {
+    SCOPED_TRACE(offset);
+    auto values = std::vector<std::string>(offset, "outside-before");
+    values.insert(values.end(), {"1", "3.5", "4e2", "7", "-2", "outside-after"});
+    auto const strings = cudf::test::strings_column_wrapper(values.begin(), values.end()).release();
+    auto valids        = std::vector<bool>(values.size(), true);
+    valids[offset + 3] = false;
+    auto [null_mask, null_count] = cudf::bools_to_mask(
+      cudf::test::fixed_width_column_wrapper<bool>(valids.begin(), valids.end()));
+    strings->set_null_mask(std::move(*null_mask), null_count);
+
+    auto const sliced = cudf::slice(strings->view(), {offset, offset + 5})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::INT32)},
+                                             {0},
+                                             {0},
+                                             true,
+                                             true,
+                                             {});
+    auto const expected =
+      cudf::test::fixed_width_column_wrapper<int32_t>({1, 0, 0, 0, -2}, {1, 0, 0, 0, 1});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
+TEST_F(FromJsonTest, ConvertFromStringsPreservesSlicedDecimalNulls)
+{
+  // These native cases exercise ASCII decimals. Java regressions supply the active JVM's full
+  // Unicode digit table for Unicode input coverage.
+  static auto const ascii_digit_values = [] {
+    auto values = std::vector<int8_t>(1 << 16, -1);
+    for (int digit = 0; digit < 10; ++digit) {
+      values['0' + digit] = static_cast<int8_t>(digit);
+    }
+    return values;
+  }();
+  for (bool const quoted : {false, true}) {
+    SCOPED_TRACE(quoted);
+    auto const strings =
+      cudf::test::strings_column_wrapper{"outside-before",
+                                         quoted ? "\"0E2147483647\"" : "0E2147483647",
+                                         quoted ? "\"7\"" : "7",
+                                         quoted ? "\"0.0E57\"" : "0.0E57",
+                                         quoted ? "\"2\"" : "2",
+                                         "outside-after"}
+        .release();
+    auto const valids            = std::vector<bool>{false, true, false, false, true, true};
+    auto [null_mask, null_count] = cudf::test::detail::make_null_mask(valids.begin(), valids.end());
+    strings->set_null_mask(std::move(null_mask), null_count);
+
+    auto const sliced = cudf::slice(strings->view(), {1, 5})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::DECIMAL64)},
+                                             {0},
+                                             {10},
+                                             true,
+                                             true,
+                                             ascii_digit_values);
+    auto const expected = cudf::test::fixed_point_column_wrapper<int64_t>(
+      {0, 0, 0, 2}, {1, 0, 0, 1}, numeric::scale_type{0});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
+TEST_F(FromJsonTest, ConvertFromStringsSupportsSlicedPrimitiveTypes)
+{
+  {
+    auto const strings =
+      cudf::test::strings_column_wrapper{"outside-before", "true", "false", "outside-after"};
+    auto const sliced = cudf::slice(strings, {1, 3})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::BOOL8)},
+                                             {0},
+                                             {0},
+                                             true,
+                                             true,
+                                             {});
+    auto const expected = cudf::test::fixed_width_column_wrapper<bool>{true, false};
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+
+  {
+    auto const strings =
+      cudf::test::strings_column_wrapper{"outside-before", "1", "-2", "outside-after"};
+    auto const sliced = cudf::slice(strings, {1, 3})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::INT32)},
+                                             {0},
+                                             {0},
+                                             true,
+                                             true,
+                                             {});
+    auto const expected = cudf::test::fixed_width_column_wrapper<int32_t>({1, -2}, {1, 1});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+
+  {
+    auto const strings =
+      cudf::test::strings_column_wrapper{"outside-before", "1.5", "-2.25", "outside-after"};
+    auto const sliced = cudf::slice(strings, {1, 3})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::FLOAT64)},
+                                             {0},
+                                             {0},
+                                             true,
+                                             true,
+                                             {});
+    auto const expected = cudf::test::fixed_width_column_wrapper<double>({1.5, -2.25}, {1, 1});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+
+  {
+    auto const strings =
+      cudf::test::strings_column_wrapper{"outside-before", "\"alpha\"", "beta", "outside-after"};
+    auto const sliced = cudf::slice(strings, {1, 3})[0];
+    auto const result =
+      spark_rapids_jni::convert_from_strings(cudf::strings_column_view{sliced},
+                                             {0},
+                                             {static_cast<int>(cudf::type_id::STRING)},
+                                             {0},
+                                             {0},
+                                             true,
+                                             true,
+                                             {});
+    auto const expected = cudf::test::strings_column_wrapper{"alpha", "beta"};
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
 namespace {
 
 // One (key, value) entry of a raw-map row, in the exact textual content the raw-map engine emits.
