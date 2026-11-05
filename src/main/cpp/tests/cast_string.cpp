@@ -17,6 +17,7 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/table_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
@@ -26,17 +27,25 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/cuda_stream.hpp>
 #include <rmm/device_uvector.hpp>
+#include <rmm/mr/callback_memory_resource.hpp>
+#include <rmm/mr/cuda_async_memory_resource.hpp>
 
 #include <cast_string.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -53,6 +62,34 @@ struct ParseTimestampWithFormatTests : public test::BaseFixture {};
 struct HexToBytesTests : public test::BaseFixture {};
 
 struct ParseCsvDateWithFormatTests : public test::BaseFixture {};
+
+enum class timestamp_test_api { corrected, legacy, exception, checked, csv };
+constexpr timestamp_test_api timestamp_test_apis[] = {timestamp_test_api::corrected,
+                                                      timestamp_test_api::legacy,
+                                                      timestamp_test_api::exception,
+                                                      timestamp_test_api::checked,
+                                                      timestamp_test_api::csv};
+
+std::unique_ptr<column> parse_timestamp_for_test(timestamp_test_api api,
+                                                 strings_column_view input,
+                                                 cuda::stream_ref stream,
+                                                 rmm::device_async_resource_ref mr)
+{
+  auto const format = "yyyy-MM-dd HH:mm:ss";
+  if (api == timestamp_test_api::checked) {
+    return spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      input, format, {}, {}, stream, mr);
+  }
+  if (api == timestamp_test_api::csv) {
+    return spark_rapids_jni::parse_csv_date_strings(input, format, {}, stream, mr);
+  }
+  return spark_rapids_jni::parse_timestamp_strings_with_format(input,
+                                                               format,
+                                                               api == timestamp_test_api::legacy,
+                                                               api == timestamp_test_api::exception,
+                                                               stream,
+                                                               mr);
+}
 
 template <typename T>
 struct StringToFloatTests : public test::BaseFixture {};
@@ -396,8 +433,265 @@ TEST_F(ParseTimestampWithFormatTests, RejectsConflictingPolicies)
   auto const strings = test::strings_column_wrapper{"2024-05-06"};
   strings_column_view scv{strings};
 
-  EXPECT_THROW(spark_rapids_jni::parse_timestamp_strings_with_format(scv, "yyyy-MM-dd", true, true),
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format(
+                 scv, "yyyy-MM-dd", true, true)),
                std::invalid_argument);
+}
+
+TEST_F(ParseTimestampWithFormatTests, ExplicitStreamAndResourceOverloads)
+{
+  auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01", "invalid"};
+  auto const input   = strings_column_view{strings};
+  auto const stream  = cudf::get_default_stream();
+  auto const mr      = cudf::get_current_device_resource_ref();
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({1'000'000, 0}, {true, false});
+  auto const with_stream = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, stream);
+  auto const with_resource = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, stream, mr);
+  auto const with_options = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss", false, false, {}, stream, mr);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_stream->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_resource->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(with_options->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, ExplicitJdkCompatibilityOptions)
+{
+  // Observed formatter options on JDK 8, 11 and 17, respectively. Keep every combination
+  // covered independently of the JVM used for the Java tests.
+  spark_rapids_jni::timestamp_format_parse_options const options[] = {
+    {true, true, false}, {false, true, true}, {false, false, true}};
+  struct sample {
+    char const* format;
+    char const* input;
+    int64_t micros;
+    bool valid[3];
+  };
+  // Expected values and nulls come from Spark's formatter recipe on those JDKs.
+  sample const samples[] = {
+    {"yyyyMMddHHmmssSXXX", "202401020304051Z", 1'704'164'645'100'000, {false, true, true}},
+    {"yyyyMMddHHmmssSXXX", "20240102030405Z", 1'704'164'645'000'000, {true, true, false}},
+    {"yyyy-MM-dd HH:mm:ss.SXXX",
+     "2024-01-02 03:04:05.Z",
+     1'704'164'645'000'000,
+     {true, true, false}},
+    {"yyyy-MM-dd HH:mm:ss.SSSXX",
+     "2024-01-02 03:04:05.123+083001",
+     1'704'134'044'123'000,
+     {true, false, false}},
+    {"yyyy-MM-dd HH:mm:ss.SSSXXX",
+     "2024-01-02 03:04:05.123+08:30:01",
+     1'704'134'044'123'000,
+     {true, false, false}},
+    {"yyyyMMddHHmmssS", "20240102030405", 0, {false, false, false}}};
+  for (int jdk = 0; jdk < 3; ++jdk) {
+    for (auto const& item : samples) {
+      SCOPED_TRACE(::testing::Message()
+                   << "JDK option index " << jdk << ": " << item.format << ", " << item.input);
+      auto const strings = test::strings_column_wrapper{item.input};
+      auto const input   = strings_column_view{strings};
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_us>({item.micros}, {item.valid[jdk]});
+      auto const ordinary = spark_rapids_jni::parse_timestamp_strings_with_format(
+        input, item.format, false, false, options[jdk]);
+      auto const checked = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+        input, item.format, options[jdk], {});
+      CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(ordinary->view(), expected);
+      CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(checked->view(), expected);
+    }
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, NonzeroOffsetInputView)
+{
+  auto const strings = test::strings_column_wrapper({"outside",
+                                                     "1970-01-01 00:00:01.123456Z",
+                                                     "ignored",
+                                                     "invalid",
+                                                     "1970-01-01 00:00:02.000001Z",
+                                                     "outside"},
+                                                    {true, true, false, true, true, true});
+  auto const sliced  = cudf::slice(strings, {1, 5}).front();
+  ASSERT_EQ(sliced.offset(), 1);
+  auto const input    = strings_column_view{sliced};
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>({1'123'456, 0, 0, 2'000'001},
+                                                                       {true, false, false, true});
+  auto const ordinary = spark_rapids_jni::parse_timestamp_strings_with_format(
+    input, "yyyy-MM-dd HH:mm:ss.SSSSSSX", false, false);
+  auto const checked = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    input, "yyyy-MM-dd HH:mm:ss.SSSSSSX", {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, NonemptyNullRowsDoNotReportOverflow)
+{
+  std::vector<std::string> const values{"1970-01-01T00:00:01.123456Z",
+                                        "+294247-01-10T04:00:54.775808Z",
+                                        "2000-01-01T00:00:00.000000Z",
+                                        "1969-12-31T23:59:59.999999Z"};
+  auto const strings = test::strings_column_wrapper(values.begin(), values.end()).release();
+  auto const format  = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX";
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                 strings_column_view{*strings}, format, {}, {})),
+               spark_rapids_jni::timestamp_parse_overflow);
+
+  // Apply the mask after construction so null rows retain their original character ranges.
+  std::vector<bool> const valid{true, false, false, true};
+  auto [null_mask, null_count] = test::detail::make_null_mask(valid.begin(), valid.end());
+  strings->set_null_mask(std::move(null_mask), null_count);
+  auto const input           = strings_column_view{*strings};
+  std::size_t expected_chars = 0;
+  for (auto const& value : values) {
+    expected_chars += value.size();
+  }
+  ASSERT_EQ(input.chars_size(cudf::get_default_stream()), expected_chars);
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({1'123'456, 0, 0, -1}, valid.begin());
+  auto const ordinary =
+    spark_rapids_jni::parse_timestamp_strings_with_format(input, format, false, false);
+  auto const checked =
+    spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, format, {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, TokenUploadCompletesBeforeOutputAllocationFailure)
+{
+  auto const strings = test::strings_column_wrapper{"1970-01-01 00:00:01"};
+  cudf::get_default_stream().sync();
+  rmm::cuda_stream stream{rmm::cuda_stream::flags::non_blocking};
+  rmm::mr::cuda_async_memory_resource upstream;
+  for (auto const api : timestamp_test_apis) {
+    SCOPED_TRACE(static_cast<int>(api));
+    std::atomic<int> completed{0};
+    int submitted                    = 0;
+    bool output_allocation_attempted = false;
+    rmm::mr::callback_memory_resource temporary_mr{
+      [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
+        auto* ptr = upstream.allocate(allocation_stream, bytes, alignment);
+        // Delay each upload without depending on the parser's allocation count. The final
+        // marker must finish before output allocation can unwind host token storage.
+        auto const status = cudaLaunchHostFunc(
+          allocation_stream.get(),
+          [](void* state) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            static_cast<std::atomic<int>*>(state)->fetch_add(1);
+          },
+          &completed);
+        if (status != cudaSuccess) {
+          upstream.deallocate(allocation_stream, ptr, bytes, alignment);
+        }
+        CUDF_CUDA_TRY(status);
+        ++submitted;
+        return ptr;
+      },
+      [&](cuda::stream_ref allocation_stream,
+          void* ptr,
+          std::size_t bytes,
+          std::size_t alignment,
+          void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+    rmm::mr::callback_memory_resource output_mr{
+      [&](cuda::stream_ref, std::size_t, std::size_t, void*) -> void* {
+        output_allocation_attempted = true;
+        EXPECT_GT(submitted, 0);
+        EXPECT_EQ(completed.load(), submitted);
+        throw std::bad_alloc{};
+      },
+      [](cuda::stream_ref, void*, std::size_t, std::size_t, void*) {}};
+    {
+      test::scoped_current_device_resource current_scope{temporary_mr};
+      EXPECT_THROW(static_cast<void>(parse_timestamp_for_test(
+                     api, strings_column_view{strings}, stream, output_mr)),
+                   std::bad_alloc);
+      // Keep callback state and resources alive even when an assertion fails.
+      stream.synchronize();
+    }
+    EXPECT_TRUE(output_allocation_attempted);
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, NonDefaultStreamUsesOutputResource)
+{
+  auto const strings = test::strings_column_wrapper(
+    {"1970-01-01 00:00:01", "invalid", "1970-01-01 00:00:01"}, {true, true, false});
+  cudf::get_default_stream().sync();
+  rmm::cuda_stream stream{rmm::cuda_stream::flags::non_blocking};
+  rmm::mr::cuda_async_memory_resource upstream;
+  for (auto const api : timestamp_test_apis) {
+    SCOPED_TRACE(static_cast<int>(api));
+    bool output_allocated = false;
+    rmm::mr::callback_memory_resource output_mr{
+      [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*) {
+        EXPECT_EQ(allocation_stream.get(), stream.value());
+        output_allocated = true;
+        return upstream.allocate(allocation_stream, bytes, alignment);
+      },
+      [&](cuda::stream_ref allocation_stream,
+          void* ptr,
+          std::size_t bytes,
+          std::size_t alignment,
+          void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+    auto const result =
+      parse_timestamp_for_test(api, strings_column_view{strings}, stream, output_mr);
+    stream.synchronize();
+    EXPECT_TRUE(output_allocated);
+    if (api == timestamp_test_api::csv) {
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_D>({0, 0, 0}, {true, false, false});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+    } else {
+      auto const expected =
+        test::fixed_width_column_wrapper<timestamp_us>({1'000'000, 0, 0}, {true, false, false});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+    }
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, RegionTableValidationAndBypass)
+{
+  auto times   = test::fixed_width_column_wrapper<int64_t>{std::numeric_limits<int64_t>::min()};
+  auto offset  = test::fixed_width_column_wrapper<int32_t>{0};
+  auto entries = test::structs_column_wrapper{{times, times, offset}};
+  auto offsets = test::fixed_width_column_wrapper<size_type>{0, 1};
+  auto fixed   = make_lists_column(
+    1, offsets.release(), entries.release(), 0, create_null_mask(0, mask_state::UNALLOCATED));
+  auto empty_offsets = test::fixed_width_column_wrapper<size_type>{0, 0};
+  auto rules         = make_lists_column(1,
+                                 empty_offsets.release(),
+                                 make_empty_column(data_type{type_id::INT32}),
+                                 0,
+                                 create_null_mask(0, mask_state::UNALLOCATED));
+  table_view const timezone{{fixed->view(), rules->view()}};
+  auto const strings  = test::strings_column_wrapper{"1970-01-01 00:00:01"};
+  auto const zoned    = test::strings_column_wrapper{"1970-01-01 00:00:01Z"};
+  auto const empty    = make_empty_column(data_type{type_id::STRING});
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>{1'000'000};
+  auto const normal   = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, {&timezone, 0, 0});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(normal->view(), expected);
+
+  for (auto const& [table, index] :
+       std::vector<std::pair<table_view, size_type>>{{table_view{{fixed->view()}}, 0},
+                                                     {table_view{{offset, rules->view()}}, 0},
+                                                     {table_view{{fixed->view(), offset}}, 0},
+                                                     {timezone, -1},
+                                                     {timezone, 1}}) {
+    SCOPED_TRACE(::testing::Message() << "columns=" << table.num_columns() << ", row=" << index);
+    spark_rapids_jni::timestamp_parse_timezone const invalid{&table, index, 0};
+    EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                   strings_column_view{strings}, "yyyy-MM-dd HH:mm:ss", {}, invalid)),
+                 cudf::logic_error);
+    auto const explicit_offset = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      strings_column_view{zoned}, "yyyy-MM-dd HH:mm:ssX", {}, invalid);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(explicit_offset->view(), expected);
+    auto const no_rows = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+      strings_column_view{*empty}, "yyyy-MM-dd HH:mm:ss", {}, invalid);
+    EXPECT_EQ(no_rows->size(), 0);
+    EXPECT_EQ(no_rows->type(), data_type{type_id::TIMESTAMP_MICROSECONDS});
+  }
 }
 
 TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviation)
@@ -417,6 +711,90 @@ TEST_F(ParseTimestampWithFormatTests, RepeatedFieldsPreserveStrictPolicyDeviatio
   auto const exception_result = spark_rapids_jni::parse_timestamp_strings_with_format(
     strings_column_view{strings}, "yyyy-MM-dd-MM", false, true);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(exception_result->view(), expected);
+}
+
+TEST_F(ParseTimestampWithFormatTests, StrictPartsRequireMatchingRepeatedFields)
+{
+  struct repeated_field {
+    char const* pattern;
+    char const* matching;
+    char const* conflicting;
+  };
+  // First occurrences equal the default values, so the walker must track presence,
+  // rather than infer it from a nondefault field value.
+  repeated_field const fields[] = {{"yyyy", "1970", "1971"},
+                                   {"MM", "01", "02"},
+                                   {"dd", "01", "02"},
+                                   {"HH", "00", "01"},
+                                   {"mm", "00", "01"},
+                                   {"ss", "00", "01"}};
+  struct layout {
+    std::string pattern;
+    std::string input;
+    int64_t micros;
+    bool extended;
+  };
+  layout const layouts[] = {{"yyyy-MM-dd HH:mm:ss.SSS", "1970-01-01 00:00:00.123", 123'000, true},
+                            {"yyyy-MM-dd HH:mm:ssX", "1970-01-01 00:00:00Z", 0, true},
+                            {"yyyy-MM-dd'T'HH:mm:ss", "1970-01-01T00:00:00", 0, true},
+                            {"yyyy-MM-dd HH:mm:ss", "1970-01-01 00:00:00", 0, false}};
+  for (auto const& syntax : layouts) {
+    for (auto const& field : fields) {
+      auto const pattern = syntax.pattern + "/" + field.pattern + "/" + field.pattern;
+      SCOPED_TRACE(pattern);
+      auto const strings =
+        test::strings_column_wrapper{syntax.input + "/" + field.matching + "/" + field.matching,
+                                     syntax.input + "/" + field.matching + "/" + field.conflicting,
+                                     syntax.input + "/" + field.conflicting + "/" + field.matching};
+      auto const input    = strings_column_view{strings};
+      auto const expected = test::fixed_width_column_wrapper<timestamp_us>(
+        {syntax.micros, int64_t{0}, int64_t{0}}, {true, false, false});
+      auto const checked =
+        spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, pattern, {}, {});
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+      if (syntax.extended) {
+        auto const ordinary =
+          spark_rapids_jni::parse_timestamp_strings_with_format(input, pattern, false, false);
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(ordinary->view(), expected);
+      }
+    }
+  }
+}
+
+TEST_F(ParseTimestampWithFormatTests, SlashDateUsesExactWidths)
+{
+  auto const strings = test::strings_column_wrapper{"1970/01/01", "1970/1/01", "1970/01/1"};
+  auto const input   = strings_column_view{strings};
+  auto const expected =
+    test::fixed_width_column_wrapper<timestamp_us>({0, 0, 0}, {true, false, false});
+  auto const checked =
+    spark_rapids_jni::parse_timestamp_strings_with_format_checked(input, "yyyy/MM/dd", {}, {});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(checked->view(), expected);
+  auto const corrected =
+    spark_rapids_jni::parse_timestamp_strings_with_format(input, "yyyy/MM/dd", false, false);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(corrected->view(), expected);
+  // LEGACY accepts the unpadded rows, so EXCEPTION reports a parser disagreement.
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format(
+                 input, "yyyy/MM/dd", false, true)),
+               spark_rapids_jni::cast_error);
+}
+
+TEST_F(ParseTimestampWithFormatTests, AdjacentPartReservationIsBounded)
+{
+  std::string format = "yyyy";
+  std::string value  = "1970";
+  for (int i = 0; i < 63; ++i) {
+    format += "MMdd";
+    value += "0101";
+  }
+  auto const strings = test::strings_column_wrapper{value + "01"};
+  auto const result  = spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+    strings_column_view{strings}, format + "MM", {}, {});
+  auto const expected = test::fixed_width_column_wrapper<timestamp_us>{0};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  EXPECT_THROW(static_cast<void>(spark_rapids_jni::parse_timestamp_strings_with_format_checked(
+                 strings_column_view{strings}, format + "MMdd", {}, {})),
+               std::invalid_argument);
 }
 
 TEST_F(ParseCsvDateWithFormatTests, StrictInput)
@@ -1013,6 +1391,25 @@ TEST_F(ParseCsvDateWithFormatTests, RejectsUnsupportedFormatsEvenForEmptyInput)
                    format,
                    {.enable_fallback = false, .trim_control_characters = true}),
                  std::invalid_argument);
+  }
+}
+
+TEST_F(ParseCsvDateWithFormatTests, ExpressionOnlyPartsReportCsvDiagnostic)
+{
+  auto const strings = test::strings_column_wrapper{"2024-01-02"};
+  for (auto const* format : {"yyyy-MM-dd HH:mm:SS", "yyyy-MM-ddXXX", "yyyy-MM-dd'T'HH:mm:ss"}) {
+    SCOPED_TRACE(format);
+    try {
+      static_cast<void>(spark_rapids_jni::parse_csv_date_strings(
+        strings_column_view{strings},
+        format,
+        {.enable_fallback = false, .trim_control_characters = true}));
+      FAIL() << "Expression-only parts must be rejected by the CSV date parser";
+    } catch (std::invalid_argument const& error) {
+      std::string const message = error.what();
+      EXPECT_NE(message.find("unsupported in CSV date formats"), std::string::npos);
+      EXPECT_EQ(message.find("CORRECTED"), std::string::npos);
+    }
   }
 }
 
