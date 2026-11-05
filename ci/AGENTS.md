@@ -21,9 +21,14 @@ as part of an image update.
 
 ## Contracts To Preserve
 
-- Main publishes only `main-*`; `release/YY.MM` publishes only `YY.MM-*`.
+- Main always publishes `main-*`. Until `release/YY.MM` exists, it also aliases
+  that POM version's `YY.MM-*` tags to the same verified digest, without rebuilding.
+  Once the branch exists, only `release/YY.MM` may refresh `YY.MM-*`.
   A release branch must match the POM version and have explicit toolchain pins.
   Main alone may use the configuration's default when its version entry is absent.
+  Check release ownership after the build, under the shared release-line/CUDA-family/
+  platform publisher lock. API uncertainty must not permit an alias. Use the shared
+  action's immutable publication output, not a fresh read of a mutable main tag.
 - Consumer lookup is different: both main and release GPU CI should try the POM's
   major.minor image first, then the matching `main-*` image. The CUDA, OS and
   architecture must match. Do not use the publishing prefix as the first-choice
@@ -58,6 +63,9 @@ Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
 prefix. Check main's missing-version default, release explicit-pin requirements,
 branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
 must affect the actual generated build arguments, not only documentation.
+Exercise absent/existing release refs, API/schema failures, missing publication
+outputs and ownership transfer during a build. Check that aliases use the verified
+digest and perform no additional build, and preserve shared publisher serialization.
 Check both architectures, including rejection of mismatched platform/build args
 and a smoke-inspected image with the wrong OS or architecture. For internal mirror
 adoption, audit the actual dev/pre-release/release and legacy consumers first;

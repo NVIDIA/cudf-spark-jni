@@ -2,12 +2,13 @@
 
 ## Publication Ownership
 
-**Main and release branches own different tags.** No branch publishes another
-branch's image tags:
+**Main hands version-tag ownership to the release branch at branch-out.**
+Additional tags reference the same verified digest; they do not rebuild the image:
 
 | Source branch | Published tag prefix | Publication triggers |
 | --- | --- | --- |
-| `main` | `main-` | Daily schedule, image-input push, manual dispatch |
+| `main`, before `release/YY.MM` exists | `main-` and current POM `YY.MM-` | Daily schedule, image-input push, manual dispatch |
+| `main`, after `release/YY.MM` exists | `main-` only | Daily schedule, image-input push, manual dispatch |
 | `release/YY.MM` | `YY.MM-` | Image-input push, manual dispatch |
 
 Other branches cannot publish. A release branch must match the POM's major.minor
@@ -21,10 +22,14 @@ GitHub-hosted runners, without consuming the shared CPU/GPU pools. Publication
 compilation parallelism is set on the build worker, not the configuration job.
 
 Publisher runs are serialized per branch. An active run finishes; only the latest
-pending refresh for that branch is retained. Main and release publishers may run
-concurrently because their tags are separate. Publication builds fresh, checks
-anonymous pulls and smoke tests, then promotes the verified digest. Initial GHCR
-package visibility may need to be made public before this succeeds.
+pending refresh for that branch is retained. A second, shared lock serializes main
+and its matching release publisher per release line, CUDA family and platform.
+Publication builds fresh, checks anonymous pulls and smoke tests, then promotes the
+verified digest. Main checks for the release branch after the build, while holding
+that lock; only a confirmed absent branch permits its version alias. API or
+publication-output errors fail closed. A release publisher cannot be overwritten
+by an already-running main publisher during branch-out. Initial GHCR package
+visibility may need to be made public before publication succeeds.
 
 ## Tags And Compatibility
 
@@ -63,17 +68,19 @@ that consumer lookup: image CI always builds and smoke-tests from its checkout.
 
 - Add the release-line toolchain entry before branch-out. The release branch keeps
   its own pinned configuration and Dockerfile; later release updates publish only
-  that release's versioned tags.
+  that release's versioned tags. Once the branch exists, main stops refreshing
+  those aliases, even if main's POM has not advanced yet.
 - Main may use `default` for a new project version without an explicit entry.
   This configuration fallback is separate from the `main-` image tag prefix,
-  which is always owned by main, even when main selected an explicit version entry.
+  which is always owned by main. For example, main at `27.02.0-SNAPSHOT` publishes
+  both `27.02-*` and `main-*` from one build until `release/27.02` exists.
 - Changing CUDA creates a new tag suffix. Changing the Dockerfile/build arguments
   changes the fingerprint even when the tag remains the same. CMake stays in the
   branch's Dockerfile; there is no additional per-release CMake configuration.
 - Until a new release's first successful publication, its versioned tag may be
-  absent. Existing branches need these workflows before they can publish; adding
-  them to main does not update other branches. Main does not publish release images
-  on their behalf.
+  absent or still point to main's pre-cut image. Existing branches need these
+  workflows before they can publish; adding them to main does not update other
+  branches. Main does not refresh version tags for an existing release branch.
 - Branch creation alone does not guarantee an image build: publication has
   image-input path filters, and a release cut may change only submodule metadata.
   Verify the first release publisher; manually dispatch it on `release/YY.MM` if

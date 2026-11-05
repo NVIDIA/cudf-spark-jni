@@ -15,7 +15,7 @@
 name: Daily image build
 
 on:
-  # Main owns main-* tags; release/YY.MM owns YY.MM-* tags. See ci/README.md.
+  # Main also aliases YY.MM-* until release/YY.MM exists. See ci/README.md.
   # The daily schedule runs only on main. Release publication is push/manual only.
   schedule:
     - cron: '47 2 * * *'
@@ -35,7 +35,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Each branch owns distinct tags; serialize refreshes within that branch.
+  # Retain only the latest pending refresh for each branch.
   group: image-build-${{ github.ref }}
   cancel-in-progress: false
 
@@ -48,6 +48,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       images: ${{ steps.catalog.outputs.images }}
+      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -89,6 +90,10 @@ jobs:
   images:
     name: Build ${{ matrix.image.tag }}
     needs: configure
+    # Main and the matching release publisher must not race the ownership transfer.
+    concurrency:
+      group: image-publish-${{ needs.configure.outputs.release-line }}-${{ matrix.image.toolchain }}-${{ matrix.image.platform }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -125,6 +130,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build, verify, and publish
+        id: publish
         # The first GHCR package may need a one-time public visibility setting.
         # Common promotes the toolchain tag only after anonymous pull and smoke pass.
         uses: NVIDIA/spark-rapids-common/container-image@main
@@ -132,3 +138,55 @@ jobs:
           config: ${{ steps.image.outputs.config }}
           publish: 'true'
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check version alias ownership after publication
+        if: github.ref == 'refs/heads/main'
+        id: alias
+        uses: actions/github-script@v9
+        env:
+          RELEASE_LINE: ${{ needs.configure.outputs.release-line }}
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}
+          VERIFIED_REFERENCE: ${{ steps.publish.outputs.reference }}
+        with:
+          retries: 3
+          script: |
+            const {RELEASE_LINE, PUBLISHED_IMAGE, VERIFIED_REFERENCE} = process.env;
+            const expected = `ghcr.io/${context.repo.owner}/${context.repo.repo}/jni-build`.toLowerCase();
+            if (!/^\d{2}\.\d{2}$/.test(RELEASE_LINE) || PUBLISHED_IMAGE !== expected ||
+                !VERIFIED_REFERENCE?.startsWith(`${expected}@sha256:`) ||
+                !/^sha256:[0-9a-f]{64}$/.test(VERIFIED_REFERENCE.slice(expected.length + 1))) {
+              throw new Error('Missing or invalid verified publication outputs; version alias was not updated.');
+            }
+            const branch = `release/${RELEASE_LINE}`;
+            const result = await github.graphql(`query($owner: String!, $repo: String!, $ref: String!) {
+              repository(owner: $owner, name: $repo) { ref(qualifiedName: $ref) { name } }
+            }`, {...context.repo, ref: `refs/heads/${branch}`, request: {timeout: 30000}});
+            if (!result.repository || !Object.hasOwn(result.repository, 'ref') ||
+                (result.repository.ref !== null && result.repository.ref.name !== branch)) {
+              throw new Error('Cannot confirm release branch ownership; version alias was not updated.');
+            }
+            const allowed = result.repository.ref === null;
+            core.setOutput('allowed', allowed);
+            core.info(allowed ? `No ${branch}; alias the verified main image without rebuilding.` :
+              `${branch} exists; leave its version tags unchanged.`);
+      - name: Authenticate for version alias promotion
+        if: steps.alias.outputs.allowed == 'true'
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Alias the verified main digest to the project version
+        if: steps.alias.outputs.allowed == 'true'
+        shell: bash
+        env:
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}
+          VERIFIED_REFERENCE: ${{ steps.publish.outputs.reference }}
+          RELEASE_LINE: ${{ needs.configure.outputs.release-line }}
+          MAIN_TAG: ${{ matrix.image.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$MAIN_TAG" == main-* ]]
+          alias="$PUBLISHED_IMAGE:$RELEASE_LINE-${MAIN_TAG#main-}"
+          docker buildx imagetools create --prefer-index=false --tag "$alias" "$VERIFIED_REFERENCE"
+          printf 'Version alias: %s\nSame verified digest: %s\nNo additional image build.\n' \
+            "$alias" "$VERIFIED_REFERENCE" | tee -a "$GITHUB_STEP_SUMMARY"
