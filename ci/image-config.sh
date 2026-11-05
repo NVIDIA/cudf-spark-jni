@@ -81,7 +81,18 @@ if jq -e '."build-args" | has("CUDA_VERSION")' <<< "$config" >/dev/null; then
 fi
 os_release=$(jq -er '."build-args".OS_RELEASE' <<< "$config")
 [[ "$os_release" =~ ^[0-9]+$ ]]
-[[ "$(jq -er '.platform' <<< "$config")" == linux/amd64 ]]
+platform=$(jq -er '.platform' <<< "$config")
+case "$platform" in
+  linux/amd64) arch=amd64; cmake_arch=x86_64 ;;
+  linux/arm64) arch=arm64; cmake_arch=aarch64 ;;
+  *) echo "Unsupported image platform: $platform" >&2; exit 1 ;;
+esac
+if ! jq -e --arg platform "$platform" --arg cmake_arch "$cmake_arch" \
+  '."build-args".TARGETPLATFORM == $platform and ."build-args".CMAKE_ARCH == $cmake_arch' \
+  <<< "$config" >/dev/null; then
+  echo "TARGETPLATFORM and CMAKE_ARCH must match image platform $platform" >&2
+  exit 1
+fi
 parallel=${PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN)}
 [[ "$parallel" =~ ^[1-9][0-9]*$ ]]
 (( parallel <= 8 )) || parallel=8
@@ -90,7 +101,7 @@ if [[ "$tag_prefix" != default && ! "$tag_prefix" =~ ^[0-9]{2}\.[0-9]{2}$ ]]; th
   echo "Image tag prefix must be default or a major.minor project version" >&2
   exit 1
 fi
-tag="${tag_prefix}-cuda${cuda}-rockylinux${os_release}-amd64"
+tag="${tag_prefix}-cuda${cuda}-rockylinux${os_release}-${arch}"
 config=$(jq -c --arg cuda "$cuda" --arg parallel "$parallel" \
   '."build-args" += {CUDA_VERSION: $cuda, PARALLEL_LEVEL: $parallel} |
    ."cache-from" |= map(gsub("\\$\\{CUDA_VERSION\\}"; $cuda)) |

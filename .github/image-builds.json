@@ -7,6 +7,7 @@
     "platform": "linux/amd64",
     "build-args": {
       "OS_RELEASE": "8",
+      "TARGETPLATFORM": "linux/amd64",
       "CMAKE_ARCH": "x86_64"
     },
     "smoke-test": "ci/image-smoke.sh",
@@ -18,6 +19,25 @@
       "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
     ]
   },
+  "premerge-cuda12-arm64": {
+    "image": "jni-build",
+    "toolchain": "cuda12",
+    "context": ".",
+    "dockerfile": "ci/Dockerfile",
+    "platform": "linux/arm64",
+    "build-args": {
+      "OS_RELEASE": "8",
+      "TARGETPLATFORM": "linux/arm64",
+      "CMAKE_ARCH": "aarch64"
+    },
+    "smoke-test": "ci/image-smoke.sh",
+    "cache-from": [
+      "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-arm64,timeout=2m"
+    ],
+    "cache-to": [
+      "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-arm64,mode=max,timeout=2m,ignore-error=true"
+    ]
+  },
   "premerge-cuda13": {
     "image": "jni-build",
     "toolchain": "cuda13",
@@ -26,6 +46,7 @@
     "platform": "linux/amd64",
     "build-args": {
       "OS_RELEASE": "8",
+      "TARGETPLATFORM": "linux/amd64",
       "CMAKE_ARCH": "x86_64"
     },
     "smoke-test": "ci/image-smoke.sh",
@@ -35,6 +56,25 @@
     ],
     "cache-to": [
       "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
+    ]
+  },
+  "premerge-cuda13-arm64": {
+    "image": "jni-build",
+    "toolchain": "cuda13",
+    "context": ".",
+    "dockerfile": "ci/Dockerfile",
+    "platform": "linux/arm64",
+    "build-args": {
+      "OS_RELEASE": "8",
+      "TARGETPLATFORM": "linux/arm64",
+      "CMAKE_ARCH": "aarch64"
+    },
+    "smoke-test": "ci/image-smoke.sh",
+    "cache-from": [
+      "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-arm64,timeout=2m"
+    ],
+    "cache-to": [
+      "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-arm64,mode=max,timeout=2m,ignore-error=true"
     ]
   }
 }

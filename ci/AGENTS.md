@@ -15,6 +15,9 @@ as part of an image update.
   change. Dockerfile/build-argument changes must still affect the recipe fingerprint.
 - `../.github/image-builds.json`: image definitions, platform, arguments and cache
   scopes. CUDA is resolved from `toolchains.json`, not hardcoded again here.
+  Keep amd64 and arm64 variants for every selected CUDA family. Pass both
+  `TARGETPLATFORM` and the matching `CMAKE_ARCH` explicitly; the Dockerfile's
+  defaults target amd64. Keep cache scopes architecture-specific.
 
 ## Contracts To Preserve
 
@@ -28,6 +31,9 @@ as part of an image update.
 - Keep daily publication main-only, release publication push/manual-only, PR jobs
   read-only, and publishing jobs separate from PR execution. Preserve anonymous
   pull and smoke checks before promotion, branch concurrency and worker limits.
+  Both workflows use native GitHub-hosted runners; do not add shared CPU/GPU pool
+  usage without a demonstrated need. Set publisher compilation parallelism on the
+  actual worker. Do not move unapproved fork PR code onto a shared runner pool.
 - Cache failures must not hide or replace build/smoke failures. Keep metadata and
   fingerprint checks; never treat registry authorization/network errors as a missing tag.
 
@@ -39,6 +45,10 @@ Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
 prefix. Check main's missing-version default, release explicit-pin requirements,
 branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
 must affect the actual generated build arguments, not only documentation.
+Check both architectures, including rejection of mismatched platform/build args
+and a smoke-inspected image with the wrong OS or architecture. For internal mirror
+adoption, audit the actual dev/pre-release/release and legacy consumers first;
+preserve verified digests and do not retire old image variants implicitly.
 
 Update README examples and the PR description for changed tags, ownership or
 fallback behavior. Keep the scenario table current. Distinguish local checks, PR

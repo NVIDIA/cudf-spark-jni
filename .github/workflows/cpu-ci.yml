@@ -101,7 +101,8 @@ jobs:
       max-parallel: 2
       matrix:
         image: ${{ fromJSON(needs.select.outputs.images) }}
-    runs-on: ubuntu-latest
+    # Build natively; GitHub has no ubuntu-latest-arm label.
+    runs-on: ${{ matrix.image.platform == 'linux/arm64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
     # Allow slow cold downloads, compilation, image loading and cache export.
     timeout-minutes: 120
     steps:
