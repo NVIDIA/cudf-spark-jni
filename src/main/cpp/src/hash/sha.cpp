@@ -26,10 +26,7 @@
 #include <hash/hash.hpp>
 
 namespace {
-using HashFunction = std::unique_ptr<cudf::column> (*)(cudf::table_view const&,
-                                                       cuda::stream_ref,
-                                                       rmm::device_async_resource_ref);
-
+template <typename HashFunction>
 std::unique_ptr<cudf::column> sha_impl(HashFunction hash_function,
                                        cudf::column_view const& input,
                                        cuda::stream_ref stream,
