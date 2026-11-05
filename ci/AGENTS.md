@@ -31,6 +31,8 @@ as part of an image update.
 - Keep daily publication main-only, release publication push/manual-only, PR jobs
   read-only, and publishing jobs separate from PR execution. Preserve anonymous
   pull and smoke checks before promotion, branch concurrency and worker limits.
+  A release cut may not match image-input path filters. Verify its first publisher
+  and dispatch it manually if needed before switching consumers to versioned tags.
   Both workflows use native GitHub-hosted runners; do not add shared CPU/GPU pool
   usage without a demonstrated need. Set publisher compilation parallelism on the
   actual worker. Do not move unapproved fork PR code onto a shared runner pool.
@@ -39,7 +41,11 @@ as part of an image update.
 - Internal consumers use the same repository suffix, tags and digests through the
   GHCR remote cache, with their existing registry credentials. Do not add another
   publisher or a moving pre-release alias. Resolve source POM/toolchains, not job
-  names; verify service-account layer pulls and pin approved release/RC digests.
+  names; verify service-account cold-cache layer pulls and pin approved release/RC
+  digests. An internal 404 may mean missing Deploy/Cache permission, not an absent
+  upstream image; never silently mask that as normal image fallback.
+  Compare upstream and cached digests after publication; matching recipe labels
+  alone do not prove that a mutable tag's cached manifest is current.
   Exercise the dev-to-pre-release pipeline copy during adoption: copied code must
   resolve the actual source ref before allocating image-backed build agents, not
   retain a hardcoded `main-*` image or CUDA version from the dev job.

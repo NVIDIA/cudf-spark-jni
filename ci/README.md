@@ -74,6 +74,10 @@ that consumer lookup: image CI always builds and smoke-tests from its checkout.
   absent. Existing branches need these workflows before they can publish; adding
   them to main does not update other branches. Main does not publish release images
   on their behalf.
+- Branch creation alone does not guarantee an image build: publication has
+  image-input path filters, and a release cut may change only submodule metadata.
+  Verify the first release publisher; manually dispatch it on `release/YY.MM` if
+  needed before switching consumers. Keep existing images until it succeeds.
 
 For future automated edits, follow the [agent update guide](AGENTS.md), including
 the main/release ownership checks and validation requirements.
@@ -106,10 +110,17 @@ ghcr.io/nvidia/cudf-spark-jni/jni-build:main-cuda13.4.3-rockylinux8-arm64
 
 The upstream GHCR package must allow anonymous pulls. Internal jobs retain their
 existing registry authentication; no GitHub token is needed to pull a public image.
-Verify full layer pulls with the internal CI service account, not only manifest
-access with a developer's account. Remote caching is on demand; mutable-tag refresh
+Verify a cold-cache full layer pull with the internal CI service account, not only
+manifest access or an already cached pull with a developer's account. The service
+account needs Read and Deploy/Cache permission on the underlying remote repository.
+An Artifactory 404 can indicate missing cache permission rather than a missing
+upstream tag; disambiguate it before consumer fallback. See
+[JFrog's remote-cache permission guidance](https://jfrog.com/help/r/how-does-the-deploy-permission-relate-to-remote-repositories).
+Remote caching is on demand; mutable-tag refresh
 depends on the registry's metadata-cache policy. Prewarming must fetch the required
-platform's layers, not only its manifest.
+platform's layers, not only its manifest. After publication, compare upstream and
+cached digests before adopting a new tag; a cached 404 or stale manifest is not
+fixed merely by setting a client's pull policy to always.
 
 Use the same consumer selection rules externally and internally:
 
@@ -132,10 +143,10 @@ pipeline would also send the copied pre-release pipeline to the main image. Keep
 source-branch routing and image-tag selection separate.
 
 For an explicit retained mirror instead of an on-demand cache, copy the published
-digest with all referenced content (for example, `skopeo copy --all
---preserve-digests`), then verify the destination digest, architecture, recipe and
-smoke checks. Caching the final image does not mirror its base image or build-time
-download dependencies.
+digest with all referenced content (for example,
+`skopeo copy --all --preserve-digests`), then verify the destination digest,
+architecture, recipe and smoke checks. Caching the final image does not mirror its
+base image or build-time download dependencies.
 
 This producer does not replace every internal image: older CUDA/GCC, CentOS,
 customer/private variants, signing/deployment images and product integration-test
