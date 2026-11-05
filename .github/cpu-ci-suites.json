@@ -1,7 +1,7 @@
 {
   "shared_paths": [
-    ".github/image-ci-suites.json",
-    ".github/workflows/image-ci.yml"
+    ".github/cpu-ci-suites.json",
+    ".github/workflows/cpu-ci.yml"
   ],
   "suites": {
     "images": {

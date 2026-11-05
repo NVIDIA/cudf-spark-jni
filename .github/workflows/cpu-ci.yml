@@ -12,39 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Image CI
+name: CPU CI
 
 # PRs run on hosted runners with read-only permissions; no bot approval is needed.
-# Start only for image-related file changes, not PR title/description edits.
-# This validates the toolchain images only, not the JNI GPU premerge tests.
-# Do not require this path-filtered workflow's gate for every PR.
+# Always report the gate; the suite catalog selects which CPU jobs must run.
+# Currently only toolchain images are covered; JNI GPU tests remain in Jenkins.
+# PR title/description edits do not restart these checks.
 on:
   pull_request:
     branches: [main, 'release/**']
     # After retargeting a PR, push or reopen it to validate the new base.
     types: [opened, synchronize, reopened]
-    # Keep in sync with image-ci-suites.json, including its shared paths.
-    paths:
-      - 'pom.xml'
-      - 'ci/Dockerfile'
-      - 'ci/image-config.sh'
-      - 'ci/image-smoke.sh'
-      - 'ci/toolchains.json'
-      - '.github/image-builds.json'
-      - '.github/image-ci-suites.json'
-      - '.github/workflows/image-build.yml'
-      - '.github/workflows/image-ci.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: image-ci-${{ github.event.pull_request.number }}
+  group: cpu-ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   select:
-    name: Select image checks
+    name: Select CPU checks
     if: github.repository == 'NVIDIA/cudf-spark-jni'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -66,7 +55,7 @@ jobs:
         id: select
         uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
         with:
-          catalog-path: .github/image-ci-suites.json
+          catalog-path: .github/cpu-ci-suites.json
           base-branch: ${{ github.base_ref }}
           selector-job: select
       - name: Read project version
@@ -140,14 +129,14 @@ jobs:
           config: ${{ steps.image.outputs.config }}
 
   gate:
-    name: Image CI gate
+    name: CPU CI gate
     if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
     needs: [select, images]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Check selected image results
+      - name: Check selected CPU results
         uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
         with:
           needs: ${{ toJSON(needs) }}
