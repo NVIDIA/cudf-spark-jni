@@ -16,6 +16,7 @@
 
 package ai.rapids.cudf;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -23,6 +24,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -151,8 +154,7 @@ public class PageableMemoryPoolTest {
       worker.start();
     }
     start.countDown();
-    // Deterministic overlap: shutdown only starts AFTER workers have allocated through
-    // the gate, so the write gate always contends with live in-flight operations.
+    // Wait until at least one worker has used the allocation path before shutdown.
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
     while (successfulAllocs.get() == 0 && System.nanoTime() < deadline) {
       Thread.yield();
@@ -166,5 +168,66 @@ public class PageableMemoryPoolTest {
       worker.join();
     }
     assertTrue(unexpected.isEmpty(), () -> "unexpected exceptions: " + unexpected);
+  }
+
+  @Test
+  public void shutdownWaitsForInFlightAllocation() throws Exception {
+    PageableMemoryPool.initialize(4 * 1024 * 1024, 2);
+    assertTrue(PageableMemoryPool.isInitialized());
+    Field singletonField = PageableMemoryPool.class.getDeclaredField("singleton_");
+    singletonField.setAccessible(true);
+    Object pool = singletonField.get(null);
+    Field gateField = PageableMemoryPool.class.getDeclaredField("lifecycleLock");
+    gateField.setAccessible(true);
+    ReentrantReadWriteLock gate = (ReentrantReadWriteLock) gateField.get(pool);
+
+    CountDownLatch operationEntered = new CountDownLatch(1);
+    CountDownLatch releaseOperation = new CountDownLatch(1);
+    CountDownLatch shutdownFinished = new CountDownLatch(1);
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread operation = new Thread(() -> {
+      gate.readLock().lock();
+      try {
+        operationEntered.countDown();
+        releaseOperation.await();
+        try (HostMemoryBuffer buffer = PageableMemoryPool.tryAllocate(4096)) {
+          assertNotNull(buffer);
+        }
+      } catch (Throwable t) {
+        failure.set(t);
+      } finally {
+        gate.readLock().unlock();
+      }
+    });
+    Thread shutdown = new Thread(() -> {
+      try {
+        PageableMemoryPool.shutdown();
+      } catch (Throwable t) {
+        failure.set(t);
+      } finally {
+        shutdownFinished.countDown();
+      }
+    });
+    operation.start();
+    try {
+      assertTrue(operationEntered.await(10, TimeUnit.SECONDS));
+      shutdown.start();
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (!gate.hasQueuedThread(shutdown) && System.nanoTime() < deadline) {
+        Thread.yield();
+      }
+      assertTrue(gate.hasQueuedThread(shutdown), "shutdown did not wait for the read gate");
+      assertFalse(shutdownFinished.await(100, TimeUnit.MILLISECONDS));
+    } finally {
+      releaseOperation.countDown();
+      operation.join(10000);
+      if (shutdown.isAlive()) {
+        shutdown.join(10000);
+      }
+    }
+    assertFalse(operation.isAlive());
+    assertFalse(shutdown.isAlive());
+    assertNull(failure.get(), () -> "unexpected failure: " + failure.get());
+    assertTrue(shutdownFinished.getCount() == 0);
   }
 }

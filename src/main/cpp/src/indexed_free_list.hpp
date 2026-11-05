@@ -90,8 +90,8 @@ class indexed_free_list {
 
   void erase_indexed(block_type const& b)
   {
-    by_addr_.erase(b.pointer());
     by_size_.erase({b.size(), b.pointer()});
+    by_addr_.erase(b.pointer());
   }
 
   // Address-ordered: coalescing neighbor lookup.

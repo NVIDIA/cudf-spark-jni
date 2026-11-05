@@ -29,6 +29,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -216,23 +217,32 @@ TEST(PageablePool, GpuNumaNodeDegradesCleanly)
 
 TEST(PageablePool, ParseCpuList)
 {
-  char const* tmpdir     = std::getenv("TMPDIR");
-  std::string const tmp  = (tmpdir != nullptr && tmpdir[0] != '\0') ? tmpdir : "/tmp";
-  std::string const path = tmp + "/pageable_pool_cpulist_test.txt";
-  {
-    std::ofstream out(path);
-    out << "0-3,8\n9\nfoo\n1048\n";  // ranges, single, malformed, above CPU_SETSIZE
-  }
+  char const* tmpdir    = std::getenv("TMPDIR");
+  std::string const tmp = (tmpdir != nullptr && tmpdir[0] != '\0') ? tmpdir : "/tmp";
+  struct temporary_path {
+    std::string path;
+    bool created{false};
+    ~temporary_path()
+    {
+      if (created) { std::remove(path.c_str()); }
+    }
+  } file{tmp + "/pageable_pool_cpulist_XXXXXX"};
+  int const fd = ::mkstemp(file.path.data());
+  ASSERT_GE(fd, 0);
+  file.created = true;
+  std::unique_ptr<FILE, decltype(&std::fclose)> out(::fdopen(fd, "w"), &std::fclose);
+  if (!out) { ::close(fd); }
+  ASSERT_NE(out, nullptr);
+  ASSERT_GE(std::fputs("0-3,8\n9\nfoo\n1048\n", out.get()), 0);  // malformed, out of range
+  out.reset();
   cpu_set_t cpus{};
-  ASSERT_TRUE(detail::parse_cpu_list(path.c_str(), &cpus));
+  ASSERT_TRUE(detail::parse_cpu_list(file.path.c_str(), &cpus));
   EXPECT_TRUE(CPU_ISSET(0, &cpus));
   EXPECT_TRUE(CPU_ISSET(3, &cpus));
   EXPECT_TRUE(CPU_ISSET(8, &cpus));
   EXPECT_TRUE(CPU_ISSET(9, &cpus));
   EXPECT_FALSE(CPU_ISSET(4, &cpus));
   EXPECT_FALSE(CPU_ISSET(1048, &cpus));
-  std::remove(path.c_str());
-
   cpu_set_t none{};
   EXPECT_FALSE(detail::parse_cpu_list("/nonexistent/cpulist", &none));
 }
@@ -301,6 +311,26 @@ TEST(PageablePool, DecisionParityListVsIndexed)
   EXPECT_EQ(list_off(list_full), idx_off(idx_full));
   list_pool.deallocate_sync(list_full, kPoolSize);
   indexed_pool.deallocate_sync(idx_full, kPoolSize);
+}
+
+TEST(PageablePool, IndexedCoalescingRecoversWholePool)
+{
+  auto pool                        = make_indexed_pool(kPoolSize);
+  constexpr std::size_t block_size = 1024 * 1024;
+  void* first                      = pool.allocate_sync(block_size);
+  void* middle                     = pool.allocate_sync(block_size);
+  void* last                       = pool.allocate_sync(block_size);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(last, nullptr);
+  pool.deallocate_sync(first, block_size);
+  pool.deallocate_sync(last, block_size);
+  // Freeing the middle block coalesces with both indexed neighbors.
+  pool.deallocate_sync(middle, block_size);
+  void* whole = pool.allocate_sync(kPoolSize);
+  ASSERT_NE(whole, nullptr);
+  EXPECT_EQ(whole, first);
+  pool.deallocate_sync(whole, kPoolSize);
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +433,36 @@ TEST(PageableArenaPool, RoundRobinAndBoundaryIsolation)
   void* full_arena = pool.allocate_sync(1024 * 1024);
   ASSERT_NE(full_arena, nullptr);
   pool.deallocate_sync(full_arena, 1024 * 1024);
+}
+
+TEST(PageableArenaPool, NonDivisibleCapacityStaysInsideBacking)
+{
+  std::size_t const alignment = detail::pool_align_up(1);
+  std::size_t const pool_size = 9 * alignment;
+  auto pool                   = pageable_arena_pool_resource(
+    cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
+    pool_size,
+    1,
+    -1,
+    true,
+    false,
+    /*arena_count=*/8);
+  std::vector<void*> blocks;
+  for (int i = 0; i < 9; ++i) {
+    blocks.push_back(pool.allocate_sync(alignment));
+    ASSERT_NE(blocks.back(), nullptr);
+  }
+  auto* const base = static_cast<char*>(blocks.front());
+  for (void* block : blocks) {
+    auto* const ptr = static_cast<char*>(block);
+    EXPECT_GE(ptr, base);
+    EXPECT_LT(ptr, base + pool_size);
+  }
+  EXPECT_THROW(
+    { [[maybe_unused]] void* _ = pool.allocate_sync(alignment); }, pageable_pool_exhausted);
+  for (void* block : blocks) {
+    pool.deallocate_sync(block, alignment);
+  }
 }
 
 TEST(PageableArenaPool, ConcurrentContentionRecovers)

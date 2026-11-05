@@ -67,11 +67,13 @@ class pageable_arena_pool_resource_t
       auto count                = static_cast<std::size_t>(std::max(1, arena_count));
       if (count > pool_size_ / min_cap) { count = std::max<std::size_t>(1, pool_size_ / min_cap); }
       arena_count_    = count;
-      arena_capacity_ = detail::pool_align_up(pool_size_ / arena_count_);
+      arena_capacity_ = (pool_size_ / arena_count_ / min_cap) * min_cap;
       if (arena_capacity_ == 0) {
         arena_capacity_ = pool_size_;  // single-arena degenerate case
         arena_count_    = 1;
       }
+      // Rounding down leaves the remaining aligned capacity in the final arena.
+      // No arena may start beyond the backing allocation.
       arenas_.reserve(arena_count_);
       for (std::size_t i = 0; i < arena_count_; ++i) {
         arenas_.emplace_back(std::make_unique<arena>());
@@ -105,7 +107,7 @@ class pageable_arena_pool_resource_t
     if (bytes == 0) { return nullptr; }
     bytes = detail::pool_align_up(bytes);
     // Largest arena capacity: every arena has arena_capacity_ except the last, which
-    // holds the remainder (>= arena_capacity_ when pool_size_ % arena_count_ != 0).
+    // holds the remainder (at least arena_capacity_).
     std::size_t const last_cap = pool_size_ - (arena_count_ - 1) * arena_capacity_;
     if (bytes > last_cap) { throw pageable_pool_exhausted{}; }
     std::size_t const start = next_arena_.fetch_add(1) % arena_count_;
