@@ -178,12 +178,12 @@ jobs:
           PROJECT_VERSION: ${{ steps.compile.outputs.version }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
           : "${SONAR_HOST_URL:?Set the SONAR_HOST_URL repository secret}"
-          : "${SONAR_TOKEN:?Set the SONAR_TOKEN repository secret}"
+          : "${SONAR_TOKEN:?Set the SONAR_RUNNER_PILOT_TOKEN repository secret}"
           rm -f .scannerwork/report-task.txt
           sonar-scanner \
             "-Dsonar.projectKey=$SONAR_PROJECT_KEY" \
@@ -207,7 +207,7 @@ jobs:
           SCANNER_OUTCOME: ${{ steps.analyze.outcome }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
         run: |
           printf 'attempt=%s\n' "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           python3 ci/sonar-pilot-result.py "$RUNNER_TEMP/sonar-result.json"

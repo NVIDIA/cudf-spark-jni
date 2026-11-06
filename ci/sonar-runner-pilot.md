@@ -18,7 +18,7 @@ outside this pilot.
 | Variable `SONAR_PROJECT_KEY` | Existing Sonar project receiving the PR analysis. |
 | Variable `SONAR_RUNNER_PILOT_MAVEN_MIRROR` | Required anonymous HTTPS Maven mirror used for compilation and version lookup; no embedded credentials. |
 | Secret `SONAR_HOST_URL` | Sonar service URL. |
-| Secret `SONAR_TOKEN` | Token with analysis access to that project. |
+| Secret `SONAR_RUNNER_PILOT_TOKEN` | Temporary pilot secret containing a token with analysis access to that project; remove after validation. |
 
 The worker must provide Linux x86-64, Git, Python 3, JDK 17, Maven, and SonarScanner
 CLI 6.2.1 or a compatible approved version. It needs access to GitHub, the configured
