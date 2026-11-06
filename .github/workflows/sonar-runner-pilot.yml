@@ -1,0 +1,185 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Test-only pilot. A maintainer must apply the label again for every new head.
+# Opening, updating, or publishing the PR does not request an internal runner.
+name: Sonar runner pilot
+run-name: Sonar runner pilot for PR ${{ github.event.pull_request.number }}
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [main, 'release/**']
+
+permissions: {}
+
+concurrency:
+  group: sonar-runner-pilot-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    if: >-
+      github.event.label.name == 'sonar-runner-pilot' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      sha: ${{ steps.approve.outputs.sha }}
+      branch: ${{ steps.approve.outputs.branch }}
+      base: ${{ steps.approve.outputs.base }}
+      runner: ${{ steps.approve.outputs.runner }}
+    steps:
+      - name: Authorize the labeled PR head
+        id: approve
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RUNNER_LABEL: ${{ vars.SONAR_RUNNER_PILOT_LABEL }}
+          RUNNER_GROUP: ${{ vars.SONAR_RUNNER_PILOT_GROUP }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const eventPR = context.payload.pull_request;
+            const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: process.env.TRIGGERING_ACTOR
+            });
+            if (!['admin', 'maintain', 'write'].includes(permission.permission)) {
+              throw new Error('The pilot must be started by a repository maintainer.');
+            }
+            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: eventPR.number});
+            if (pr.state !== 'open' || pr.head.repo?.full_name !== `${owner}/${repo}` ||
+                pr.head.sha !== eventPR.head.sha || pr.base.ref !== eventPR.base.ref ||
+                !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
+              throw new Error('PR approval is stale. Review the current head and reapply the pilot label.');
+            }
+            const label = process.env.RUNNER_LABEL;
+            if (!/^sonar-runner-pilot-[a-z0-9-]+$/.test(label || '')) {
+              throw new Error('Set SONAR_RUNNER_PILOT_LABEL to a dedicated sonar-runner-pilot-* label.');
+            }
+            if (!process.env.SONAR_PROJECT_KEY?.trim()) {
+              throw new Error('Set the SONAR_PROJECT_KEY repository variable.');
+            }
+            const runner = {labels: ['self-hosted', 'Linux', 'X64', label]};
+            if (process.env.RUNNER_GROUP?.trim()) runner.group = process.env.RUNNER_GROUP.trim();
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: pr.head.sha, context: 'sonar-runner-pilot', state: 'pending',
+              description: 'Approved Sonar runner pilot is waiting to scan this commit.',
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            });
+            core.setOutput('sha', pr.head.sha);
+            core.setOutput('branch', pr.head.ref);
+            core.setOutput('base', pr.base.ref);
+            core.setOutput('runner', JSON.stringify(runner));
+
+  scan:
+    needs: authorize
+    runs-on: ${{ fromJSON(needs.authorize.outputs.runner) }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check that approval still names the current head
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const {data: pr} = await github.rest.pulls.get({
+              owner, repo, pull_number: context.payload.pull_request.number
+            });
+            if (pr.state !== 'open' || pr.head.repo?.full_name !== `${owner}/${repo}` ||
+                pr.head.sha !== process.env.APPROVED_SHA || pr.base.ref !== process.env.APPROVED_BASE ||
+                !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
+              throw new Error('PR changed while waiting for the runner; reapply the label after review.');
+            }
+
+      - name: Check out the approved commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Compile Java and wait for the Sonar quality gate
+        shell: bash
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ needs.authorize.outputs.branch }}
+          PR_BASE: ${{ needs.authorize.outputs.base }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
+          : "${SONAR_HOST_URL:?Set the SONAR_HOST_URL repository secret}"
+          : "${SONAR_TOKEN:?Set the SONAR_TOKEN repository secret}"
+          command -v java
+          command -v mvn
+          command -v sonar-scanner
+
+          # Match the existing Sonar Java compile, without native builds or tests.
+          # Default public Maven resolution avoids granting artifact-server credentials.
+          mvn -B -Dmaven.wagon.http.retryHandler.count=3 compile \
+            -DskipTests=true -Dmaven.antrun.skip=true
+          version=$(mvn -B -Dstyle.color=never help:evaluate \
+            -Dexpression=project.version -q -DforceStdout)
+          sonar-scanner \
+            "-Dsonar.projectKey=$SONAR_PROJECT_KEY" \
+            "-Dsonar.projectVersion=$version" \
+            "-Dsonar.scm.revision=$APPROVED_SHA" \
+            "-Dsonar.pullrequest.key=$PR_NUMBER" \
+            "-Dsonar.pullrequest.branch=$PR_BRANCH" \
+            "-Dsonar.pullrequest.base=$PR_BASE" \
+            -Dsonar.java.binaries=target/classes \
+            -Dsonar.sources=src/main/java,src/main/cpp/src \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.qualitygate.timeout=600
+
+  report:
+    needs: [authorize, scan]
+    if: always() && needs.authorize.result == 'success' && needs.authorize.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Report the result on the analyzed commit
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const passed = process.env.SCAN_RESULT === 'success';
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: process.env.APPROVED_SHA, context: 'sonar-runner-pilot',
+              state: passed ? 'success' : 'failure',
+              description: passed ? 'Sonar quality gate passed for this commit.' :
+                `Sonar pilot did not pass (${process.env.SCAN_RESULT}).`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            });
+            if (!passed) core.setFailed(`Sonar pilot result: ${process.env.SCAN_RESULT}`);
