@@ -5,8 +5,9 @@
 
   External CI reuses premerge-build.sh and fuzz-test.sh through MVN_SETTINGS.
   Mirror Central explicitly: dependency/plugin POMs can introduce their own Central
-  repository and bypass the project's Google-first order. This replaces Central
-  for these CI builds (no Central fallback), without internal credentials.
+  repository and bypass the project's Google-first order. The active profile
+  lists that mirrored repository first and a separate, unmirrored Central fallback
+  second, for both dependencies and plugins. No internal credentials are needed.
   Jenkins keeps settings.xml; local Maven retains the user's own settings.
 -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
@@ -19,4 +20,36 @@
       <mirrorOf>central</mirrorOf>
     </mirror>
   </mirrors>
+  <profiles>
+    <profile>
+      <id>public-repositories</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>maven-central-fallback</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>maven-central-fallback</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>public-repositories</activeProfile>
+  </activeProfiles>
 </settings>

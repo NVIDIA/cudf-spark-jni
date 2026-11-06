@@ -110,7 +110,9 @@ plain local Maven and Docker builds, with Central retained as fallback. Existing
 developer settings are not replaced. Internal `ci/settings.xml` redirects the Google
 repository to the same authenticated Artifactory entry as Central. External CI uses
 `ci/settings-public.xml` to mirror Central explicitly, including repository entries
-introduced by dependency/plugin POMs; that mode has no direct Central fallback.
+introduced by dependency/plugin POMs. Its active profile tries that Google mirror
+first, then a separate Maven Central repository if Google cannot supply an artifact.
+The same order applies to dependencies and plugins; internal settings are unchanged.
 
 ## Branching And Version Updates
 
