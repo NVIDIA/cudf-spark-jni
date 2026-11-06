@@ -36,9 +36,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Retain only the latest pending refresh for each branch.
-  group: image-build-${{ github.ref }}
+  # All branches share the package with image-cleanup.yml; retain queued publishes.
+  group: jni-image-maintenance
   cancel-in-progress: false
+  queue: max
 
 jobs:
   configure:
