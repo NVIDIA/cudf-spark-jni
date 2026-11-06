@@ -29,14 +29,10 @@ import jenkins.model.CauseOfInterruption.UserInterruption
 import ipp.blossom.*
 
 def githubHelper // blossom github helper
-def TEMP_IMAGE_BUILD = false
 def IMAGE_PREMERGE_CU12
 def IMAGE_PREMERGE_CU13
 // Metadata selection needs Python, not a JNI toolchain or a GPU.
 def cpuImage = pod.getCPUYAML('python:3.11-slim')
-def imageSelections = [:]
-def PREMERGE_TAG_CU12
-def PREMERGE_TAG_CU13
 def skipped = false
 def major_ver // major version extracted from project version
 def minor_ver // minor version extracted from project version
@@ -129,7 +125,7 @@ pipeline {
                         ]
                     )
 
-                    // Keep common outside the source stash and Docker build context.
+                    // Keep common outside the source stash.
                     def helperRoot = pwd(tmp: true) + '/ci-image-common'
                     dir(helperRoot) {
                         checkout(changelog: false, poll: false, scm: [
@@ -151,6 +147,7 @@ pipeline {
                         error 'GitHub did not return the PR target branch'
                     }
                     def allowMainFallback = pr.base.ref == 'main'
+                    def imageSelections
                     withEnv(["CI_IMAGE_METADATA_HELPER=${helperRoot}/container-image/metadata.py"]) {
                         container('cpu') {
                             imageSelections = readJSON(text: sh(returnStdout: true,
@@ -159,52 +156,12 @@ pipeline {
                                 returnPojo: true)
                         }
                     }
-                    // HEAD is GitHub's merge commit; its first parent is the tested base.
-                    // Preserve temporary image validation for recipe/pin/metadata changes,
-                    // including explicitly declared Docker COPY/ADD inputs.
-                    def imagePaths = ['pom.xml', 'ci/Dockerfile', 'ci/toolchains.json',
-                        'ci/image-config.py', 'ci/image-config.sh', '.github/image-builds.json']
-                    imageSelections.values().each { imagePaths.addAll(it.config['recipe-inputs']) }
-                    def changed = sh(returnStatus: true, script: 'git diff --quiet HEAD^1 HEAD -- ' +
-                        imagePaths.unique().collect { common.shellQuote(it) }.join(' '))
-                    if (changed > 1) {
-                        error 'Unable to compare PR image inputs with the tested base'
-                    }
-                    TEMP_IMAGE_BUILD = changed == 1
-                    if (!TEMP_IMAGE_BUILD) {
-                        // Authenticated internal GHCR mirror, recipe checked and digest pinned.
-                        def images = resolveCiImages(imageSelections, [allowFallback: allowMainFallback])
-                        IMAGE_PREMERGE_CU12 = images.cuda12
-                        IMAGE_PREMERGE_CU13 = images.cuda13
-                    }
+                    // Temporary validation: require published images through the internal mirror.
+                    // Do not build locally and hide a missing or incompatible mirrored image.
+                    def images = resolveCiImages(imageSelections, [allowFallback: allowMainFallback])
+                    IMAGE_PREMERGE_CU12 = images.cuda12
+                    IMAGE_PREMERGE_CU13 = images.cuda13
                     stash(name: 'source_tree', includes: '**,.git/**', useDefaultExcludes: false)
-                }
-            }
-        }
-
-        stage('Build docker image') {
-            when {
-                beforeAgent true
-                expression { !skipped && TEMP_IMAGE_BUILD }
-            }
-            agent {
-                kubernetes {
-                    label "docker-${BUILD_TAG}"
-                    cloud "${common.CLOUD_NAME}"
-                    yaml pod.getDockerBuildYAML()
-                    customWorkspace "${CUSTOM_WORKSPACE}"
-                }
-            }
-            steps {
-                script {
-                    unstash 'source_tree'
-                    container('cpu') {
-                        sh 'apk add --no-cache bash jq'
-                        PREMERGE_TAG_CU12 = "rockylinux8-blossom-dev-${BUILD_TAG}-cu12"
-                        PREMERGE_TAG_CU13 = "rockylinux8-blossom-dev-${BUILD_TAG}-cu13"
-                        IMAGE_PREMERGE_CU12 = buildPrImage(imageSelections.cuda12, PREMERGE_TAG_CU12)
-                        IMAGE_PREMERGE_CU13 = buildPrImage(imageSelections.cuda13, PREMERGE_TAG_CU13)
-                    }
                 }
             }
         }
@@ -365,12 +322,6 @@ pipeline {
                     githubHelper.updateCommitStatus("", "Fail", GitHubCommitState.FAILURE)
                 }
 
-                if (TEMP_IMAGE_BUILD) {
-                    container('cpu') {
-                        deleteDockerTempTag("${PREMERGE_TAG_CU12}") // clean premerge temp image
-                        deleteDockerTempTag("${PREMERGE_TAG_CU13}") // clean premerge temp image
-                    }
-                }
             }
         }
     }
@@ -388,56 +339,6 @@ void runPremergeBuild() {
             this,
             'source build/env.sh && ${sclCMD} "ci/premerge-build.sh"'
         )
-    }
-}
-
-String buildPrImage(Map selected, String tag) {
-    def config = selected.config
-    def image = "${env.ARTIFACTORY_NAME}/sw-spark-docker-local/plugin-jni:${tag}"
-    def args = ['--network=host', '--platform', config.platform, '-f', config.dockerfile,
-                '--label', "org.opencontainers.image.version=${selected.version}"]
-    config['build-args'].each { key, value -> args.addAll(['--build-arg', "${key}=${value}"]) }
-    args.add(config.context)
-    docker.build(image, args.collect { common.shellQuote(it) }.join(' '))
-    def smoke = ['bash', config['smoke-test'], image, config.platform] + config['smoke-args']
-    sh smoke.collect { common.shellQuote(it) }.join(' ')
-    uploadDocker(image)
-    // Pin what was pushed; a later pod must not resolve a mutable tag again.
-    def digestImage = sh(returnStdout: true,
-        script: "docker image inspect --format '{{index .RepoDigests 0}}' ${common.shellQuote(image)}").trim()
-    def repository = image.substring(0, image.lastIndexOf(':'))
-    if (!digestImage.startsWith(repository + '@') ||
-            !(digestImage.substring(repository.length() + 1) ==~ /sha256:[0-9a-f]{64}/)) {
-        error "No pushed digest available for temporary image ${tag}"
-    }
-    return digestImage
-}
-
-void uploadDocker(String IMAGE_NAME) {
-    def DOCKER_CMD = "docker --config $WORKSPACE/.docker"
-    retry(3) {
-        sleep(time: 10, unit: "SECONDS")
-        sh """
-            echo $ART_CREDS_PSW | $DOCKER_CMD login $ARTIFACTORY_NAME -u $ART_CREDS_USR --password-stdin
-            $DOCKER_CMD push $IMAGE_NAME
-            $DOCKER_CMD logout $ARTIFACTORY_NAME
-        """
-    }
-}
-
-void deleteDockerTempTag(String tag) {
-    if (!tag?.trim()) { // return if the tag is null or empty
-        return
-    }
-    try {
-        httpRequest(httpMode: 'DELETE', authentication: 'urm_creds',
-            url: "https://${env.ARTIFACTORY_NAME}/artifactory/sw-spark-docker-local/plugin-jni/${tag}",
-            validResponseCodes: '200:299,404', timeout: 60, quiet: true,
-            consoleLogResponseBody: false)
-    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException e) {
-        throw e
-    } catch (e) {
-        echo "Unable to clean temporary image ${tag}: ${e}"
     }
 }
 
