@@ -348,12 +348,28 @@ class device_row_hasher {
       {
       }
 
-      template <typename T, CUDF_ENABLE_IF(cudf::column_device_view::has_element_accessor<T>())>
+      template <typename T,
+                CUDF_ENABLE_IF(cudf::column_device_view::has_element_accessor<T>() and
+                               not cudf::is_dictionary<T>())>
       __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                             cudf::size_type row_index) const noexcept
       {
         if (_check_nulls && col.is_null(row_index)) { return _seed; }
         return XXHash_64<T>{_seed}(col.element<T>(row_index));
+      }
+
+      /**
+       * @brief Hashes a DICTIONARY32 element as its STRING key, so a dictionary hashes exactly
+       * like its decoded STRING column. Keys are checked to be STRING on the host.
+       */
+      template <typename T, CUDF_ENABLE_IF(cudf::is_dictionary<T>())>
+      __device__ hash_value_type operator()(cudf::column_device_view const& col,
+                                            cudf::size_type row_index) const noexcept
+      {
+        if (_check_nulls && col.is_null(row_index)) { return _seed; }
+        auto const keys      = col.child(cudf::dictionary_column_view::keys_column_index);
+        auto const key_index = col.element<cudf::dictionary32>(row_index).value();
+        return XXHash_64<cudf::string_view>{_seed}(keys.element<cudf::string_view>(key_index));
       }
 
       template <typename T, CUDF_ENABLE_IF(not cudf::column_device_view::has_element_accessor<T>())>
@@ -567,6 +583,7 @@ std::unique_ptr<cudf::column> xxhash64(cudf::table_view const& input,
   if (input.num_columns() == 0 || input.num_rows() == 0) { return output; }
 
   check_nested_depth(input);
+  check_dictionary_keys(input);
 
   bool const nullable = has_nested_nulls(input);
   auto const input_view =
