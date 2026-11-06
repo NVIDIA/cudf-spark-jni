@@ -186,6 +186,7 @@ jobs:
           : "${SONAR_TOKEN:?Set the SONAR_RUNNER_PILOT_TOKEN repository secret}"
           rm -f .scannerwork/report-task.txt
           sonar-scanner \
+            -Dsonar.ci.autoconfig.disabled=true \
             "-Dsonar.projectKey=$SONAR_PROJECT_KEY" \
             "-Dsonar.projectVersion=$PROJECT_VERSION" \
             "-Dsonar.scm.revision=$APPROVED_SHA" \
