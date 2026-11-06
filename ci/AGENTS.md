@@ -25,6 +25,10 @@ fallback. Do not claim the bot enforces a supplied SHA for trusted contributors.
   Keep amd64 and arm64 variants for every selected CUDA family. Pass both
   `TARGETPLATFORM` and the matching `CMAKE_ARCH` explicitly; the Dockerfile's
   defaults target amd64. Keep cache scopes architecture-specific.
+- Consumer tags omit architecture and resolve through a multi-platform index.
+  Keep native build tags, classifiers and recipe fingerprints architecture-specific.
+  Combine verified immutable digests from the same source revision only after both
+  platforms succeed; parallel workers must never overwrite the shared tag.
 - Every local Dockerfile COPY/ADD source must be in each affected image's explicit
   `recipe-inputs` list, relative to the checkout root. Keep it empty only while
   there are no copied inputs. For example, cuDF-Spark's copied
@@ -65,6 +69,11 @@ fallback. Do not claim the bot enforces a supplied SHA for trusted contributors.
   actual worker. Do not move unapproved fork PR code onto a shared runner pool.
 - Cache failures must not hide or replace build/smoke failures. Keep metadata and
   fingerprint checks; never treat registry authorization/network errors as a missing tag.
+- Combined manifests have their own release-line/CUDA-family lock and repeat the
+  release-ownership check before aliasing. Keep the selector contract at one
+  versioned tag plus one optional main fallback. One complete CUDA pair may publish
+  even if another family failed. Extend the existing CPU metadata checks when changing
+  this manifest/selector contract.
 
 ## Validation And Documentation
 

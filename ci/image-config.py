@@ -121,7 +121,9 @@ def describe(entry, toolchains, prefix):
     for key in ("cache-from", "cache-to"):
         config[key] = [value.replace("${CUDA_VERSION}", cuda) for value in config.get(key, [])]
     fingerprint = recipe_fingerprint(config)
-    config.update(version=fingerprint, tag=f"{prefix}-cuda{cuda}-rockylinux{os_release}-{arch}")
+    manifest_tag = f"{prefix}-cuda{cuda}-rockylinux{os_release}"
+    config.update(version=fingerprint, tag=f"{manifest_tag}-{arch}")
+    config["manifest-tag"] = manifest_tag
     config["smoke-args"] = [cuda, fingerprint]
     return config
 
@@ -147,8 +149,8 @@ def select(classifiers, allow_main=False):
         config = describe(entries[0], toolchains, metadata["release-line"])
         result[classifier] = {
             "image": IMAGE, "platform": platform, "version": config["version"],
-            "tags": [config["tag"]] + (
-                ["main-" + config["tag"].split("-", 1)[1]] if allow_main else []),
+            "tags": [config["manifest-tag"]] + (
+                ["main-" + config["manifest-tag"].split("-", 1)[1]] if allow_main else []),
             "project-version": metadata["version"], "release-line": metadata["release-line"],
             "toolchain-key": key, "cuda-version": toolchains[family],
             "config": config,
@@ -156,22 +158,59 @@ def select(classifiers, allow_main=False):
     return result
 
 
+def manifest_sources(tag, directory, source_sha):
+    """Require both verified platform records from this publisher's source revision."""
+    require(source_sha and re.fullmatch(r"[0-9a-f]{40}", source_sha), "Invalid source SHA")
+    configs = json.loads(os.environ["CI_IMAGE_CONFIGS"])
+    expected = [config for config in configs if config["manifest-tag"] == tag]
+    platforms = ["linux/amd64", "linux/arm64"]
+    require(len(expected) == 2 and sorted(config["platform"] for config in expected) == platforms,
+            "A JNI manifest requires exactly one amd64 and one arm64 recipe")
+    records = [json.loads(path.read_text(encoding="utf-8"))
+               for path in sorted(Path(directory).glob("*.json"))]
+    require(len(records) == 2, "Both native builds must publish verified image records")
+    require(sorted(record["platform"] for record in records) == platforms,
+            "Missing or duplicate image platform")
+    sources = []
+    for config in sorted(expected, key=lambda config: config["platform"]):
+        record = next(record for record in records if record["platform"] == config["platform"])
+        require(record["source-sha"] == source_sha and record["tag"] == config["tag"] and
+                record["version"] == config["version"],
+                "Image record does not match this source revision and platform recipe")
+        reference = record["reference"]
+        require(isinstance(reference, str) and
+                re.fullmatch(re.escape(IMAGE) + r"@sha256:[0-9a-f]{64}", reference),
+                "Image record must contain a verified immutable JNI image reference")
+        sources.append(reference)
+    require(len(set(sources)) == 2, "Platforms must have distinct image digests")
+    return {"image": IMAGE, "tag": tag, "platforms": platforms, "sources": sources}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("version", "list", "describe", "matrix", "select"))
+    parser.add_argument("operation", choices=("version", "list", "describe", "matrix", "select", "manifest"))
     parser.add_argument("entry", nargs="?")
+    parser.add_argument("--records-dir", help="Verified native publication records (manifest only)")
+    parser.add_argument("--source-sha", help="Expected publisher source revision (manifest only)")
     parser.add_argument("--branch", help="Publisher source/PR base branch (version command only)")
     parser.add_argument("--classifiers", help="Comma-separated CUDA classifiers; defaults to all catalog entries")
     parser.add_argument("--allow-main-fallback", action="store_true",
                         help="Development consumers only: permit main pins and a matching main image")
     args = parser.parse_args()
-    if args.entry is not None and args.operation != "describe":
-        parser.error("Only describe accepts a catalog entry")
+    if args.entry is not None and args.operation not in ("describe", "manifest"):
+        parser.error("Only describe or manifest accepts an entry")
+    if args.operation == "manifest":
+        if not all((args.entry, args.records_dir, args.source_sha)):
+            parser.error("manifest requires a tag, --records-dir and --source-sha")
+    elif args.records_dir is not None or args.source_sha is not None:
+        parser.error("--records-dir and --source-sha require manifest")
     if args.branch is not None and args.operation != "version":
         parser.error("--branch is for publisher version metadata, not consumer image selection")
     if (args.classifiers is not None or args.allow_main_fallback) and args.operation != "select":
         parser.error("--classifiers and --allow-main-fallback require select")
-    if args.operation == "version":
+    if args.operation == "manifest":
+        result = manifest_sources(args.entry, args.records_dir, args.source_sha)
+    elif args.operation == "version":
         result = project_version() if args.branch is None else version_context(args.branch)[0]
     elif args.operation == "select":
         result = select(args.classifiers, args.allow_main_fallback)

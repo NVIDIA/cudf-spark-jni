@@ -23,10 +23,17 @@ own Dockerfile and the definitions in
 Each selected CUDA version has separate native amd64 and arm64 builds on
 GitHub-hosted runners, without consuming the shared CPU/GPU pools. Publication
 compilation parallelism is set on the build worker, not the configuration job.
+After the native builds, one manifest job per CUDA version combines that run's
+verified digests into a tag containing both platforms. It does not rebuild images
+or use emulation. Missing, duplicate, stale-source or mismatched-recipe records
+fail publication for that CUDA version; a failed CUDA family does not prevent the
+other complete pair from publishing. Caches remain architecture-specific.
 
 Publisher runs are serialized per branch. An active run finishes; only the latest
 pending refresh for that branch is retained. A second, shared lock serializes main
 and its matching release publisher per release line, CUDA family and platform.
+The combined manifest has a separate release-line/CUDA-family lock to protect
+its version aliases across main and release publishers.
 Publication builds fresh, checks anonymous pulls and smoke tests, then promotes the
 verified digest. Main checks for the release branch after the build, while holding
 that lock; only a confirmed absent branch permits its version alias. API or
@@ -39,11 +46,14 @@ visibility may need to be made public before publication succeeds.
 Images live under `ghcr.io/nvidia/cudf-spark-jni/jni-build`, with tags such as:
 
 ```text
-26.10-cuda13.3.0-rockylinux8-amd64
-26.12-cuda13.4.3-rockylinux8-amd64
-main-cuda13.4.3-rockylinux8-amd64
-main-cuda13.4.3-rockylinux8-arm64
+26.10-cuda13.3.0-rockylinux8
+26.12-cuda13.4.3-rockylinux8
+main-cuda12.9.1-rockylinux8
+main-cuda13.4.3-rockylinux8
 ```
+
+Each tag contains `linux/amd64` and `linux/arm64`; Docker selects the host platform,
+or callers can specify `--platform`. CUDA 12 and CUDA 13 remain distinct tags.
 
 Versioned tags use only major.minor: `26.12.0-SNAPSHOT` and `26.12.1` both use
 `26.12-`. Patch versions and snapshot suffixes do not create new tags. The image
@@ -61,8 +71,9 @@ changes the fingerprint. Update the CPU suite and image-push path filters for th
 files too, so input-only changes trigger validation and publication.
 Smoke checks verify Linux, the requested architecture and
 the label, then run the inspected image ID, not a mutable tag. Temporary `build-...`
-tags are publication candidates only. The architecture-suffixed tags are separate
-images; there is no combined amd64/arm64 consumer tag.
+tags are publication candidates only. A combined tag is a manifest index over the
+verified native images; consumers validate the selected platform's recipe label,
+not a shared index-level fingerprint.
 
 Image CI always builds and smoke-tests from its checkout.
 
@@ -90,10 +101,13 @@ a commit once and run the selector from that checkout; branch, tag and commit-SH
 inputs all use the same checked-out POM and recipe. Both architectures are selected
 when `--classifiers` is omitted. Exact POM-version pins take priority.
 
-The default is versioned-only: missing pins or a missing/incompatible `YY.MM-*`
-image must fail. Development callers may explicitly use `--allow-main-fallback`
-to permit the checkout's `main` pins when the version entry is absent and append a
-recipe-checked `main-*` image candidate. Release callers must not enable this flag.
+The default is versioned-only: select the `YY.MM-*` multi-platform tag. Missing
+pins or a missing/incompatible versioned image must fail. Development callers may
+explicitly use `--allow-main-fallback` to permit the checkout's `main` pins when
+the version entry is absent and append
+one recipe-checked `main-*` candidate. Release callers must not enable this flag.
+Publish the matching combined manifests before enabling consumers of the updated
+selector.
 The selector does not infer development/release policy from a branch name, commit
 containment or the `SNAPSHOT` suffix, since the same commit may be used in both.
 
@@ -176,8 +190,11 @@ toolchain pins before their copied PRs can use it; merging only to main does not
 enable them. Do not retire their existing Blossom checks before that rollout.
 
 Workers use public GHCR images verified against the checkout's recipe, or build and
-smoke-test a missing/incompatible recipe locally without publishing. Registry/auth
-failures remain errors. Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
+smoke-test a missing/incompatible recipe locally without publishing. For the shared
+multi-platform tags, GPU workers select the linux/amd64 child, verify its recipe
+label and pin its immutable digest; the arm64 image and attestation descriptors are
+not used by these workers. Registry/auth failures remain errors.
+Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
 Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
 The parent resolves the PR's actual target, and the worker rechecks it after waiting
 for a runner. Release targets require matching POM/pins and versioned images; only
