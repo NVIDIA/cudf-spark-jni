@@ -4,6 +4,13 @@ Read [README.md](README.md) before changing image configuration. Keep edits scop
 to the requested toolchain or release; do not change Jenkins or product coverage
 as part of an image update.
 
+For GPU CI changes, keep `.github/gpu-ci-suites.json`, its workflow job IDs and
+the result gate aligned. Preserve explicit bot approval for copied PRs and the trusted
+main-only cache baseline. Keep existing Blossom/Sonar coverage until explicitly
+retired; registry failures and real workload failures must not cause GPU retries.
+Recheck the copied head and actual PR target; only main targets allow main-image
+fallback. Do not claim the bot enforces a supplied SHA for trusted contributors.
+
 ## Configuration Ownership
 
 - `toolchains.json`: CUDA requirements keyed by the POM's major.minor version.

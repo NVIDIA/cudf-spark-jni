@@ -118,6 +118,16 @@ authentication/network failures must not be treated as an absent tag. The select
 itself does not pull, publish or silently build an image. Existing product-test
 Jenkinsfiles and the local `build/run-in-docker` workflow are unchanged.
 
+Maven dependencies and plugins prefer Google's Central mirror by default, including
+plain local Maven and Docker builds, with Central retained as fallback. Existing
+developer settings are not replaced. The POM declares Google first, followed by
+`maven-central-fallback`, for both dependencies and plugins. Internal `ci/settings.xml`
+redirects both IDs to the same authenticated Artifactory entry as Central. External CI uses
+`ci/settings-public.xml` to mirror Central explicitly, including repository entries
+introduced by dependency/plugin POMs, without a separate repository profile.
+The POM's fallback repository is not mirrored by these public settings and remains
+available if Google cannot supply an artifact.
+
 ## Branching And Version Updates
 
 - Add the release-line toolchain entry before branch-out. The release branch keeps
@@ -159,3 +169,41 @@ Builds export separate layer-cache scopes for each full CUDA version and
 architecture. The existing amd64 PR builds can also import earlier major-series
 caches during migration. Cache export failure is non-fatal; build,
 recipe-verification and smoke-test failures remain failures.
+
+## GPU Premerge
+
+`GPU CI` adds CUDA 12/13 amd64 native/Java tests and fuzzing alongside Blossom.
+For PRs targeting main or `release/YY.MM`, approve the exact head with
+`/ok to test <full-head-SHA>`.
+The bot enforces that SHA for untrusted changes; for trusted contributors its
+current policy copies the latest head. This workflow verifies the copied SHA
+against the open PR, rather than interpreting the approval comment itself.
+The copied push selects suites from `.github/gpu-ci-suites.json`; documentation-only
+changes skip GPU jobs while still reporting the gate. The existing PR-title
+`[skip ci]` marker also skips GPU dispatch while reporting the gate.
+Keep existing required checks and Blossom/Sonar enabled during validation.
+The worker workflow and bot configuration
+must be present on main before dispatch-based validation can run.
+Existing release branches also need this workflow, its scripts/catalogs and matching
+toolchain pins before their copied PRs can use it; merging only to main does not
+enable them. Do not retire their existing Blossom checks before that rollout.
+
+Workers use public GHCR images verified against the checkout's recipe, or build and
+smoke-test a missing/incompatible recipe locally without publishing. For the shared
+multi-platform tags, GPU workers select the linux/amd64 child, verify its recipe
+label and pin its immutable digest; the arm64 image and attestation descriptors are
+not used by these workers. Registry/auth failures remain errors.
+Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
+Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
+The parent resolves the PR's actual target, and the worker rechecks it after waiting
+for a runner. Release targets require matching POM/pins and versioned images; only
+main targets may use a recipe-compatible main image fallback.
+The GHA worker has a five-hour total budget; Jenkins retains its six-hour test budget.
+
+Main pushes and manual main runs warm Maven, ccache and CPM caches using the same
+worker. Documentation-only main pushes skip the worker using the same suite catalog;
+manual seeding and uncertain/truncated push diffs run all enabled suites.
+PRs can restore main's baseline and save branch-local updates. Native caches
+are isolated by architecture and recipe; no compiled library or test result is used
+as a substitute for validation. Optional cache failures do not turn build failures
+into success. Test output streams to the console and reports are retained for two days.

@@ -1,0 +1,16 @@
+{
+  "shared_paths": [
+    ".github/gpu-ci-suites.json",
+    ".github/workflows/gpu-ci.yml",
+    ".github/workflows/gpu-ci-worker.yml"
+  ],
+  "suites": {
+    "jni": {
+      "enabled": true,
+      "comment": "Run CUDA 12 and CUDA 13 native/Java tests and fuzzing. To pause, set enabled to false and record the reason here.",
+      "paths": ["**"],
+      "exclude_paths": ["**/*.md"],
+      "jobs": ["gpu-test"]
+    }
+  }
+}
