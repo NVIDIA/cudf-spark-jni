@@ -90,9 +90,11 @@ jobs:
         shell: bash
         env:
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
-          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
+          # Step env is evaluated even when image validation is skipped.
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata || '{}').tag-prefix }}
         run: |
           set -euo pipefail
+          : "${IMAGE_TAG_PREFIX:?Missing image tag prefix from version metadata}"
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
       - name: Validate consumer image selection

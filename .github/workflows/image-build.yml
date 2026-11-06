@@ -52,7 +52,7 @@ jobs:
     outputs:
       images: ${{ steps.catalog.outputs.images }}
       manifests: ${{ steps.catalog.outputs.manifests }}
-      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+      release-line: ${{ fromJSON(steps.version.outputs.metadata || '{}').release-line }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -86,9 +86,11 @@ jobs:
         shell: bash
         env:
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
-          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
+          # Preserve the original setup error if version metadata was not produced.
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata || '{}').tag-prefix }}
         run: |
           set -euo pipefail
+          : "${IMAGE_TAG_PREFIX:?Missing image tag prefix from version metadata}"
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
           manifests=$(jq -c '[.[] | {tag: ."manifest-tag", toolchain}] | unique' <<< "$images")
