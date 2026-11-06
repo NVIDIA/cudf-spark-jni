@@ -100,3 +100,6 @@ ConfigureBench(PROTOBUF_DECODE_BENCH
 
 ConfigureBench(FROM_JSON_BENCH
   from_json.cu)
+
+ConfigureBench(PAGEABLE_POOL_BENCH
+  pageable_pool_dtoh.cpp)
