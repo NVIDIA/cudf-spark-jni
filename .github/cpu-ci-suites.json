@@ -6,7 +6,7 @@
   "suites": {
     "jni-images": {
       "enabled": true,
-      "comment": "Validate JNI toolchain images for PR and nightly builds; GPU CI and Jenkins run product tests.",
+      "comment": "Validate JNI toolchain images for PR and nightly builds; product tests stay in Jenkins.",
       "paths": [
         "pom.xml",
         "ci/Dockerfile",

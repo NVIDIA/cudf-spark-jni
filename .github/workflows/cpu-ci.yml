@@ -16,7 +16,7 @@ name: CPU CI
 
 # PRs run on hosted runners with read-only permissions; no bot approval is needed.
 # Always report the gate; the suite catalog selects which CPU jobs must run.
-# This workflow covers toolchain images; GPU CI and Jenkins run product tests.
+# Currently only toolchain images are covered; JNI GPU tests remain in Jenkins.
 # PR title/description edits do not restart these checks.
 on:
   pull_request:
@@ -198,7 +198,7 @@ jobs:
           persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
-      - name: Build and smoke-test ${{ matrix.image.tag }} without publishing
+      - name: Build and smoke-test without publishing
         # Branch-scoped PR caches can reuse the fresh baseline exported from main.
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
