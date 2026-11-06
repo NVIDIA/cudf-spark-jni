@@ -18,8 +18,19 @@ as part of an image update.
   Keep amd64 and arm64 variants for every selected CUDA family. Pass both
   `TARGETPLATFORM` and the matching `CMAKE_ARCH` explicitly; the Dockerfile's
   defaults target amd64. Keep cache scopes architecture-specific.
-- `image-config.py`: shared branch/version, tag and recipe calculation for publishers
-  and consumers. Keep `image-config.sh` as its compatible CLI entry point; do not
+- Every local Dockerfile COPY/ADD source must be in each affected image's explicit
+  `recipe-inputs` list, relative to the checkout root. Keep it empty only while
+  there are no copied inputs. For example, cuDF-Spark's copied
+  `integration_tests/requirements.txt` must affect the fingerprint; apply the same
+  rule if JNI adds a requirements file, installer, patch or other copied source.
+  List build-context controls such as `.dockerignore` when added. Do not implement
+  a Dockerfile parser or silently hash an arbitrary directory. Update the CPU-suite
+  and publishing workflow path filters so these input changes select image CI.
+  Verify that changing only a declared file changes the fingerprint.
+- `image-config.py`: project branch/version, argument mapping and tag policy for
+  publishers and consumers. Fingerprinting belongs to public common's
+  `container-image/metadata.py`, supplied via `CI_IMAGE_METADATA_HELPER`.
+  Keep `image-config.sh` as its compatible CLI entry point; do not
   duplicate this policy in workflow YAML or internal CI. Registry/authentication
   and digest lookup belong to the caller.
 - Consumer selection is derived from the exact checkout and versioned-only by
@@ -52,7 +63,9 @@ as part of an image update.
 
 Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
 `git diff --check`. Check Python syntax and `image-config.py select` from exact
-checkouts, with versioned-only and explicit development fallback policies. Exercise
+checkouts with the shared helper configured, with versioned-only and explicit
+development fallback policies. Confirm `version`/`list` still work without the
+helper and metadata operations fail clearly when it is missing. Exercise
 `image-config.sh matrix` with the selected
 `CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=main` and the POM's major.minor
 prefix. Check main's missing-version fallback, release explicit-pin requirements,

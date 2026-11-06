@@ -48,9 +48,18 @@ main-cuda13.4.3-rockylinux8-arm64
 Versioned tags use only major.minor: `26.12.0-SNAPSHOT` and `26.12.1` both use
 `26.12-`. Patch versions and snapshot suffixes do not create new tags. The image
 version label contains a recipe fingerprint of the Dockerfile,
-platform and resolved build arguments, excluding build parallelism. The current
-Dockerfile has no COPY/ADD inputs. Include any future file inputs in the fingerprint
-before relying on reuse. Smoke checks verify Linux, the requested architecture and
+platform, resolved build arguments and explicit `recipe-inputs` files. The shared
+`container-image/metadata.py` helper computes it; the catalog excludes only build
+parallelism with `recipe-exclude-args`. The current Dockerfile has no COPY/ADD inputs,
+so each catalog entry has an empty `recipe-inputs` list. Before adding local COPY/ADD
+inputs, list every source file in each affected entry, relative to the checkout root.
+Also list any build-context configuration that changes the inputs, such as an added
+`.dockerignore`. The helper deliberately does not parse Dockerfiles or discover
+files automatically. For example, a recipe copying cuDF-Spark's
+`integration_tests/requirements.txt` must list that path; changing its bytes then
+changes the fingerprint. Update the CPU suite and image-push path filters for those
+files too, so input-only changes trigger validation and publication.
+Smoke checks verify Linux, the requested architecture and
 the label, then run the inspected image ID, not a mutable tag. Temporary `build-...`
 tags are publication candidates only. The architecture-suffixed tags are separate
 images; there is no combined amd64/arm64 consumer tag.
@@ -63,13 +72,19 @@ Use the same checkout-derived metadata as the publisher instead of maintaining
 image tags in each workflow:
 
 ```sh
+# Point to a checkout of the public common repository, outside this source tree:
+export CI_IMAGE_METADATA_HELPER=/path/to/common/container-image/metadata.py
 python3 ci/image-config.py select --classifiers cuda12,cuda13
 # Development consumers may opt in to compatible main fallback:
 python3 ci/image-config.py select --classifiers cuda12 --allow-main-fallback
 ```
 
-The selector needs only Python 3.9+ and the checkout, not Docker, Maven, registry
-credentials or a GPU. It returns each classifier's image repository, platform,
+The selector needs Python 3.9+, the project checkout and the public common helper,
+not Docker, Maven, registry credentials or a GPU. The GHA configuration jobs check
+out common at `main`; other callers supply `CI_IMAGE_METADATA_HELPER` from their
+own checkout of the same helper. No helper is downloaded or executed implicitly.
+The `version` and `list` commands do not need the helper.
+Selection returns each classifier's image repository, platform,
 recipe fingerprint, candidate tags and build config. Resolve the requested ref to
 a commit once and run the selector from that checkout; branch, tag and commit-SHA
 inputs all use the same checked-out POM and recipe. Both architectures are selected

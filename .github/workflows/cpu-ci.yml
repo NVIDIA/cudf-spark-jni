@@ -37,6 +37,8 @@ jobs:
     if: github.repository == 'NVIDIA/cudf-spark-jni'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
     permissions:
       contents: read
       pull-requests: read
@@ -74,6 +76,14 @@ jobs:
         with:
           config: ci/toolchains.json
           version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
+      - name: Checkout shared image metadata helper
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
       - name: Read the checked-out project's image catalog
         if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: catalog

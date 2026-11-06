@@ -5,6 +5,8 @@
     "context": ".",
     "dockerfile": "ci/Dockerfile",
     "platform": "linux/amd64",
+    "recipe-inputs": [],
+    "recipe-exclude-args": ["PARALLEL_LEVEL"],
     "build-args": {
       "OS_RELEASE": "8",
       "TARGETPLATFORM": "linux/amd64",
@@ -25,6 +27,8 @@
     "context": ".",
     "dockerfile": "ci/Dockerfile",
     "platform": "linux/arm64",
+    "recipe-inputs": [],
+    "recipe-exclude-args": ["PARALLEL_LEVEL"],
     "build-args": {
       "OS_RELEASE": "8",
       "TARGETPLATFORM": "linux/arm64",
@@ -44,6 +48,8 @@
     "context": ".",
     "dockerfile": "ci/Dockerfile",
     "platform": "linux/amd64",
+    "recipe-inputs": [],
+    "recipe-exclude-args": ["PARALLEL_LEVEL"],
     "build-args": {
       "OS_RELEASE": "8",
       "TARGETPLATFORM": "linux/amd64",
@@ -64,6 +70,8 @@
     "context": ".",
     "dockerfile": "ci/Dockerfile",
     "platform": "linux/arm64",
+    "recipe-inputs": [],
+    "recipe-exclude-args": ["PARALLEL_LEVEL"],
     "build-args": {
       "OS_RELEASE": "8",
       "TARGETPLATFORM": "linux/arm64",

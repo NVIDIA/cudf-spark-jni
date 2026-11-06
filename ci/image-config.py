@@ -17,7 +17,7 @@
 
 import argparse
 import copy
-import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -38,6 +38,18 @@ def require(condition, message):
 def read_json(path):
     with (ROOT / path).open(encoding="utf-8") as source:
         return json.load(source)
+
+
+def recipe_fingerprint(config):
+    helper = os.environ.get("CI_IMAGE_METADATA_HELPER")
+    require(helper, "Set CI_IMAGE_METADATA_HELPER to the common container-image/metadata.py helper")
+    path = Path(helper).resolve()
+    require(path.is_file(), f"Image metadata helper not found: {path}")
+    spec = importlib.util.spec_from_file_location("ci_image_metadata", path)
+    require(spec and spec.loader, f"Cannot load image metadata helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.fingerprint(config, ROOT)
 
 
 def project_version():
@@ -108,13 +120,7 @@ def describe(entry, toolchains, prefix):
     args.update(CUDA_VERSION=cuda, PARALLEL_LEVEL=str(min(int(parallel), 8)))
     for key in ("cache-from", "cache-to"):
         config[key] = [value.replace("${CUDA_VERSION}", cuda) for value in config.get(key, [])]
-    recipe = {
-        "dockerfile": hashlib.sha256((ROOT / config["dockerfile"]).read_bytes()).hexdigest(),
-        "platform": platform,
-        "build-args": {key: value for key, value in args.items() if key != "PARALLEL_LEVEL"},
-    }
-    canonical = json.dumps(recipe, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    fingerprint = "recipe-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    fingerprint = recipe_fingerprint(config)
     config.update(version=fingerprint, tag=f"{prefix}-cuda{cuda}-rockylinux{os_release}-{arch}")
     config["smoke-args"] = [cuda, fingerprint]
     return config

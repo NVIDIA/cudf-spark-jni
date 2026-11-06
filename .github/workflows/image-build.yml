@@ -47,6 +47,8 @@ jobs:
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
     outputs:
       images: ${{ steps.catalog.outputs.images }}
       release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
@@ -71,6 +73,13 @@ jobs:
         with:
           config: ci/toolchains.json
           version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
+      - name: Checkout shared image metadata helper
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
       - name: Resolve image configurations
         id: catalog
         shell: bash
