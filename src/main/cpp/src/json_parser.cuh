@@ -223,19 +223,6 @@ class json_parser {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
   }
 
-  // Decodes b/f/n/r/t for validated names; other bytes pass through and are not validated here.
-  static __device__ inline char simple_escape(char c)
-  {
-    switch (c) {
-      case 'b': return '\b';
-      case 'f': return '\f';
-      case 'n': return '\n';
-      case 'r': return '\r';
-      case 't': return '\t';
-      default: return c;
-    }
-  }
-
   // A null destination counts bytes; a non-null destination copies the literal.
   static __device__ inline int write_lit(char* destination, char const* text, int len)
   {
@@ -878,6 +865,50 @@ class json_parser {
     }
 
     return true;
+  }
+
+  /**
+   * Compares a validated quoted field name with decoded candidate bytes, without moving parser
+   * state. `raw` must be the whole raw token including both quotes, as current_range returns for
+   * a FIELD_NAME token; `candidate` holds already-decoded bytes. Escape-free names decode to
+   * their own bytes and match by plain byte compare that returns at the first mismatch; names
+   * containing an escape delegate to try_parse_string — the single decoder for simple escapes
+   * and \u including surrogate pairs — whose decoded bytes are never re-escaped. Returns false
+   * when the raw name ends before the candidate is consumed, when an escape is invalid, or when
+   * bytes follow the closing quote.
+   */
+  static __device__ bool match_decoded_name(char_range raw, cudf::string_view candidate)
+  {
+    if (raw.is_empty()) { return false; }
+    // Failed probes dominate the multi-child name scan, so compare escape-free names byte by
+    // byte and return at the first mismatch instead of decoding the whole token. Engagement
+    // requires a same-quote wrapped token whose content holds neither a backslash nor the
+    // quote byte: then the decoded content is exactly the raw content, and a byte compare
+    // decides the match without the decoder. Coupling: this compare must mirror whatever
+    // equivalence try_parse_string applies to escape-free content — if matching gains a
+    // normalization step (e.g. malformed UTF-8 mapped to a replacement character), the
+    // escape-free branch must adopt it too or it will disagree with the delegated result.
+    if (raw.size() >= 2 && raw.data()[0] == raw.data()[raw.size() - 1]) {
+      char const quote_char       = raw.data()[0];
+      cudf::size_type const clen  = raw.size() - 2;
+      char const* content         = raw.data() + 1;
+      cudf::size_type const limit = clen < candidate.size_bytes() ? clen : candidate.size_bytes();
+      cudf::size_type ci          = 0;
+      for (; ci < limit; ++ci) {
+        char const c = content[ci];
+        // Escapes and stray delimiters need the decoder's semantics; hand the token over.
+        if (c == '\\' || c == quote_char) { break; }
+        if (c != candidate.data()[ci]) { return false; }
+      }
+      if (ci == clen) { return ci == candidate.size_bytes(); }
+      // The loop reached the candidate's end with content left: every remaining content byte
+      // decodes to at least one byte, so the candidate can no longer match. Anything else
+      // broke on an escape or delimiter and delegates.
+      if (ci == candidate.size_bytes()) { return false; }
+    }
+    auto const [success, matched, end] =
+      try_parse_string(char_range_reader(raw), char_range_reader(candidate));
+    return success && matched && end == raw.data() + raw.size();
   }
 
  private:
