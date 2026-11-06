@@ -157,16 +157,26 @@ recipe-verification and smoke-test failures remain failures.
 ## GPU Premerge
 
 `GPU CI` adds CUDA 12/13 amd64 native/Java tests and fuzzing alongside Blossom.
-For main-targeting PRs, approve the exact head with `/ok to test <full-head-SHA>`.
+For PRs targeting main or `release/YY.MM`, approve the exact head with
+`/ok to test <full-head-SHA>`.
+The bot enforces that SHA for untrusted changes; for trusted contributors its
+current policy copies the latest head. This workflow verifies the copied SHA
+against the open PR, rather than interpreting the approval comment itself.
 The copied push selects suites from `.github/gpu-ci-suites.json`; documentation-only
 changes skip GPU jobs while still reporting the gate. Keep existing required checks
 and Blossom/Sonar enabled during validation. The worker workflow and bot configuration
 must be present on main before dispatch-based validation can run.
+Existing release branches also need this workflow, its scripts/catalogs and matching
+toolchain pins before their copied PRs can use it; merging only to main does not
+enable them. Do not retire their existing Blossom checks before that rollout.
 
 Workers use public GHCR images verified against the checkout's recipe, or build and
 smoke-test a missing/incompatible recipe locally without publishing. Registry/auth
 failures remain errors. Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
 Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
+The parent resolves the PR's actual target, and the worker rechecks it after waiting
+for a runner. Release targets require matching POM/pins and versioned images; only
+main targets may use a recipe-compatible main image fallback.
 The GHA worker has a five-hour total budget; Jenkins retains its six-hour test budget.
 
 Main pushes and manual main runs warm Maven, ccache and CPM caches using the same

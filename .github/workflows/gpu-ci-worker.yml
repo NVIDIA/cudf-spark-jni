@@ -33,6 +33,7 @@ on:
 permissions:
   contents: read
   actions: read
+  pull-requests: read
 
 jobs:
   worker:
@@ -44,6 +45,7 @@ jobs:
       TZ: UTC
       CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
       CLASSIFIER: ${{ fromJSON(inputs.workload).classifier }}
+      BASE_BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
     steps:
       - name: Check coordinator and approved source
         uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
@@ -62,6 +64,25 @@ jobs:
           [[ "$SOURCE_REF" == refs/heads/main || "$SOURCE_REF" =~ ^refs/heads/pull-request/[0-9]+$ ]]
           [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
           [[ "$CLASSIFIER" == cuda12 || "$CLASSIFIER" == cuda13 ]]
+      # A PR can be retargeted while its worker is queued. Never let that silently
+      # change release pinning or reuse a main-policy result for a release PR.
+      - name: Recheck PR target before selecting the toolchain
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const base = process.env.BASE_BRANCH;
+            if (base !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(base)) {
+              throw new Error('Unsupported JNI target branch');
+            }
+            if (context.ref === 'refs/heads/main') {
+              if (base !== 'main') throw new Error('Main cache builds must target main');
+            } else {
+              const number = Number(context.ref.split('/').at(-1));
+              const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
+              if (pr.state !== 'open' || pr.head.sha !== context.sha || pr.base.ref !== base) {
+                throw new Error('PR head or target changed while queued; approve and rerun the current PR');
+              }
+            }
       - name: Checkout approved source
         uses: NVIDIA/spark-rapids-common/checkout@main
         with:
@@ -78,7 +99,7 @@ jobs:
       # recipe-incompatible images build locally; auth/network errors fail closed.
       - name: Select compatible public toolchain
         id: image
-        run: python3 ci/gha-image.py "$CLASSIFIER"
+        run: python3 ci/gha-image.py "$CLASSIFIER" "$BASE_BRANCH"
       - name: Set up Docker Buildx
         if: steps.image.outputs.reference == ''
         uses: docker/setup-buildx-action@v4.4.1

@@ -2,7 +2,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve the approved main-targeting PR's public toolchain, without Docker credentials."""
+"""Resolve the approved PR's branch-compatible public toolchain without Docker credentials."""
 
 import json
 import os
@@ -80,13 +80,18 @@ def resolve(selected):
 
 
 def main():
-    if len(sys.argv) != 2 or sys.argv[1] not in ("cuda12", "cuda13"):
-        sys.exit("Usage: gha-image.py cuda12|cuda13")
+    if (len(sys.argv) != 3 or sys.argv[1] not in ("cuda12", "cuda13") or
+            not re.fullmatch(r"main|release/[0-9]{2}\.[0-9]{2}", sys.argv[2])):
+        sys.exit("Usage: gha-image.py cuda12|cuda13 main|release/YY.MM")
     classifier = sys.argv[1]
+    branch = sys.argv[2]
+    # Reuse branch/POM and explicit release-pin validation from the publisher.
+    subprocess.check_call([
+        sys.executable, "ci/image-config.py", "version", "--branch", branch,
+    ])
     selected = json.loads(subprocess.check_output([
         sys.executable, "ci/image-config.py", "select", "--classifiers", classifier,
-        "--allow-main-fallback",
-    ], text=True))[classifier]
+    ] + (["--allow-main-fallback"] if branch == "main" else []), text=True))[classifier]
     reference = resolve(selected)
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         output.write(f"reference={reference}\nrecipe={selected['version']}\n")

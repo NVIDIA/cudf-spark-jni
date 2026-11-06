@@ -3,9 +3,9 @@
 
 name: GPU CI
 
-# Additive validation for main: Blossom CI and its Sonar check remain enabled.
-# A maintainer approves /ok to test <full-head-SHA>; copy-pr-bot copies that head.
-# Each new head needs approval, including changes to these workflow definitions.
+# Additive validation for main/release PRs; Blossom and Sonar remain enabled.
+# Use /ok to test <full-head-SHA>; copy-pr-bot copies the current head under its
+# trust policy. Auto-sync stays disabled; each new head needs another command.
 # Selection uses the full PR diff. Unaffected paths skip GPU jobs, not the gate.
 # exclude_paths applies only inside each suite's paths; shared paths select all
 # enabled suites. Add future suites to the catalog, jobs and gate's needs together.
@@ -38,7 +38,29 @@ jobs:
     outputs:
       suites: ${{ steps.select.outputs.suites || steps.baseline.outputs.suites }}
       required-jobs: ${{ steps.select.outputs.required-jobs || steps.baseline.outputs.required-jobs }}
+      base-branch: ${{ steps.target.outputs.base-branch }}
     steps:
+      - name: Resolve approved PR target
+        id: target
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let base = 'main';
+            if (context.ref !== 'refs/heads/main') {
+              const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+              if (!match) throw new Error('Expected an approved copied PR');
+              const {data: pr} = await github.rest.pulls.get({
+                ...context.repo, pull_number: Number(match[1]),
+              });
+              if (pr.state !== 'open' || pr.head.sha !== context.sha) {
+                throw new Error('Copied branch no longer matches the open PR head');
+              }
+              base = pr.base.ref;
+            }
+            if (base !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(base)) {
+              throw new Error(`Unsupported JNI target branch: ${base}`);
+            }
+            core.setOutput('base-branch', base);
       - uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           ref: ${{ github.sha }}
@@ -49,7 +71,7 @@ jobs:
         uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
         with:
           catalog-path: .github/gpu-ci-suites.json
-          base-branch: main
+          base-branch: ${{ steps.target.outputs.base-branch }}
           selector-job: select
       - name: Checkout shared suite selector for main
         if: github.ref == 'refs/heads/main'
@@ -99,7 +121,7 @@ jobs:
           workflow-ref: ${{ github.ref_name }}
           source-ref: ${{ github.ref }}
           source-sha: ${{ github.sha }}
-          workload: '{"classifier":"${{ matrix.classifier }}"}'
+          workload: '{"classifier":"${{ matrix.classifier }}","base-branch":"${{ needs.select.outputs.base-branch }}"}'
           runner-type: gpu-amd64
           queue-policy: standard
           queue-timeout-minutes: '5'
