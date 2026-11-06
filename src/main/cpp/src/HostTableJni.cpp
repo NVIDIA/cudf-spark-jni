@@ -273,20 +273,20 @@ std::unique_ptr<host_table_view> to_host_table_async(cudf::table_view const& dev
                                                      cudaStream_t stream)
 {
   host_layout layout{buffer, buffer_size, stream};
-  std::vector<host_column_view> cols;
-  cols.reserve(dev_table.num_columns());
   try {
+    std::vector<host_column_view> cols;
+    cols.reserve(dev_table.num_columns());
     std::for_each(dev_table.begin(), dev_table.end(), [&](cudf::column_view const& dev_col) {
       cols.push_back(layout.add(dev_col));
     });
+    return std::make_unique<host_table_view>(cols);
   } catch (...) {
-    // Copies into `buffer` may already be queued: temporaries for later columns are allocated
-    // between copies, and the allocation can fail. Wait for the copies before rethrowing. An error
-    // from the wait itself is dropped in favor of the original one.
+    // Copies into `buffer` may already be queued when something fails: a temporary allocated
+    // between copies, or building the host table view. Wait for the copies before rethrowing. An
+    // error from the wait itself is dropped in favor of the original one.
     static_cast<void>(cudaStreamSynchronize(stream));
     throw;
   }
-  return std::make_unique<host_table_view>(cols);
 }
 
 cudf::column_view to_device_column(host_column_view const& host_col, jlong host_to_dev_offset)
