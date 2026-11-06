@@ -1,0 +1,196 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Daily image build
+
+on:
+  # Main also aliases YY.MM-* until release/YY.MM exists. See ci/README.md.
+  # The daily schedule runs only on main. Release publication is push/manual only.
+  schedule:
+    - cron: '47 2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'pom.xml'
+      - 'ci/Dockerfile'
+      - 'ci/image-config.sh'
+      - 'ci/image-config.py'
+      - 'ci/image-smoke.sh'
+      - 'ci/toolchains.json'
+      - '.github/image-builds.json'
+      - '.github/workflows/image-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Retain only the latest pending refresh for each branch.
+  group: image-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
+    outputs:
+      images: ${{ steps.catalog.outputs.images }}
+      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+    steps:
+      - name: Checkout image catalog
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read project version and tag owner
+        id: version
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          metadata=$(bash ci/image-config.sh version --branch "$SOURCE_BRANCH")
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+      - name: Resolve project toolchains
+        id: toolchains
+        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
+        with:
+          config: ci/toolchains.json
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
+      - name: Checkout shared image metadata helper
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
+      - name: Resolve image configurations
+        id: catalog
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
+        run: |
+          set -euo pipefail
+          images=$(bash ci/image-config.sh matrix)
+          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+
+  jni-images:
+    name: Build JNI image ${{ matrix.image.tag }}
+    needs: configure
+    # Main and the matching release publisher must not race the ownership transfer.
+    concurrency:
+      group: image-publish-${{ needs.configure.outputs.release-line }}-${{ matrix.image.toolchain }}-${{ matrix.image.platform }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        image: ${{ fromJSON(needs.configure.outputs.images) }}
+    # Build natively; GitHub has no ubuntu-latest-arm label.
+    runs-on: ${{ matrix.image.platform == 'linux/arm64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    # Fresh builds also need time for cache export, registry transfers and smoke checks.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout trusted image source
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare image configuration
+        id: image
+        shell: bash
+        env:
+          IMAGE_CONFIG: ${{ toJSON(matrix.image) }}
+        run: |
+          set -euo pipefail
+          # Publish freshly built layers; only export a baseline for later PR builds.
+          # Use the actual build worker's CPU count, not the configuration job's.
+          parallel=$(getconf _NPROCESSORS_ONLN)
+          config=$(jq -c --arg parallel "$parallel" \
+            'del(."cache-from") | ."build-args".PARALLEL_LEVEL = $parallel' <<< "$IMAGE_CONFIG")
+          printf 'Native image build: %s, %s parallel compile jobs\n' \
+            "$(jq -r '.platform' <<< "$config")" "$parallel"
+          printf 'config=%s\n' "$config" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build, verify, and publish
+        id: publish
+        # The first GHCR package may need a one-time public visibility setting.
+        # Common promotes the toolchain tag only after anonymous pull and smoke pass.
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ steps.image.outputs.config }}
+          publish: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check version alias ownership after publication
+        if: github.ref == 'refs/heads/main'
+        id: alias
+        uses: actions/github-script@v9
+        env:
+          RELEASE_LINE: ${{ needs.configure.outputs.release-line }}
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}
+          VERIFIED_REFERENCE: ${{ steps.publish.outputs.reference }}
+        with:
+          retries: 3
+          script: |
+            const {RELEASE_LINE, PUBLISHED_IMAGE, VERIFIED_REFERENCE} = process.env;
+            const expected = `ghcr.io/${context.repo.owner}/${context.repo.repo}/jni-build`.toLowerCase();
+            if (!/^\d{2}\.\d{2}$/.test(RELEASE_LINE) || PUBLISHED_IMAGE !== expected ||
+                !VERIFIED_REFERENCE?.startsWith(`${expected}@sha256:`) ||
+                !/^sha256:[0-9a-f]{64}$/.test(VERIFIED_REFERENCE.slice(expected.length + 1))) {
+              throw new Error('Missing or invalid verified publication outputs; version alias was not updated.');
+            }
+            const branch = `release/${RELEASE_LINE}`;
+            const result = await github.graphql(`query($owner: String!, $repo: String!, $ref: String!) {
+              repository(owner: $owner, name: $repo) { ref(qualifiedName: $ref) { name } }
+            }`, {...context.repo, ref: `refs/heads/${branch}`, request: {timeout: 30000}});
+            if (!result.repository || !Object.hasOwn(result.repository, 'ref') ||
+                (result.repository.ref !== null && result.repository.ref.name !== branch)) {
+              throw new Error('Cannot confirm release branch ownership; version alias was not updated.');
+            }
+            const allowed = result.repository.ref === null;
+            core.setOutput('allowed', allowed);
+            core.info(allowed ? `No ${branch}; alias the verified main image without rebuilding.` :
+              `${branch} exists; leave its version tags unchanged.`);
+      - name: Authenticate for version alias promotion
+        if: steps.alias.outputs.allowed == 'true'
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Alias the verified main digest to the project version
+        if: steps.alias.outputs.allowed == 'true'
+        shell: bash
+        env:
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}
+          VERIFIED_REFERENCE: ${{ steps.publish.outputs.reference }}
+          RELEASE_LINE: ${{ needs.configure.outputs.release-line }}
+          MAIN_TAG: ${{ matrix.image.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$MAIN_TAG" == main-* ]]
+          alias="$PUBLISHED_IMAGE:$RELEASE_LINE-${MAIN_TAG#main-}"
+          docker buildx imagetools create --prefer-index=false --tag "$alias" "$VERIFIED_REFERENCE"
+          printf 'Version alias: %s\nSame verified digest: %s\nNo additional image build.\n' \
+            "$alias" "$VERIFIED_REFERENCE" | tee -a "$GITHUB_STEP_SUMMARY"
