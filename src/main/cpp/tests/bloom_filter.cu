@@ -388,3 +388,28 @@ TEST_F(BloomFilterTest, V2WithSeed)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_in, *r0);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_in, *r42);
 }
+
+TEST_F(BloomFilterTest, RejectsNonInt64Input)
+{
+  auto stream                      = cudf::get_default_stream();
+  constexpr int bloom_filter_longs = 1024;
+  constexpr int num_hashes         = 3;
+
+  for (int version :
+       {spark_rapids_jni::bloom_filter_version_1, spark_rapids_jni::bloom_filter_version_2}) {
+    auto bloom_filter =
+      spark_rapids_jni::bloom_filter_create(version, num_hashes, bloom_filter_longs, 0, stream);
+
+    cudf::test::fixed_width_column_wrapper<int32_t> ints{20, 80, 100};
+    cudf::test::dictionary_column_wrapper<std::string> dict{"a", "b", "a"};
+
+    EXPECT_THROW(spark_rapids_jni::bloom_filter_put(*bloom_filter, ints, stream),
+                 cudf::logic_error);
+    EXPECT_THROW(spark_rapids_jni::bloom_filter_put(*bloom_filter, dict, stream),
+                 cudf::logic_error);
+    EXPECT_THROW(spark_rapids_jni::bloom_filter_probe(ints, *bloom_filter, stream),
+                 cudf::logic_error);
+    EXPECT_THROW(spark_rapids_jni::bloom_filter_probe(dict, *bloom_filter, stream),
+                 cudf::logic_error);
+  }
+}
