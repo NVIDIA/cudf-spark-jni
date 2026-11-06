@@ -513,7 +513,8 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                lcv_histograms.offsets_end(),
                                histogram_labels.begin(),
                                histogram_labels.end(),
-                               stream);
+                               stream,
+                               default_mr);
   auto const labels_cv = cudf::column_view{cudf::data_type{cudf::type_to_id<cudf::size_type>()},
                                            static_cast<cudf::size_type>(histogram_labels.size()),
                                            histogram_labels.data(),
