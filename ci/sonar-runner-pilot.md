@@ -37,7 +37,7 @@ After validation is authorized:
 
 1. Configure the settings above and start the bounded ephemeral worker pool.
 2. Review the exact PR head and apply `sonar-runner-pilot` as a maintainer.
-3. Confirm the scan checked out that SHA and the `sonar-runner-pilot` commit
+3. Confirm the scan checked out that SHA and the `Sonar check` commit
    status links to this workflow run. Success requires Sonar processing and its
    quality gate to pass; an upload alone is insufficient.
 4. Confirm the worker deregistered after the job and its environment was removed.
@@ -52,3 +52,16 @@ The result is published on the approved SHA even if the PR later advances.
 Cancellation or a skipped/failed scan cannot produce a successful pilot status.
 The status is supplementary and should not be made a required merge check during
 this test-only pilot.
+
+The internal worker collects the scan's CE task, exact analysis ID, quality gate,
+and new PR issues. A hosted job uses the GitHub Actions token to publish a summary
+comment and the `Sonar check` status. The worker has no GitHub write permissions.
+New High or Blocker issues fail the check; Medium findings are reported without
+changing the project's quality gate. Missing scan evidence or report publication
+failure also fails the check. Result artifacts are retained for three days.
+
+Issue collection conservatively requires this task to remain the project's latest
+completed analysis. An overlapping analysis, even on another branch, fails result
+collection rather than mixing evidence from different scans; reapprove the pilot
+after the other analysis completes. The unused Java examples intentionally produce
+Medium and High findings and must not be merged into production.

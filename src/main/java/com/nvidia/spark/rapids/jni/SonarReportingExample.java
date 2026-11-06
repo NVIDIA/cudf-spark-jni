@@ -27,4 +27,10 @@ final class SonarReportingExample {
     // Intentionally triggers java:S1764: identical operands in a comparison.
     return value == value;
   }
+
+  static int intentionalHighSeverityFinding() {
+    // Intentionally triggers javabugs:S3518 (High); this unused example must not be called.
+    int zero = 0;
+    return 1 / zero;
+  }
 }
