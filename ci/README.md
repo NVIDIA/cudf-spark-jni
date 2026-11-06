@@ -163,8 +163,10 @@ The bot enforces that SHA for untrusted changes; for trusted contributors its
 current policy copies the latest head. This workflow verifies the copied SHA
 against the open PR, rather than interpreting the approval comment itself.
 The copied push selects suites from `.github/gpu-ci-suites.json`; documentation-only
-changes skip GPU jobs while still reporting the gate. Keep existing required checks
-and Blossom/Sonar enabled during validation. The worker workflow and bot configuration
+changes skip GPU jobs while still reporting the gate. The existing PR-title
+`[skip ci]` marker also skips GPU dispatch while reporting the gate.
+Keep existing required checks and Blossom/Sonar enabled during validation.
+The worker workflow and bot configuration
 must be present on main before dispatch-based validation can run.
 Existing release branches also need this workflow, its scripts/catalogs and matching
 toolchain pins before their copied PRs can use it; merging only to main does not
@@ -180,7 +182,9 @@ main targets may use a recipe-compatible main image fallback.
 The GHA worker has a five-hour total budget; Jenkins retains its six-hour test budget.
 
 Main pushes and manual main runs warm Maven, ccache and CPM caches using the same
-worker. PRs can restore main's baseline and save branch-local updates. Native caches
+worker. Documentation-only main pushes skip the worker using the same suite catalog;
+manual seeding and uncertain/truncated push diffs run all enabled suites.
+PRs can restore main's baseline and save branch-local updates. Native caches
 are isolated by architecture and recipe; no compiled library or test result is used
 as a substitute for validation. Optional cache failures do not turn build failures
 into success. Test output streams to the console and reports are retained for two days.
