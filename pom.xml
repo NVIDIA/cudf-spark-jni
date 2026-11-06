@@ -123,6 +123,27 @@
     <hilbert.version>0.2.2</hilbert.version>
   </properties>
 
+  <!-- Prefer Google's Central mirror for external builds, retaining Central as
+       a fallback. Internal CI settings redirect this ID to Artifactory. -->
+  <repositories>
+    <repository>
+      <id>google-maven-central</id>
+      <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
+  </repositories>
+  <pluginRepositories>
+    <pluginRepository>
+      <id>google-maven-central</id>
+      <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </pluginRepository>
+  </pluginRepositories>
+
   <dependencies>
     <dependency>
       <groupId>org.apache.hadoop</groupId>

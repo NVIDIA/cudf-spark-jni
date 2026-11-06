@@ -101,8 +101,16 @@ Consumers choose their registry endpoint and authentication. Before using either
 candidate, verify its Linux platform and recipe label against the returned values,
 then use the immutable digest. Development callers may try the next candidate;
 authentication/network failures must not be treated as an absent tag. The selector
-itself does not pull, publish or silently build an image. Existing product-test
-Jenkinsfiles and the local `build/run-in-docker` workflow are unchanged.
+itself does not pull, publish or silently build an image. Internal consumers resolve
+these selections through the authenticated GHCR mirror rather than pulling directly
+from GHCR. The local `build/run-in-docker` image workflow is unchanged.
+
+Maven dependencies and plugins prefer Google's Central mirror by default, including
+plain local Maven and Docker builds, with Central retained as fallback. Existing
+developer settings are not replaced. Internal `ci/settings.xml` redirects the Google
+repository to the same authenticated Artifactory entry as Central. External CI uses
+`ci/settings-public.xml` to mirror Central explicitly, including repository entries
+introduced by dependency/plugin POMs; that mode has no direct Central fallback.
 
 ## Branching And Version Updates
 
@@ -145,3 +153,24 @@ Builds export separate layer-cache scopes for each full CUDA version and
 architecture. The existing amd64 PR builds can also import earlier major-series
 caches during migration. Cache export failure is non-fatal; build,
 recipe-verification and smoke-test failures remain failures.
+
+## GPU Premerge
+
+`GPU CI` adds CUDA 12/13 amd64 native/Java tests and fuzzing alongside Blossom.
+For main-targeting PRs, approve the exact head with `/ok to test <full-head-SHA>`.
+The copied push selects suites from `.github/gpu-ci-suites.json`; documentation-only
+changes skip GPU jobs while still reporting the gate. Keep existing required checks
+and Blossom/Sonar enabled during validation. The worker workflow and bot configuration
+must be present on main before dispatch-based validation can run.
+
+Workers use public GHCR images verified against the checkout's recipe, or build and
+smoke-test a missing/incompatible recipe locally without publishing. Registry/auth
+failures remain errors. Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
+Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
+The GHA worker has a five-hour total budget; Jenkins retains its six-hour test budget.
+
+Main pushes and manual main runs warm Maven, ccache and CPM caches using the same
+worker. PRs can restore main's baseline and save branch-local updates. Native caches
+are isolated by architecture and recipe; no compiled library or test result is used
+as a substitute for validation. Optional cache failures do not turn build failures
+into success. Test output streams to the console and reports are retained for two days.

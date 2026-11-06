@@ -1,0 +1,119 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI
+
+# Additive validation for main: Blossom CI and its Sonar check remain enabled.
+# A maintainer approves /ok to test <full-head-SHA>; copy-pr-bot copies that head.
+# Each new head needs approval, including changes to these workflow definitions.
+# Selection uses the full PR diff. Unaffected paths skip GPU jobs, not the gate.
+# exclude_paths applies only inside each suite's paths; shared paths select all
+# enabled suites. Add future suites to the catalog, jobs and gate's needs together.
+# Keep the existing required checks until this additional gate is validated.
+# Main pushes warm a trusted baseline through the same build/test worker. New PRs
+# restore main's caches; later approved commits restore their branch's caches first.
+# Manual main runs can seed that baseline after the workflow is first merged.
+on:
+  push:
+    branches: [main, 'pull-request/[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: gpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select GPU test suites
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      (github.ref == 'refs/heads/main' ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.select.outputs.suites || steps.baseline.outputs.suites }}
+      required-jobs: ${{ steps.select.outputs.required-jobs || steps.baseline.outputs.required-jobs }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select suites from the full PR diff
+        if: github.ref != 'refs/heads/main'
+        id: select
+        uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
+        with:
+          catalog-path: .github/gpu-ci-suites.json
+          base-branch: main
+          selector-job: select
+      - name: Checkout shared suite selector for main
+        if: github.ref == 'refs/heads/main'
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
+      - name: Select enabled suites for the trusted main baseline
+        if: github.ref == 'refs/heads/main'
+        id: baseline
+        run: |
+          node <<'JS'
+          const fs = require('node:fs');
+          const {selectSuites} = require('./.ci-common/workflow-suite-selector');
+          const path = '.github/gpu-ci-suites.json';
+          const catalog = JSON.parse(fs.readFileSync(path, 'utf8'));
+          // A shared catalog path selects all enabled suites, including future additions.
+          const suites = selectSuites([{filename: path}], catalog);
+          const jobs = [...new Set(['select', ...suites.flatMap(name => catalog.suites[name].jobs)])];
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `suites=${JSON.stringify(suites)}\nrequired-jobs=${JSON.stringify(jobs)}\n`);
+          JS
+
+  gpu-test:
+    name: JNI ${{ matrix.classifier }} tests
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.suites), 'jni')
+    strategy:
+      fail-fast: false
+      matrix:
+        classifier: [cuda12, cuda13]
+    runs-on: ubuntu-latest
+    # Six standard five-minute queues + up to five hours on the allocated worker,
+    # with headroom for dispatch/cleanup. Jenkins keeps its existing six-hour limit.
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # This write-token coordinator never checks out or executes PR code.
+      - name: Run JNI tests with queue fallback
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+        with:
+          workflow: gpu-ci-worker.yml
+          workflow-ref: ${{ github.ref_name }}
+          source-ref: ${{ github.ref }}
+          source-sha: ${{ github.sha }}
+          workload: '{"classifier":"${{ matrix.classifier }}"}'
+          runner-type: gpu-amd64
+          queue-policy: standard
+          queue-timeout-minutes: '5'
+          execution-timeout-minutes: '300'
+
+  gate:
+    name: GPU CI gate
+    if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
+    needs: [select, gpu-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.required-jobs }}

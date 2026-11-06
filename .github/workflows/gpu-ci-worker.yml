@@ -1,0 +1,171 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU CI worker
+run-name: ${{ inputs.request-id }}
+
+# Dispatch only. No pull_request registration trigger that leaves skipped checks.
+on:
+  workflow_dispatch:
+    inputs:
+      request-id:
+        required: true
+        type: string
+      parent-run-id:
+        required: true
+        type: string
+      parent-run-attempt:
+        required: true
+        type: string
+      source-ref:
+        required: true
+        type: string
+      source-sha:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      workload:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  worker:
+    name: worker
+    if: github.repository == 'NVIDIA/cudf-spark-jni'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 300
+    env:
+      TZ: UTC
+      CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
+      CLASSIFIER: ${{ fromJSON(inputs.workload).classifier }}
+    steps:
+      - name: Check coordinator and approved source
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
+        with:
+          request-id: ${{ inputs.request-id }}
+          parent-run-id: ${{ inputs.parent-run-id }}
+          parent-run-attempt: ${{ inputs.parent-run-attempt }}
+          source-ref: ${{ inputs.source-ref }}
+          source-sha: ${{ inputs.source-sha }}
+      - name: Check approved worker definition
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REF" == refs/heads/main || "$SOURCE_REF" =~ ^refs/heads/pull-request/[0-9]+$ ]]
+          [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
+          [[ "$CLASSIFIER" == cuda12 || "$CLASSIFIER" == cuda13 ]]
+      - name: Checkout approved source
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - name: Checkout shared image metadata helper
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
+      # Resolve on the host, before creating the workload container. Missing or
+      # recipe-incompatible images build locally; auth/network errors fail closed.
+      - name: Select compatible public toolchain
+        id: image
+        run: python3 ci/gha-image.py "$CLASSIFIER"
+      - name: Set up Docker Buildx
+        if: steps.image.outputs.reference == ''
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build and smoke-test unpublished PR toolchain
+        if: steps.image.outputs.reference == ''
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ steps.image.outputs.config }}
+      - name: Pin workload image
+        id: toolchain
+        env:
+          REFERENCE: ${{ steps.image.outputs.reference }}
+          CONFIG: ${{ steps.image.outputs.config }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REFERENCE" ]]; then
+            docker pull "$REFERENCE"
+          else
+            REFERENCE="image-validation:$(jq -er '.tag' <<< "$CONFIG")"
+          fi
+          image_id=$(docker image inspect --format '{{.Id}}' "$REFERENCE")
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'image=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+      - name: Restore Maven dependencies
+        id: maven-cache
+        uses: actions/cache/restore@v6.1.0
+        continue-on-error: true
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: ${{ runner.temp }}/jni-home/.m2/repository
+          # Refresh after each commit; avoid an immutable partial dependency cache.
+          key: jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-${{ hashFiles('pom.xml') }}-${{ github.sha }}
+          restore-keys: |
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-${{ hashFiles('pom.xml') }}-
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-
+      - name: Restore native compilation and dependency sources
+        id: native-cache
+        uses: actions/cache/restore@v6.1.0
+        continue-on-error: true
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: |
+            ${{ runner.temp }}/jni-home/.ccache
+            ${{ runner.temp }}/jni-home/.cache/cpm
+          # Main owns the trusted baseline; PRs only save their branch's caches.
+          # Recipe/architecture isolated; ccache checks source and compiler inputs.
+          key: jni-native-v1-${{ runner.arch }}-${{ steps.image.outputs.recipe }}-${{ github.sha }}
+          restore-keys: jni-native-v1-${{ runner.arch }}-${{ steps.image.outputs.recipe }}-
+      - name: Build, test and fuzz JNI
+        id: tests
+        env:
+          JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
+        run: bash ci/gha-premerge.sh
+      # A failed test does not invalidate compiler/dependency caches. Save partial
+      # useful work on this branch too, without masking failures or cancellation.
+      - name: Save Maven dependencies
+        if: >-
+          !cancelled() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure') &&
+          steps.maven-cache.outputs.cache-primary-key != '' && steps.maven-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/jni-home/.m2/repository
+          key: ${{ steps.maven-cache.outputs.cache-primary-key }}
+      - name: Save native compilation and dependency sources
+        if: >-
+          !cancelled() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure') &&
+          steps.native-cache.outputs.cache-primary-key != '' && steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        continue-on-error: true
+        with:
+          path: |
+            ${{ runner.temp }}/jni-home/.ccache
+            ${{ runner.temp }}/jni-home/.cache/cpm
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Upload JNI test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: jni-${{ env.CLASSIFIER }}-${{ github.run_id }}
+          path: |
+            target/gha-premerge.log
+            target/surefire-reports/
+            target/**/Testing/Temporary/*.log
+            target/**/hs_err_pid*.log
+            hs_err_pid*.log
+          if-no-files-found: warn
+          retention-days: 2

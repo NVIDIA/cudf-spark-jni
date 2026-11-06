@@ -16,7 +16,7 @@ name: CPU CI
 
 # PRs run on hosted runners with read-only permissions; no bot approval is needed.
 # Always report the gate; the suite catalog selects which CPU jobs must run.
-# Currently only toolchain images are covered; JNI GPU tests remain in Jenkins.
+# This workflow covers toolchain images; GPU CI and Jenkins run product tests.
 # PR title/description edits do not restart these checks.
 on:
   pull_request:
