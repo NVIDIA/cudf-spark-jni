@@ -87,8 +87,8 @@ jobs:
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
 
-  images:
-    name: Build ${{ matrix.image.tag }}
+  jni-images:
+    name: Build JNI image ${{ matrix.image.tag }}
     needs: configure
     # Main and the matching release publisher must not race the ownership transfer.
     concurrency:
@@ -96,7 +96,7 @@ jobs:
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         image: ${{ fromJSON(needs.configure.outputs.images) }}
     # Build natively; GitHub has no ubuntu-latest-arm label.

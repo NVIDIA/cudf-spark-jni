@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Compile only: this validates the premerge toolchain without allocating a GPU.
+# Compile only: validate the shared JNI build toolchain without allocating a GPU.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}

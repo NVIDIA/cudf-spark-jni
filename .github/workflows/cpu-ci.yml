@@ -58,7 +58,7 @@ jobs:
           base-branch: ${{ github.base_ref }}
           selector-job: select
       - name: Read project version
-        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: version
         shell: bash
         env:
@@ -73,7 +73,7 @@ jobs:
           [[ "$BASE_BRANCH" != main ]] || prefix=main
           printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
-        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: toolchains
         uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
         with:
@@ -81,7 +81,7 @@ jobs:
           version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
           allow-default: ${{ github.base_ref == 'main' }}
       - name: Read the checked-out project's image catalog
-        if: contains(fromJSON(steps.select.outputs.suites), 'images')
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: catalog
         shell: bash
         env:
@@ -92,13 +92,13 @@ jobs:
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
 
-  images:
-    name: Validate ${{ matrix.image.tag }}
+  jni-images:
+    name: Validate JNI image ${{ matrix.image.tag }}
     needs: select
-    if: contains(fromJSON(needs.select.outputs.suites), 'images')
+    if: contains(fromJSON(needs.select.outputs.suites), 'jni-images')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         image: ${{ fromJSON(needs.select.outputs.images) }}
     # Build natively; GitHub has no ubuntu-latest-arm label.
@@ -123,7 +123,7 @@ jobs:
   gate:
     name: CPU CI gate
     if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
-    needs: [select, images]
+    needs: [select, jni-images]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

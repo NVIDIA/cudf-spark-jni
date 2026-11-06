@@ -29,10 +29,6 @@ as part of an image update.
   Check release ownership after the build, under the shared release-line/CUDA-family/
   platform publisher lock. API uncertainty must not permit an alias. Use the shared
   action's immutable publication output, not a fresh read of a mutable main tag.
-- Consumer lookup is different: both main and release GPU CI should try the POM's
-  major.minor image first, then the matching `main-*` image. The CUDA, OS and
-  architecture must match. Do not use the publishing prefix as the first-choice
-  consumer tag. Consumer lookup is not implemented by the image-build workflows.
 - Keep daily publication main-only, release publication push/manual-only, PR jobs
   read-only, and publishing jobs separate from PR execution. Preserve anonymous
   pull and smoke checks before promotion, branch concurrency and worker limits.
@@ -43,17 +39,6 @@ as part of an image update.
   actual worker. Do not move unapproved fork PR code onto a shared runner pool.
 - Cache failures must not hide or replace build/smoke failures. Keep metadata and
   fingerprint checks; never treat registry authorization/network errors as a missing tag.
-- Internal consumers use the same repository suffix, tags and digests through the
-  GHCR remote cache, with their existing registry credentials. Do not add another
-  publisher or a moving pre-release alias. Resolve source POM/toolchains, not job
-  names; verify service-account cold-cache layer pulls and pin approved release/RC
-  digests. An internal 404 may mean missing Deploy/Cache permission, not an absent
-  upstream image; never silently mask that as normal image fallback.
-  Compare upstream and cached digests after publication; matching recipe labels
-  alone do not prove that a mutable tag's cached manifest is current.
-  Exercise the dev-to-pre-release pipeline copy during adoption: copied code must
-  resolve the actual source ref before allocating image-backed build agents, not
-  retain a hardcoded `main-*` image or CUDA version from the dev job.
 
 ## Validation And Documentation
 
@@ -67,11 +52,8 @@ Exercise absent/existing release refs, API/schema failures, missing publication
 outputs and ownership transfer during a build. Check that aliases use the verified
 digest and perform no additional build, and preserve shared publisher serialization.
 Check both architectures, including rejection of mismatched platform/build args
-and a smoke-inspected image with the wrong OS or architecture. For internal mirror
-adoption, audit the actual dev/pre-release/release and legacy consumers first;
-preserve verified digests and do not retire old image variants implicitly.
+and a smoke-inspected image with the wrong OS or architecture.
 
 Update README examples and the PR description for changed tags, ownership or
-fallback behavior. Keep the scenario table current. Distinguish local checks, PR
-build/smoke validation, actual GHCR publication and future consumer validation;
-do not claim that a successful image build proves consumer fallback works.
+configuration behavior. Keep the scenario table current. Distinguish local checks,
+PR build/smoke validation and actual GHCR publication.

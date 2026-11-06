@@ -1,5 +1,5 @@
 {
-  "premerge-cuda12": {
+  "jni-cuda12-amd64": {
     "image": "jni-build",
     "toolchain": "cuda12",
     "context": ".",
@@ -19,7 +19,7 @@
       "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
     ]
   },
-  "premerge-cuda12-arm64": {
+  "jni-cuda12-arm64": {
     "image": "jni-build",
     "toolchain": "cuda12",
     "context": ".",
@@ -38,7 +38,7 @@
       "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-arm64,mode=max,timeout=2m,ignore-error=true"
     ]
   },
-  "premerge-cuda13": {
+  "jni-cuda13-amd64": {
     "image": "jni-build",
     "toolchain": "cuda13",
     "context": ".",
@@ -58,7 +58,7 @@
       "type=gha,version=2,scope=jni-cuda${CUDA_VERSION}-rockylinux8-amd64,mode=max,timeout=2m,ignore-error=true"
     ]
   },
-  "premerge-cuda13-arm64": {
+  "jni-cuda13-arm64": {
     "image": "jni-build",
     "toolchain": "cuda13",
     "context": ".",
