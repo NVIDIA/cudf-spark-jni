@@ -107,12 +107,13 @@ from GHCR. The local `build/run-in-docker` image workflow is unchanged.
 
 Maven dependencies and plugins prefer Google's Central mirror by default, including
 plain local Maven and Docker builds, with Central retained as fallback. Existing
-developer settings are not replaced. Internal `ci/settings.xml` redirects the Google
-repository to the same authenticated Artifactory entry as Central. External CI uses
+developer settings are not replaced. The POM declares Google first, followed by
+`maven-central-fallback`, for both dependencies and plugins. Internal `ci/settings.xml`
+redirects both IDs to the same authenticated Artifactory entry as Central. External CI uses
 `ci/settings-public.xml` to mirror Central explicitly, including repository entries
-introduced by dependency/plugin POMs. Its active profile tries that Google mirror
-first, then a separate Maven Central repository if Google cannot supply an artifact.
-The same order applies to dependencies and plugins; internal settings are unchanged.
+introduced by dependency/plugin POMs, without a separate repository profile.
+The POM's fallback repository is not mirrored by these public settings and remains
+available if Google cannot supply an artifact.
 
 ## Branching And Version Updates
 

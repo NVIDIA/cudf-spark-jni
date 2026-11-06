@@ -50,13 +50,13 @@
     </server>
   </servers>
   <mirrors>
-    <!-- The POM's public Google repository must not bypass internal routing.
+    <!-- Neither of the POM's public repositories may bypass internal routing.
          Reuse the central server ID above so mirror downloads stay authenticated.
          The artifactory profile already routes Central itself to ART_URL. -->
     <mirror>
       <id>central</id>
       <url>${env.ART_URL}</url>
-      <mirrorOf>google-maven-central</mirrorOf>
+      <mirrorOf>google-maven-central,maven-central-fallback</mirrorOf>
     </mirror>
   </mirrors>
   <profiles>
