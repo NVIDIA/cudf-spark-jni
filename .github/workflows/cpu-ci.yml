@@ -1,0 +1,219 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CPU CI
+
+# PRs run on hosted runners with read-only permissions; no bot approval is needed.
+# Always report the gate; the suite catalog selects which CPU jobs must run.
+# Currently only toolchain images are covered; JNI GPU tests remain in Jenkins.
+# PR title/description edits do not restart these checks.
+on:
+  pull_request:
+    branches: [main, 'release/**']
+    # After retargeting a PR, push or reopen it to validate the new base.
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select CPU checks
+    if: github.repository == 'NVIDIA/cudf-spark-jni'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      suites: ${{ steps.select.outputs.suites }}
+      required-jobs: ${{ steps.select.outputs.required-jobs }}
+      images: ${{ steps.catalog.outputs.images || '[]' }}
+    steps:
+      - name: Checkout PR merge commit
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select checks from the full PR diff
+        id: select
+        uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
+        with:
+          catalog-path: .github/cpu-ci-suites.json
+          base-branch: ${{ github.base_ref }}
+          selector-job: select
+      - name: Read project version
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        id: version
+        shell: bash
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          metadata=$(bash ci/image-config.sh version --branch "$BASE_BRANCH")
+          printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
+      - name: Resolve project toolchains
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        id: toolchains
+        uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
+        with:
+          config: ci/toolchains.json
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
+      - name: Checkout shared image metadata helper
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
+      - name: Read the checked-out project's image catalog
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        id: catalog
+        shell: bash
+        env:
+          CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
+        run: |
+          set -euo pipefail
+          images=$(bash ci/image-config.sh matrix)
+          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+      - name: Validate consumer image selection
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        env:
+          IMAGE_CONFIGS: ${{ steps.catalog.outputs.images }}
+          VERSION_METADATA: ${{ steps.version.outputs.metadata }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          images = json.loads(os.environ["IMAGE_CONFIGS"])
+          metadata = json.loads(os.environ["VERSION_METADATA"])
+          command = ["python3", "ci/image-config.py", "select"]
+
+          def verify(selection, allow_main):
+              assert len(selection) == len(images), "Selector and publisher image counts differ"
+              for image in images:
+                  classifier = image["toolchain"] + ("-arm64" if image["platform"] == "linux/arm64" else "")
+                  selected = selection[classifier]
+                  suffix = image["tag"].split("-", 1)[1]
+                  tag = metadata["release-line"] + "-" + suffix
+                  manifest_suffix = image["manifest-tag"].split("-", 1)[1]
+                  manifest_tag = metadata["release-line"] + "-" + manifest_suffix
+                  assert selected["config"] == dict(image, tag=tag, **{"manifest-tag": manifest_tag}), "Consumer recipe differs from publisher"
+                  assert selected["version"] == image["version"], "Recipe fingerprint differs"
+                  assert selected["platform"] == image["platform"], "Image platform differs"
+                  assert selected["image"].endswith("/" + image["image"]), "Image repository differs"
+                  assert selected["tags"] == [manifest_tag] + (
+                      ["main-" + manifest_suffix] if allow_main else []), "Wrong fallback policy"
+                  args = command + ["--classifiers", classifier]
+                  if allow_main:
+                      args.append("--allow-main-fallback")
+                  assert json.loads(subprocess.check_output(args, text=True)) == {classifier: selected}
+
+          strict = subprocess.run(command, capture_output=True, text=True)
+          if metadata["toolchain-key"] == metadata["release-line"]:
+              strict.check_returncode()
+              verify(json.loads(strict.stdout), False)
+          else:
+              assert strict.returncode != 0, "Versioned-only selection accepted missing version pins"
+          verify(json.loads(subprocess.check_output(command + ["--allow-main-fallback"], text=True)), True)
+          print("Consumer tags, classifier mapping and recipes match the publisher; fallback policy passed")
+
+          # Exercise the publication handoff using this workflow's existing metadata checks.
+          source_sha = "a" * 40
+          for tag in sorted({image["manifest-tag"] for image in images}):
+              pair = sorted((image for image in images if image["manifest-tag"] == tag),
+                            key=lambda image: image["platform"])
+              assert [image["platform"] for image in pair] == ["linux/amd64", "linux/arm64"]
+              records = [dict(tag=image["tag"], platform=image["platform"], version=image["version"],
+                              reference="ghcr.io/nvidia/cudf-spark-jni/jni-build@sha256:" + str(i + 1) * 64,
+                              **{"source-sha": source_sha}) for i, image in enumerate(pair)]
+              with tempfile.TemporaryDirectory() as directory:
+                  env = dict(os.environ, CI_IMAGE_CONFIGS=json.dumps(images))
+                  args = ["python3", "ci/image-config.py", "manifest", tag,
+                          "--records-dir", directory, "--source-sha", source_sha]
+
+                  def check(items, succeeds):
+                      for path in Path(directory).glob("*.json"):
+                          path.unlink()
+                      for i, record in enumerate(items):
+                          (Path(directory) / f"{i}.json").write_text(json.dumps(record))
+                      result = subprocess.run(args, env=env, text=True, capture_output=True)
+                      assert (result.returncode == 0) == succeeds, result.stdout + result.stderr
+                      if succeeds:
+                          assert json.loads(result.stdout)["sources"] == [r["reference"] for r in records]
+
+                  check(records, True)
+                  check(list(reversed(records)), True)
+                  check(records[:1], False)
+                  check([records[0], records[0]], False)
+                  for field, invalid in (("source-sha", "b" * 40), ("version", "wrong-recipe"),
+                                         ("tag", "wrong-tag"), ("reference", "ghcr.io/other/image@sha256:" + "1" * 64)):
+                      check([records[0], dict(records[1], **{field: invalid})], False)
+                  check([records[0], dict(records[1], reference=records[0]["reference"])], False)
+          print("Multi-platform handoff: both CUDA pairs passed; incomplete, stale and mismatched records rejected")
+          PY
+
+  jni-images:
+    name: Validate JNI image ${{ matrix.image.tag }}
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.suites), 'jni-images')
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.images) }}
+    # Build natively; GitHub has no ubuntu-latest-arm label.
+    runs-on: ${{ matrix.image.platform == 'linux/arm64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
+    # Allow slow cold downloads, compilation, image loading and cache export.
+    timeout-minutes: 120
+    steps:
+      # PR code runs directly on a hosted runner, without package write access.
+      - name: Checkout PR merge commit
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+      - name: Build and smoke-test without publishing
+        # Branch-scoped PR caches can reuse the fresh baseline exported from main.
+        uses: NVIDIA/spark-rapids-common/container-image@main
+        with:
+          config: ${{ toJSON(matrix.image) }}
+
+  gate:
+    name: CPU CI gate
+    if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
+    needs: [select, jni-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check selected CPU results
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.required-jobs }}

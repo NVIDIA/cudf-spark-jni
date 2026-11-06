@@ -1,0 +1,25 @@
+{
+  "shared_paths": [
+    ".github/cpu-ci-suites.json",
+    ".github/workflows/cpu-ci.yml"
+  ],
+  "suites": {
+    "jni-images": {
+      "enabled": true,
+      "comment": "Validate JNI toolchain images for PR and nightly builds; product tests stay in Jenkins.",
+      "paths": [
+        "pom.xml",
+        "ci/Dockerfile",
+        "ci/image-config.sh",
+        "ci/image-config.py",
+        "ci/image-smoke.sh",
+        "ci/toolchains.json",
+        ".github/image-builds.json",
+        ".github/workflows/image-build.yml"
+      ],
+      "jobs": [
+        "jni-images"
+      ]
+    }
+  }
+}
