@@ -157,11 +157,16 @@ public final class ProtobufSchemaDescriptorBuilder {
   }
 
   public ProtobufSchemaDescriptorBuilder required() {
-    current().isRequired = true;
+    return required(true);
+  }
+
+  /** Set whether the current field is required. */
+  public ProtobufSchemaDescriptorBuilder required(boolean value) {
+    current().isRequired = value;
     return this;
   }
 
-  /** Mark the current field hidden: decoded for validation but dropped from the output struct. */
+  /** Mark the current field hidden: validated but returned as an all-null column. */
   public ProtobufSchemaDescriptorBuilder isOutput(boolean isOutput) {
     current().isOutput = isOutput;
     return this;

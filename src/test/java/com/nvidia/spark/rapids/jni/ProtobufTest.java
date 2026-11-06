@@ -2018,9 +2018,10 @@ public class ProtobufTest {
     try (Table input = new Table.TestBuilder().column(rows).build();
          ColumnVector expected = ColumnVector.fromStructs(
              new StructType(true,
+                 new StructType(true),
                  new ListType(true, new BasicType(true, DType.INT32))),
              null,
-             struct(Arrays.asList(8)));
+             struct(null, Arrays.asList(8)));
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0), schema, false)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);
@@ -5163,7 +5164,7 @@ public class ProtobufTest {
   }
 
   @Test
-  void testHiddenFieldDoesNotAppearInOutput() {
+  void testHiddenFieldIsReturnedAsNulls() {
     // message Msg { int32 a = 1; int32 b = 2; } — both present in the wire, b is hidden.
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(7)),
@@ -5176,7 +5177,8 @@ public class ProtobufTest {
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
          ColumnVector expectedA = ColumnVector.fromBoxedInts(7);
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedA);
+         ColumnVector expectedB = ColumnVector.fromBoxedInts((Integer) null);
+         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedA, expectedB);
          ColumnVector actualStruct = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
       AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
@@ -5186,7 +5188,7 @@ public class ProtobufTest {
   void testHiddenRepeatedMessageAbsentDoesNotFail() {
     // message Msg { int32 a = 1; repeated Inner hidden = 2; }
     // message Inner { int32 x = 1; }
-    // Wire data omits hidden; it should be validated/scanned, then dropped from the output.
+    // Wire data omits hidden; it should be validated/scanned, then returned as nulls.
     Byte[] row = concat(box(tag(1, WT_VARINT)), box(encodeVarint(7)));
 
     ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
@@ -5197,8 +5199,11 @@ public class ProtobufTest {
         .build();
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector expectedA = ColumnVector.fromBoxedInts(7);
-         ColumnVector expectedStruct = ColumnVector.makeStruct(expectedA);
+         ColumnVector expectedStruct = ColumnVector.fromStructs(
+             new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new ListType(true, new StructType(true, new BasicType(true, DType.INT32)))),
+             struct(7, null));
          ColumnVector actualStruct = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
       AssertUtils.assertStructColumnsAreEqual(expectedStruct, actualStruct);
     }
@@ -5239,10 +5244,12 @@ public class ProtobufTest {
             .addField(1, DType.INT32).required().isOutput(false)
         .up()
         .build();
-    StructType expectedType = new StructType(true, new BasicType(true, DType.INT32));
+    StructType expectedType = new StructType(true,
+        new BasicType(true, DType.INT32),
+        new ListType(true, new StructType(true, new BasicType(true, DType.INT32))));
 
     try (Table input = new Table.TestBuilder().column(invalidRow, validRow).build();
-         ColumnVector expected = ColumnVector.fromStructs(expectedType, null, struct(9));
+         ColumnVector expected = ColumnVector.fromStructs(expectedType, null, struct(9, null));
          ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
@@ -5269,9 +5276,8 @@ public class ProtobufTest {
   }
 
   @Test
-  void testAllFieldsHiddenProducesEmptyStruct() {
+  void testAllFieldsHiddenProducesNullChildren() {
     // message Msg { int32 a = 1; int32 b = 2; } — both present on the wire but both hidden.
-    // The result is a STRUCT with no children, still carrying the correct row count.
     Byte[] row = concat(
         box(tag(1, WT_VARINT)), box(encodeVarint(7)),
         box(tag(2, WT_VARINT)), box(encodeVarint(11)));
@@ -5282,10 +5288,280 @@ public class ProtobufTest {
         .build();
 
     try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
-         ColumnVector result = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
-      assertEquals(DType.STRUCT, result.getType());
-      assertEquals(0, result.getNumChildren());
-      assertEquals(1, result.getRowCount());
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new BasicType(true, DType.INT32), new BasicType(true, DType.INT32)),
+             struct(null, null));
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testVisibleMessageWithHiddenScalarChild() {
+    // message Outer { Inner inner = 1; }  message Inner { int32 a = 1; int32 b = 2; }
+    Byte[] row = concat(box(tag(1, WT_LEN)), encodeMessage(concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(7)),
+        box(tag(2, WT_VARINT)), box(encodeVarint(11)))));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32)
+            .addField(2, DType.INT32).isOutput(false)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true,
+                 new BasicType(true, DType.INT32), new BasicType(true, DType.INT32))),
+             struct(struct(7, null)));
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testRepeatedMessageWithHiddenChild() {
+    // message Outer { repeated Item items = 1; }  message Item { int32 id = 1; string name = 2; }
+    Byte[] item1 = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(1)),
+        box(tag(2, WT_LEN)), encodeString("a"));
+    Byte[] item2 = concat(box(tag(1, WT_VARINT)), box(encodeVarint(2)));
+    Byte[] row = concat(
+        box(tag(1, WT_LEN)), encodeMessage(item1),
+        box(tag(1, WT_LEN)), encodeMessage(item2));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).repeated().down()
+            .addField(1, DType.INT32)
+            .addField(2, DType.STRING).isOutput(false)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new ListType(true, new StructType(true,
+                 new BasicType(true, DType.INT32), new BasicType(true, DType.STRING)))),
+             struct(Arrays.asList(struct(1, null), struct(2, null))));
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  private static ProtobufSchemaDescriptor hiddenLeavesUnderVisibleMessage(boolean requiredX) {
+    // message Outer { Inner inner = 1; }
+    // message Inner { int32 a = 1; repeated Leaf leaves = 2; }  (leaves hidden)
+    // message Leaf { [required] int32 x = 1; }
+    return new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32)
+            .addField(2, DType.STRUCT).repeated().isOutput(false).down()
+                .addField(1, DType.INT32).required(requiredX).isOutput(false)
+            .up()
+        .up()
+        .build();
+  }
+
+  private static ProtobufSchemaDescriptor hiddenLeafUnderVisibleMessage() {
+    // message Outer { Inner inner = 1; }
+    // message Inner { int32 a = 1; Leaf leaf = 2; }  (leaf hidden)
+    // message Leaf { int32 x = 1; }
+    return new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32)
+            .addField(2, DType.STRUCT).isOutput(false).down()
+                .addField(1, DType.INT32).isOutput(false)
+            .up()
+        .up()
+        .build();
+  }
+
+  private static Byte[] leaf(int x) {
+    return concat(box(tag(1, WT_VARINT)), box(encodeVarint(x)));
+  }
+
+  // A Leaf whose only field is a varint with its continuation bit set and no next byte.
+  private static Byte[] truncatedLeaf() {
+    return concat(box(tag(1, WT_VARINT)), new Byte[]{(byte) 0x80});
+  }
+
+  private static Byte[] innerWithLeaves(int a, Byte[]... leaves) {
+    Byte[] inner = concat(box(tag(1, WT_VARINT)), box(encodeVarint(a)));
+    for (Byte[] leaf : leaves) {
+      inner = concat(inner, box(tag(2, WT_LEN)), encodeMessage(leaf));
+    }
+    return concat(box(tag(1, WT_LEN)), encodeMessage(inner));
+  }
+
+  @Test
+  void testHiddenChildOfVisibleMessageMissingRequiredField_Failfast() {
+    Byte[] row = innerWithLeaves(7, EMPTY_MESSAGE);
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0), hiddenLeavesUnderVisibleMessage(true), true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testHiddenChildOfVisibleMessageMissingRequiredField_Permissive() {
+    Byte[] invalid = innerWithLeaves(7, EMPTY_MESSAGE);
+    Byte[] valid = innerWithLeaves(9, leaf(1));
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{invalid, valid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new ListType(true, new StructType(true, new BasicType(true, DType.INT32))))),
+             null,
+             struct(struct(9, null)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), hiddenLeavesUnderVisibleMessage(true), false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testHiddenChildOfVisibleMessageWithTruncatedVarint_Failfast() {
+    Byte[] row = innerWithLeaves(7, truncatedLeaf());
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row}).build()) {
+      assertThrows(ai.rapids.cudf.CudfException.class, () -> {
+        try (ColumnVector ignored = Protobuf.decodeToStruct(
+            input.getColumn(0), hiddenLeavesUnderVisibleMessage(false), true)) {
+        }
+      });
+    }
+  }
+
+  @Test
+  void testHiddenChildOfVisibleMessageWithTruncatedVarint_Permissive() {
+    // x is not required, so only the truncated varint can invalidate the first row.
+    Byte[] invalid = innerWithLeaves(7, truncatedLeaf());
+    Byte[] valid = innerWithLeaves(9, leaf(1));
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{invalid, valid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new ListType(true, new StructType(true, new BasicType(true, DType.INT32))))),
+             null,
+             struct(struct(9, null)));
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), hiddenLeavesUnderVisibleMessage(false), false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void testVisibleMessageWithHiddenMessageChild_Permissive(boolean duplicateLeaf) {
+    // Duplicate occurrences of a singular message are merged, then validated.
+    Byte[] valid = duplicateLeaf
+        ? innerWithLeaves(7, leaf(1), leaf(2))
+        : innerWithLeaves(7, leaf(1));
+    Byte[] invalid = duplicateLeaf
+        ? innerWithLeaves(9, leaf(1), truncatedLeaf())
+        : innerWithLeaves(9, truncatedLeaf());
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{valid, invalid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new StructType(true, new BasicType(true, DType.INT32)))),
+             struct(struct(7, null)),
+             null);
+         ColumnVector actual = Protobuf.decodeToStruct(
+             input.getColumn(0), hiddenLeafUnderVisibleMessage(), false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testVisibleMessageWithHiddenPackedChild_Permissive() {
+    // message Outer { Inner inner = 1; }  message Inner { int32 a = 1; repeated int32 ids = 2; }
+    // Only the count scan walks the hidden packed ids, so it alone must reject the truncated varint.
+    Byte[] valid = concat(box(tag(1, WT_LEN)), encodeMessage(concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(7)),
+        box(tag(2, WT_LEN)), encodeBytes(concatBytes(encodeVarint(1), encodeVarint(2))))));
+    Byte[] invalid = concat(box(tag(1, WT_LEN)), encodeMessage(concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(9)),
+        box(tag(2, WT_LEN)), encodeBytes(new byte[]{(byte) 0x80}))));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.STRUCT).down()
+            .addField(1, DType.INT32)
+            .addField(2, DType.INT32).repeated().isOutput(false)
+        .up()
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{valid, invalid}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true, new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new ListType(true, new BasicType(true, DType.INT32)))),
+             struct(struct(7, null)),
+             null);
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, false)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testHiddenFieldsOfEveryShapeAreTypedNulls() {
+    // message Outer { int32 keep = 1; string s = 2; bytes b = 3; repeated int32 r = 4;
+    //                 Leaf leaf = 5; repeated Leaf leaves = 6; }  message Leaf { string x = 1; }
+    Byte[] leaf = concat(box(tag(1, WT_LEN)), encodeString("x"));
+    Byte[] row = concat(
+        box(tag(1, WT_VARINT)), box(encodeVarint(3)),
+        box(tag(2, WT_LEN)), encodeString("s"),
+        box(tag(3, WT_LEN)), encodeBytes(new byte[]{1, 2}),
+        box(tag(4, WT_VARINT)), box(encodeVarint(4)),
+        box(tag(5, WT_LEN)), encodeMessage(leaf),
+        box(tag(6, WT_LEN)), encodeMessage(leaf));
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .addField(2, DType.STRING).isOutput(false)
+        .addField(3, DType.LIST).isOutput(false)
+        .addField(4, DType.INT32).repeated().isOutput(false)
+        .addField(5, DType.STRUCT).isOutput(false).down()
+            .addField(1, DType.STRING).isOutput(false)
+        .up()
+        .addField(6, DType.STRUCT).repeated().isOutput(false).down()
+            .addField(1, DType.STRING).isOutput(false)
+        .up()
+        .build();
+    StructType leafType = new StructType(true, new BasicType(true, DType.STRING));
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{row, null}).build();
+         ColumnVector expected = ColumnVector.fromStructs(
+             new StructType(true,
+                 new BasicType(true, DType.INT32),
+                 new BasicType(true, DType.STRING),
+                 new ListType(true, new BasicType(true, DType.UINT8)),
+                 new ListType(true, new BasicType(true, DType.INT32)),
+                 leafType,
+                 new ListType(true, leafType)),
+             struct(3, null, null, null, null, null),
+             null);
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void testHiddenFieldsKeepSchemaForEmptyInput() {
+    ProtobufSchemaDescriptor schema = new ProtobufSchemaDescriptorBuilder()
+        .addField(1, DType.INT32)
+        .addField(2, DType.STRUCT).down()
+            .addField(1, DType.INT32).isOutput(false)
+        .up()
+        .addField(3, DType.STRING).isOutput(false)
+        .build();
+
+    try (Table input = new Table.TestBuilder().column(new Byte[][]{}).build();
+         ColumnVector expected = ColumnVector.fromStructs(new StructType(true,
+             new BasicType(true, DType.INT32),
+             new StructType(true, new BasicType(true, DType.INT32)),
+             new BasicType(true, DType.STRING)));
+         ColumnVector actual = Protobuf.decodeToStruct(input.getColumn(0), schema, true)) {
+      AssertUtils.assertStructColumnsAreEqual(expected, actual);
     }
   }
 
@@ -5625,9 +5901,10 @@ public class ProtobufTest {
     try (Table input = new Table.TestBuilder().column(new Byte[][]{malformed, valid}).build();
          ColumnVector expected = ColumnVector.fromStructs(
              new StructType(true,
+                 new StructType(true),
                  new ListType(true, new BasicType(true, DType.INT32))),
              null,
-             struct(Arrays.asList(8)));
+             struct(null, Arrays.asList(8)));
          ColumnVector actual = Protobuf.decodeToStruct(
              input.getColumn(0), schema, false)) {
       AssertUtils.assertStructColumnsAreEqual(expected, actual);

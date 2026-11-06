@@ -206,6 +206,15 @@ inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_row
                                         0);
 }
 
+inline std::unique_ptr<cudf::column> make_zero_offsets_column(cudf::size_type num_rows,
+                                                              cuda::stream_ref stream,
+                                                              rmm::device_async_resource_ref mr)
+{
+  return make_offsets_column(num_rows,
+                             cudf::detail::make_zeroed_device_uvector_async<int32_t>(
+                               static_cast<std::size_t>(num_rows) + 1, stream, mr));
+}
+
 inline rmm::device_uvector<int32_t> make_top_row_indices(
   rmm::device_uvector<field_occurrence> const& occurrences,
   int32_t const* parent_top_row_indices,
@@ -546,11 +555,6 @@ void validate_enum_values(rmm::device_uvector<int32_t> const& values,
 // Forward declarations of builder/utility functions
 // ============================================================================
 
-std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
-                                               cudf::size_type num_rows,
-                                               cuda::stream_ref stream,
-                                               rmm::device_async_resource_ref mr);
-
 // Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
 // in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce
 // but with `num_rows` all-null rows.
@@ -560,9 +564,15 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
                                                            cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> make_null_list_column_with_child(
-  std::unique_ptr<cudf::column> child_col,
+// Assemble a STRUCT from `children`, which follow `child_indices`. Hidden children were only
+// validated and become all-null columns, so the struct's nulls go only into the visible ones.
+std::unique_ptr<cudf::column> make_struct_column(
+  protobuf_schema const& schema,
+  std::vector<int> const& child_indices,
   cudf::size_type num_rows,
+  std::vector<std::unique_ptr<cudf::column>> children,
+  cudf::size_type null_count,
+  cuda::device_buffer<cudf::bitmask_type> null_mask,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr);
 
