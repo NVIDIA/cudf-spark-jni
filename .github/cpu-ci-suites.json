@@ -11,6 +11,7 @@
         "pom.xml",
         "ci/Dockerfile",
         "ci/image-config.sh",
+        "ci/image-config.py",
         "ci/image-smoke.sh",
         "ci/toolchains.json",
         ".github/image-builds.json",

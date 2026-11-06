@@ -57,6 +57,38 @@ images; there is no combined amd64/arm64 consumer tag.
 
 Image CI always builds and smoke-tests from its checkout.
 
+## Automatic Consumer Selection
+
+Use the same checkout-derived metadata as the publisher instead of maintaining
+image tags in each workflow:
+
+```sh
+python3 ci/image-config.py select --classifiers cuda12,cuda13
+# Development consumers may opt in to compatible main fallback:
+python3 ci/image-config.py select --classifiers cuda12 --allow-main-fallback
+```
+
+The selector needs only Python 3.9+ and the checkout, not Docker, Maven, registry
+credentials or a GPU. It returns each classifier's image repository, platform,
+recipe fingerprint, candidate tags and build config. Resolve the requested ref to
+a commit once and run the selector from that checkout; branch, tag and commit-SHA
+inputs all use the same checked-out POM and recipe. Both architectures are selected
+when `--classifiers` is omitted. Exact POM-version pins take priority.
+
+The default is versioned-only: missing pins or a missing/incompatible `YY.MM-*`
+image must fail. Development callers may explicitly use `--allow-main-fallback`
+to permit the checkout's `main` pins when the version entry is absent and append a
+recipe-checked `main-*` image candidate. Release callers must not enable this flag.
+The selector does not infer development/release policy from a branch name, commit
+containment or the `SNAPSHOT` suffix, since the same commit may be used in both.
+
+Consumers choose their registry endpoint and authentication. Before using either
+candidate, verify its Linux platform and recipe label against the returned values,
+then use the immutable digest. Development callers may try the next candidate;
+authentication/network failures must not be treated as an absent tag. The selector
+itself does not pull, publish or silently build an image. Existing product-test
+Jenkinsfiles and the local `build/run-in-docker` workflow are unchanged.
+
 ## Branching And Version Updates
 
 - Add the release-line toolchain entry before branch-out. The release branch keeps
@@ -86,6 +118,8 @@ the main/release ownership checks and validation requirements.
 
 `CPU CI gate` reports for PRs targeting main or `release/**`. Image-related PRs
 validate that branch's selected toolchains and tag prefix without publishing.
+The configuration job checks consumer selection against the publisher matrix,
+including versioned-only selection and explicit main fallback, before image builds.
 Unrelated changes skip the image jobs, not the gate.
 These hosted PR jobs have read-only permissions and never publish images. They use
 `ubuntu-latest` for amd64 and `ubuntu-26.04-arm` for arm64, both native 4-CPU runners;

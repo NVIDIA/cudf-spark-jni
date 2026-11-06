@@ -65,34 +65,67 @@ jobs:
           BASE_BRANCH: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          metadata=$(bash ci/image-config.sh version)
-          line=$(jq -r '."release-line"' <<< "$metadata")
-          [[ "$BASE_BRANCH" == main || "$BASE_BRANCH" == "release/$line" ]]
+          metadata=$(bash ci/image-config.sh version --branch "$BASE_BRANCH")
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
-          prefix=$line
-          [[ "$BASE_BRANCH" != main ]] || prefix=main
-          printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
-          key=$(jq -er --arg line "$line" --arg branch "$BASE_BRANCH" \
-            'if has($line) or $branch != "main" then $line else "main" end' ci/toolchains.json)
-          printf 'toolchain-key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: toolchains
         uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
         with:
           config: ci/toolchains.json
-          version-key: ${{ steps.version.outputs.toolchain-key }}
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
       - name: Read the checked-out project's image catalog
         if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: catalog
         shell: bash
         env:
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
-          IMAGE_TAG_PREFIX: ${{ steps.version.outputs.tag-prefix }}
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
         run: |
           set -euo pipefail
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+      - name: Validate consumer image selection
+        if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
+        env:
+          IMAGE_CONFIGS: ${{ steps.catalog.outputs.images }}
+          VERSION_METADATA: ${{ steps.version.outputs.metadata }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          images = json.loads(os.environ["IMAGE_CONFIGS"])
+          metadata = json.loads(os.environ["VERSION_METADATA"])
+          command = ["python3", "ci/image-config.py", "select"]
+
+          def verify(selection, allow_main):
+              assert len(selection) == len(images), "Selector and publisher image counts differ"
+              for image in images:
+                  classifier = image["toolchain"] + ("-arm64" if image["platform"] == "linux/arm64" else "")
+                  selected = selection[classifier]
+                  suffix = image["tag"].split("-", 1)[1]
+                  tag = metadata["release-line"] + "-" + suffix
+                  assert selected["config"] == dict(image, tag=tag), "Consumer recipe differs from publisher"
+                  assert selected["version"] == image["version"], "Recipe fingerprint differs"
+                  assert selected["platform"] == image["platform"], "Image platform differs"
+                  assert selected["image"].endswith("/" + image["image"]), "Image repository differs"
+                  assert selected["tags"] == [tag] + (["main-" + suffix] if allow_main else []), "Wrong fallback policy"
+                  args = command + ["--classifiers", classifier]
+                  if allow_main:
+                      args.append("--allow-main-fallback")
+                  assert json.loads(subprocess.check_output(args, text=True)) == {classifier: selected}
+
+          strict = subprocess.run(command, capture_output=True, text=True)
+          if metadata["toolchain-key"] == metadata["release-line"]:
+              strict.check_returncode()
+              verify(json.loads(strict.stdout), False)
+          else:
+              assert strict.returncode != 0, "Versioned-only selection accepted missing version pins"
+          verify(json.loads(subprocess.check_output(command + ["--allow-main-fallback"], text=True)), True)
+          print("Consumer tags, classifier mapping and recipes match the publisher; fallback policy passed")
+          PY
 
   jni-images:
     name: Validate JNI image ${{ matrix.image.tag }}

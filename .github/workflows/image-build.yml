@@ -26,6 +26,7 @@ on:
       - 'pom.xml'
       - 'ci/Dockerfile'
       - 'ci/image-config.sh'
+      - 'ci/image-config.py'
       - 'ci/image-smoke.sh'
       - 'ci/toolchains.json'
       - '.github/image-builds.json'
@@ -62,28 +63,20 @@ jobs:
           SOURCE_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          metadata=$(bash ci/image-config.sh version)
-          line=$(jq -r '."release-line"' <<< "$metadata")
-          [[ "$SOURCE_BRANCH" == main || "$SOURCE_BRANCH" == "release/$line" ]]
+          metadata=$(bash ci/image-config.sh version --branch "$SOURCE_BRANCH")
           printf 'metadata=%s\n' "$metadata" >> "$GITHUB_OUTPUT"
-          prefix=$line
-          [[ "$SOURCE_BRANCH" != main ]] || prefix=main
-          printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
-          key=$(jq -er --arg line "$line" --arg branch "$SOURCE_BRANCH" \
-            'if has($line) or $branch != "main" then $line else "main" end' ci/toolchains.json)
-          printf 'toolchain-key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         id: toolchains
         uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
         with:
           config: ci/toolchains.json
-          version-key: ${{ steps.version.outputs.toolchain-key }}
+          version-key: ${{ fromJSON(steps.version.outputs.metadata).toolchain-key }}
       - name: Resolve image configurations
         id: catalog
         shell: bash
         env:
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
-          IMAGE_TAG_PREFIX: ${{ steps.version.outputs.tag-prefix }}
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
         run: |
           set -euo pipefail
           images=$(bash ci/image-config.sh matrix)

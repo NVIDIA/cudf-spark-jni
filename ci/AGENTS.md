@@ -18,6 +18,14 @@ as part of an image update.
   Keep amd64 and arm64 variants for every selected CUDA family. Pass both
   `TARGETPLATFORM` and the matching `CMAKE_ARCH` explicitly; the Dockerfile's
   defaults target amd64. Keep cache scopes architecture-specific.
+- `image-config.py`: shared branch/version, tag and recipe calculation for publishers
+  and consumers. Keep `image-config.sh` as its compatible CLI entry point; do not
+  duplicate this policy in workflow YAML or internal CI. Registry/authentication
+  and digest lookup belong to the caller.
+- Consumer selection is derived from the exact checkout and versioned-only by
+  default, including detached commits. Only development callers may opt in to
+  main fallback; do not infer this policy from branch containment or SNAPSHOT.
+  Publisher branch ownership is separate from consumer selection policy.
 
 ## Contracts To Preserve
 
@@ -43,7 +51,9 @@ as part of an image update.
 ## Validation And Documentation
 
 Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
-`git diff --check`. Exercise `image-config.sh matrix` with the selected
+`git diff --check`. Check Python syntax and `image-config.py select` from exact
+checkouts, with versioned-only and explicit development fallback policies. Exercise
+`image-config.sh matrix` with the selected
 `CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=main` and the POM's major.minor
 prefix. Check main's missing-version fallback, release explicit-pin requirements,
 branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
