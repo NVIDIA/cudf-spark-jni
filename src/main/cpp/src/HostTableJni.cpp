@@ -265,6 +265,8 @@ std::size_t host_buffer_size(cudf::table_view const& t, cudaStream_t stream)
   return layout.size();
 }
 
+// Copies a table into `buffer` on `stream`. If this throws, no copy into `buffer` is still pending,
+// so the caller may free it.
 std::unique_ptr<host_table_view> to_host_table_async(cudf::table_view const& dev_table,
                                                      uint8_t* buffer,
                                                      std::size_t buffer_size,
@@ -273,9 +275,17 @@ std::unique_ptr<host_table_view> to_host_table_async(cudf::table_view const& dev
   host_layout layout{buffer, buffer_size, stream};
   std::vector<host_column_view> cols;
   cols.reserve(dev_table.num_columns());
-  std::for_each(dev_table.begin(), dev_table.end(), [&](cudf::column_view const& dev_col) {
-    cols.push_back(layout.add(dev_col));
-  });
+  try {
+    std::for_each(dev_table.begin(), dev_table.end(), [&](cudf::column_view const& dev_col) {
+      cols.push_back(layout.add(dev_col));
+    });
+  } catch (...) {
+    // Copies into `buffer` may already be queued: temporaries for later columns are allocated
+    // between copies, and the allocation can fail. Wait for the copies before rethrowing. An error
+    // from the wait itself is dropped in favor of the original one.
+    static_cast<void>(cudaStreamSynchronize(stream));
+    throw;
+  }
   return std::make_unique<host_table_view>(cols);
 }
 
