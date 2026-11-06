@@ -115,9 +115,8 @@ Consumers choose their registry endpoint and authentication. Before using either
 candidate, verify its Linux platform and recipe label against the returned values,
 then use the immutable digest. Development callers may try the next candidate;
 authentication/network failures must not be treated as an absent tag. The selector
-itself does not pull, publish or silently build an image. Internal consumers resolve
-these selections through the authenticated GHCR mirror rather than pulling directly
-from GHCR. The local `build/run-in-docker` image workflow is unchanged.
+itself does not pull, publish or silently build an image. Existing product-test
+Jenkinsfiles and the local `build/run-in-docker` workflow are unchanged.
 
 Maven dependencies and plugins prefer Google's Central mirror by default, including
 plain local Maven and Docker builds, with Central retained as fallback. Existing
