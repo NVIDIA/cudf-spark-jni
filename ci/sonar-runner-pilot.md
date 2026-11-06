@@ -16,12 +16,13 @@ outside this pilot.
 | Variable `SONAR_RUNNER_PILOT_LABEL` | Dedicated runner label beginning with `sonar-runner-pilot-`; do not use the production `blossom` label. |
 | Variable `SONAR_RUNNER_PILOT_GROUP` | Optional organization runner group. Leave unset for the initial repository runner. |
 | Variable `SONAR_PROJECT_KEY` | Existing Sonar project receiving the PR analysis. |
+| Variable `SONAR_RUNNER_PILOT_MAVEN_MIRROR` | Required anonymous HTTPS Maven mirror used for compilation and version lookup; no embedded credentials. |
 | Secret `SONAR_HOST_URL` | Sonar service URL. |
 | Secret `SONAR_TOKEN` | Token with analysis access to that project. |
 
-The worker must provide Linux x86-64, Git, JDK 17, Maven, and SonarScanner CLI 6.2.1
-or a compatible approved version. It needs access to GitHub, public Maven
-dependencies, and the configured Sonar service. Register each worker for one job
+The worker must provide Linux x86-64, Git, Python 3, JDK 17, Maven, and SonarScanner
+CLI 6.2.1 or a compatible approved version. It needs access to GitHub, the configured
+anonymous Maven mirror, and the configured Sonar service. Register each worker for one job
 and dispose of its filesystem afterward. The workflow does not receive runner
 registration credentials or artifact publication credentials.
 

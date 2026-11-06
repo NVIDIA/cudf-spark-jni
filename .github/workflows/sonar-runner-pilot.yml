@@ -53,6 +53,7 @@ jobs:
           RUNNER_LABEL: ${{ vars.SONAR_RUNNER_PILOT_LABEL }}
           RUNNER_GROUP: ${{ vars.SONAR_RUNNER_PILOT_GROUP }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          MAVEN_MIRROR: ${{ vars.SONAR_RUNNER_PILOT_MAVEN_MIRROR }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -75,6 +76,9 @@ jobs:
             }
             if (!process.env.SONAR_PROJECT_KEY?.trim()) {
               throw new Error('Set the SONAR_PROJECT_KEY repository variable.');
+            }
+            if (!process.env.MAVEN_MIRROR?.trim()) {
+              throw new Error('Set the SONAR_RUNNER_PILOT_MAVEN_MIRROR repository variable.');
             }
             const runner = {labels: ['self-hosted', 'Linux', 'X64', label]};
             if (process.env.RUNNER_GROUP?.trim()) runner.group = process.env.RUNNER_GROUP.trim();
@@ -128,13 +132,37 @@ jobs:
         shell: bash
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          MAVEN_MIRROR: ${{ vars.SONAR_RUNNER_PILOT_MAVEN_MIRROR }}
+          MAVEN_SETTINGS: ${{ runner.temp }}/sonar-maven-settings.xml
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
-          # Default public Maven resolution avoids artifact-server credentials.
-          mvn -B -Dmaven.wagon.http.retryHandler.count=3 compile \
+          # Use the configured anonymous mirror; no repository credentials are needed.
+          python3 - <<'PY'
+          import os
+          import urllib.parse
+          import xml.etree.ElementTree as ET
+
+          mirror = os.environ["MAVEN_MIRROR"].strip()
+          try:
+              url = urllib.parse.urlsplit(mirror)
+              port = url.port
+          except ValueError:
+              raise SystemExit("The Maven mirror must be a valid HTTPS URL")
+          if (url.scheme != "https" or not url.hostname or url.username is not None
+                  or url.password is not None or url.query or url.fragment
+                  or any(character.isspace() for character in mirror)):
+              raise SystemExit("The Maven mirror must use HTTPS without credentials, query, or fragment")
+          settings = ET.Element("settings", xmlns="http://maven.apache.org/SETTINGS/1.0.0")
+          entry = ET.SubElement(ET.SubElement(settings, "mirrors"), "mirror")
+          for key, value in (("id", "sonar-pilot"), ("mirrorOf", "*"), ("url", mirror)):
+              ET.SubElement(entry, key).text = value
+          ET.ElementTree(settings).write(os.environ["MAVEN_SETTINGS"], encoding="utf-8",
+                                         xml_declaration=True)
+          PY
+          mvn -s "$MAVEN_SETTINGS" -B -Dmaven.wagon.http.retryHandler.count=3 compile \
             -DskipTests=true -Dmaven.antrun.skip=true
-          version=$(mvn -B -Dstyle.color=never help:evaluate \
+          version=$(mvn -s "$MAVEN_SETTINGS" -B -Dstyle.color=never help:evaluate \
             -Dexpression=project.version -q -DforceStdout)
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
@@ -272,7 +300,7 @@ jobs:
               const advanced = currentPR.head.sha !== sha;
               const lines = [marker, '### Sonar pilot: analysis result', '',
                 `**Quality gate: ${report ? (report.gateStatus === 'OK' ? 'PASS' : 'FAIL') : 'Unavailable'} · New issues: ${report ? report.totalIssues : 'Unavailable'}**`, '',
-                `Analyzed commit: [\`${sha.slice(0, 12)}\`](${commitUrl}). This result applies to that commit.${advanced ? ' The PR has since advanced to another commit.' : ''}`, ''];
+                `${report ? 'Analyzed' : 'Approved'} commit: [\`${sha.slice(0, 12)}\`](${commitUrl}). This result applies to that commit.${advanced ? ' The PR has since advanced to another commit.' : ''}`, ''];
               if (report) {
                 lines.push('| Finding | Location | Severity |', '| --- | --- | --- |');
                 const rank = {BLOCKER: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1};
