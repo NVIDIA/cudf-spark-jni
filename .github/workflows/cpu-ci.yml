@@ -104,7 +104,9 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          from pathlib import Path
           import subprocess
+          import tempfile
 
           images = json.loads(os.environ["IMAGE_CONFIGS"])
           metadata = json.loads(os.environ["VERSION_METADATA"])
@@ -117,11 +119,14 @@ jobs:
                   selected = selection[classifier]
                   suffix = image["tag"].split("-", 1)[1]
                   tag = metadata["release-line"] + "-" + suffix
-                  assert selected["config"] == dict(image, tag=tag), "Consumer recipe differs from publisher"
+                  manifest_suffix = image["manifest-tag"].split("-", 1)[1]
+                  manifest_tag = metadata["release-line"] + "-" + manifest_suffix
+                  assert selected["config"] == dict(image, tag=tag, **{"manifest-tag": manifest_tag}), "Consumer recipe differs from publisher"
                   assert selected["version"] == image["version"], "Recipe fingerprint differs"
                   assert selected["platform"] == image["platform"], "Image platform differs"
                   assert selected["image"].endswith("/" + image["image"]), "Image repository differs"
-                  assert selected["tags"] == [tag] + (["main-" + suffix] if allow_main else []), "Wrong fallback policy"
+                  assert selected["tags"] == [manifest_tag] + (
+                      ["main-" + manifest_suffix] if allow_main else []), "Wrong fallback policy"
                   args = command + ["--classifiers", classifier]
                   if allow_main:
                       args.append("--allow-main-fallback")
@@ -135,6 +140,40 @@ jobs:
               assert strict.returncode != 0, "Versioned-only selection accepted missing version pins"
           verify(json.loads(subprocess.check_output(command + ["--allow-main-fallback"], text=True)), True)
           print("Consumer tags, classifier mapping and recipes match the publisher; fallback policy passed")
+
+          # Exercise the publication handoff using this workflow's existing metadata checks.
+          source_sha = "a" * 40
+          for tag in sorted({image["manifest-tag"] for image in images}):
+              pair = sorted((image for image in images if image["manifest-tag"] == tag),
+                            key=lambda image: image["platform"])
+              assert [image["platform"] for image in pair] == ["linux/amd64", "linux/arm64"]
+              records = [dict(tag=image["tag"], platform=image["platform"], version=image["version"],
+                              reference="ghcr.io/nvidia/cudf-spark-jni/jni-build@sha256:" + str(i + 1) * 64,
+                              **{"source-sha": source_sha}) for i, image in enumerate(pair)]
+              with tempfile.TemporaryDirectory() as directory:
+                  env = dict(os.environ, CI_IMAGE_CONFIGS=json.dumps(images))
+                  args = ["python3", "ci/image-config.py", "manifest", tag,
+                          "--records-dir", directory, "--source-sha", source_sha]
+
+                  def check(items, succeeds):
+                      for path in Path(directory).glob("*.json"):
+                          path.unlink()
+                      for i, record in enumerate(items):
+                          (Path(directory) / f"{i}.json").write_text(json.dumps(record))
+                      result = subprocess.run(args, env=env, text=True, capture_output=True)
+                      assert (result.returncode == 0) == succeeds, result.stdout + result.stderr
+                      if succeeds:
+                          assert json.loads(result.stdout)["sources"] == [r["reference"] for r in records]
+
+                  check(records, True)
+                  check(list(reversed(records)), True)
+                  check(records[:1], False)
+                  check([records[0], records[0]], False)
+                  for field, invalid in (("source-sha", "b" * 40), ("version", "wrong-recipe"),
+                                         ("tag", "wrong-tag"), ("reference", "ghcr.io/other/image@sha256:" + "1" * 64)):
+                      check([records[0], dict(records[1], **{field: invalid})], False)
+                  check([records[0], dict(records[1], reference=records[0]["reference"])], False)
+          print("Multi-platform handoff: both CUDA pairs passed; incomplete, stale and mismatched records rejected")
           PY
 
   jni-images:
