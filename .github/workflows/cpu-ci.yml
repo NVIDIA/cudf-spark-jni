@@ -198,7 +198,7 @@ jobs:
           persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.4.1
-      - name: Build and smoke-test without publishing
+      - name: Build and smoke-test ${{ matrix.image.tag }} without publishing
         # Branch-scoped PR caches can reuse the fresh baseline exported from main.
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
