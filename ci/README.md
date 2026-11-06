@@ -15,7 +15,7 @@ Additional tags reference the same verified digest; they do not rebuild the imag
 
 Other branches cannot publish. A release branch must match the POM's major.minor
 version and have an explicit entry in [`toolchains.json`](toolchains.json). Main
-selects its project-version entry, or the configuration's `default` entry when a new
+selects its project-version entry, or the configuration's `main` entry when a new
 version has no entry yet. Each branch builds only its selected toolchains using its
 own Dockerfile and the definitions in
 [`image-builds.json`](../.github/image-builds.json), with up to four images at once
@@ -63,7 +63,7 @@ Image CI always builds and smoke-tests from its checkout.
   its own pinned configuration and Dockerfile; later release updates publish only
   that release's versioned tags. Once the branch exists, main stops refreshing
   those aliases, even if main's POM has not advanced yet.
-- Main may use `default` for a new project version without an explicit entry.
+- Main may use the `main` entry for a new project version without an explicit entry.
   This configuration fallback is separate from the `main-` image tag prefix,
   which is always owned by main. For example, main at `27.02.0-SNAPSHOT` publishes
   both `27.02-*` and `main-*` from one build until `release/27.02` exists.

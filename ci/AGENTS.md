@@ -7,7 +7,7 @@ as part of an image update.
 ## Configuration Ownership
 
 - `toolchains.json`: CUDA requirements keyed by the POM's major.minor version.
-  Update the target release entry only. Change `default` deliberately for future
+  Update the target release entry only. Change `main` deliberately for future
   main versions; do not overwrite it with an older release's requirements.
   Preserve other release entries so release-to-main merges retain their pins.
 - `Dockerfile`: branch-local image recipe, including CMake and compiler defaults.
@@ -25,7 +25,7 @@ as part of an image update.
   that POM version's `YY.MM-*` tags to the same verified digest, without rebuilding.
   Once the branch exists, only `release/YY.MM` may refresh `YY.MM-*`.
   A release branch must match the POM version and have explicit toolchain pins.
-  Main alone may use the configuration's default when its version entry is absent.
+  Main alone may use the configuration's `main` entry when its version entry is absent.
   Check release ownership after the build, under the shared release-line/CUDA-family/
   platform publisher lock. API uncertainty must not permit an alias. Use the shared
   action's immutable publication output, not a fresh read of a mutable main tag.
@@ -45,7 +45,7 @@ as part of an image update.
 Run Bash syntax checks, ShellCheck, actionlint on the affected workflows and
 `git diff --check`. Exercise `image-config.sh matrix` with the selected
 `CI_TOOLCHAINS` map and both `IMAGE_TAG_PREFIX=main` and the POM's major.minor
-prefix. Check main's missing-version default, release explicit-pin requirements,
+prefix. Check main's missing-version fallback, release explicit-pin requirements,
 branch/POM mismatch rejection and patch/snapshot tag reuse. A configuration change
 must affect the actual generated build arguments, not only documentation.
 Exercise absent/existing release refs, API/schema failures, missing publication

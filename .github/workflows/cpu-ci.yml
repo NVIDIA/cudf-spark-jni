@@ -72,14 +72,16 @@ jobs:
           prefix=$line
           [[ "$BASE_BRANCH" != main ]] || prefix=main
           printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
+          key=$(jq -er --arg line "$line" --arg branch "$BASE_BRANCH" \
+            'if has($line) or $branch != "main" then $line else "main" end' ci/toolchains.json)
+          printf 'toolchain-key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: toolchains
         uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
         with:
           config: ci/toolchains.json
-          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
-          allow-default: ${{ github.base_ref == 'main' }}
+          version-key: ${{ steps.version.outputs.toolchain-key }}
       - name: Read the checked-out project's image catalog
         if: contains(fromJSON(steps.select.outputs.suites), 'jni-images')
         id: catalog

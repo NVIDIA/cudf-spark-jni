@@ -69,13 +69,15 @@ jobs:
           prefix=$line
           [[ "$SOURCE_BRANCH" != main ]] || prefix=main
           printf 'tag-prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
+          key=$(jq -er --arg line "$line" --arg branch "$SOURCE_BRANCH" \
+            'if has($line) or $branch != "main" then $line else "main" end' ci/toolchains.json)
+          printf 'toolchain-key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Resolve project toolchains
         id: toolchains
         uses: NVIDIA/spark-rapids-common/resolve-toolchain-config@main
         with:
           config: ci/toolchains.json
-          version-key: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
-          allow-default: ${{ github.ref == 'refs/heads/main' }}
+          version-key: ${{ steps.version.outputs.toolchain-key }}
       - name: Resolve image configurations
         id: catalog
         shell: bash
