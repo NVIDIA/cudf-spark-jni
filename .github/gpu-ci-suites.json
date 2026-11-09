@@ -8,8 +8,35 @@
     "jni": {
       "enabled": true,
       "comment": "Run CUDA 12 and CUDA 13 native/Java tests and fuzzing. To pause, set enabled to false and record the reason here.",
-      "paths": ["**"],
-      "exclude_paths": ["**/*.md"],
+      "paths": [
+        "src/",
+        "thirdparty/",
+        "patches/",
+        ".mvn/",
+        ".gitmodules",
+        "pom.xml",
+        "build/apply-patches",
+        "build/build-info",
+        "build/buildcpp.sh",
+        "build/env.sh",
+        "build/submodule-check",
+        "build/unapply-patches",
+        "ci/premerge-build.sh",
+        "ci/fuzz-test.sh",
+        "ci/check-cuda-dependencies.sh",
+        "ci/gha-image.py",
+        "ci/gha-premerge.sh",
+        "ci/gha-report.py",
+        "ci/settings-public.xml",
+        "ci/Dockerfile",
+        "ci/Dockerfile.dockerignore",
+        ".dockerignore",
+        "ci/toolchains.json",
+        "ci/image-config.py",
+        "ci/image-smoke.sh",
+        ".github/image-builds.json"
+      ],
+      "exclude_paths": ["**/*.md", ".mvn/**/*.md"],
       "jobs": ["gpu-test"]
     }
   }

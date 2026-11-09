@@ -18,7 +18,33 @@ home_dir=${RUNNER_TEMP:?}/jni-home
 mkdir -p "$home_dir/.m2/repository" "$home_dir/.ccache" "$home_dir/.cache/cpm" target
 echo "JNI $CLASSIFIER: parallel_level=$parallel_level; Maven, ccache and CPM caches enabled"
 
-docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+finish() {
+  status=$?
+  printf '%s\n' "$status" > target/gha-exit-code.txt || :
+  # A timed-out Docker client can leave the container running on the GPU.
+  if [[ -s target/gha-container.cid ]]; then
+    timeout -k 5s 20s docker rm -f "$(< target/gha-container.cid)" \
+      > target/gha-cleanup.log 2>&1 || :
+  fi
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+printf 'starting container\n' > target/gha-phase.txt || :
+[[ "${JNI_WORKLOAD_DEADLINE:?Worker deadline required}" =~ ^[0-9]+$ ]]
+remaining=$((JNI_WORKLOAD_DEADLINE - $(date +%s)))
+if (( remaining <= 0 )); then
+  echo "Workload budget exhausted during setup; collecting available evidence."
+  exit 124
+fi
+echo "Workload budget remaining: $remaining seconds"
+
+# Variables in the command below are expanded inside the workload container.
+# shellcheck disable=SC2016
+timeout -k 30s "${remaining}s" docker run --rm --init --gpus all \
+  --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$(id -g)" \
   -v "$PWD:/workspace" -v "$home_dir:/home/ci" -v /etc/passwd:/etc/passwd:ro \
   -w /workspace -e HOME=/home/ci -e WORKSPACE=/workspace \
   -e "CUDA_VER=$CLASSIFIER" \
@@ -37,7 +63,25 @@ docker run --rm --gpus all --user "$(id -u):$(id -g)" \
     mkdir -p .mvn
     printf "\n-Dcuda.version=%s\n" "$CUDA_VER" >> .mvn/maven.config
     ccache --zero-stats
-    trap "ccache --show-stats || :" EXIT
+    finish_container() {
+      status=$?
+      timeout -k 5s 10s ccache --show-stats > target/gha-ccache.log 2>&1 || :
+      exit "$status"
+    }
+    trap finish_container EXIT
+
+    # Best-effort identity/version diagnostics, not a new readiness gate.
+    timeout -k 5s 10s nvidia-smi --query-gpu=name,uuid,driver_version --format=csv \
+      > target/gha-gpu.txt 2>&1 || :
+    cat target/gha-gpu.txt || :
+    timeout -k 5s 10s nvcc --version || :
+    timeout -k 5s 10s java -version || :
+
+    printf "build and Java/native tests\n" > target/gha-phase.txt || :
+    echo "=== JNI build and tests ==="
     ${sclCMD} "ci/premerge-build.sh"
+    printf "fuzz test\n" > target/gha-phase.txt || :
+    echo "=== JNI fuzz test ==="
     bash ci/fuzz-test.sh
+    printf "complete\n" > target/gha-phase.txt || :
   ' 2>&1 | tee target/gha-premerge.log

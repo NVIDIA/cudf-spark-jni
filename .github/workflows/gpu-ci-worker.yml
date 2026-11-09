@@ -61,6 +61,8 @@ jobs:
           SOURCE_SHA: ${{ inputs.source-sha }}
         run: |
           set -euo pipefail
+          # Include setup time in the workload budget; leave 30 minutes for evidence/caches.
+          echo "JNI_WORKLOAD_DEADLINE=$(( $(date +%s) + 270 * 60 ))" >> "$GITHUB_ENV"
           [[ "$SOURCE_REF" == refs/heads/main || "$SOURCE_REF" =~ ^refs/heads/pull-request/[0-9]+$ ]]
           [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
           [[ "$CLASSIFIER" == cuda12 || "$CLASSIFIER" == cuda13 ]]
@@ -99,17 +101,20 @@ jobs:
       # recipe-incompatible images build locally; auth/network errors fail closed.
       - name: Select compatible public toolchain
         id: image
+        timeout-minutes: 5
         run: python3 ci/gha-image.py "$CLASSIFIER" "$BASE_BRANCH"
       - name: Set up Docker Buildx
         if: steps.image.outputs.reference == ''
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build and smoke-test unpublished PR toolchain
         if: steps.image.outputs.reference == ''
+        timeout-minutes: 240
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
           config: ${{ steps.image.outputs.config }}
       - name: Pin workload image
         id: toolchain
+        timeout-minutes: 15
         env:
           REFERENCE: ${{ steps.image.outputs.reference }}
           CONFIG: ${{ steps.image.outputs.config }}
@@ -127,6 +132,7 @@ jobs:
         id: maven-cache
         uses: actions/cache/restore@v6.1.0
         continue-on-error: true
+        timeout-minutes: 5
         env:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
         with:
@@ -140,6 +146,7 @@ jobs:
         id: native-cache
         uses: actions/cache/restore@v6.1.0
         continue-on-error: true
+        timeout-minutes: 5
         env:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
         with:
@@ -155,6 +162,43 @@ jobs:
         env:
           JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
         run: bash ci/gha-premerge.sh
+      # Collect evidence before optional cache uploads. Diagnostics must never
+      # replace the workload result; cancellation/runner loss may prevent collection.
+      - name: Upload JNI test evidence
+        id: evidence
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: jni-${{ env.CLASSIFIER }}-${{ github.run_id }}
+          path: |
+            target/gha-*.log
+            target/gha-*.txt
+            target/surefire-reports/
+            target/**/Testing/Temporary/*.log
+            target/**/CMakeFiles/CMakeConfigureLog.yaml
+            target/**/CMakeFiles/CMakeError.log
+            target/**/CMakeFiles/CMakeOutput.log
+            target/**/hs_err_pid*.log
+            hs_err_pid*.log
+            monte.rmm.log
+            monte.state.log
+          if-no-files-found: warn
+          retention-days: 2
+      - name: JNI result and diagnostics
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          IMAGE_ID: ${{ steps.toolchain.outputs.image }}
+          IMAGE_RECIPE: ${{ steps.image.outputs.recipe }}
+          MAVEN_CACHE_KEY: ${{ steps.maven-cache.outputs.cache-matched-key }}
+          NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
+          EVIDENCE_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: python3 ci/gha-report.py
       # A failed test does not invalidate compiler/dependency caches. Save partial
       # useful work on this branch too, without masking failures or cancellation.
       - name: Save Maven dependencies
@@ -163,6 +207,7 @@ jobs:
           steps.maven-cache.outputs.cache-primary-key != '' && steps.maven-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         continue-on-error: true
+        timeout-minutes: 5
         with:
           path: ${{ runner.temp }}/jni-home/.m2/repository
           key: ${{ steps.maven-cache.outputs.cache-primary-key }}
@@ -172,21 +217,9 @@ jobs:
           steps.native-cache.outputs.cache-primary-key != '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         continue-on-error: true
+        timeout-minutes: 5
         with:
           path: |
             ${{ runner.temp }}/jni-home/.ccache
             ${{ runner.temp }}/jni-home/.cache/cpm
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
-      - name: Upload JNI test evidence
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: jni-${{ env.CLASSIFIER }}-${{ github.run_id }}
-          path: |
-            target/gha-premerge.log
-            target/surefire-reports/
-            target/**/Testing/Temporary/*.log
-            target/**/hs_err_pid*.log
-            hs_err_pid*.log
-          if-no-files-found: warn
-          retention-days: 2
