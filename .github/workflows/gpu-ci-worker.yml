@@ -4,11 +4,8 @@
 name: GPU CI worker
 run-name: ${{ inputs.request-id }}
 
-# Validation only: register this new dispatch workflow before its first merge.
-# Remove the copied-PR push trigger and registration job after registration.
+# Dispatch only. No pull_request registration trigger that leaves skipped checks.
 on:
-  push:
-    branches: ['pull-request/5399']
   workflow_dispatch:
     inputs:
       request-id:
@@ -39,24 +36,16 @@ permissions:
   pull-requests: read
 
 jobs:
-  register:
-    name: Register new GPU worker workflow
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions: {}
-    timeout-minutes: 1
-    steps:
-      - run: echo 'Registering workflow_dispatch; no source checkout or GPU allocation.'
   worker:
     name: worker
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'NVIDIA/cudf-spark-jni'
-    runs-on: ${{ fromJSON(inputs.runner || '"ubuntu-latest"') }}
+    if: github.repository == 'NVIDIA/cudf-spark-jni'
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 300
     env:
       TZ: UTC
       CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
-      CLASSIFIER: ${{ fromJSON(inputs.workload || '{}').classifier }}
-      BASE_BRANCH: ${{ fromJSON(inputs.workload || '{}').base-branch }}
+      CLASSIFIER: ${{ fromJSON(inputs.workload).classifier }}
+      BASE_BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
     steps:
       - name: Check coordinator and approved source
         uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
