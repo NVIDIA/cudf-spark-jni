@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,27 @@ public class Hash {
    * @return the new ColumnVector of 32-bit values representing each row's hash value.
    */
   public static ColumnVector murmurHash32(int seed, ColumnView columns[]) {
+    return new ColumnVector(murmurHash32(seed, murmurHashColumnViews(columns)));
+  }
+
+  /**
+   * Compute pmod of each signed Spark Murmur3 row hash without allocating the hash column.
+   * Input normalization and supported types are the same as for murmurHash32.
+   *
+   * @param seed initial hash seed (42 for Spark SQL)
+   * @param numPartitions positive partition count
+   * @param columns input columns with the same number of rows
+   * @return a non-nullable INT32 partition map
+   * @throws IllegalArgumentException if numPartitions is nonpositive or columns is empty
+   */
+  public static ColumnVector murmurHash32Pmod(int seed, int numPartitions, ColumnView[] columns) {
+    if (numPartitions <= 0) {
+      throw new IllegalArgumentException("Number of partitions must be positive");
+    }
+    return new ColumnVector(murmurHash32Pmod(seed, numPartitions, murmurHashColumnViews(columns)));
+  }
+
+  private static long[] murmurHashColumnViews(ColumnView[] columns) {
     if (columns.length < 1) {
       throw new IllegalArgumentException("Murmur3 hashing requires at least 1 column of input");
     }
@@ -54,7 +75,7 @@ public class Hash {
       assert !columns[i].getType().isDurationType() : "Unsupported column type Duration";
       columnViews[i] = columns[i].getNativeView(); 
     }
-    return new ColumnVector(murmurHash32(seed, columnViews));
+    return columnViews;
   }
 
   public static ColumnVector murmurHash32(ColumnView columns[]) {
@@ -176,6 +197,9 @@ public class Hash {
   private static native int getMaxStackDepth();
 
   private static native long murmurHash32(int seed, long[] viewHandles) throws CudfException;
+
+  private static native long murmurHash32Pmod(int seed, int numPartitions, long[] viewHandles)
+      throws CudfException;
   
   private static native long xxhash64(long seed, long[] viewHandles) throws CudfException;
 
