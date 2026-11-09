@@ -161,33 +161,24 @@ jobs:
         id: tests
         env:
           JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
+          # Read-only job token, scoped to this guarded worker step, never a PAT.
+          GITHUB_DOWNLOAD_TOKEN: ${{ github.token }}
         run: bash ci/gha-premerge.sh
       # Collect evidence before optional cache uploads. Diagnostics must never
       # replace the workload result; cancellation/runner loss may prevent collection.
       - name: Upload JNI test evidence
         id: evidence
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.tests.outputs.publish-safe == 'true' }}
         continue-on-error: true
         timeout-minutes: 5
         uses: actions/upload-artifact@v7.0.2
         with:
           name: jni-${{ env.CLASSIFIER }}-${{ github.run_id }}
-          path: |
-            target/gha-*.log
-            target/gha-*.txt
-            target/surefire-reports/
-            target/**/Testing/Temporary/*.log
-            target/**/CMakeFiles/CMakeConfigureLog.yaml
-            target/**/CMakeFiles/CMakeError.log
-            target/**/CMakeFiles/CMakeOutput.log
-            target/**/hs_err_pid*.log
-            hs_err_pid*.log
-            monte.rmm.log
-            monte.state.log
+          path: target/gha-evidence/
           if-no-files-found: warn
           retention-days: 2
       - name: JNI result and diagnostics
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.tests.outputs.publish-safe == 'true' }}
         continue-on-error: true
         timeout-minutes: 2
         env:
@@ -198,12 +189,13 @@ jobs:
           MAVEN_CACHE_KEY: ${{ steps.maven-cache.outputs.cache-matched-key }}
           NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
           EVIDENCE_URL: ${{ steps.evidence.outputs.artifact-url }}
-        run: python3 ci/gha-report.py
+        working-directory: target/gha-evidence
+        run: python3 "$GITHUB_WORKSPACE/ci/gha-report.py"
       # A failed test does not invalidate compiler/dependency caches. Save partial
       # useful work on this branch too, without masking failures or cancellation.
       - name: Save Maven dependencies
         if: >-
-          !cancelled() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure') &&
+          !cancelled() && steps.tests.outputs.publish-safe == 'true' &&
           steps.maven-cache.outputs.cache-primary-key != '' && steps.maven-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         continue-on-error: true
@@ -213,7 +205,7 @@ jobs:
           key: ${{ steps.maven-cache.outputs.cache-primary-key }}
       - name: Save native compilation and dependency sources
         if: >-
-          !cancelled() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure') &&
+          !cancelled() && steps.tests.outputs.publish-safe == 'true' &&
           steps.native-cache.outputs.cache-primary-key != '' && steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         continue-on-error: true

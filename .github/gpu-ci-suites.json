@@ -26,6 +26,7 @@
         "ci/check-cuda-dependencies.sh",
         "ci/gha-image.py",
         "ci/gha-premerge.sh",
+        "ci/gha-download-auth.py",
         "ci/gha-report.py",
         "ci/settings-public.xml",
         "ci/Dockerfile",

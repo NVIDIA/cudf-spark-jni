@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -71,6 +71,14 @@ fi
 
 source "$PROJECT_BUILD_DIR/buildcpp-env.sh"
 
+# CMake's libcurl does not read .curlrc or inherit these environment variables.
+# Opt in only when supplied, preserving existing libcudf/sparkjni cache settings.
+cmake_netrc_args=()
+if [[ -n "${CMAKE_NETRC:-}" || -n "${CMAKE_NETRC_FILE:-}" ]]; then
+  cmake_netrc_args=("-DCMAKE_NETRC=${CMAKE_NETRC:-IGNORED}"
+                    "-DCMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}")
+fi
+# Keep the existing libcudfjni defaults for callers without CI credential setup.
 CMAKE_NETRC=${CMAKE_NETRC:-IGNORED}
 CMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}
 
@@ -113,6 +121,7 @@ if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.tx
     -DCMAKE_BUILD_TYPE="$CUDF_BUILD_TYPE" \
     -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
     -DCMAKE_INSTALL_PREFIX="$LIBCUDF_INSTALL_PATH" \
+    "${cmake_netrc_args[@]}" \
     -DCUDF_DEPENDENCY_PIN_MODE="$LIBCUDF_DEPENDENCY_MODE" \
     -DCUDA_STATIC_CUFILE=ON \
     -DCUDA_STATIC_RUNTIME=ON \
@@ -172,6 +181,7 @@ CUDF_ROOT="$CUDF_PATH" \
     -DBUILD_BENCHMARKS="$BUILD_BENCHMARKS" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
     -DBUILD_FAULTINJ="$BUILD_FAULTINJ" \
+    "${cmake_netrc_args[@]}" \
     -DBUILD_PROFILER="$BUILD_PROFILER" \
     -DBUILD_TESTS="$BUILD_TESTS" \
     -DCUDF_DEPENDENCY_PIN_MODE=pinned \

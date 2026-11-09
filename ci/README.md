@@ -173,6 +173,21 @@ recipe-verification and smoke-test failures remain failures.
 ## GPU Premerge
 
 `GPU CI` adds CUDA 12/13 amd64 native/Java tests and fuzzing alongside Blossom.
+The guarded GPU worker supplies its read-only job token in a temporary,
+GitHub-only netrc mounted into the build container. CMake uses `OPTIONAL` netrc
+authentication; the token is not passed in the container environment or cached.
+Console output and uploaded diagnostics are filtered for download credentials.
+If container cleanup or filtering cannot be confirmed, evidence/cache uploads
+are withheld without replacing the workload's exit status. Authentication is an
+outage mitigation, not a guarantee of successful dependency downloads.
+
+Other callers keep their current authentication defaults. To use a CI-prepared
+netrc for all three native configure steps, export `CMAKE_NETRC=OPTIONAL` and
+`CMAKE_NETRC_FILE=/path/to/netrc` before invoking the existing build script or Maven.
+The caller owns that file's permissions, lifetime and log redaction. No file is
+created or deleted by `build/buildcpp.sh`; existing local and Blossom entry points
+remain supported, without a coordinated pipeline rollout.
+
 For PRs targeting main or `release/YY.MM`, approve the exact head with
 `/ok to test <full-head-SHA>`.
 The bot enforces that SHA for untrusted changes; for trusted contributors its
