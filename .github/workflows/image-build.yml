@@ -36,9 +36,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Retain only the latest pending refresh for each branch.
-  group: image-build-${{ github.ref }}
+  # All branches share the package with image-cleanup.yml; retain queued publishes.
+  group: jni-image-maintenance
   cancel-in-progress: false
+  queue: max
 
 jobs:
   configure:
@@ -52,7 +53,7 @@ jobs:
     outputs:
       images: ${{ steps.catalog.outputs.images }}
       manifests: ${{ steps.catalog.outputs.manifests }}
-      release-line: ${{ fromJSON(steps.version.outputs.metadata).release-line }}
+      release-line: ${{ fromJSON(steps.version.outputs.metadata || '{}').release-line }}
     steps:
       - name: Checkout image catalog
         uses: NVIDIA/spark-rapids-common/checkout@main
@@ -86,9 +87,11 @@ jobs:
         shell: bash
         env:
           CI_TOOLCHAINS: ${{ steps.toolchains.outputs.toolchains }}
-          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata).tag-prefix }}
+          # Preserve the original setup error if version metadata was not produced.
+          IMAGE_TAG_PREFIX: ${{ fromJSON(steps.version.outputs.metadata || '{}').tag-prefix }}
         run: |
           set -euo pipefail
+          : "${IMAGE_TAG_PREFIX:?Missing image tag prefix from version metadata}"
           images=$(bash ci/image-config.sh matrix)
           printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
           manifests=$(jq -c '[.[] | {tag: ."manifest-tag", toolchain}] | unique' <<< "$images")
@@ -275,10 +278,14 @@ jobs:
           jq -e '[.manifests[] | select(.platform.os != "unknown") |
             (.platform.os + "/" + .platform.architecture)] | sort ==
             ["linux/amd64", "linux/arm64"]' manifest.json
-          docker buildx imagetools create --tag "$image:$MANIFEST_TAG" \
+          # Keep a disposable tag after moving aliases advance so cleanup can retire this index.
+          candidate="$image:build-${MANIFEST_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --tag "$candidate" \
             --metadata-file manifest-metadata.json "${sources[@]}"
           digest=$(jq -er '."containerimage.descriptor".digest |
             select(test("^sha256:[0-9a-f]{64}$"))' manifest-metadata.json)
+          docker buildx imagetools create --prefer-index=false \
+            --tag "$image:$MANIFEST_TAG" "$image@$digest"
           printf 'image=%s\nreference=%s@%s\n' "$image" "$image" "$digest" >> "$GITHUB_OUTPUT"
           printf 'Published %s:%s\nDigest: %s\nPlatforms: linux/amd64, linux/arm64\n' \
             "$image" "$MANIFEST_TAG" "$digest" | tee -a "$GITHUB_STEP_SUMMARY"

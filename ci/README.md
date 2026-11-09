@@ -29,9 +29,10 @@ or use emulation. Missing, duplicate, stale-source or mismatched-recipe records
 fail publication for that CUDA version; a failed CUDA family does not prevent the
 other complete pair from publishing. Caches remain architecture-specific.
 
-Publisher runs are serialized per branch. An active run finishes; only the latest
-pending refresh for that branch is retained. A second, shared lock serializes main
-and its matching release publisher per release line, CUDA family and platform.
+Publisher runs and cleanup share one package-wide lock across main and release
+branches. An active run finishes while pending runs queue; each publisher still
+builds up to four images in parallel. Separate locks serialize main and its
+matching release publisher per release line, CUDA family and platform.
 The combined manifest has a separate release-line/CUDA-family lock to protect
 its version aliases across main and release publishers.
 Publication builds fresh, checks anonymous pulls and smoke tests, then promotes the
@@ -40,6 +41,11 @@ that lock; only a confirmed absent branch permits its version alias. API or
 publication-output errors fail closed. A release publisher cannot be overwritten
 by an already-running main publisher during branch-out. Initial GHCR package
 visibility may need to be made public before publication succeeds.
+
+Daily cleanup retires build-only versions and unreferenced untagged manifests
+older than seven days, capped at 20 versions per run. Live main/release aliases
+and their dependencies remain protected. Manual cleanup defaults to dry-run;
+drain older publishers and inspect a dry-run before the first scheduled deletion.
 
 ## Tags And Compatibility
 
