@@ -12,43 +12,9 @@ mode=${JNI_MODE:-test}
 [[ "$mode" == test || "$mode" == cache ]]
 gpu_args=()
 if [[ "$mode" == test ]]; then gpu_args=(--gpus all); fi
-cpu_limit=$(nproc)
-memory_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
-[[ "$cpu_limit" =~ ^[1-9][0-9]*$ && "$memory_kb" =~ ^[0-9]+$ ]]
-# ARC runners may see host memory/CPUs but have a smaller cgroup allowance.
-# Keep 4 GiB per compiler and respect both cgroup v2 and v1 limits.
-if [[ -r /sys/fs/cgroup/cpu.max ]]; then
-  read -r quota period < /sys/fs/cgroup/cpu.max
-elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
-  quota=$(< /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
-  period=$(< /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-fi
-if [[ "${quota:-}" =~ ^[0-9]+$ && "${period:-}" =~ ^[1-9][0-9]*$ ]]; then
-  quota_cpus=$(( (quota + period - 1) / period ))
-  if (( quota_cpus > 0 && quota_cpus < cpu_limit )); then cpu_limit=$quota_cpus; fi
-fi
-if [[ -r /sys/fs/cgroup/memory.max && -r /sys/fs/cgroup/memory.current ]]; then
-  memory_limit=$(< /sys/fs/cgroup/memory.max)
-  memory_used=$(< /sys/fs/cgroup/memory.current)
-elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes &&
-        -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then
-  memory_limit=$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)
-  memory_used=$(< /sys/fs/cgroup/memory/memory.usage_in_bytes)
-fi
-if [[ "${memory_limit:-}" =~ ^[0-9]+$ && "${memory_used:-}" =~ ^[0-9]+$ ]]; then
-  remaining_kb=$(( memory_limit / 1024 - memory_used / 1024 ))
-  if (( remaining_kb < memory_kb )); then memory_kb=$remaining_kb; fi
-fi
-memory_jobs=$(( memory_kb / 4194304 ))
-if (( memory_jobs < 1 )); then memory_jobs=1; fi
-parallel_level=${PARALLEL_LEVEL:-$cpu_limit}
-[[ "$parallel_level" =~ ^[1-9][0-9]*$ ]]
-if (( parallel_level > cpu_limit )); then parallel_level=$cpu_limit; fi
-if (( parallel_level > memory_jobs )); then parallel_level=$memory_jobs; fi
-echo "Build resources: cpus=$cpu_limit available_memory_kib=$memory_kb parallel_level=$parallel_level"
 home_dir=${RUNNER_TEMP:?}/jni-home
 mkdir -p "$home_dir/.m2/repository" "$home_dir/.ccache" "$home_dir/.cache/cpm" target
-echo "JNI $CLASSIFIER: parallel_level=$parallel_level; Maven, ccache and CPM caches enabled"
+echo "JNI $CLASSIFIER: mode=$mode; Maven, ccache and CPM caches enabled"
 auth_dir=
 container_started=false
 
@@ -120,7 +86,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   -e "JNI_MODE=$mode" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
   -e MVN_SETTINGS=/workspace/ci/settings-public.xml \
-  -e "PARALLEL_LEVEL=$parallel_level" \
+  -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
   -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=10G \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
   -e CMAKE_C_COMPILER_LAUNCHER=ccache -e CMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -128,6 +94,42 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   --entrypoint /bin/bash "$JNI_IMAGE" -c '
     set -eo pipefail
     source build/env.sh
+    # Size compilation where it runs, not from the Docker client cgroup.
+    # Keep 4 GiB per compiler and honor visible cgroup v2/v1 limits.
+    cpu_limit=$(nproc)
+    memory_kb=$(awk "/MemAvailable:/ {print \$2}" /proc/meminfo)
+    [[ "$cpu_limit" =~ ^[1-9][0-9]*$ && "$memory_kb" =~ ^[0-9]+$ ]]
+    if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+      read -r quota period < /sys/fs/cgroup/cpu.max
+    elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
+      quota=$(< /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+      period=$(< /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+    fi
+    if [[ "${quota:-}" =~ ^[0-9]+$ && "${period:-}" =~ ^[1-9][0-9]*$ ]]; then
+      quota_cpus=$(( (quota + period - 1) / period ))
+      if (( quota_cpus > 0 && quota_cpus < cpu_limit )); then cpu_limit=$quota_cpus; fi
+    fi
+    if [[ -r /sys/fs/cgroup/memory.max && -r /sys/fs/cgroup/memory.current ]]; then
+      memory_limit=$(< /sys/fs/cgroup/memory.max)
+      memory_used=$(< /sys/fs/cgroup/memory.current)
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes &&
+            -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then
+      memory_limit=$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)
+      memory_used=$(< /sys/fs/cgroup/memory/memory.usage_in_bytes)
+    fi
+    if [[ "${memory_limit:-}" =~ ^[0-9]+$ && "${memory_used:-}" =~ ^[0-9]+$ ]]; then
+      remaining_kb=$(( memory_limit / 1024 - memory_used / 1024 ))
+      if (( remaining_kb < memory_kb )); then memory_kb=$remaining_kb; fi
+    fi
+    memory_jobs=$(( memory_kb / 4194304 ))
+    if (( memory_jobs < 1 )); then memory_jobs=1; fi
+    parallel_level=${PARALLEL_LEVEL:-$cpu_limit}
+    [[ "$parallel_level" =~ ^[1-9][0-9]*$ ]]
+    if (( parallel_level > cpu_limit )); then parallel_level=$cpu_limit; fi
+    if (( parallel_level > memory_jobs )); then parallel_level=$memory_jobs; fi
+    echo "Build resources: requested=${PARALLEL_LEVEL:-auto} cpus=$cpu_limit available_memory_kib=$memory_kb parallel_level=$parallel_level"
+    export PARALLEL_LEVEL=$parallel_level
+
     # Maven user properties must reach verify and every help:evaluate invocation.
     # MAVEN_OPTS system properties do not consistently override POM interpolation.
     mkdir -p .mvn
