@@ -6,10 +6,15 @@ as part of an image update.
 
 For GPU CI changes, keep `.github/gpu-ci-suites.json`, its workflow job IDs and
 the result gate aligned. Preserve explicit bot approval for copied PRs and the trusted
-main-only cache baseline. Keep existing Blossom/Sonar coverage until explicitly
-retired; registry failures and real workload failures must not cause GPU retries.
+main-scoped cache baseline from trusted post-merge main/release sources. Keep
+existing Blossom/Sonar coverage until explicitly retired; registry failures and
+real workload failures must not cause GPU retries.
 Recheck the copied head and actual PR target; only main targets allow main-image
 fallback. Do not claim the bot enforces a supplied SHA for trusted contributors.
+Keep cache preparation build-only and independent of the required GPU gate.
+Preserve PR source guards; only the main cache workflow may warm trusted release
+sources into main's cache scope. Cache keys use the built source, not the workflow
+SHA; never promote a PR's cache into the trusted baseline.
 
 ## Configuration Ownership
 

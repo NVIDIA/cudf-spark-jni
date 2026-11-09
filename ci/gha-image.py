@@ -86,15 +86,16 @@ def main():
     classifier = sys.argv[1]
     branch = sys.argv[2]
     # Reuse branch/POM and explicit release-pin validation from the publisher.
-    subprocess.check_call([
+    version = json.loads(subprocess.check_output([
         sys.executable, "ci/image-config.py", "version", "--branch", branch,
-    ])
+    ], text=True))
     selected = json.loads(subprocess.check_output([
         sys.executable, "ci/image-config.py", "select", "--classifiers", classifier,
     ] + (["--allow-main-fallback"] if branch == "main" else []), text=True))[classifier]
     reference = resolve(selected)
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         output.write(f"reference={reference}\nrecipe={selected['version']}\n")
+        output.write(f"release-line={version['release-line']}\n")
         output.write("config=" + json.dumps(selected["config"], separators=(",", ":")) + "\n")
 
 

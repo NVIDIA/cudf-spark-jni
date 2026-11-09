@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: GPU CI worker
+name: JNI CI worker
 run-name: ${{ inputs.request-id }}
 
 # Dispatch only. No pull_request registration trigger that leaves skipped checks.
@@ -46,6 +46,7 @@ jobs:
       CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
       CLASSIFIER: ${{ fromJSON(inputs.workload).classifier }}
       BASE_BRANCH: ${{ fromJSON(inputs.workload).base-branch }}
+      JNI_MODE: ${{ fromJSON(inputs.workload).mode || 'test' }}
     steps:
       - name: Check coordinator and approved source
         uses: NVIDIA/spark-rapids-common/runner-queue-fallback/guard@main
@@ -63,21 +64,39 @@ jobs:
           set -euo pipefail
           # Include setup time in the workload budget; leave 30 minutes for evidence/caches.
           echo "JNI_WORKLOAD_DEADLINE=$(( $(date +%s) + 270 * 60 ))" >> "$GITHUB_ENV"
-          [[ "$SOURCE_REF" == refs/heads/main || "$SOURCE_REF" =~ ^refs/heads/pull-request/[0-9]+$ ]]
-          [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
+          if [[ "$JNI_MODE" == cache ]]; then
+            # Trusted post-merge sources warm main's cache scope. PR code must
+            # never reach this path; the parent workflow is verified below.
+            [[ "$GITHUB_REF" == refs/heads/main ]]
+            [[ "$SOURCE_REF" == "refs/heads/$BASE_BRANCH" ]]
+          else
+            [[ "$JNI_MODE" == test ]]
+            [[ "$SOURCE_REF" =~ ^refs/heads/pull-request/[0-9]+$ ]]
+            [[ "$GITHUB_REF" == "$SOURCE_REF" && "$GITHUB_SHA" == "$SOURCE_SHA" ]]
+          fi
           [[ "$CLASSIFIER" == cuda12 || "$CLASSIFIER" == cuda13 ]]
       # A PR can be retargeted while its worker is queued. Never let that silently
       # change release pinning or reuse a main-policy result for a release PR.
-      - name: Recheck PR target before selecting the toolchain
+      - name: Verify workload source and target
         uses: actions/github-script@v9
+        env:
+          PARENT_RUN_ID: ${{ inputs.parent-run-id }}
         with:
           script: |
             const base = process.env.BASE_BRANCH;
             if (base !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(base)) {
               throw new Error('Unsupported JNI target branch');
             }
-            if (context.ref === 'refs/heads/main') {
-              if (base !== 'main') throw new Error('Main cache builds must target main');
+            if (process.env.JNI_MODE === 'cache') {
+              const {data: parent} = await github.rest.actions.getWorkflowRun({
+                ...context.repo, run_id: Number(process.env.PARENT_RUN_ID),
+              });
+              if (context.ref !== 'refs/heads/main' || parent.head_branch !== 'main' ||
+                  parent.path !== '.github/workflows/gpu-cache.yml' ||
+                  parent.head_sha !== context.sha ||
+                  !['push', 'workflow_dispatch'].includes(parent.event)) {
+                throw new Error('Only the main post-merge cache workflow may prepare shared caches');
+              }
             } else {
               const number = Number(context.ref.split('/').at(-1));
               const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
@@ -137,11 +156,12 @@ jobs:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
         with:
           path: ${{ runner.temp }}/jni-home/.m2/repository
-          # Refresh after each commit; avoid an immutable partial dependency cache.
-          key: jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-${{ hashFiles('pom.xml') }}-${{ github.sha }}
+          # Save a fresh snapshot even on reruns; a partial cache is immutable.
+          # Prefer this branch's latest dependencies, then the trusted main baseline.
+          key: jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pom.xml') }}-${{ inputs.source-sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-${{ hashFiles('pom.xml') }}-
-            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ env.CLASSIFIER }}-
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pom.xml') }}-
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore native compilation and dependency sources
         id: native-cache
         uses: actions/cache/restore@v6.1.0
@@ -154,10 +174,11 @@ jobs:
             ${{ runner.temp }}/jni-home/.ccache
             ${{ runner.temp }}/jni-home/.cache/cpm
           # Main owns the trusted baseline; PRs only save their branch's caches.
-          # Recipe/architecture isolated; ccache checks source and compiler inputs.
-          key: jni-native-v1-${{ runner.arch }}-${{ steps.image.outputs.recipe }}-${{ github.sha }}
-          restore-keys: jni-native-v1-${{ runner.arch }}-${{ steps.image.outputs.recipe }}-
-      - name: Build, test and fuzz JNI
+          # Main/release checkouts sharing a release line and recipe share this
+          # RAPIDS-target baseline. Ccache also checks source/compiler/flags.
+          key: jni-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.release-line }}-${{ env.CLASSIFIER }}-${{ steps.image.outputs.recipe }}-${{ inputs.source-sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: jni-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.release-line }}-${{ env.CLASSIFIER }}-${{ steps.image.outputs.recipe }}-
+      - name: Run JNI workload
         id: tests
         env:
           JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
@@ -183,6 +204,7 @@ jobs:
         timeout-minutes: 2
         env:
           TEST_OUTCOME: ${{ steps.tests.outcome }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
           IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
           IMAGE_ID: ${{ steps.toolchain.outputs.image }}
           IMAGE_RECIPE: ${{ steps.image.outputs.recipe }}

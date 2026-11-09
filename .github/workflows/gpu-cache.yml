@@ -1,0 +1,216 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU cache preparation
+
+# Build-only warming is independent of the required PR GPU gate. Release sources
+# run in main's cache scope so copied PR branches can restore their baseline.
+on:
+  push:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+  workflow_dispatch:
+    inputs:
+      source-branch:
+        description: 'Source branch: main or release/YY.MM. Run this workflow on main.'
+        default: main
+        required: true
+        type: string
+      source-sha:
+        description: 'Optional current source SHA; release pushes pin this automatically.'
+        required: false
+        type: string
+      before:
+        description: 'Optional previous source SHA for changed-path selection.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Forwarders and main-context builds must not cancel each other.
+  group: gpu-cache-${{ github.ref }}-${{ inputs.source-branch || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  forward:
+    name: Forward release source to main
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      github.event_name == 'push' && github.ref != 'refs/heads/main' &&
+      !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const match = /^refs\/heads\/(release\/[0-9]{2}\.[0-9]{2})$/.exec(context.ref);
+            if (!match) throw new Error('Expected a release/YY.MM push');
+            const {data: current} = await github.rest.repos.getCommit({
+              ...context.repo, ref: context.ref,
+            });
+            if (current.sha !== context.sha) {
+              core.notice('Source advanced; skip obsolete cache preparation');
+              return;
+            }
+            // Dispatch once. A timeout may mean the request was accepted.
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'gpu-cache.yml', ref: 'main',
+              inputs: {
+                'source-branch': match[1],
+                'source-sha': context.sha,
+                before: context.payload.before,
+              },
+            });
+
+  select:
+    name: Select trusted cache source
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.ref == 'refs/heads/main' && !github.event.deleted))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source-ref: ${{ steps.source.outputs.source-ref }}
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      source-branch: ${{ steps.source.outputs.source-branch }}
+      suites: ${{ steps.suites.outputs.suites || '[]' }}
+    steps:
+      - name: Resolve current trusted branch source
+        id: source
+        uses: actions/github-script@v9
+        env:
+          SOURCE_BRANCH: ${{ inputs.source-branch }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+          SOURCE_BEFORE: ${{ inputs.before }}
+        with:
+          script: |
+            if (context.ref !== 'refs/heads/main') {
+              throw new Error('Cache preparation must be dispatched on main');
+            }
+            const manual = context.eventName === 'workflow_dispatch';
+            const branch = manual ? process.env.SOURCE_BRANCH : 'main';
+            const requested = manual ? process.env.SOURCE_SHA : context.sha;
+            const before = manual ? process.env.SOURCE_BEFORE : context.payload.before;
+            if (!/^(main|release\/[0-9]{2}\.[0-9]{2})$/.test(branch)) {
+              throw new Error('Source must be main or release/YY.MM in this repository');
+            }
+            if ((requested && !/^[a-f0-9]{40}$/.test(requested)) ||
+                (before && !/^[a-f0-9]{40}$/.test(before))) {
+              throw new Error('Source and previous revisions must be full lowercase commit SHAs');
+            }
+            const ref = `refs/heads/${branch}`;
+            const {data: current} = await github.rest.repos.getCommit({...context.repo, ref});
+            if (requested && requested !== current.sha) {
+              core.notice('Source advanced; skip obsolete cache preparation');
+              return;
+            }
+            core.setOutput('source-ref', ref);
+            core.setOutput('source-sha', current.sha);
+            core.setOutput('source-branch', branch);
+            core.setOutput('before', before || '');
+      - name: Checkout pinned build source
+        if: steps.source.outputs.source-sha != ''
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ steps.source.outputs.source-sha }}
+          persist-credentials: false
+      - name: Check cache preparation support on this source
+        if: steps.source.outputs.source-sha != ''
+        id: support
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('node:fs');
+            const required = [
+              '.github/gpu-ci-suites.json', 'ci/toolchains.json', 'ci/image-config.py',
+              'ci/gha-image.py', 'ci/gha-premerge.sh', 'ci/gha-download-auth.py',
+              'ci/gha-report.py', 'ci/settings-public.xml', 'ci/premerge-build.sh',
+            ];
+            if (required.some(path => !fs.existsSync(path)) ||
+                !fs.readFileSync('ci/premerge-build.sh', 'utf8').includes('--prepare-cache')) {
+              core.notice('Cache preparation skipped: this source needs the build-only cache workflow/helpers backported first');
+              return;
+            }
+            core.setOutput('ready', 'true');
+      - name: Validate source release and toolchain pins
+        if: steps.support.outputs.ready == 'true'
+        env:
+          SOURCE_BRANCH: ${{ steps.source.outputs.source-branch }}
+        run: python3 ci/image-config.py version --branch "$SOURCE_BRANCH"
+      - name: Checkout trusted suite selector
+        if: steps.support.outputs.ready == 'true'
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: main
+          path: .ci-common
+          persist-credentials: false
+      - name: Select enabled suites from source changes
+        if: steps.support.outputs.ready == 'true'
+        id: suites
+        uses: actions/github-script@v9
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source-sha }}
+          SOURCE_BEFORE: ${{ steps.source.outputs.before }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const {selectSuites} = require(`${process.env.GITHUB_WORKSPACE}/.ci-common/workflow-suite-selector`);
+            const path = '.github/gpu-ci-suites.json';
+            const catalog = JSON.parse(fs.readFileSync(path, 'utf8'));
+            // Manual seeding, new branches and incomplete diffs select all enabled suites.
+            let files = [{filename: path}];
+            const before = process.env.SOURCE_BEFORE;
+            if (before && !/^0+$/.test(before)) {
+              try {
+                const {data} = await github.rest.repos.compareCommitsWithBasehead({
+                  ...context.repo, basehead: `${before}...${process.env.SOURCE_SHA}`, per_page: 1,
+                });
+                if (['ahead', 'identical'].includes(data.status) && Array.isArray(data.files) && data.files.length < 300) {
+                  files = data.files;
+                } else core.warning('Incomplete/nonlinear diff: prepare all enabled suites');
+              } catch (error) {
+                core.warning(`Cannot determine changed files: prepare all enabled suites (${error.status || 'API error'})`);
+              }
+            }
+            // A warmer-only change seeds caches without selecting product GPU tests.
+            if (files.some(file => [file.filename, file.previous_filename].includes('.github/workflows/gpu-cache.yml'))) {
+              files.push({filename: path});
+            }
+            const suites = selectSuites(files, catalog);
+            core.setOutput('suites', JSON.stringify(suites));
+            core.info(`Cache preparation: ${suites.join(', ') || 'no enabled suites affected'}`);
+
+  prepare:
+    name: Prepare ${{ matrix.classifier }} caches
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.suites || '[]'), 'jni')
+    strategy:
+      fail-fast: false
+      matrix:
+        classifier: [cuda12, cuda13]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # No source execution in this write-token coordinator. Workers are read-only.
+      - name: Prepare caches with CPU queue fallback
+        uses: NVIDIA/spark-rapids-common/runner-queue-fallback@main
+        with:
+          workflow: gpu-ci-worker.yml
+          workflow-ref: main
+          source-ref: ${{ needs.select.outputs.source-ref }}
+          source-sha: ${{ needs.select.outputs.source-sha }}
+          workload: '{"classifier":"${{ matrix.classifier }}","base-branch":"${{ needs.select.outputs.source-branch }}","mode":"cache"}'
+          runner-type: cpu-amd64
+          queue-policy: standard
+          queue-timeout-minutes: '10'
+          execution-timeout-minutes: '300'

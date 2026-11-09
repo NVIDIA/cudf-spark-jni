@@ -205,8 +205,10 @@ the gate. Native/Java sources, build inputs, toolchain recipes and GPU CI script
 select the tests. The existing PR-title
 `[skip ci]` marker also skips GPU dispatch while reporting the gate.
 Keep existing required checks and Blossom/Sonar enabled during validation.
-The worker workflow and bot configuration
-must be present on main before dispatch-based validation can run.
+The bot must be enabled and the worker registered with Actions before its first
+dispatch. A first-PR pilot can register it with a temporary, scoped hosted job;
+remove that registration job before validation because the queue action requires
+exactly one worker job. No extra registration trigger remains in this workflow.
 Existing release branches also need this workflow, its scripts/catalogs and matching
 toolchain pins before their copied PRs can use it; merging only to main does not
 enable them. Do not retire their existing Blossom checks before that rollout.
@@ -218,6 +220,9 @@ label and pin its immutable digest; the arm64 image and attestation descriptors 
 not used by these workers. Registry/auth failures remain errors.
 Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
 Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
+Compiler parallelism uses available CPUs and memory, including cgroup limits,
+with 4 GiB per compiler. `PARALLEL_LEVEL` can lower this limit; there is no fixed
+18-job ceiling on larger runners.
 The parent resolves the PR's actual target, and the worker rechecks it after waiting
 for a runner. Release targets require matching POM/pins and versioned images; only
 main targets may use a recipe-compatible main image fallback.
@@ -226,15 +231,29 @@ is deducted from a 270-minute budget to reserve time for evidence and optional c
 uploads. This does not impose a single deadline across all setup steps; a setup hang
 can still exhaust the job budget. Jenkins retains its six-hour test budget.
 
-Main pushes and manual main runs warm Maven, ccache and CPM caches using the same
-worker. Documentation-only main pushes skip the worker using the same suite catalog;
-manual seeding and uncertain/truncated push diffs run all enabled suites.
-PRs can restore main's baseline and save branch-local updates. Native caches
-are isolated by architecture and recipe; no compiled library or test result is used
-as a substitute for validation. Optional cache failures do not turn build failures
-into success. Test output streams to the console. The parent summary links to each
+`GPU cache preparation` is a separate, non-required post-merge workflow for main
+and migrated `release/YY.MM` branches. CPU workers run
+`premerge-build.sh --prepare-cache`: the same native targets/options and Java
+test compilation, stopping at Maven `test-compile`, without tests or fuzzing.
+Its failure does not change the PR's GPU gate or the result of product tests.
+Documentation-only pushes skip warming; manual runs and uncertain/truncated push
+diffs prepare all enabled suites. Release pushes dispatch the main workflow with
+the pinned release source so caches are saved in main's scope, visible to copied
+PR branches. The workflow and compatible helpers must be merged on main and
+backported to supported releases before their automatic warming is available.
+
+PRs restore their latest matching cache first, then main's trusted baseline; they
+cannot read sibling PR caches or write main's cache. Maven can reuse dependencies
+across CUDA families. Native caches use the checkout's release line, architecture,
+CUDA family and toolchain recipe, not the branch name: main and a release with the
+same version/recipe can share a baseline. Ccache still checks source/compiler/flags;
+RAPIDS architecture targets keep entries reusable across GPU pools. Each run saves
+a fresh snapshot, including reruns that enrich an earlier partial cache. No cached
+test result replaces validation. Restore/upload errors remain best-effort.
+
+Test output streams to the console. The parent summary links to each
 worker; its `JNI result and diagnostics` step and job summary show the last phase,
-failed tests, CUDA/GPU/driver, pinned image, restored cache keys and ccache statistics,
+failed tests, CUDA/GPU/driver, pinned image, restored cache keys, timings and ccache statistics,
 plus a link to full reports. Failure excerpts are printed without requiring a download.
 The artifact includes Surefire, fuzz (`monte.rmm.log`, `monte.state.log`), CMake and JVM
 crash logs and is retained for two days. Collection is bounded and best-effort, before

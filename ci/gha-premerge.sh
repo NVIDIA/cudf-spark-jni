@@ -8,14 +8,44 @@ set -euo pipefail
 set +x
 [[ "${CLASSIFIER:?CUDA classifier required}" == cuda12 || "$CLASSIFIER" == cuda13 ]]
 [[ "${JNI_IMAGE:?Verified toolchain image required}" =~ ^sha256:[0-9a-f]{64}$ ]]
-parallel_level=${PARALLEL_LEVEL:-$(nproc)}
-[[ "$parallel_level" =~ ^[1-9][0-9]*$ ]]
-# Keep the existing premerge ceiling, with 4 GiB per compiler on smaller workers.
-if (( parallel_level > 18 )); then parallel_level=18; fi
-memory_jobs=$(awk '/MemAvailable:/ {n=int($2 / 4194304); print (n > 0 ? n : 1)}' /proc/meminfo)
-if [[ -n "$memory_jobs" ]] && (( parallel_level > memory_jobs )); then
-  parallel_level=$memory_jobs
+mode=${JNI_MODE:-test}
+[[ "$mode" == test || "$mode" == cache ]]
+gpu_args=()
+if [[ "$mode" == test ]]; then gpu_args=(--gpus all); fi
+cpu_limit=$(nproc)
+memory_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
+[[ "$cpu_limit" =~ ^[1-9][0-9]*$ && "$memory_kb" =~ ^[0-9]+$ ]]
+# ARC runners may see host memory/CPUs but have a smaller cgroup allowance.
+# Keep 4 GiB per compiler and respect both cgroup v2 and v1 limits.
+if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+  read -r quota period < /sys/fs/cgroup/cpu.max
+elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]]; then
+  quota=$(< /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+  period=$(< /sys/fs/cgroup/cpu/cpu.cfs_period_us)
 fi
+if [[ "${quota:-}" =~ ^[0-9]+$ && "${period:-}" =~ ^[1-9][0-9]*$ ]]; then
+  quota_cpus=$(( (quota + period - 1) / period ))
+  if (( quota_cpus > 0 && quota_cpus < cpu_limit )); then cpu_limit=$quota_cpus; fi
+fi
+if [[ -r /sys/fs/cgroup/memory.max && -r /sys/fs/cgroup/memory.current ]]; then
+  memory_limit=$(< /sys/fs/cgroup/memory.max)
+  memory_used=$(< /sys/fs/cgroup/memory.current)
+elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes &&
+        -r /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then
+  memory_limit=$(< /sys/fs/cgroup/memory/memory.limit_in_bytes)
+  memory_used=$(< /sys/fs/cgroup/memory/memory.usage_in_bytes)
+fi
+if [[ "${memory_limit:-}" =~ ^[0-9]+$ && "${memory_used:-}" =~ ^[0-9]+$ ]]; then
+  remaining_kb=$(( memory_limit / 1024 - memory_used / 1024 ))
+  if (( remaining_kb < memory_kb )); then memory_kb=$remaining_kb; fi
+fi
+memory_jobs=$(( memory_kb / 4194304 ))
+if (( memory_jobs < 1 )); then memory_jobs=1; fi
+parallel_level=${PARALLEL_LEVEL:-$cpu_limit}
+[[ "$parallel_level" =~ ^[1-9][0-9]*$ ]]
+if (( parallel_level > cpu_limit )); then parallel_level=$cpu_limit; fi
+if (( parallel_level > memory_jobs )); then parallel_level=$memory_jobs; fi
+echo "Build resources: cpus=$cpu_limit available_memory_kib=$memory_kb parallel_level=$parallel_level"
 home_dir=${RUNNER_TEMP:?}/jni-home
 mkdir -p "$home_dir/.m2/repository" "$home_dir/.ccache" "$home_dir/.cache/cpm" target
 echo "JNI $CLASSIFIER: parallel_level=$parallel_level; Maven, ccache and CPM caches enabled"
@@ -80,13 +110,14 @@ container_started=true
 set +e
 # Variables in the command below are expanded inside the workload container.
 # shellcheck disable=SC2016
-timeout -k 30s "${remaining}s" docker run --rm --init --gpus all \
+timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$(id -g)" \
   -v "$PWD:/workspace" -v "$home_dir:/home/ci" -v /etc/passwd:/etc/passwd:ro \
   -v "$auth_dir/netrc:/run/secrets/github.netrc:ro" \
   -w /workspace -e HOME=/home/ci -e WORKSPACE=/workspace \
   -e "CMAKE_NETRC=${CMAKE_NETRC:-OPTIONAL}" -e CMAKE_NETRC_FILE=/run/secrets/github.netrc \
   -e "CUDA_VER=$CLASSIFIER" \
+  -e "JNI_MODE=$mode" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
   -e MVN_SETTINGS=/workspace/ci/settings-public.xml \
   -e "PARALLEL_LEVEL=$parallel_level" \
@@ -104,24 +135,37 @@ timeout -k 30s "${remaining}s" docker run --rm --init --gpus all \
     ccache --zero-stats
     finish_container() {
       status=$?
+      printf "total_seconds=%s\n" "$SECONDS" >> target/gha-timing.txt || :
       timeout -k 5s 10s ccache --show-stats > target/gha-ccache.log 2>&1 || :
       exit "$status"
     }
     trap finish_container EXIT
 
     # Best-effort identity/version diagnostics, not a new readiness gate.
-    timeout -k 5s 10s nvidia-smi --query-gpu=name,uuid,driver_version --format=csv \
-      > target/gha-gpu.txt 2>&1 || :
-    cat target/gha-gpu.txt || :
+    if [[ "$JNI_MODE" == test ]]; then
+      timeout -k 5s 10s nvidia-smi --query-gpu=name,uuid,driver_version --format=csv \
+        > target/gha-gpu.txt 2>&1 || :
+      cat target/gha-gpu.txt || :
+    fi
     timeout -k 5s 10s nvcc --version || :
     timeout -k 5s 10s java -version || :
 
-    printf "build and Java/native tests\n" > target/gha-phase.txt || :
-    echo "=== JNI build and tests ==="
-    ${sclCMD} "ci/premerge-build.sh"
-    printf "fuzz test\n" > target/gha-phase.txt || :
-    echo "=== JNI fuzz test ==="
-    bash ci/fuzz-test.sh
+    if [[ "$JNI_MODE" == cache ]]; then
+      printf "build-only cache preparation\n" > target/gha-phase.txt || :
+      echo "=== JNI cache preparation (no tests) ==="
+      ${sclCMD} "ci/premerge-build.sh --prepare-cache"
+      printf "build_only_seconds=%s\n" "$SECONDS" > target/gha-timing.txt || :
+    else
+      printf "build and Java/native tests\n" > target/gha-phase.txt || :
+      echo "=== JNI build and tests ==="
+      ${sclCMD} "ci/premerge-build.sh"
+      printf "build_and_tests_seconds=%s\n" "$SECONDS" > target/gha-timing.txt || :
+      fuzz_start=$SECONDS
+      printf "fuzz test\n" > target/gha-phase.txt || :
+      echo "=== JNI fuzz test ==="
+      bash ci/fuzz-test.sh
+      printf "fuzz_seconds=%s\n" "$((SECONDS - fuzz_start))" >> target/gha-timing.txt || :
+    fi
     printf "complete\n" > target/gha-phase.txt || :
   ' 2>&1 | python3 ci/gha-download-auth.py "$auth_dir/netrc" | tee target/gha-premerge.log
 results=("${PIPESTATUS[@]}")

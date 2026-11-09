@@ -11,13 +11,10 @@ name: GPU CI
 # exclude_paths applies only inside each suite's paths; shared paths select all
 # enabled suites. Add future suites to the catalog, jobs and gate's needs together.
 # Keep the existing required checks until this additional gate is validated.
-# Main pushes warm a trusted baseline through the same build/test worker. New PRs
-# restore main's caches; later approved commits restore their branch's caches first.
-# Manual main runs can seed that baseline after the workflow is first merged.
+# gpu-cache.yml warms shared dependencies after merge, independently of this gate.
 on:
   push:
-    branches: [main, 'pull-request/[0-9]+']
-  workflow_dispatch:
+    branches: ['pull-request/[0-9]+']
 
 permissions:
   contents: read
@@ -32,13 +29,12 @@ jobs:
     name: Select GPU test suites
     if: >-
       github.repository == 'NVIDIA/cudf-spark-jni' &&
-      (github.ref == 'refs/heads/main' ||
-       (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')))
+      github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      suites: ${{ steps.select.outputs.suites || steps.baseline.outputs.suites || '[]' }}
-      required-jobs: ${{ steps.select.outputs.required-jobs || steps.baseline.outputs.required-jobs || '["select"]' }}
+      suites: ${{ steps.select.outputs.suites || '[]' }}
+      required-jobs: ${{ steps.select.outputs.required-jobs || '["select"]' }}
       base-branch: ${{ steps.target.outputs.base-branch }}
     steps:
       - name: Resolve approved PR target
@@ -46,20 +42,16 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            let base = 'main';
-            let skip = false;
-            if (context.ref !== 'refs/heads/main') {
-              const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
-              if (!match) throw new Error('Expected an approved copied PR');
-              const {data: pr} = await github.rest.pulls.get({
-                ...context.repo, pull_number: Number(match[1]),
-              });
-              if (pr.state !== 'open' || pr.head.sha !== context.sha) {
-                throw new Error('Copied branch no longer matches the open PR head');
-              }
-              base = pr.base.ref;
-              skip = /\[skip ci\]/.test(pr.title);
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (!match) throw new Error('Expected an approved copied PR');
+            const {data: pr} = await github.rest.pulls.get({
+              ...context.repo, pull_number: Number(match[1]),
+            });
+            if (pr.state !== 'open' || pr.head.sha !== context.sha) {
+              throw new Error('Copied branch no longer matches the open PR head');
             }
+            const base = pr.base.ref;
+            const skip = /\[skip ci\]/.test(pr.title);
             if (base !== 'main' && !/^release\/[0-9]{2}\.[0-9]{2}$/.test(base)) {
               throw new Error(`Unsupported JNI target branch: ${base}`);
             }
@@ -72,53 +64,13 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select suites from the full PR diff
-        if: github.ref != 'refs/heads/main' && steps.target.outputs.skip-ci != 'true'
+        if: steps.target.outputs.skip-ci != 'true'
         id: select
         uses: NVIDIA/spark-rapids-common/workflow-suite-selector@main
         with:
           catalog-path: .github/gpu-ci-suites.json
           base-branch: ${{ steps.target.outputs.base-branch }}
           selector-job: select
-      - name: Checkout shared suite selector for main
-        if: github.ref == 'refs/heads/main'
-        uses: NVIDIA/spark-rapids-common/checkout@main
-        with:
-          repository: NVIDIA/spark-rapids-common
-          ref: main
-          path: .ci-common
-          persist-credentials: false
-      - name: Select enabled suites for the trusted main baseline
-        if: github.ref == 'refs/heads/main'
-        id: baseline
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const fs = require('node:fs');
-            const {selectSuites} = require(`${process.env.GITHUB_WORKSPACE}/.ci-common/workflow-suite-selector`);
-            const path = '.github/gpu-ci-suites.json';
-            const catalog = JSON.parse(fs.readFileSync(path, 'utf8'));
-            // Manual seeding, new branches and incomplete diffs run all enabled suites.
-            let files = [{filename: path}];
-            const before = context.payload.before;
-            if (context.eventName === 'push' && /^[a-f0-9]{40}$/.test(before || '') && !/^0+$/.test(before)) {
-              try {
-                const {data} = await github.rest.repos.compareCommitsWithBasehead({
-                  ...context.repo, basehead: `${before}...${context.sha}`, per_page: 1,
-                });
-                // GitHub only returns files on page one, capped at 300.
-                if (['ahead', 'identical'].includes(data.status) && Array.isArray(data.files) && data.files.length < 300) {
-                  files = data.files;
-                } else core.warning('Incomplete/nonlinear push diff: run all enabled suites');
-              } catch (error) {
-                core.warning(`Cannot determine changed files: run all enabled suites (${error.status || 'API error'})`);
-              }
-            }
-            const suites = selectSuites(files, catalog);
-            const jobs = [...new Set(['select', ...suites.flatMap(name => catalog.suites[name].jobs)])];
-            core.setOutput('suites', JSON.stringify(suites));
-            core.setOutput('required-jobs', JSON.stringify(jobs));
-            core.info(`Main cache validation: ${suites.join(', ') || 'no enabled suites affected'}`);
-
   gpu-test:
     name: JNI ${{ matrix.classifier }} tests
     needs: select

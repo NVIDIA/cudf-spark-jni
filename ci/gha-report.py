@@ -26,13 +26,15 @@ def code(value):
 
 def main():
     outcome = os.environ.get("TEST_OUTCOME", "unknown")
+    mode = os.environ.get("JNI_MODE", "test")
     phase = tail("target/gha-phase.txt", 1)
     exit_code = tail("target/gha-exit-code.txt", 1)
     rows = [
         ("Workload outcome", outcome),
+        ("Mode", "cache preparation (no tests)" if mode == "cache" else "build, tests and fuzz"),
         ("Last phase", phase),
         ("Exit code (124 = workload deadline)", exit_code),
-        ("Source", os.environ.get("GITHUB_SHA")),
+        ("Source", os.environ.get("SOURCE_SHA") or os.environ.get("GITHUB_SHA")),
         ("CUDA family", os.environ.get("CLASSIFIER")),
         ("Published image", os.environ.get("IMAGE_REFERENCE") or
          ("local recipe build" if os.environ.get("IMAGE_ID") else "unavailable")),
@@ -41,7 +43,8 @@ def main():
         ("Maven cache restored", os.environ.get("MAVEN_CACHE_KEY") or "none; see restore step"),
         ("Native cache restored", os.environ.get("NATIVE_CACHE_KEY") or "none; see restore step"),
     ]
-    report = ["## JNI GPU CI diagnostics", "", "| Item | Result |", "| --- | --- |"]
+    title = "JNI cache preparation" if mode == "cache" else "JNI GPU CI diagnostics"
+    report = [f"## {title}", "", "| Item | Result |", "| --- | --- |"]
     report.extend(f"| {name} | {code(value)} |" for name, value in rows)
     evidence = os.environ.get("EVIDENCE_URL")
     report += ["", f"[Download full JNI reports and logs]({evidence})" if evidence else
@@ -66,7 +69,9 @@ def main():
         except (ET.ParseError, OSError) as error:
             warnings.append(f"Cannot read {path.name}: {str(error)[:300]}")
 
-    sections = [("GPU / driver", tail("target/gha-gpu.txt", 20))]
+    sections = [("Workload timings", tail("target/gha-timing.txt", 10))]
+    if mode != "cache":
+        sections.append(("GPU / driver", tail("target/gha-gpu.txt", 20)))
     if failures:
         sections.append(("Failing tests (first 10)", "\n\n".join(failures)))
     if warnings:
@@ -81,7 +86,7 @@ def main():
         report += ["", f"### {name}", "", f"<pre>{html.escape(text)}</pre>"]
     summary = "\n".join(report) + "\n"
     # Keep useful evidence in the console even if summary publication fails.
-    print("=== JNI GPU CI diagnostics ===")
+    print(f"=== {title} ===")
     for name, value in rows:
         print(f"{name}: {value or 'unavailable'}")
     print(f"Full reports: {evidence or 'unavailable; see upload step'}")
