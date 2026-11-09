@@ -80,7 +80,7 @@ jobs:
       matrix:
         classifier: [cuda12, cuda13]
     runs-on: ubuntu-latest
-    # Six standard five-minute queues + up to five hours on the allocated worker,
+    # Six fifteen-minute queues + up to four hours on the allocated worker,
     # with headroom for dispatch/cleanup. Jenkins keeps its existing six-hour limit.
     timeout-minutes: 360
     permissions:
@@ -98,8 +98,8 @@ jobs:
           workload: '{"classifier":"${{ matrix.classifier }}","base-branch":"${{ needs.select.outputs.base-branch }}"}'
           runner-type: gpu-amd64
           queue-policy: standard
-          queue-timeout-minutes: '5'
-          execution-timeout-minutes: '300'
+          queue-timeout-minutes: '15'
+          execution-timeout-minutes: '240'
 
   gate:
     name: GPU CI gate

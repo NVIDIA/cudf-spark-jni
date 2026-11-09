@@ -40,7 +40,7 @@ jobs:
     name: worker
     if: github.repository == 'NVIDIA/cudf-spark-jni'
     runs-on: ${{ fromJSON(inputs.runner) }}
-    timeout-minutes: 300
+    timeout-minutes: ${{ fromJSON(inputs.workload).mode == 'cache' && 300 || 240 }}
     env:
       TZ: UTC
       CI_IMAGE_METADATA_HELPER: ${{ github.workspace }}/.ci-common/container-image/metadata.py
@@ -60,10 +60,11 @@ jobs:
         env:
           SOURCE_REF: ${{ inputs.source-ref }}
           SOURCE_SHA: ${{ inputs.source-sha }}
+          WORKLOAD_MINUTES: ${{ env.JNI_MODE == 'cache' && 270 || 210 }}
         run: |
           set -euo pipefail
           # Include setup time in the workload budget; leave 30 minutes for evidence/caches.
-          echo "JNI_WORKLOAD_DEADLINE=$(( $(date +%s) + 270 * 60 ))" >> "$GITHUB_ENV"
+          echo "JNI_WORKLOAD_DEADLINE=$(( $(date +%s) + WORKLOAD_MINUTES * 60 ))" >> "$GITHUB_ENV"
           if [[ "$JNI_MODE" == cache ]]; then
             # Trusted post-merge sources warm main's cache scope. PR code must
             # never reach this path; the parent workflow is verified below.
@@ -127,7 +128,7 @@ jobs:
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build and smoke-test unpublished PR toolchain
         if: steps.image.outputs.reference == ''
-        timeout-minutes: 240
+        timeout-minutes: ${{ env.JNI_MODE == 'cache' && 240 || 180 }}
         uses: NVIDIA/spark-rapids-common/container-image@main
         with:
           config: ${{ steps.image.outputs.config }}

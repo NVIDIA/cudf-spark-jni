@@ -226,8 +226,9 @@ with 4 GiB per compiler. `PARALLEL_LEVEL` can lower this limit; there is no fixe
 The parent resolves the PR's actual target, and the worker rechecks it after waiting
 for a runner. Release targets require matching POM/pins and versioned images; only
 main targets may use a recipe-compatible main image fallback.
-The GHA worker has a five-hour total budget. On workload entry, elapsed setup time
-is deducted from a 270-minute budget to reserve time for evidence and optional cache
+The GPU worker has a four-hour total budget, allowing fifteen minutes per GPU pool
+within the hosted coordinator's six-hour limit. On workload entry, elapsed setup time
+is deducted from a 210-minute budget to reserve time for evidence and optional cache
 uploads. This does not impose a single deadline across all setup steps; a setup hang
 can still exhaust the job budget. Jenkins retains its six-hour test budget.
 
