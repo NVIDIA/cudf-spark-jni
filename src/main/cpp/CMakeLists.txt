@@ -236,6 +236,7 @@ add_library(
   src/MapZipWithUtilsJNI.cpp
   src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
+  src/NativeFileSourceJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
   src/PageablePoolJni.cpp
