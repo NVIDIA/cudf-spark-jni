@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,10 +23,9 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/utilities/span.hpp>
 
 //
-#include <rmm/device_uvector.hpp>
-
 #include <cuda/stream>
 
 //
@@ -58,8 +57,8 @@ std::string token_to_string(PdaTokenT const token_type)
 }
 
 // Print the content of the input device vector.
-template <typename T, typename U = int>
-void print_debug(rmm::device_uvector<T> const& input,
+template <typename T, typename Buffer, typename U = int>
+void print_debug(Buffer const& input,
                  std::string const& name,
                  std::string const& separator,
                  cuda::stream_ref stream)
@@ -76,10 +75,8 @@ void print_debug(rmm::device_uvector<T> const& input,
 }
 
 // Print the content of the input map given by a device vector.
-template <typename T, typename U = int>
-void print_map_debug(rmm::device_uvector<T> const& input,
-                     std::string const& name,
-                     cuda::stream_ref stream)
+template <typename T, typename Buffer, typename U = int>
+void print_map_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
   auto const h_input = cudf::detail::make_host_vector_sync(
     cudf::device_span<T const>{input.data(), input.size()}, stream);
@@ -92,10 +89,8 @@ void print_map_debug(rmm::device_uvector<T> const& input,
 }
 
 // Print the content of the input pairs given by a device vector.
-template <typename T, typename U = int>
-void print_pair_debug(rmm::device_uvector<T> const& input,
-                      std::string const& name,
-                      cuda::stream_ref stream)
+template <typename T, typename Buffer, typename U = int>
+void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
   auto const h_input = cudf::detail::make_host_vector_sync(
     cudf::device_span<T const>{input.data(), input.size()}, stream);
