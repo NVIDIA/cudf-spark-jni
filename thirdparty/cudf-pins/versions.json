@@ -4,8 +4,8 @@
     "CCCL" : 
     {
       "always_download" : true,
-      "url" : "https://github.com/NVIDIA/cccl/archive/cb9bee55d3f52b06b839c0895edd2d58655c4391.tar.gz",
-      "url_hash" : "SHA256=e44f9f1375516150234e3657396c9d0372d1a9094450c8a7da17d4a37f84c581",
+      "url" : "https://github.com/NVIDIA/cccl/archive/084c5e6673faff38b8d2785982c01be055025b29.tar.gz",
+      "url_hash" : "SHA256=455257d6218f24e123c7e7a44b6d901dbcb596cfc31064b788a897928892eec8",
       "version" : "3.6.0"
     },
     "GTest" : 
@@ -51,7 +51,7 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "6ddda9a1ad59e105723fab9348b3d4d262a56b76",
+      "git_tag" : "e53154bf24e0ceab788ffdbde31a5e3886fb0951",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
       "source_subdir" : "cpp",
       "version" : "26.12"
