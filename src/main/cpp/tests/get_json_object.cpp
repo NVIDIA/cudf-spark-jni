@@ -643,8 +643,9 @@ multi_paths const eight_key_paths = named_depth2({"a", "a", "a", "a", "b", "b", 
 
 void pad_paths(multi_paths& paths, int from)
 {
-  // All pads share root `pad0`: distinct-root pads would flip the fan-out admission the
-  // helper's merged side relies on.
+  // Pads reuse existing roots (pad0 repeats the caller's first root) with fresh children; the
+  // helper's fan-out deficit padding, not the pad0 choice, is what keeps the 8-path/3-root
+  // group admissible under the 3.15 gate.
   paths.resize(8);
   for (int p = from; p < 8; ++p) {
     paths[p] = named({"pad0", "v" + std::to_string(p)});
@@ -1030,7 +1031,8 @@ TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
 
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], expect, true));
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", true));
-  // Pads share root `pad0` and add no distinct root, so the padded group stays admissible.
+  // Pads reuse existing roots, so the padded group keeps the caller's fan-out ratio and stays
+  // admissible (the helper's deficit padding supplies the required path count).
   for (std::size_t col = 2; col < 8; ++col) {
     SCOPED_TRACE("retry pad column " + std::to_string(col));
     EXPECT_EQ(batch_out[col]->null_count(), 64);
