@@ -29,6 +29,7 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
+#include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
@@ -3035,7 +3036,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<std::size_t> oob_indices;
   std::vector<std::size_t> no_oob_indices;
   auto const oob_count = static_cast<std::size_t>(
-    std::count_if(h_error_check.begin(), h_error_check.begin() + num_outputs, [](int8_t flag) {
+    std::count_if(error_markers.begin(), error_markers.begin() + num_outputs, [](int8_t flag) {
       return flag != 0;
     }));
 
