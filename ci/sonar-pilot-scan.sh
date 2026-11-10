@@ -6,7 +6,7 @@ set -euo pipefail
 test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
 test -z "${GITHUB_RUNNER_ADMIN_TOKEN:-}"
 : "${SONAR_HOST_URL:?Set the existing SONAR_HOST_URL repository secret}"
-: "${SONAR_TOKEN:?Set the existing SONAR_TOKEN repository secret}"
+: "${SONAR_TOKEN:?Configure the temporary validated Sonar pilot secret}"
 test -n "$(find target/classes -type f -name '*.class' -print -quit)"
 rm -f .scannerwork/report-task.txt
 

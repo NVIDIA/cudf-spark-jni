@@ -10,7 +10,7 @@ The workflow validates common PR #77 at the reviewed commit
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
 3. A fresh worker downloads that build's exact artifact, verifies its digest,
-   and runs Sonar and the common collector. It does not execute Maven/plugins.
+   and runs Sonar and the common collector. It does not execute Maven or PR build scripts.
 4. The hosted common reporter posts its own summary and **Sonar check** using
    the workflow token. New High/Blocker issues, a failed gate, or missing evidence
    fail the check. The intentional example should demonstrate a failure.
@@ -25,8 +25,11 @@ Production consumers must use that action with the published prebuilt image.
 
 - Variable `SONAR_PROJECT_KEY`: existing Sonar project.
 - Variable `SONAR_RUNNER_PILOT_MAVEN_MIRROR`: anonymous HTTPS Maven mirror.
-- Existing secrets `SONAR_HOST_URL` and `SONAR_TOKEN`: scanner/analysis-read access,
-  including scanner-context permission for exact source identity verification.
+- Existing secret `SONAR_HOST_URL`: Sonar service URL.
+- Temporary `SONAR_RUNNER_PILOT_TOKEN`: the existing Jenkins Sonar credential,
+  securely transferred only for validation. The repository's `SONAR_TOKEN` is
+  rejected by the current service and is left unchanged. The credential must allow
+  scanner-context reads for exact source identity verification.
 
 Runner administration credentials remain in Jenkins. The workflow only selects
 `[self-hosted, Linux, X64, spark-sonar-internal]`; it creates no runners or jobs.
@@ -36,5 +39,5 @@ The reporter always runs after an approved attempt, including preflight failure.
 
 Artifacts are bound to the producing run/attempt and downloaded by exact artifact
 ID with digest mismatches treated as errors. Keep the PR label absent after testing
-and remove only pilot-created variables; retain existing secrets and the shared
-runner pool. The check remains supplementary during validation.
+and remove the pilot-created variables and temporary secret; retain existing
+secrets and the shared runner pool. The check remains supplementary during validation.

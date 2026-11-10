@@ -175,7 +175,7 @@ jobs:
           PROJECT_VERSION: ${{ needs.compile.outputs.version }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
         run: bash ci/sonar-pilot-scan.sh
       - name: Collect the exact analysis using common PR 77
         id: collect
@@ -190,7 +190,7 @@ jobs:
           base-ref: ${{ needs.authorize.outputs.base }}
           scanner-outcome: ${{ steps.analyze.outcome }}
           sonar-url: ${{ secrets.SONAR_HOST_URL }}
-          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          sonar-token: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
       - name: Transfer the result even when the quality gate fails
         id: upload
         if: always() && steps.collect.outcome != 'skipped'
