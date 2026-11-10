@@ -146,7 +146,9 @@ jobs:
             const suites = selectSuites([{filename: path}], catalog);
             const prepared = [];
             if (suites.includes('jni')) {
-              const args = ['ci/image-config.py', 'select'];
+              // Check only enabled warmup variants within the shared lookup budget.
+              // TODO: Add ARM64 classifiers here when enabling them in prepare's matrix.
+              const args = ['ci/image-config.py', 'select', '--classifiers', 'cuda12,cuda13'];
               if (process.env.SOURCE_BRANCH === 'main') args.push('--allow-main-fallback');
               const configs = JSON.parse(execFileSync('python3', args, {encoding: 'utf8'}));
               // Optional cache observations share one minute, not a full timeout per variant.
