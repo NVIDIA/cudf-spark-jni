@@ -1817,22 +1817,28 @@ void launch_grouped(
       merged_shallow_indices.clear();
     }
   } else if (merged_plans.empty() && !merged_shallow_indices.empty()) {
-    std::size_t max_inst_count = 0;
-    std::set<std::string_view> distinct_roots;
-    using path_vector = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
-    std::set<path_vector> distinct_paths;
-    for (auto idx : merged_shallow_indices) {
-      max_inst_count = std::max(max_inst_count, json_paths[idx].size());
-      distinct_roots.insert(std::get<1>(json_paths[idx].front()));
-      distinct_paths.emplace(json_paths[idx].begin(), json_paths[idx].end());
-    }
-    if (max_inst_count <= k_merged_max_depth &&
-        distinct_paths.size() * k_merged_min_fanout_den >=
-          distinct_roots.size() * k_merged_min_fanout_num &&
-        merged_shallow_indices.size() >= k_merged_min_paths &&
+    // Cheap row/path-count rejections first: the dedup sets below allocate, so groups that
+    // fail the floors must not pay for them.
+    if (merged_shallow_indices.size() >= k_merged_min_paths &&
         static_cast<std::size_t>(input.size()) >= k_min_rows_per_family) {
-      merged_plans.emplace_back(build_merged_named_plan(
-        json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
+      std::size_t max_inst_count = 0;
+      std::set<std::string_view> distinct_roots;
+      using path_vector = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
+      std::set<path_vector> distinct_paths;
+      for (auto idx : merged_shallow_indices) {
+        max_inst_count = std::max(max_inst_count, json_paths[idx].size());
+        distinct_roots.insert(std::get<1>(json_paths[idx].front()));
+        distinct_paths.emplace(json_paths[idx].begin(), json_paths[idx].end());
+      }
+      if (max_inst_count <= k_merged_max_depth &&
+          distinct_paths.size() * k_merged_min_fanout_den >=
+            distinct_roots.size() * k_merged_min_fanout_num) {
+        merged_plans.emplace_back(build_merged_named_plan(
+          json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
+      } else {
+        general_indices.insert(
+          general_indices.end(), merged_shallow_indices.begin(), merged_shallow_indices.end());
+      }
     } else {
       general_indices.insert(
         general_indices.end(), merged_shallow_indices.begin(), merged_shallow_indices.end());
