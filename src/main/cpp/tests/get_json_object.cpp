@@ -726,21 +726,25 @@ std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::s
     if (eligible(path)) { distinct_eligible.insert(path); }
   }
   int eligible_count = static_cast<int>(distinct_eligible.size());
-  // Pads reuse existing roots (adding no distinct root, so admission arithmetic stays
-  // caller-controlled) and round-robin over them so every root keeps the shared fan-out;
-  // the gate needs >= 3.15 paths per root, so the deficit is computed from the caller's
-  // distinct-root count, not from k_merged_min_test_paths alone. Pad columns carry no
-  // assertions.
+  // Deep-only groups (no eligible shallow caller path) route through the deep gate, not the
+  // shallow fan-out gate, so they need no padding; padding would also be impossible since
+  // there is no caller root to ride.
   std::vector<std::string> pad_roots;
   for (auto const& path : merged_paths) {
     if (eligible(path)) { pad_roots.push_back(std::get<1>(path.front())); }
   }
-  CUDF_EXPECTS(!pad_roots.empty(), "merged-vs-general needs an eligible caller path to pad from");
+  CUDF_EXPECTS(!pad_roots.empty() || eligible_count == 0,
+               "merged-vs-general needs an eligible caller path to pad from");
   int const distinct_roots =
     static_cast<int>(std::set<std::string>(pad_roots.begin(), pad_roots.end()).size());
-  int const fanout_deficit =
-    std::max(0, static_cast<int>(std::ceil(distinct_roots * 63.0 / 20.0)) - eligible_count);
-  int const deficit = std::max<int>(fanout_deficit, k_merged_min_test_paths - eligible_count);
+  // Deep-only groups pad nothing: their admission rides the deep gate, and there is no caller
+  // root for the deficit loop to round-robin over.
+  int const deficit =
+    pad_roots.empty()
+      ? 0
+      : std::max<int>(
+          std::max(0, static_cast<int>(std::ceil(distinct_roots * 63.0 / 20.0)) - eligible_count),
+          k_merged_min_test_paths - eligible_count);
   padded.reserve(padded.size() + deficit);
   for (int p = 0; p < deficit; ++p) {
     padded.push_back(named({pad_roots[p % pad_roots.size()], "mpad" + std::to_string(p)}));
