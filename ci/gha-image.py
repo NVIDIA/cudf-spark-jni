@@ -43,6 +43,10 @@ def digest(value):
 
 def resolve(selected):
     image = selected["image"]
+    platform = selected["platform"]
+    if platform not in ("linux/amd64", "linux/arm64"):
+        raise ValueError(f"Unsupported toolchain platform: {platform}")
+    architecture = platform.split("/")[1]
     if not image.startswith("ghcr.io/"):
         raise ValueError("JNI toolchain must use GHCR")
     path = image.removeprefix("ghcr.io/")
@@ -57,18 +61,18 @@ def resolve(selected):
         if "manifests" in manifest:
             matches = [entry for entry in manifest["manifests"]
                        if entry.get("platform", {}).get("os") == "linux" and
-                       entry.get("platform", {}).get("architecture") == "amd64"]
+                       entry.get("platform", {}).get("architecture") == architecture]
             if not matches:
-                print(f"No linux/amd64 toolchain: {image}:{tag}")
+                print(f"No {platform} toolchain: {image}:{tag}")
                 continue
             if len(matches) != 1:
-                raise ValueError("Ambiguous linux/amd64 image manifest")
+                raise ValueError(f"Ambiguous {platform} image manifest")
             image_digest = digest(matches[0]["digest"])
             manifest, _ = get(f"https://ghcr.io/v2/{path}/manifests/{image_digest}", token)
         image_digest = digest(image_digest)
         config_digest = digest(manifest["config"]["digest"])
         config, _ = get(f"https://ghcr.io/v2/{path}/blobs/{config_digest}", token)
-        if (config.get("os") == "linux" and config.get("architecture") == "amd64" and
+        if (config.get("os") == "linux" and config.get("architecture") == architecture and
                 (config.get("config", {}).get("Labels") or {}).get(
                     "org.opencontainers.image.version") == selected["version"]):
             reference = f"{image}@{image_digest}"
@@ -80,10 +84,12 @@ def resolve(selected):
 
 
 def main():
-    if (len(sys.argv) != 3 or sys.argv[1] not in ("cuda12", "cuda13") or
-            not re.fullmatch(r"main|release/[0-9]{2}\.[0-9]{2}", sys.argv[2])):
-        sys.exit("Usage: gha-image.py cuda12|cuda13 main|release/YY.MM")
-    classifier = sys.argv[1]
+    if (len(sys.argv) not in (3, 4) or sys.argv[1] not in ("cuda12", "cuda13") or
+            not re.fullmatch(r"main|release/[0-9]{2}\.[0-9]{2}", sys.argv[2]) or
+            (len(sys.argv) == 4 and sys.argv[3] not in ("amd64", "arm64"))):
+        sys.exit("Usage: gha-image.py cuda12|cuda13 main|release/YY.MM [amd64|arm64]")
+    architecture = sys.argv[3] if len(sys.argv) == 4 else "amd64"
+    classifier = sys.argv[1] + ("-arm64" if architecture == "arm64" else "")
     branch = sys.argv[2]
     # Reuse branch/POM and explicit release-pin validation from the publisher.
     version = json.loads(subprocess.check_output([

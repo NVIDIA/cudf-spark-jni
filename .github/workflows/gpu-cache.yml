@@ -188,15 +188,16 @@ jobs:
             core.info(`Cache preparation: ${suites.join(', ') || 'no enabled suites affected'}`);
 
   prepare:
-    name: Prepare ${{ matrix.classifier }} caches
+    name: Prepare ${{ matrix.classifier }} ${{ matrix.architecture }} caches
     needs: select
     if: contains(fromJSON(needs.select.outputs.suites || '[]'), 'jni')
     strategy:
       fail-fast: false
       matrix:
         classifier: [cuda12, cuda13]
+        architecture: [amd64]
     runs-on: ubuntu-latest
-    # 40 minutes of queue waits + 300 minutes of execution leave 20 for coordination.
+    # 80 minutes of queue waits + 240 minutes of execution leave 40 for coordination.
     timeout-minutes: 360
     permissions:
       contents: read
@@ -210,13 +211,13 @@ jobs:
           workflow-ref: main
           source-ref: ${{ needs.select.outputs.source-ref }}
           source-sha: ${{ needs.select.outputs.source-sha }}
-          workload: '{"classifier":"${{ matrix.classifier }}","base-branch":"${{ needs.select.outputs.source-branch }}","mode":"cache"}'
-          runner-type: cpu-amd64
+          workload: '{"classifier":"${{ matrix.classifier }}","architecture":"${{ matrix.architecture }}","base-branch":"${{ needs.select.outputs.source-branch }}","mode":"cache"}'
+          runner-type: cpu-${{ matrix.architecture }}
           # Keep compilation on >=12-vCPU runners, preferring the largest available size.
           runners: >-
-            [{"group":"nv-cpu-general","labels":"linux-amd64-cpu32"},
-             {"group":"nv-cpu-general","labels":"linux-amd64-cpu16"},
-             {"group":"nv-cpu-general","labels":"linux-amd64-cpu32","queue-timeout-minutes":20}]
+            [{"group":"nv-cpu-general","labels":"linux-${{ matrix.architecture }}-cpu32"},
+             {"group":"nv-cpu-general","labels":"linux-${{ matrix.architecture }}-cpu16"},
+             {"group":"nv-cpu-general","labels":"linux-${{ matrix.architecture }}-cpu32","queue-timeout-minutes":60}]
           queue-policy: standard
           queue-timeout-minutes: '10'
-          execution-timeout-minutes: '300'
+          execution-timeout-minutes: '240'

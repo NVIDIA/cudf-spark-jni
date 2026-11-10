@@ -95,6 +95,11 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   --entrypoint /bin/bash "$JNI_IMAGE" -c '
     set -eo pipefail
     source build/env.sh
+    # Preserve the ARM POM policy when premerge-build.sh supplies Maven properties.
+    # The static CUPTI library required by the profiler is unavailable on ARM64.
+    if [[ "$(uname -m)" == aarch64 ]]; then
+      export BUILD_PROFILER=OFF
+    fi
     # Size compilation where it runs, not from the Docker client cgroup.
     # Keep 4 GiB per compiler and honor visible cgroup v2/v1 limits.
     cpu_limit=$(nproc)
