@@ -74,6 +74,7 @@ echo "Workload budget remaining: $remaining seconds"
 
 container_started=true
 set +e
+# Reserve 3x the larger clean CUDA build's ccache footprint (about 750 MB).
 # Variables in the command below are expanded inside the workload container.
 # shellcheck disable=SC2016
 timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
@@ -87,7 +88,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
   -e MVN_SETTINGS=/workspace/ci/settings-public.xml \
   -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
-  -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=10G \
+  -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=2250M \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
   -e JNI_DOWNLOAD_CACHE=/home/ci/.cache/cpm/jni-downloads-v1 \
   -e CMAKE_C_COMPILER_LAUNCHER=ccache -e CMAKE_CXX_COMPILER_LAUNCHER=ccache \
