@@ -5,7 +5,7 @@ A maintainer applies `sonar-runner-pilot` to approve the current same-repository
 head. New commits require a new label event; ordinary pushes do not run the pilot.
 
 The workflow validates common PR #77 at the reviewed commit
-`b0cb860cb186d6bae817229270f58c8f2bfe94ff` with this path:
+`9659fe9f136fa61cefe5a90182a66337c1e7eab0` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
