@@ -141,7 +141,9 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     # MAVEN_OPTS system properties do not consistently override POM interpolation.
     mkdir -p .mvn
     printf "\n-Dcuda.version=%s\n" "$CUDA_VER" >> .mvn/maven.config
-    ccache --zero-stats
+    if ! timeout -k 5s 10s ccache --zero-stats; then
+      echo "::warning::Could not reset ccache statistics; continuing with existing counters."
+    fi
     finish_container() {
       status=$?
       printf "total_seconds=%s\n" "$SECONDS" >> target/gha-timing.txt || :

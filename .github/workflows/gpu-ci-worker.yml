@@ -103,9 +103,18 @@ jobs:
               });
               if (context.ref !== 'refs/heads/main' || parent.head_branch !== 'main' ||
                   parent.path !== '.github/workflows/gpu-cache.yml' ||
-                  parent.head_sha !== context.sha ||
                   !['push', 'workflow_dispatch'].includes(parent.event)) {
                 throw new Error('Only the main post-merge cache workflow may prepare shared caches');
+              }
+              // Pending warmers select the latest source when admitted, while their
+              // workflow event can refer to an older, still-trusted main revision.
+              if (parent.head_sha !== context.sha) {
+                const {data: lineage} = await github.rest.repos.compareCommitsWithBasehead({
+                  ...context.repo, basehead: `${parent.head_sha}...${context.sha}`, per_page: 1,
+                });
+                if (lineage.status !== 'ahead' || lineage.merge_base_commit?.sha !== parent.head_sha) {
+                  throw new Error('Cache parent must be an ancestor of the trusted main worker');
+                }
               }
             } else {
               const number = Number(context.ref.split('/').at(-1));

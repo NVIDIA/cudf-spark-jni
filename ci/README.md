@@ -198,8 +198,12 @@ Cache restore/upload failures do not replace the build or test result.
 
 `GPU cache preparation` builds without running tests after relevant merges to main
 or enabled `release/YY.MM` branches, and can be started manually. There is no daily
-cron; documentation-only changes skip preparation. It currently warms CUDA 12/13
-on amd64 only. Newer commits can supersede a warmup; warming never gates PR tests.
+cron. It currently warms CUDA 12/13 on amd64 only, with one active warmup and one
+pending run per source branch. New merges replace the pending run; it selects the
+latest source when it starts. An allocated warmup can finish its pinned source.
+An already-prepared source, or only documentation changes since that successful
+build, skips compilation while both matching cache archives remain available.
+Missing or incomplete caches are rebuilt. Warming never gates PR tests.
 
 Release warmups build the release's exact source and toolchain, not main's source.
 They save in main's cache scope so copied PR branches can access them. Native
