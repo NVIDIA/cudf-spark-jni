@@ -711,7 +711,8 @@ std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::s
   // group keeps the caller's root count and admission holds; pad columns carry no assertions.
   // Shallow admission counts only all-NAMED paths of depth <= 2, so a depth-3 call-site path
   // stays general and does not count. Every call site passes 64 rows (>= the 32-row floor).
-  auto const general_paths = first_n(merged_paths, 7);
+  auto const general_count = std::min<std::size_t>(7, merged_paths.size());
+  auto const general_paths = first_n(merged_paths, general_count);
   auto padded              = merged_paths;
   auto const eligible      = [](path_list const& path) {
     return path.size() <= 2 && std::all_of(path.begin(), path.end(), [](path_tuple const& t) {
