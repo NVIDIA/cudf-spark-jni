@@ -124,15 +124,10 @@ authentication/network failures must not be treated as an absent tag. The select
 itself does not pull, publish or silently build an image. Existing product-test
 Jenkinsfiles and the local `build/run-in-docker` workflow are unchanged.
 
-Maven dependencies and plugins prefer Google's Central mirror by default, including
-plain local Maven and Docker builds, with Central retained as fallback. Existing
-developer settings are not replaced. The POM declares Google first, followed by
-`maven-central-fallback`, for both dependencies and plugins. Internal `ci/settings.xml`
-redirects both IDs to the same authenticated Artifactory entry as Central. External CI uses
-`ci/settings-public.xml` to mirror Central explicitly, including repository entries
-introduced by dependency/plugin POMs, without a separate repository profile.
-The POM's fallback repository is not mirrored by these public settings and remains
-available if Google cannot supply an artifact.
+Maven dependencies and plugins prefer Google's Central mirror, with Central as
+fallback. External CI uses `ci/settings-public.xml` to apply this to transitive
+repositories too. Internal CI continues using Artifactory through `ci/settings.xml`;
+existing developer settings are not replaced.
 
 ## Branching And Version Updates
 
@@ -178,100 +173,51 @@ recipe-verification and smoke-test failures remain failures.
 
 ## GPU Premerge
 
-`GPU CI` adds CUDA 12/13 amd64 native/Java tests and fuzzing alongside Blossom.
-The guarded GPU worker supplies its read-only job token in a temporary,
-GitHub-only netrc mounted into the build container. CMake uses `OPTIONAL` netrc
-authentication; the token is not passed in the container environment or cached.
-Console output and uploaded diagnostics are filtered for download credentials.
-If container cleanup or filtering cannot be confirmed, evidence/cache uploads
-are withheld without replacing the workload's exit status. Authentication is an
-outage mitigation, not a guarantee of successful dependency downloads.
+`GPU CI` runs the existing CUDA 12/13 amd64 native/Java tests and fuzzing alongside
+Blossom. For PRs targeting main or `release/YY.MM`, a maintainer triggers it with
+`/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
+commands can copy the latest head rather than the supplied SHA.
 
-Other callers keep their current authentication defaults. To use a CI-prepared
-netrc for all three native configure steps, export `CMAKE_NETRC=OPTIONAL` and
-`CMAKE_NETRC_FILE=/path/to/netrc` before invoking the existing build script or Maven.
-The caller owns that file's permissions, lifetime and log redaction. No file is
-created or deleted by `build/buildcpp.sh`; existing local and Blossom entry points
-remain supported, without a coordinated pipeline rollout.
+The suite catalog selects affected tests. Documentation and unrelated workflow
+changes skip GPU work but still report the gate; a PR-title `[skip ci]` marker also
+skips GPU work. Keep existing Blossom/Sonar checks until their replacement is ready.
+Release branches need the workflows, helpers and toolchain pins backported before
+their PRs can use GPU CI.
 
-For PRs targeting main or `release/YY.MM`, approve the exact head with
-`/ok to test <full-head-SHA>`.
-The bot enforces that SHA for untrusted changes; for trusted contributors its
-current policy copies the latest head. This workflow verifies the copied SHA
-against the open PR, rather than interpreting the approval comment itself.
-The copied push selects suites from `.github/gpu-ci-suites.json`; documentation and
-publisher/cleanup/Sonar/CPU-workflow-only changes skip GPU jobs while still reporting
-the gate. Native/Java sources, build inputs, toolchain recipes and GPU CI scripts
-select the tests. The existing PR-title
-`[skip ci]` marker also skips GPU dispatch while reporting the gate.
-Keep existing required checks and Blossom/Sonar enabled during validation.
-The bot must be enabled and the worker registered with Actions before its first
-dispatch. A first-PR pilot can register it with a temporary, scoped hosted job;
-remove that registration job before validation because the queue action requires
-exactly one worker job. No extra registration trigger remains in this workflow.
-Existing release branches also need this workflow, its scripts/catalogs and matching
-toolchain pins before their copied PRs can use it; merging only to main does not
-enable them. Do not retire their existing Blossom checks before that rollout.
+Workers reuse a verified, branch-compatible GHCR image or build a missing recipe
+locally without publishing it. Registry failures remain errors. Runner fallback
+applies only while queued, not after a build or test fails. Compilation parallelism
+adapts to available CPU and memory. Scheduling details live in the workflow files.
 
-Workers use public GHCR images verified against the checkout's recipe, or build and
-smoke-test a missing/incompatible recipe locally without publishing. For the shared
-multi-platform tags, GPU workers select the linux/amd64 child, verify its recipe
-label and pin its immutable digest; the arm64 image and attestation descriptors are
-not used by these workers. Registry/auth failures remain errors.
-Tests reuse `premerge-build.sh` and `fuzz-test.sh` with public
-Maven settings. Only queued workers may switch GPU pools, never failed builds/tests.
-Compiler parallelism uses available CPUs and memory, including cgroup limits,
-with 4 GiB per compiler. `PARALLEL_LEVEL` can lower this limit; there is no fixed
-18-job ceiling on larger runners.
-The parent resolves the PR's actual target, and the worker rechecks it after waiting
-for a runner. Release targets require matching POM/pins and versioned images; only
-main targets may use a recipe-compatible main image fallback.
-The GPU worker has a four-hour total budget, allowing fifteen minutes per GPU pool
-within the hosted coordinator's six-hour limit. On workload entry, elapsed setup time
-is deducted from a 210-minute budget to reserve time for evidence and optional cache
-uploads. This does not impose a single deadline across all setup steps; a setup hang
-can still exhaust the job budget. Jenkins retains its six-hour test budget.
+### Build Caches
 
-`GPU cache preparation` is a separate, non-required post-merge workflow for main
-and migrated `release/YY.MM` branches. CPU workers run
-`premerge-build.sh --prepare-cache`: the same native targets/options and Java
-test compilation, stopping at Maven `test-compile`, without tests or fuzzing.
-Its failure does not change the PR's GPU gate or the result of product tests.
-CPU warming runs CUDA 12/13 in parallel on amd64 workers. Each waits up to 10 minutes
-for 32-vCPU, then 10 for 16-vCPU, then 60 for 32-vCPU again; smaller CPU pools are
-excluded. Each worker has a four-hour limit, including setup and cache uploads,
-within its coordinator's six-hour limit.
-The worker supports ARM images and architecture-isolated caches, but ARM warming
-is disabled: the cache matrix contains only `amd64`. GPU PR tests remain amd64.
-Documentation-only pushes skip warming; manual runs and uncertain/truncated push
-diffs prepare all enabled suites. Release pushes dispatch the main workflow with
-the pinned release source so caches are saved in main's scope, visible to copied
-PR branches. The workflow and compatible helpers must be merged on main and
-backported to supported releases before their automatic warming is available.
+GPU tests reuse Maven dependencies, ccache, CPM sources and selected CMake/Arrow
+download archives. Source/compiler/toolchain checks still apply; generated build
+trees and test results are not cached. Some dependencies still download again.
+Cache restore/upload failures do not replace the build or test result.
 
-PRs restore their latest matching cache first, then main's trusted baseline; they
-cannot read sibling PR caches or write main's cache. Maven can reuse dependencies
-across CUDA families. Native caches use the checkout's release line, architecture,
-CUDA family and toolchain recipe, not the branch name: main and a release with the
-same version/recipe can share a baseline. Ccache still checks source/compiler/flags;
-RAPIDS architecture targets keep entries reusable across GPU pools. Each run saves
-a fresh snapshot, including reruns that enrich an earlier partial cache. No cached
-test result replaces validation. Restore/upload errors remain best-effort.
+`GPU cache preparation` builds without running tests after relevant merges to main
+or enabled `release/YY.MM` branches, and can be started manually. There is no daily
+cron; documentation-only changes skip preparation. It currently warms CUDA 12/13
+on amd64 only. Newer commits can supersede a warmup; warming never gates PR tests.
 
-Both GPU workers and build-only warmers also cache the RAPIDS CMake bootstrap and
-Arrow's Thrift, RapidJSON and xsimd archives inside the persisted CPM directory.
-`JNI_DOWNLOAD_CACHE` opts into this archive cache; other callers are unchanged.
-URLs/pins and available upstream checksums identify entries; explicit Arrow URL
-or mirror overrides win. Cache failures retain upstream downloads. Each build
-still extracts, patches and configures dependencies in its own workspace.
-This is not a complete dependency cache: pinned RAPIDS Git dependencies can still
-download again. Generated build trees and test results are not cached.
+Release warmups build the release's exact source and toolchain, not main's source.
+They save in main's cache scope so copied PR branches can access them. Native
+caches are separated by release line, CUDA family, architecture and image recipe.
+PRs prefer their own matching cache, then the shared baseline; PRs cannot update
+that baseline. Backport the workflow and helpers to enable release warmups.
 
-Test output streams to the console. The parent summary links to each
-worker; its `JNI result and diagnostics` step and job summary show the last phase,
-failed tests, CUDA/GPU/driver, pinned image, restored cache keys, timings and ccache statistics,
-plus a link to full reports. Failure excerpts are printed without requiring a download.
-The artifact includes Surefire, fuzz (`monte.rmm.log`, `monte.state.log`), CMake and JVM
-crash logs and is retained for two days. Collection is bounded and best-effort, before
-cache uploads; it never changes the workload result and cannot be guaranteed after
-cancellation or loss of the runner.
+### Downloads And Diagnostics
+
+GPU CI uses a temporary, read-only GitHub credential for dependency downloads;
+credentials are excluded from caches and filtered from published diagnostics.
+Local and Blossom authentication defaults are unchanged. Other callers may opt in
+to an existing netrc with `CMAKE_NETRC=OPTIONAL` and `CMAKE_NETRC_FILE`, and own its
+permissions, cleanup and log redaction. `JNI_DOWNLOAD_CACHE` enables the optional
+archive cache without changing dependency pins or explicit download overrides.
+
+Follow the parent summary's worker links for console output and
+`JNI result and diagnostics`: failed tests, last phase, GPU/toolchain identity,
+cache statistics and timings. Full Java/native/fuzz and crash logs are linked as
+artifacts, retained for two days. Diagnostics are best-effort, never change test
+results, and may be unavailable after cancellation, runner loss or unsafe cleanup.

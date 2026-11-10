@@ -4,17 +4,13 @@ Read [README.md](README.md) before changing image configuration. Keep edits scop
 to the requested toolchain or release; do not change Jenkins or product coverage
 as part of an image update.
 
-For GPU CI changes, keep `.github/gpu-ci-suites.json`, its workflow job IDs and
-the result gate aligned. Preserve explicit bot approval for copied PRs and the trusted
-main-scoped cache baseline from trusted post-merge main/release sources. Keep
-existing Blossom/Sonar coverage until explicitly retired; registry failures and
-real workload failures must not cause GPU retries.
-Recheck the copied head and actual PR target; only main targets allow main-image
-fallback. Do not claim the bot enforces a supplied SHA for trusted contributors.
-Keep cache preparation build-only and independent of the required GPU gate.
-Preserve PR source guards; only the main cache workflow may warm trusted release
-sources into main's cache scope. Cache keys use the built source, not the workflow
-SHA; never promote a PR's cache into the trusted baseline.
+For GPU CI changes, keep the suite catalog, job IDs and result gate aligned.
+Preserve bot approval, copied-head/target checks and existing Blossom/Sonar coverage.
+Do not retry registry or workload failures, or weaken release image pinning.
+Keep cache warming build-only and independent of the GPU gate. Trusted main/release
+sources may warm the shared baseline; PR caches must stay isolated from it.
+Document expected behavior in the README; keep scheduling and implementation
+details in the owning workflow/scripts. Do not claim unperformed live validation.
 
 ## Configuration Ownership
 
