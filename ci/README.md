@@ -237,6 +237,8 @@ and migrated `release/YY.MM` branches. CPU workers run
 `premerge-build.sh --prepare-cache`: the same native targets/options and Java
 test compilation, stopping at Maven `test-compile`, without tests or fuzzing.
 Its failure does not change the PR's GPU gate or the result of product tests.
+CPU warming waits up to 10 minutes for 32-vCPU, then 10 for 16-vCPU, then 20 for
+32-vCPU again; smaller CPU pools are excluded. The worker keeps its five-hour limit.
 Documentation-only pushes skip warming; manual runs and uncertain/truncated push
 diffs prepare all enabled suites. Release pushes dispatch the main workflow with
 the pinned release source so caches are saved in main's scope, visible to copied

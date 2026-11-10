@@ -196,6 +196,7 @@ jobs:
       matrix:
         classifier: [cuda12, cuda13]
     runs-on: ubuntu-latest
+    # 40 minutes of queue waits + 300 minutes of execution leave 20 for coordination.
     timeout-minutes: 360
     permissions:
       contents: read
@@ -211,6 +212,11 @@ jobs:
           source-sha: ${{ needs.select.outputs.source-sha }}
           workload: '{"classifier":"${{ matrix.classifier }}","base-branch":"${{ needs.select.outputs.source-branch }}","mode":"cache"}'
           runner-type: cpu-amd64
+          # Keep compilation on >=12-vCPU runners, preferring the largest available size.
+          runners: >-
+            [{"group":"nv-cpu-general","labels":"linux-amd64-cpu32"},
+             {"group":"nv-cpu-general","labels":"linux-amd64-cpu16"},
+             {"group":"nv-cpu-general","labels":"linux-amd64-cpu32","queue-timeout-minutes":20}]
           queue-policy: standard
           queue-timeout-minutes: '10'
           execution-timeout-minutes: '300'
