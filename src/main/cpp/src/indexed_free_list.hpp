@@ -50,17 +50,13 @@ class indexed_free_list {
     bool const merge_next = (next != by_addr_.end()) && b.is_contiguous_before(next->second);
     if (merge_prev && merge_next) {
       block_type const merged = previous->second.merge(b).merge(next->second);
-      erase_indexed(next->second);
-      erase_indexed(previous->second);
-      put_indexed(merged);
+      replace_indexed(merged, &next->second, &previous->second);
     } else if (merge_prev) {
       block_type const merged = previous->second.merge(b);
-      erase_indexed(previous->second);
-      put_indexed(merged);
+      replace_indexed(merged, &previous->second);
     } else if (merge_next) {
       block_type const merged = b.merge(next->second);
-      erase_indexed(next->second);
-      put_indexed(merged);
+      replace_indexed(merged, &next->second);
     } else {
       put_indexed(b);
     }
@@ -84,8 +80,30 @@ class indexed_free_list {
  private:
   void put_indexed(block_type const& b)
   {
-    by_addr_[b.pointer()] = b;
-    by_size_.insert({b.size(), b.pointer()});
+    auto const [it, inserted] = by_addr_.emplace(b.pointer(), b);
+    try {
+      by_size_.emplace(b.size(), b.pointer());
+    } catch (...) {
+      if (inserted) { by_addr_.erase(it); }
+      throw;
+    }
+  }
+
+  void replace_indexed(block_type const& merged,
+                       block_type const* first,
+                       block_type const* second = nullptr)
+  {
+    // Prepare both new nodes before removing either neighbor. If an allocation
+    // fails, the original free blocks remain available in both indexes.
+    std::map<char*, block_type> staged_addr;
+    std::set<std::pair<std::size_t, char*>> staged_size;
+    staged_addr.emplace(merged.pointer(), merged);
+    staged_size.emplace(merged.size(), merged.pointer());
+
+    erase_indexed(*first);
+    if (second != nullptr) { erase_indexed(*second); }
+    by_addr_.insert(staged_addr.extract(staged_addr.begin()));
+    by_size_.insert(staged_size.extract(staged_size.begin()));
   }
 
   void erase_indexed(block_type const& b)

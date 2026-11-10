@@ -183,6 +183,52 @@ TEST(PageablePool, IndexedFreeListPreservesBestFitAndCoalescing)
   EXPECT_EQ(merged_original.pointer(), merged_indexed.pointer());
 }
 
+TEST(PageablePool, IndexedFreeListChoosesBestFitAmongUnequalHoles)
+{
+  alignas(rmm::CUDA_ALLOCATION_ALIGNMENT) char backing[8192];
+  rmm::mr::detail::coalescing_free_list original;
+  detail::indexed_free_list indexed;
+  for (auto const& [offset, size] :
+       {std::pair<std::size_t, std::size_t>{0, 512}, {1024, 2048}, {4096, 1024}}) {
+    rmm::mr::detail::block const b{backing + offset, size, false};
+    original.insert(b);
+    indexed.insert(b);
+  }
+
+  auto const first_original = original.get_block(900);
+  auto const first_indexed  = indexed.get_block(900);
+  ASSERT_TRUE(first_original.is_valid());
+  EXPECT_EQ(backing + 4096, first_original.pointer());
+  EXPECT_EQ(first_original.pointer(), first_indexed.pointer());
+  EXPECT_EQ(first_original.size(), first_indexed.size());
+
+  auto const second_original = original.get_block(1500);
+  auto const second_indexed  = indexed.get_block(1500);
+  ASSERT_TRUE(second_original.is_valid());
+  EXPECT_EQ(backing + 1024, second_original.pointer());
+  EXPECT_EQ(second_original.pointer(), second_indexed.pointer());
+  EXPECT_EQ(second_original.size(), second_indexed.size());
+}
+
+TEST(PageablePool, IndexedFreeListCoalescesBothNeighbors)
+{
+  alignas(rmm::CUDA_ALLOCATION_ALIGNMENT) char backing[4096];
+  rmm::mr::detail::coalescing_free_list original;
+  detail::indexed_free_list indexed;
+  for (auto const offset : {std::size_t{0}, std::size_t{2048}, std::size_t{1024}}) {
+    rmm::mr::detail::block const b{backing + offset, 1024, false};
+    original.insert(b);
+    indexed.insert(b);
+  }
+
+  auto const original_block = original.get_block(3072);
+  auto const indexed_block  = indexed.get_block(3072);
+  ASSERT_TRUE(original_block.is_valid());
+  EXPECT_EQ(backing, original_block.pointer());
+  EXPECT_EQ(original_block.pointer(), indexed_block.pointer());
+  EXPECT_EQ(original_block.size(), indexed_block.size());
+}
+
 // ---------------------------------------------------------------------------
 // OOM: exhausting the pool throws pageable_pool_exhausted
 // ---------------------------------------------------------------------------
