@@ -252,6 +252,15 @@ RAPIDS architecture targets keep entries reusable across GPU pools. Each run sav
 a fresh snapshot, including reruns that enrich an earlier partial cache. No cached
 test result replaces validation. Restore/upload errors remain best-effort.
 
+Both GPU workers and build-only warmers also cache the RAPIDS CMake bootstrap and
+Arrow's Thrift, RapidJSON and xsimd archives inside the persisted CPM directory.
+`JNI_DOWNLOAD_CACHE` opts into this archive cache; other callers are unchanged.
+URLs/pins and available upstream checksums identify entries; explicit Arrow URL
+or mirror overrides win. Cache failures retain upstream downloads. Each build
+still extracts, patches and configures dependencies in its own workspace.
+This is not a complete dependency cache: pinned RAPIDS Git dependencies can still
+download again. Generated build trees and test results are not cached.
+
 Test output streams to the console. The parent summary links to each
 worker; its `JNI result and diagnostics` step and job summary show the last phase,
 failed tests, CUDA/GPU/driver, pinned image, restored cache keys, timings and ccache statistics,

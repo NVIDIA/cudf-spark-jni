@@ -14,7 +14,7 @@ gpu_args=()
 if [[ "$mode" == test ]]; then gpu_args=(--gpus all); fi
 home_dir=${RUNNER_TEMP:?}/jni-home
 mkdir -p "$home_dir/.m2/repository" "$home_dir/.ccache" "$home_dir/.cache/cpm" target
-echo "JNI $CLASSIFIER: mode=$mode; Maven, ccache and CPM caches enabled"
+echo "JNI $CLASSIFIER: mode=$mode; Maven, ccache, CPM and download-archive caches enabled"
 auth_dir=
 container_started=false
 
@@ -89,6 +89,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
   -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=10G \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
+  -e JNI_DOWNLOAD_CACHE=/home/ci/.cache/cpm/jni-downloads-v1 \
   -e CMAKE_C_COMPILER_LAUNCHER=ccache -e CMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -e CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
   --entrypoint /bin/bash "$JNI_IMAGE" -c '
