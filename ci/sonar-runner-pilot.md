@@ -5,16 +5,20 @@ A maintainer applies `sonar-runner-pilot` to approve the current same-repository
 head. New commits require a new label event; ordinary pushes do not run the pilot.
 
 The workflow validates common PR #77 at the reviewed commit
-`9659fe9f136fa61cefe5a90182a66337c1e7eab0` with this path:
+`732a29325629ff5e1795d5bdee178877684f8197` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
 3. A fresh worker downloads that build's exact artifact, verifies its digest,
    and runs Sonar and the common collector. It does not execute Maven or PR build scripts.
-4. The hosted common reporter posts its own summary and **Sonar check** using
+4. The hosted common reporter posts its own summary and scoped **Sonar check** using
    the workflow token. New High/Blocker issues, a failed gate, or missing evidence
    fail the check. The earlier division-by-zero example validates failure; the
    repaired version retains only a Medium finding to validate a passing check.
+
+The shared reporter sets `Sonar check / PR #5400 / <scope>` pending after approval
+and updates that same context after scanning. The scope binds the Sonar server,
+project, and target branch, keeping unrelated Sonar checks independent.
 
 The common scanner image is not published yet. This unmerged pilot explicitly
 builds the reviewed image recipe on the hosted worker and invokes the same scan

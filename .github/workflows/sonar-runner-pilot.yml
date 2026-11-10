@@ -58,7 +58,16 @@ jobs:
           retries: 0
           script: |
             const approve = require('./ci/sonar-pilot-approval.js');
-            await approve({github, context, core, pending: true});
+            await approve({github, context, core, initial: true});
+      - name: Mark this Sonar scope pending using common PR 77
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@732a29325629ff5e1795d5bdee178877684f8197
+        with:
+          phase: pending
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ steps.approve.outputs.sha }}
+          base-ref: ${{ steps.approve.outputs.base }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
 
   security:
     needs: authorize
@@ -79,7 +88,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NVIDIA/spark-rapids-common
-          ref: 9659fe9f136fa61cefe5a90182a66337c1e7eab0
+          ref: 732a29325629ff5e1795d5bdee178877684f8197
           persist-credentials: false
           path: common
       # Pre-merge validation only: the production action requires a published image.
@@ -182,7 +191,7 @@ jobs:
         if: always() && steps.analyze.outcome != 'skipped'
         continue-on-error: true
         timeout-minutes: 12
-        uses: NVIDIA/spark-rapids-common/sonar-check/collect@9659fe9f136fa61cefe5a90182a66337c1e7eab0
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@732a29325629ff5e1795d5bdee178877684f8197
         with:
           project: ${{ vars.SONAR_PROJECT_KEY }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -222,7 +231,7 @@ jobs:
           digest-mismatch: error
       - name: Report the check and summary using common PR 77
         if: always()
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@9659fe9f136fa61cefe5a90182a66337c1e7eab0
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@732a29325629ff5e1795d5bdee178877684f8197
         with:
           result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
           project: ${{ vars.SONAR_PROJECT_KEY }}

@@ -1,7 +1,7 @@
 // Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
-module.exports = async function approve({github, context, core, pending = false}) {
+module.exports = async function approve({github, context, core, initial = false}) {
   const {owner, repo} = context.repo;
   const eventPR = context.payload.pull_request;
   const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -25,19 +25,10 @@ module.exports = async function approve({github, context, core, pending = false}
       !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
     throw new Error('PR approval changed; review the current head and reapply the label.');
   }
-  if (pending) {
+  if (initial) {
     if (!process.env.SONAR_PROJECT_KEY?.trim() || !process.env.MAVEN_MIRROR?.trim()) {
       throw new Error('Configure the Sonar project and anonymous Maven mirror.');
     }
-    await github.rest.repos.createCommitStatus({
-      owner,
-      repo,
-      sha,
-      context: 'Sonar check',
-      state: 'pending',
-      description: 'Approved commit is waiting for script security and Sonar analysis.',
-      target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-    });
     core.setOutput('sha', sha);
     core.setOutput('branch', pr.head.ref);
     core.setOutput('base', base);
