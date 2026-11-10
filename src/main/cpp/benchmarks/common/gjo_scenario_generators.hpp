@@ -429,5 +429,57 @@ inline std::vector<nested_prefix_entry> const& nested_table_33()
   return table;
 }
 
+/**
+ * @brief The reviewer-reported mixed flat+nested shape: 15 top-level fields
+ * with distinct short names plus one depth-two path `$.zz_nested.x`. The
+ * rows carry `member_count` top-level members (filler string members absorb
+ * the row budget), so the same 16 paths run over both the 50- and the
+ * 150-member layouts from the caller's size axis.
+ */
+inline multi_paths flat_mixed_build_paths()
+{
+  multi_paths paths;
+  paths.reserve(16);
+  for (int i = 0; i < 15; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
+  }
+  paths.push_back(path_list{path_tuple{instruction_t::NAMED, "zz_nested", -1},
+                            path_tuple{instruction_t::NAMED, "x", -1}});
+  return paths;
+}
+
+/**
+ * @brief Rows for the flat-mixed shape: `member_count` top-level members,
+ * with the 15 queried fields first and the nested object last. The
+ * queried/fill members shrink or grow so `pad_row_to` absorbs any
+ * remaining `row_bytes` budget, matching the other scenarios' row sizing.
+ */
+inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
+                                                      std::size_t num_rows,
+                                                      std::size_t member_count,
+                                                      std::size_t row_bytes,
+                                                      std::uint64_t seed)
+{
+  std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < std::min<std::size_t>(member_count, 15)) {
+        row += "\"f" + std::to_string(m) + "\":\"v" + std::to_string((r + salt) % 1000) + "\"";
+      } else if (m == member_count - 1) {
+        row += "\"zz_nested\":{\"x\":\"n" + std::to_string((r + salt) % 1000) + "\"}";
+      } else {
+        row += "\"fill_m" + std::to_string(m) + "\":\"" + random_string(rng, 12) + "\"";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
 }  // namespace gjo_scenarios
 }  // namespace spark_rapids_jni
