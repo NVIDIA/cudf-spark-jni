@@ -450,9 +450,9 @@ inline multi_paths flat_mixed_build_paths()
 
 /**
  * @brief Rows for the flat-mixed shape: `member_count` top-level members,
- * with the 15 queried fields first and the nested object last. The
- * queried/fill members shrink or grow so `pad_row_to` absorbs any
- * remaining `row_bytes` budget, matching the other scenarios' row sizing.
+ * with the 15 queried fields first and the nested object last. A trailing
+ * `fill` member absorbs the remaining `row_bytes` budget via `pad_row_to`,
+ * matching the other scenarios' row sizing.
  */
 inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
                                                       std::size_t num_rows,
