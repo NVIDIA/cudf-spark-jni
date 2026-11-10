@@ -13,7 +13,8 @@ The workflow validates common PR #77 at the reviewed commit
    and runs Sonar and the common collector. It does not execute Maven or PR build scripts.
 4. The hosted common reporter posts its own summary and **Sonar check** using
    the workflow token. New High/Blocker issues, a failed gate, or missing evidence
-   fail the check. The intentional example should demonstrate a failure.
+   fail the check. The earlier division-by-zero example validates failure; the
+   repaired version retains only a Medium finding to validate a passing check.
 
 The common scanner image is not published yet. This unmerged pilot explicitly
 builds the reviewed image recipe on the hosted worker and invokes the same scan
