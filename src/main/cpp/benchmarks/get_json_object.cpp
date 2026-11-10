@@ -117,7 +117,7 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int8_t>(input_bytes);
   state.add_element_count(num_rows, "rows");
-  state.add_element_count(num_paths, "paths");
+  state.add_element_count(mixed ? base_paths.size() : num_paths, "paths");
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::get_json_object_multiple_paths(
       cudf::strings_column_view{input}, tiled, budget, override_r);
