@@ -40,7 +40,7 @@
 
 using namespace spark_rapids_jni::gjo_scenarios;
 
-// Benchmarks the two nested-path shapes with reproducible row seeds.
+// Benchmarks the nested-path shapes and the flat-mixed shape with reproducible row seeds.
 
 namespace {
 
