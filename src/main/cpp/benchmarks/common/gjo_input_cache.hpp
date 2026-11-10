@@ -31,16 +31,21 @@ namespace bench {
 using input_cache_key = std::uint64_t;
 
 /**
- * @brief Pack (scenario, size_bytes, seed) into one cache key: 16 / 32 / 16 bits respectively.
+ * @brief Pack (scenario, flavor, size_bytes, seed) into one cache key:
+ * 8 / 8 / 32 / 16 bits at shifts 56 / 48 / 16 / 0 respectively.
  *
- * `scenario` distinguishes input shapes at the same byte size (row kind, `max_depth`); `seed`
- * distinguishes generator seeds.
+ * `scenario` distinguishes input shapes at the same byte size (row kind, `max_depth`); `flavor`
+ * distinguishes row-shape variants within one scenario (e.g. the mixed shape's member count);
+ * `size_bytes` is packed in KiB units so 32 bits cover up to 4 TiB; `seed` distinguishes
+ * generator seeds. All fields are disjoint, so distinct tuples map to distinct keys.
  */
 constexpr input_cache_key make_input_cache_key(std::uint64_t scenario,
                                                std::uint64_t size_bytes,
-                                               std::uint64_t seed)
+                                               std::uint64_t seed,
+                                               std::uint64_t flavor = 0)
 {
-  return (scenario << 48) | ((size_bytes & 0xFFFF'FFFFULL) << 16) | (seed & 0xFFFFULL);
+  return (scenario & 0xFFULL) << 56 | (flavor & 0xFFULL) << 48 |
+         ((size_bytes >> 10) & 0xFFFF'FFFFULL) << 16 | (seed & 0xFFFFULL);
 }
 
 /**
