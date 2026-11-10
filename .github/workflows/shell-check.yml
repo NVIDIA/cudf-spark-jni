@@ -72,7 +72,7 @@ jobs:
           import tempfile
           import xml.etree.ElementTree as ET
 
-          helper = Path("ci/gha-download-auth.py").resolve()
+          helper = Path(".github/scripts/gpu-ci/download-auth.py").resolve()
           spec = importlib.util.spec_from_file_location("download_auth", helper)
           auth = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(auth)

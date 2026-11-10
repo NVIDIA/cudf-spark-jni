@@ -55,7 +55,7 @@ async function alreadyPrepared({github, context, core, source, pomHash, selected
       if (diff.status !== 'ahead' || diff.merge_base_commit?.sha !== baseline ||
           !Array.isArray(diff.files) || diff.files.length >= 300) return false;
       const warmerChanged = diff.files.some(file => [file.filename, file.previous_filename]
-        .some(path => ['.github/workflows/gpu-cache.yml', 'ci/gha-cache.js'].includes(path)));
+        .some(path => ['.github/workflows/gpu-cache.yml', '.github/scripts/gpu-ci/cache.js'].includes(path)));
       if (warmerChanged || selectSuites(diff.files, catalog).includes('jni')) return false;
     }
     // Release source history does not include changes to the main-owned worker.

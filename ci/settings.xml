@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  Copyright (c) 2022, NVIDIA CORPORATION.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -49,16 +49,6 @@
       <password>${env.SONATYPE_PSW}</password>
     </server>
   </servers>
-  <mirrors>
-    <!-- Neither of the POM's public repositories may bypass internal routing.
-         Reuse the central server ID above so mirror downloads stay authenticated.
-         The artifactory profile already routes Central itself to ART_URL. -->
-    <mirror>
-      <id>central</id>
-      <url>${env.ART_URL}</url>
-      <mirrorOf>google-maven-central,maven-central-fallback</mirrorOf>
-    </mirror>
-  </mirrors>
   <profiles>
     <profile>
       <repositories>

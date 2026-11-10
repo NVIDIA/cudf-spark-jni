@@ -6,10 +6,11 @@ name: GPU CI
 # Additive validation for main/release PRs; Blossom and Sonar remain enabled.
 # Use /ok to test <full-head-SHA>; copy-pr-bot copies the current head under its
 # trust policy. Auto-sync stays disabled; each new head needs another command.
-# Selection uses the full PR diff. Unaffected paths skip GPU jobs, not the gate.
+# Selection uses the full PR diff. Documentation and explicitly listed unrelated
+# workflow files skip GPU jobs, not the gate; every other change selects the suite.
 # A PR-title [skip ci] marker also skips GPU work, matching Jenkins premerge.
-# exclude_paths applies only inside each suite's paths; shared paths select all
-# enabled suites. Add future suites to the catalog, jobs and gate's needs together.
+# The current suite omits paths to cover all files except exclude_paths.
+# Add future suites to the catalog, jobs and gate's needs together.
 # Keep the existing required checks until this additional gate is validated.
 # gpu-cache.yml warms shared dependencies after merge, independently of this gate.
 on:

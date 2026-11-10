@@ -4,14 +4,6 @@ Read [README.md](README.md) before changing image configuration. Keep edits scop
 to the requested toolchain or release; do not change Jenkins or product coverage
 as part of an image update.
 
-For GPU CI changes, keep the suite catalog, job IDs and result gate aligned.
-Preserve bot approval, copied-head/target checks and existing Blossom/Sonar coverage.
-Do not retry registry or workload failures, or weaken release image pinning.
-Keep cache warming build-only and independent of the GPU gate. Trusted main/release
-sources may warm the shared baseline; PR caches must stay isolated from it.
-Document expected behavior in the README; keep scheduling and implementation
-details in the owning workflow/scripts. Do not claim unperformed live validation.
-
 ## Configuration Ownership
 
 - `toolchains.json`: CUDA requirements keyed by the POM's major.minor version.

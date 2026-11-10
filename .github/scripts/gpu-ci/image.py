@@ -87,7 +87,7 @@ def main():
     if (len(sys.argv) not in (3, 4) or sys.argv[1] not in ("cuda12", "cuda13") or
             not re.fullmatch(r"main|release/[0-9]{2}\.[0-9]{2}", sys.argv[2]) or
             (len(sys.argv) == 4 and sys.argv[3] not in ("amd64", "arm64"))):
-        sys.exit("Usage: gha-image.py cuda12|cuda13 main|release/YY.MM [amd64|arm64]")
+        sys.exit("Usage: image.py cuda12|cuda13 main|release/YY.MM [amd64|arm64]")
     architecture = sys.argv[3] if len(sys.argv) == 4 else "amd64"
     classifier = sys.argv[1] + ("-arm64" if architecture == "arm64" else "")
     branch = sys.argv[2]

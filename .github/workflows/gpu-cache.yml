@@ -103,12 +103,12 @@ jobs:
             const fs = require('node:fs');
             const required = [
               '.github/gpu-ci-suites.json', 'ci/toolchains.json', 'ci/image-config.py',
-              'ci/gha-image.py', 'ci/gha-premerge.sh', 'ci/gha-download-auth.py',
-              'ci/gha-report.py', 'ci/settings-public.xml', 'ci/premerge-build.sh',
-              'ci/gha-cache.js',
+              '.github/scripts/gpu-ci/image.py', '.github/scripts/gpu-ci/run.sh',
+              '.github/scripts/gpu-ci/download-auth.py', '.github/scripts/gpu-ci/report.py',
+              '.github/scripts/gpu-ci/settings.xml', '.github/scripts/gpu-ci/cache.js',
+              'ci/premerge-build.sh',
             ];
-            if (required.some(path => !fs.existsSync(path)) ||
-                !fs.readFileSync('ci/premerge-build.sh', 'utf8').includes('--prepare-cache')) {
+            if (required.some(path => !fs.existsSync(path))) {
               core.notice('Cache preparation skipped: this source needs the build-only cache workflow/helpers backported first');
               return;
             }
@@ -140,7 +140,7 @@ jobs:
             const fs = require('node:fs');
             const {execFileSync} = require('node:child_process');
             const {selectSuites} = require(`${process.env.GITHUB_WORKSPACE}/.ci-common/workflow-suite-selector`);
-            const {alreadyPrepared} = require(`${process.env.GITHUB_WORKSPACE}/ci/gha-cache.js`);
+            const {alreadyPrepared} = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/gpu-ci/cache.js`);
             const path = '.github/gpu-ci-suites.json';
             const catalog = JSON.parse(fs.readFileSync(path, 'utf8'));
             const suites = selectSuites([{filename: path}], catalog);

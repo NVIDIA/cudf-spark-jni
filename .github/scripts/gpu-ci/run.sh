@@ -14,7 +14,7 @@ gpu_args=()
 if [[ "$mode" == test ]]; then gpu_args=(--gpus all); fi
 home_dir=${RUNNER_TEMP:?}/jni-home
 mkdir -p "$home_dir/.m2/repository" "$home_dir/.ccache" "$home_dir/.cache/cpm" target
-echo "JNI $CLASSIFIER: mode=$mode; Maven, ccache, CPM and download-archive caches enabled"
+echo "JNI $CLASSIFIER: mode=$mode; Maven, ccache and CPM caches enabled"
 auth_dir=
 container_started=false
 
@@ -37,7 +37,7 @@ finish() {
     stopped=false
   fi
   if [[ "$stopped" == true && -n "$auth_dir" ]] &&
-      python3 ci/gha-download-auth.py "$auth_dir/netrc" --stage target/gha-evidence; then
+      python3 .github/scripts/gpu-ci/download-auth.py "$auth_dir/netrc" --stage target/gha-evidence; then
     [[ -z "${GITHUB_OUTPUT:-}" ]] || echo 'publish-safe=true' >> "$GITHUB_OUTPUT"
   else
     echo '::warning::Could not safely collect diagnostics; evidence and cache uploads are disabled.'
@@ -86,11 +86,10 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   -e "CUDA_VER=$CLASSIFIER" \
   -e "JNI_MODE=$mode" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
-  -e MVN_SETTINGS=/workspace/ci/settings-public.xml \
+  -e MVN_SETTINGS=/workspace/.github/scripts/gpu-ci/settings.xml \
   -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
   -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=3G \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
-  -e JNI_DOWNLOAD_CACHE=/home/ci/.cache/cpm/jni-downloads-v1 \
   -e CMAKE_C_COMPILER_LAUNCHER=ccache -e CMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -e CMAKE_CUDA_COMPILER_LAUNCHER=ccache \
   --entrypoint /bin/bash "$JNI_IMAGE" -c '
@@ -164,7 +163,19 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     if [[ "$JNI_MODE" == cache ]]; then
       printf "build-only cache preparation\n" > target/gha-phase.txt || :
       echo "=== JNI cache preparation (no tests) ==="
-      ${sclCMD} "ci/premerge-build.sh --prepare-cache"
+      git submodule update --init --recursive
+      BUILD_FAULTINJ=${BUILD_FAULTINJ:-ON}
+      BUILD_PROFILER=${BUILD_PROFILER:-ON}
+      if [[ "$CUDA_VER" == cuda13 ]]; then
+        BUILD_FAULTINJ=OFF
+        BUILD_PROFILER=OFF
+      fi
+      # Match premerge native/Java targets, but stop before process-test-classes
+      # and test: those phases execute code that requires a GPU.
+      ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 test-compile \
+        -DCPP_PARALLEL_LEVEL=$PARALLEL_LEVEL -Dlibcudf.build.configure=true \
+        -DUSE_GDS=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
+        -DBUILD_FAULTINJ=$BUILD_FAULTINJ -DBUILD_PROFILER=$BUILD_PROFILER"
       printf "build_only_seconds=%s\n" "$SECONDS" > target/gha-timing.txt || :
     else
       printf "build and Java/native tests\n" > target/gha-phase.txt || :
@@ -178,7 +189,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
       printf "fuzz_seconds=%s\n" "$((SECONDS - fuzz_start))" >> target/gha-timing.txt || :
     fi
     printf "complete\n" > target/gha-phase.txt || :
-  ' 2>&1 | python3 ci/gha-download-auth.py "$auth_dir/netrc" | tee target/gha-premerge.log
+  ' 2>&1 | python3 .github/scripts/gpu-ci/download-auth.py "$auth_dir/netrc" | tee target/gha-premerge.log
 results=("${PIPESTATUS[@]}")
 # Keep the real workload failure even if filtering or tee also failed.
 if (( results[0] != 0 )); then exit "${results[0]}"; fi

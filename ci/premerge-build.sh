@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,14 +17,7 @@
 
 set -ex
 
-# Cache warming compiles native and Java test code, but stops before Maven's
-# process-test-classes/test phases. Normal premerge still verifies everything.
-maven_goal=verify
-if [[ "${1:-}" == --prepare-cache ]]; then
-  maven_goal=test-compile
-else
-  nvidia-smi
-fi
+nvidia-smi
 
 git submodule update --init --recursive
 
@@ -42,7 +35,7 @@ fi
 MVN_SETTINGS=${MVN_SETTINGS:-"ci/settings.xml"}
 MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -B -s $MVN_SETTINGS"
 PARALLEL_LEVEL=${PARALLEL_LEVEL:-4}
-${MVN} "${maven_goal}" ${MVN_MIRROR} \
+${MVN} verify ${MVN_MIRROR} \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON \
@@ -50,8 +43,6 @@ ${MVN} "${maven_goal}" ${MVN_MIRROR} \
   -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
   -DBUILD_PROFILER=${BUILD_PROFILER}
-
-if [[ "$maven_goal" == test-compile ]]; then exit 0; fi
 
 build_name=$(${MVN} help:evaluate -Dexpression=project.build.finalName -q -DforceStdout)
 cuda_version=$(${MVN} help:evaluate -Dexpression=cuda.version -q -DforceStdout)

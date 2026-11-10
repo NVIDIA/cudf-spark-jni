@@ -140,7 +140,7 @@ jobs:
       - name: Select compatible public toolchain
         id: image
         timeout-minutes: 5
-        run: python3 ci/gha-image.py "$CLASSIFIER" "$BASE_BRANCH" "$JNI_ARCH"
+        run: python3 .github/scripts/gpu-ci/image.py "$CLASSIFIER" "$BASE_BRANCH" "$JNI_ARCH"
       - name: Set up Docker Buildx
         if: steps.image.outputs.reference == ''
         uses: docker/setup-buildx-action@v4.4.1
@@ -203,7 +203,7 @@ jobs:
           JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
           # Read-only job token, scoped to this guarded worker step, never a PAT.
           GITHUB_DOWNLOAD_TOKEN: ${{ github.token }}
-        run: bash ci/gha-premerge.sh
+        run: bash .github/scripts/gpu-ci/run.sh
       # Collect evidence before optional cache uploads. Diagnostics must never
       # replace the workload result; cancellation/runner loss may prevent collection.
       - name: Upload JNI test evidence
@@ -231,7 +231,7 @@ jobs:
           NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
           EVIDENCE_URL: ${{ steps.evidence.outputs.artifact-url }}
         working-directory: target/gha-evidence
-        run: python3 "$GITHUB_WORKSPACE/ci/gha-report.py"
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/gpu-ci/report.py"
       # A failed test does not invalidate compiler/dependency caches. Save partial
       # useful work on this branch too, without masking failures or cancellation.
       - name: Save Maven dependencies

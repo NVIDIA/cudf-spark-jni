@@ -71,16 +71,14 @@ fi
 
 source "$PROJECT_BUILD_DIR/buildcpp-env.sh"
 
-# CMake's libcurl does not read .curlrc or inherit these environment variables.
-# Opt in only when supplied, preserving existing libcudf/sparkjni cache settings.
-cmake_netrc_args=()
+# Keep libcudfjni's defaults, but only override libcudf/sparkjni when the caller
+# supplies netrc settings. CMake does not inherit these environment variables.
+netrc_args=("-DCMAKE_NETRC=${CMAKE_NETRC:-IGNORED}"
+            "-DCMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}")
+optional_netrc_args=()
 if [[ -n "${CMAKE_NETRC:-}" || -n "${CMAKE_NETRC_FILE:-}" ]]; then
-  cmake_netrc_args=("-DCMAKE_NETRC=${CMAKE_NETRC:-IGNORED}"
-                    "-DCMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}")
+  optional_netrc_args=("${netrc_args[@]}")
 fi
-# Keep the existing libcudfjni defaults for callers without CI credential setup.
-CMAKE_NETRC=${CMAKE_NETRC:-IGNORED}
-CMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}
 
 if [[ "$GPU_ARCHS" != "DEPRECATED" ]]; then
     CMAKE_CUDA_ARCHITECTURES="$GPU_ARCHS"    
@@ -121,7 +119,7 @@ if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.tx
     -DCMAKE_BUILD_TYPE="$CUDF_BUILD_TYPE" \
     -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
     -DCMAKE_INSTALL_PREFIX="$LIBCUDF_INSTALL_PATH" \
-    "${cmake_netrc_args[@]}" \
+    "${optional_netrc_args[@]}" \
     -DCUDF_DEPENDENCY_PIN_MODE="$LIBCUDF_DEPENDENCY_MODE" \
     -DCUDA_STATIC_CUFILE=ON \
     -DCUDA_STATIC_RUNTIME=ON \
@@ -156,8 +154,7 @@ CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
   -DCUDF_JNI_LIBCUDF_STATIC=ON \
   -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
   -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
-  -DCMAKE_NETRC="$CMAKE_NETRC" \
-  -DCMAKE_NETRC_FILE="$CMAKE_NETRC_FILE" \
+  "${netrc_args[@]}" \
   -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
   -DUSE_GDS="$USE_GDS" \
   -C="$CUDF_PIN_PATH/setup.cmake"
@@ -181,7 +178,7 @@ CUDF_ROOT="$CUDF_PATH" \
     -DBUILD_BENCHMARKS="$BUILD_BENCHMARKS" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
     -DBUILD_FAULTINJ="$BUILD_FAULTINJ" \
-    "${cmake_netrc_args[@]}" \
+    "${optional_netrc_args[@]}" \
     -DBUILD_PROFILER="$BUILD_PROFILER" \
     -DBUILD_TESTS="$BUILD_TESTS" \
     -DCUDF_DEPENDENCY_PIN_MODE=pinned \
