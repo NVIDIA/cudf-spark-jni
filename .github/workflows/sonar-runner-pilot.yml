@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Test-only pilot. A maintainer must apply the label again for every new head.
-# Opening, updating, or publishing the PR does not request an internal runner.
+# Test-only validation. Only a new maintainer label approves a new PR head.
 name: Sonar runner pilot
 run-name: Sonar runner pilot for PR ${{ github.event.pull_request.number }}
 
@@ -32,6 +31,7 @@ jobs:
   authorize:
     if: >-
       github.event.label.name == 'sonar-runner-pilot' &&
+      github.event.pull_request.number == 5400 &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -43,179 +43,157 @@ jobs:
       sha: ${{ steps.approve.outputs.sha }}
       branch: ${{ steps.approve.outputs.branch }}
       base: ${{ steps.approve.outputs.base }}
-      runner: ${{ steps.approve.outputs.runner }}
     steps:
-      - name: Authorize the labeled PR head
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Approve the labeled PR head
         id: approve
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-          RUNNER_LABEL: ${{ vars.SONAR_RUNNER_PILOT_LABEL }}
-          RUNNER_GROUP: ${{ vars.SONAR_RUNNER_PILOT_GROUP }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           MAVEN_MIRROR: ${{ vars.SONAR_RUNNER_PILOT_MAVEN_MIRROR }}
         with:
+          retries: 0
           script: |
-            const {owner, repo} = context.repo;
-            const eventPR = context.payload.pull_request;
-            const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
-              owner, repo, username: process.env.TRIGGERING_ACTOR
-            });
-            if (!['admin', 'maintain', 'write'].includes(permission.permission)) {
-              throw new Error('The pilot must be started by a repository maintainer.');
-            }
-            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: eventPR.number});
-            if (pr.state !== 'open' || pr.head.repo?.full_name !== `${owner}/${repo}` ||
-                pr.head.sha !== eventPR.head.sha || pr.base.ref !== eventPR.base.ref ||
-                !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
-              throw new Error('PR approval is stale. Review the current head and reapply the pilot label.');
-            }
-            const label = process.env.RUNNER_LABEL;
-            if (!/^sonar-runner-pilot-[a-z0-9-]+$/.test(label || '')) {
-              throw new Error('Set SONAR_RUNNER_PILOT_LABEL to a dedicated sonar-runner-pilot-* label.');
-            }
-            if (!process.env.SONAR_PROJECT_KEY?.trim()) {
-              throw new Error('Set the SONAR_PROJECT_KEY repository variable.');
-            }
-            if (!process.env.MAVEN_MIRROR?.trim()) {
-              throw new Error('Set the SONAR_RUNNER_PILOT_MAVEN_MIRROR repository variable.');
-            }
-            const runner = {labels: ['self-hosted', 'Linux', 'X64', label]};
-            if (process.env.RUNNER_GROUP?.trim()) runner.group = process.env.RUNNER_GROUP.trim();
-            await github.rest.repos.createCommitStatus({
-              owner, repo, sha: pr.head.sha, context: 'Sonar check', state: 'pending',
-              description: 'Approved Sonar runner pilot is waiting to scan this commit.',
-              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
-            });
-            core.setOutput('sha', pr.head.sha);
-            core.setOutput('branch', pr.head.ref);
-            core.setOutput('base', pr.base.ref);
-            core.setOutput('runner', JSON.stringify(runner));
+            const approve = require('./ci/sonar-pilot-approval.js');
+            await approve({github, context, core, pending: true});
 
-  scan:
+  security:
     needs: authorize
-    runs-on: ${{ fromJSON(needs.authorize.outputs.runner) }}
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     outputs:
-      attempt: ${{ steps.collect.outputs.attempt }}
+      sha: ${{ steps.scan.outputs.sha }}
+    steps:
+      - name: Checkout approved source as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+          path: source
+      - name: Checkout the reviewed shared scanner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NVIDIA/spark-rapids-common
+          ref: b0cb860cb186d6bae817229270f58c8f2bfe94ff
+          persist-credentials: false
+          path: common
+      # Pre-merge validation only: the production action requires a published image.
+      # Exercise the same reviewed image recipe/core without publishing a PR image.
+      - name: Validate script security with the proposed image
+        id: scan
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+        run: python3 -I source/ci/sonar-pilot-security.py
+
+  compile:
+    needs: [authorize, security]
+    runs-on: [self-hosted, Linux, X64, spark-sonar-internal]
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.compile.outputs.version }}
     steps:
-      - name: Check that approval still names the current head
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.security.outputs.sha }}
+          persist-credentials: false
+      - name: Recheck approval after runner allocation
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           APPROVED_BASE: ${{ needs.authorize.outputs.base }}
         with:
           script: |
-            const {owner, repo} = context.repo;
-            const {data: pr} = await github.rest.pulls.get({
-              owner, repo, pull_number: context.payload.pull_request.number
-            });
-            if (pr.state !== 'open' || pr.head.repo?.full_name !== `${owner}/${repo}` ||
-                pr.head.sha !== process.env.APPROVED_SHA || pr.base.ref !== process.env.APPROVED_BASE ||
-                !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
-              throw new Error('PR changed while waiting for the runner; reapply the label after review.');
-            }
-
-      - name: Check out the approved commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.authorize.outputs.sha }}
-          fetch-depth: 0
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Compile Java
+            const approve = require('./ci/sonar-pilot-approval.js');
+            await approve({github, context, core});
+      - name: Compile Java without Sonar credentials
         id: compile
-        shell: bash
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           MAVEN_MIRROR: ${{ vars.SONAR_RUNNER_PILOT_MAVEN_MIRROR }}
           MAVEN_SETTINGS: ${{ runner.temp }}/sonar-maven-settings.xml
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
-          # Use the configured anonymous mirror; no repository credentials are needed.
-          python3 - <<'PY'
-          import os
-          import urllib.parse
-          import xml.etree.ElementTree as ET
+        run: python3 -I ci/sonar-pilot-build.py
+      - name: Transfer only compiled classes to a fresh worker
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-classes-${{ github.run_attempt }}
+          path: target/classes/**/*.class
+          if-no-files-found: error
+          retention-days: 3
 
-          mirror = os.environ["MAVEN_MIRROR"].strip()
-          try:
-              url = urllib.parse.urlsplit(mirror)
-              port = url.port
-          except ValueError:
-              raise SystemExit("The Maven mirror must be a valid HTTPS URL")
-          if (url.scheme != "https" or not url.hostname or url.username is not None
-                  or url.password is not None or url.query or url.fragment
-                  or any(character.isspace() for character in mirror)):
-              raise SystemExit("The Maven mirror must use HTTPS without credentials, query, or fragment")
-          settings = ET.Element("settings", xmlns="http://maven.apache.org/SETTINGS/1.0.0")
-          entry = ET.SubElement(ET.SubElement(settings, "mirrors"), "mirror")
-          for key, value in (("id", "sonar-pilot"), ("mirrorOf", "*"), ("url", mirror)):
-              ET.SubElement(entry, key).text = value
-          ET.ElementTree(settings).write(os.environ["MAVEN_SETTINGS"], encoding="utf-8",
-                                         xml_declaration=True)
-          PY
-          mvn -s "$MAVEN_SETTINGS" -B -Dmaven.wagon.http.retryHandler.count=3 compile \
-            -DskipTests=true -Dmaven.antrun.skip=true
-          version=$(mvn -s "$MAVEN_SETTINGS" -B -Dstyle.color=never help:evaluate \
-            -Dexpression=project.version -q -DforceStdout)
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-
+  scan:
+    needs: [authorize, security, compile]
+    runs-on: [self-hosted, Linux, X64, spark-sonar-internal]
+    timeout-minutes: 30
+    outputs:
+      attempt: ${{ steps.collect.outputs.source-attempt }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    steps:
+      - name: Checkout approved source in a fresh scan worker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.security.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck approval after runner allocation
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+        with:
+          script: |
+            const approve = require('./ci/sonar-pilot-approval.js');
+            await approve({github, context, core});
+      - name: Download this build's compiled classes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile.outputs.artifact-id }}
+          path: target/classes
+          digest-mismatch: error
       - name: Scan the approved SHA and wait for the quality gate
         id: analyze
         continue-on-error: true
-        shell: bash
         env:
           APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BRANCH: ${{ needs.authorize.outputs.branch }}
           PR_BASE: ${{ needs.authorize.outputs.base }}
-          PROJECT_VERSION: ${{ steps.compile.outputs.version }}
+          PROJECT_VERSION: ${{ needs.compile.outputs.version }}
           SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
-          : "${SONAR_HOST_URL:?Set the SONAR_HOST_URL repository secret}"
-          : "${SONAR_TOKEN:?Set the SONAR_RUNNER_PILOT_TOKEN repository secret}"
-          rm -f .scannerwork/report-task.txt
-          sonar-scanner \
-            -Dsonar.ci.autoconfig.disabled=true \
-            "-Dsonar.projectKey=$SONAR_PROJECT_KEY" \
-            "-Dsonar.projectVersion=$PROJECT_VERSION" \
-            "-Dsonar.scm.revision=$APPROVED_SHA" \
-            "-Dsonar.pullrequest.key=$PR_NUMBER" \
-            "-Dsonar.pullrequest.branch=$PR_BRANCH" \
-            "-Dsonar.pullrequest.base=$PR_BASE" \
-            -Dsonar.java.binaries=target/classes \
-            -Dsonar.sources=src/main/java,src/main/cpp/src \
-            -Dsonar.qualitygate.wait=true \
-            -Dsonar.qualitygate.timeout=600
-
-      - name: Collect the exact analysis result, including a failed quality gate
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: bash ci/sonar-pilot-scan.sh
+      - name: Collect the exact analysis using common PR 77
         id: collect
         if: always() && steps.analyze.outcome != 'skipped'
+        continue-on-error: true
         timeout-minutes: 12
-        env:
-          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          SCANNER_OUTCOME: ${{ steps.analyze.outcome }}
-          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_RUNNER_PILOT_TOKEN }}
-        run: |
-          printf 'attempt=%s\n' "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          python3 ci/sonar-pilot-result.py "$RUNNER_TEMP/sonar-result.json"
-
-      - name: Hand the result to the hosted reporter
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@b0cb860cb186d6bae817229270f58c8f2bfe94ff
+        with:
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ needs.authorize.outputs.sha }}
+          base-ref: ${{ needs.authorize.outputs.base }}
+          scanner-outcome: ${{ steps.analyze.outcome }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+      - name: Transfer the result even when the quality gate fails
+        id: upload
         if: always() && steps.collect.outcome != 'skipped'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sonar-result-${{ github.run_attempt }}
           path: ${{ runner.temp }}/sonar-result.json
@@ -223,7 +201,7 @@ jobs:
           retention-days: 3
 
   report:
-    needs: [authorize, scan]
+    needs: [authorize, security, compile, scan]
     if: always() && needs.authorize.result == 'success' && needs.authorize.outputs.sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -232,129 +210,24 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
-      - name: Download this attempt's scan result
+      - name: Download the exact producing scan artifact
+        id: download
+        if: needs.scan.outputs.artifact-id != ''
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: sonar-result-${{ needs.scan.outputs.attempt || github.run_attempt }}
+          artifact-ids: ${{ needs.scan.outputs.artifact-id }}
           path: ${{ runner.temp }}/sonar-report
-
-      - name: Publish the summary and Sonar check as GitHub Actions
+          digest-mismatch: error
+      - name: Report the check and summary using common PR 77
         if: always()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        env:
-          APPROVED_SHA: ${{ needs.authorize.outputs.sha }}
-          SCAN_RESULT: ${{ needs.scan.result }}
-          SCAN_ATTEMPT: ${{ needs.scan.outputs.attempt }}
-          REPORT_PATH: ${{ runner.temp }}/sonar-report/sonar-result.json
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@b0cb860cb186d6bae817229270f58c8f2bfe94ff
         with:
-          script: |
-            const fs = require('node:fs');
-            const {owner, repo} = context.repo;
-            const sha = process.env.APPROVED_SHA;
-            const prNumber = context.payload.pull_request.number;
-            const runId = String(context.runId);
-            const attempt = String(context.runAttempt || process.env.GITHUB_RUN_ATTEMPT);
-            const scanAttempt = process.env.SCAN_ATTEMPT;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${runId}/attempts/${attempt}`;
-            const scanUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${runId}/attempts/${scanAttempt}`;
-            const commitUrl = `${context.serverUrl}/${owner}/${repo}/commit/${sha}`;
-            const marker = `<!-- sonar-pilot-summary:${runId}:${attempt} -->`;
-            const escape = value => String(value ?? '').replace(/[\r\n]+/g, ' ')
-              .replace(/[\\`*_{}[\]()|]/g, '\\$&').replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/@/g, '&#64;');
-            const link = value => value.replace(/[()]/g, character => `%${character.charCodeAt(0).toString(16)}`);
-            const count = value => Number.isSafeInteger(value) && value >= 0;
-            let report;
-            let passed = false;
-            let published = false;
-            let failure = 'Scan or result collection did not complete successfully.';
-
-            try {
-              const data = JSON.parse(fs.readFileSync(process.env.REPORT_PATH, 'utf8'));
-              if (data.schema !== 1 || data.sha !== sha || data.pr !== prNumber ||
-                  String(data.runId) !== runId || !/^[1-9][0-9]*$/.test(scanAttempt || '') ||
-                  String(data.runAttempt) !== scanAttempt ||
-                  data.complete !== true || typeof data.passed !== 'boolean' ||
-                  !['OK', 'ERROR', 'WARN', 'NONE'].includes(data.gateStatus) ||
-                  ![data.totalIssues, data.high, data.blocker].every(count) ||
-                  !data.analysisId || !data.taskId || !Array.isArray(data.issues)) {
-                throw new Error('Missing or mismatched scan evidence.');
-              }
-              const reportUrl = new URL(data.reportUrl);
-              if (reportUrl.protocol !== 'https:' || reportUrl.username || reportUrl.password ||
-                  !/\/dashboard\/?$/.test(reportUrl.pathname)) {
-                throw new Error('Invalid Sonar report URL.');
-              }
-              report = data;
-              passed = data.passed && data.gateStatus === 'OK' && data.high === 0 &&
-                data.blocker === 0 && process.env.SCAN_RESULT === 'success';
-              if (!passed && (data.gateStatus !== 'OK' || data.high > 0 || data.blocker > 0)) {
-                failure = 'Sonar quality gate failed or new High/Blocker issues were found.';
-              }
-            } catch (error) {
-              core.warning(`Cannot use the Sonar result artifact: ${error.message}`);
-            }
-
-            try {
-              const {data: currentPR} = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              const advanced = currentPR.head.sha !== sha;
-              const lines = [marker, '### Sonar pilot: analysis result', '',
-                `**Quality gate: ${report ? (report.gateStatus === 'OK' ? 'PASS' : 'FAIL') : 'Unavailable'} · New issues: ${report ? report.totalIssues : 'Unavailable'}**`, '',
-                `${report ? 'Analyzed' : 'Approved'} commit: [\`${sha.slice(0, 12)}\`](${commitUrl}). This result applies to that commit.${advanced ? ' The PR has since advanced to another commit.' : ''}`, ''];
-              if (report) {
-                lines.push('| Finding | Location | Severity |', '| --- | --- | --- |');
-                const rank = {BLOCKER: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1};
-                const highest = issue => Math.max(0, ...(issue.impacts || []).map(impact => rank[impact.severity] || 0));
-                const issues = [...report.issues].sort((left, right) => highest(right) - highest(left)).slice(0, 10);
-                for (const issue of issues) {
-                  const path = typeof issue.path === 'string' && issue.path &&
-                    !issue.path.startsWith('/') && !issue.path.split('/').includes('..') ? issue.path : '';
-                  const location = path ? `${context.serverUrl}/${owner}/${repo}/blob/${sha}/${path.split('/').map(encodeURIComponent).join('/')}${Number.isSafeInteger(issue.line) && issue.line > 0 ? `#L${issue.line}` : ''}` : '';
-                  const label = path ? `${path.split('/').pop()}${issue.line ? `:${issue.line}` : ''}` : 'Project';
-                  const impacts = (issue.impacts || []).map(impact =>
-                    `${String(impact.severity).slice(0, 1)}${String(impact.severity).slice(1).toLowerCase()} ${String(impact.softwareQuality).toLowerCase()}`).join(', ');
-                  const severity = `${impacts || 'Unspecified'} (legacy: ${String(issue.legacySeverity || 'unknown').toLowerCase()} ${String(issue.legacyType || 'issue').toLowerCase().replaceAll('_', ' ')})`;
-                  lines.push(`| ${escape(issue.rule)} — ${escape(String(issue.message || '').slice(0, 500))} | ${location ? `[${escape(label)}](${link(location)})` : escape(label)} | ${escape(severity)} |`);
-                }
-                if (report.totalIssues === 0) lines.push('| No new issues | — | — |');
-                if (report.totalIssues > issues.length) lines.push('', `Showing ${issues.length} of ${report.totalIssues} issues; see the full report.`);
-                lines.push('', 'The project gate rejects new **High** and **Blocker** issues. **Medium** findings are reported without failing that severity policy.');
-                const links = [];
-                if (issues[0]?.key) {
-                  const issueUrl = new URL(report.reportUrl);
-                  issueUrl.pathname = issueUrl.pathname.replace(/\/dashboard\/?$/, '/project/issues');
-                  issueUrl.searchParams.set('open', issues[0].key);
-                  links.push(`[View the finding](${link(issueUrl.href)})`);
-                }
-                links.push(`[Full Sonar report](${link(report.reportUrl)})`, `[Scan run](${scanUrl})`);
-                if (scanAttempt !== attempt) links.push(`[Report retry](${runUrl})`);
-                lines.push('', links.join(' · '));
-              }
-              if (!passed) lines.push('', `**Sonar check: FAIL.** ${failure} [Workflow logs](${runUrl}).`);
-              lines.push('', 'This is a test-only pilot with intentionally unused examples; do not merge it. This summary and the **Sonar check** are published by the workflow from its scan evidence.');
-              const body = lines.join('\n');
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: prNumber, per_page: 100
-              });
-              const existing = comments.find(comment => comment.user?.type === 'Bot' &&
-                comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(marker));
-              if (existing) {
-                await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
-              } else {
-                await github.rest.issues.createComment({owner, repo, issue_number: prNumber, body});
-              }
-              published = true;
-            } catch (error) {
-              passed = false;
-              core.warning(`Sonar summary publication failed: ${error.message}`);
-            } finally {
-              passed = passed && published;
-              await github.rest.repos.createCommitStatus({
-                owner, repo, sha, context: 'Sonar check', state: passed ? 'success' : 'failure',
-                description: passed ? 'Sonar passed: no new High or Blocker issues.' :
-                  'Sonar failed: quality gate, scan, or report publication failed.',
-                target_url: runUrl
-              });
-              if (!passed) core.setFailed('Sonar check failed; see the scan evidence and workflow logs.');
-            }
+          result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ github.event.pull_request.number }}
+          sha: ${{ needs.authorize.outputs.sha }}
+          base-ref: ${{ needs.authorize.outputs.base }}
+          source-attempt: ${{ needs.scan.outputs.attempt || github.run_attempt }}
+          scan-result: ${{ steps.download.outcome == 'success' && needs.scan.result || 'failure' }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}

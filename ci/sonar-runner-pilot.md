@@ -1,68 +1,40 @@
 # Sonar runner pilot
 
-This test-only workflow runs the existing Java compilation and Sonar analysis on
-an ephemeral CPU runner. It does not replace the production Blossom checks.
+Test-only validation on dummy PR #5400. Do not merge the deliberate Java findings.
+A maintainer applies `sonar-runner-pilot` to approve the current same-repository
+head. New commits require a new label event; ordinary pushes do not run the pilot.
 
-The workflow runs only when a maintainer applies the `sonar-runner-pilot` label to
-an open, same-repository PR targeting `main` or `release/*`. The approved commit
-is the PR head at that label event. Opening or updating a PR does not start the
-pilot. Remove and reapply the label after reviewing any new head. Fork PRs are
-outside this pilot.
+The workflow validates common PR #77 at the reviewed commit
+`b0cb860cb186d6bae817229270f58c8f2bfe94ff` with this path:
 
-## Configuration
+1. A hosted job scans the exact approved source without executing its build.
+2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
+3. A fresh worker downloads that build's exact artifact, verifies its digest,
+   and runs Sonar and the common collector. It does not execute Maven/plugins.
+4. The hosted common reporter posts its own summary and **Sonar check** using
+   the workflow token. New High/Blocker issues, a failed gate, or missing evidence
+   fail the check. The intentional example should demonstrate a failure.
 
-| Repository setting | Purpose |
-| --- | --- |
-| Variable `SONAR_RUNNER_PILOT_LABEL` | Dedicated runner label beginning with `sonar-runner-pilot-`; do not use the production `blossom` label. |
-| Variable `SONAR_RUNNER_PILOT_GROUP` | Optional organization runner group. Leave unset for the initial repository runner. |
-| Variable `SONAR_PROJECT_KEY` | Existing Sonar project receiving the PR analysis. |
-| Variable `SONAR_RUNNER_PILOT_MAVEN_MIRROR` | Required anonymous HTTPS Maven mirror used for compilation and version lookup; no embedded credentials. |
-| Secret `SONAR_HOST_URL` | Sonar service URL. |
-| Secret `SONAR_RUNNER_PILOT_TOKEN` | Temporary pilot secret containing a token with analysis access to that project; remove after validation. |
+The common scanner image is not published yet. This unmerged pilot explicitly
+builds the reviewed image recipe on the hosted worker and invokes the same scan
+core by immutable local image ID. This validates the proposed image and source
+policy; it does not validate the public `scan-scripts` action's registry pull.
+Production consumers must use that action with the published prebuilt image.
 
-The worker must provide Linux x86-64, Git, Python 3, JDK 17, Maven, and SonarScanner
-CLI 6.2.1 or a compatible approved version. It needs access to GitHub, the configured
-anonymous Maven mirror, and the configured Sonar service. Register each worker for one job
-and dispose of its filesystem afterward. The workflow does not receive runner
-registration credentials or artifact publication credentials.
+## Settings
 
-## Later validation
+- Variable `SONAR_PROJECT_KEY`: existing Sonar project.
+- Variable `SONAR_RUNNER_PILOT_MAVEN_MIRROR`: anonymous HTTPS Maven mirror.
+- Existing secrets `SONAR_HOST_URL` and `SONAR_TOKEN`: scanner/analysis-read access,
+  including scanner-context permission for exact source identity verification.
 
-Publish the test branch in the same repository and open a draft PR. Keep the
-pilot label absent while reviewing the workflow and runner launcher. Because the
-workflow listens for a `pull_request` label event, it can be exercised from that
-unmerged PR; a new `workflow_dispatch` workflow would require default-branch
-activation first.
+Runner administration credentials remain in Jenkins. The workflow only selects
+`[self-hosted, Linux, X64, spark-sonar-internal]`; it creates no runners or jobs.
+The pool replenishes each one-job worker after completion. Compilation and scan
+have separate 30-minute execution limits; queue waiting needs operator monitoring.
+The reporter always runs after an approved attempt, including preflight failure.
 
-After validation is authorized:
-
-1. Configure the settings above and start the bounded ephemeral worker pool.
-2. Review the exact PR head and apply `sonar-runner-pilot` as a maintainer.
-3. Confirm the scan checked out that SHA and the `Sonar check` commit
-   status links to this workflow run. Success requires Sonar processing and its
-   quality gate to pass; an upload alone is insufficient.
-4. Confirm the worker deregistered after the job and its environment was removed.
-
-The scan job has a 45-minute execution timeout, including up to 10 minutes for
-Sonar processing. The launcher must budget additional startup and idle time and
-must not terminate a busy worker on a shorter timer. A missing worker leaves the
-job queued; GitHub job execution timeout does not bound that queue wait. Cancel
-the workflow explicitly if no worker becomes available during the pilot.
-
-The result is published on the approved SHA even if the PR later advances.
-Cancellation or a skipped/failed scan cannot produce a successful pilot status.
-The status is supplementary and should not be made a required merge check during
-this test-only pilot.
-
-The internal worker collects the scan's CE task, exact analysis ID, quality gate,
-and new PR issues. A hosted job uses the GitHub Actions token to publish a summary
-comment and the `Sonar check` status. The worker has no GitHub write permissions.
-New High or Blocker issues fail the check; Medium findings are reported without
-changing the project's quality gate. Missing scan evidence or report publication
-failure also fails the check. Result artifacts are retained for three days.
-
-Issue collection conservatively requires this task to remain the project's latest
-completed analysis. An overlapping analysis, even on another branch, fails result
-collection rather than mixing evidence from different scans; reapprove the pilot
-after the other analysis completes. The unused Java examples intentionally produce
-Medium and High findings and must not be merged into production.
+Artifacts are bound to the producing run/attempt and downloaded by exact artifact
+ID with digest mismatches treated as errors. Keep the PR label absent after testing
+and remove only pilot-created variables; retain existing secrets and the shared
+runner pool. The check remains supplementary during validation.
