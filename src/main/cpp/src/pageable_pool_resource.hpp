@@ -16,9 +16,10 @@
 
 #pragma once
 
+#include "indexed_free_list.hpp"
+
 #include <rmm/aligned.hpp>
 #include <rmm/detail/error.hpp>
-#include <rmm/mr/detail/coalescing_free_list.hpp>
 #include <rmm/resource_ref.hpp>
 
 #include <cuda/cmath>
@@ -101,9 +102,9 @@ static_assert(
 // page-fault cost, so DtoH copies into pool-allocated buffers reach near-pinned
 // bandwidth rather than incurring per-page faults at copy time.
 //
-// Fragmentation: known limitation inherited from the underlying coalescing free
-// list — same behavior as rmm::pool_memory_resource. Unlike the pinned pool, this
-// pool is not growable; supporting growth would require multiple backing buffers
+// Fragmentation: the indexed free list uses the same best-fit allocation decisions
+// as the original coalescing list. Unlike the pinned pool, this pool cannot grow;
+// supporting growth would require multiple backing buffers
 // plus per-buffer lifetime, pretouch, and coalescing-boundary bookkeeping.
 // ---------------------------------------------------------------------------
 class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_pool_resource> {
@@ -250,7 +251,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   std::size_t pool_size_;
   void* base_;
   std::mutex mtx_;
-  rmm::mr::detail::coalescing_free_list free_list_;
+  detail::indexed_free_list free_list_;
 };
 
 static_assert(

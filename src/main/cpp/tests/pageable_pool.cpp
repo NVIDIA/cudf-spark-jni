@@ -16,6 +16,8 @@
 
 #include "pageable_pool_resource.hpp"
 
+#include <rmm/mr/detail/coalescing_free_list.hpp>
+
 #include <gtest/gtest.h>
 #include <sys/mman.h>
 
@@ -148,6 +150,37 @@ TEST(PageablePool, CoalescingAllowsFullReuse)
   void* c                     = pool.allocate_sync(kPoolSize - align);
   ASSERT_NE(c, nullptr);
   pool.deallocate_sync(c, kPoolSize - align);
+}
+
+TEST(PageablePool, IndexedFreeListPreservesBestFitAndCoalescing)
+{
+  // Both implementations must choose the same block when equally sized holes
+  // exist, then recover a full span after adjacent blocks are returned.
+  alignas(rmm::CUDA_ALLOCATION_ALIGNMENT) char backing[4096];
+  rmm::mr::detail::coalescing_free_list original;
+  detail::indexed_free_list indexed;
+  auto insert_both = [&](std::size_t offset, std::size_t size) {
+    rmm::mr::detail::block const b{backing + offset, size, false};
+    original.insert(b);
+    indexed.insert(b);
+  };
+  insert_both(0, 1024);
+  insert_both(2048, 1024);
+  auto const first_original = original.get_block(512);
+  auto const first_indexed  = indexed.get_block(512);
+  ASSERT_TRUE(first_original.is_valid());
+  EXPECT_EQ(first_original.pointer(), first_indexed.pointer());
+  auto const second_original = original.get_block(512);
+  auto const second_indexed  = indexed.get_block(512);
+  ASSERT_TRUE(second_original.is_valid());
+  EXPECT_EQ(second_original.pointer(), second_indexed.pointer());
+  insert_both(0, 1024);
+  insert_both(1024, 1024);
+  insert_both(2048, 1024);
+  auto const merged_original = original.get_block(3072);
+  auto const merged_indexed  = indexed.get_block(3072);
+  ASSERT_TRUE(merged_original.is_valid());
+  EXPECT_EQ(merged_original.pointer(), merged_indexed.pointer());
 }
 
 // ---------------------------------------------------------------------------
