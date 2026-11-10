@@ -481,5 +481,57 @@ inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
   return rows;
 }
 
+/**
+ * @brief The reviewer's wide-flat shape: `num_paths` distinct depth-2 paths spread over 40
+ * distinct roots (124/40 = 3.1 paths per root) over rows whose top-level members are exactly
+ * those 40 roots.
+ */
+inline multi_paths flat_wide_build_paths(std::size_t num_paths)
+{
+  constexpr std::size_t num_roots = 40;
+  CUDF_EXPECTS(num_paths >= num_roots, "flat-wide needs at least one path per root");
+  multi_paths paths;
+  paths.reserve(num_paths);
+  // Child c<k> repeats across roots, so all 40 roots see the full child set.
+  for (std::size_t p = 0; p < num_paths; ++p) {
+    std::size_t const root  = p % num_roots;
+    std::size_t const child = p / num_roots;
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(root), -1},
+                              path_tuple{instruction_t::NAMED, "c" + std::to_string(child), -1}});
+  }
+  return paths;
+}
+
+/**
+ * @brief Rows for the flat-wide shape: each row is an object whose members are the 40 queried
+ * roots, each mapped to a child object. A trailing `fill` member absorbs the remaining
+ * `row_bytes` budget via `pad_row_to`, matching the other scenarios' row sizing.
+ */
+inline std::vector<std::string> flat_wide_build_rows(std::mt19937_64& rng,
+                                                     std::size_t num_rows,
+                                                     std::size_t row_bytes,
+                                                     std::uint64_t seed)
+{
+  constexpr std::size_t num_roots = 40;
+  std::uint64_t const salt        = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < num_roots; ++m) {
+      if (m > 0) { row += ','; }
+      row += "\"f" + std::to_string(m) + "\":{";
+      for (std::size_t c = 0; c < 4; ++c) {
+        if (c > 0) { row += ','; }
+        row += "\"c" + std::to_string(c) + "\":\"v" + std::to_string((r + salt + c) % 1000) + "\"";
+      }
+      row += '}';
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
 }  // namespace gjo_scenarios
 }  // namespace spark_rapids_jni

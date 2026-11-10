@@ -60,7 +60,6 @@
 #include <cstring>
 #include <numeric>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 
@@ -989,27 +988,19 @@ namespace {
 // One decoded-name trie walk per pure-NAMED group; first duplicate wins, dead paths stay dead.
 // Parse errors null all paths; depth overflow throws only when a path is not already dead.
 
-// Shallow admission: depth <= 2 and >= 8 paths with >= 3.15 paths per distinct root; the
-// 32-row floor is below. Production hit rate under the plugin's 4 GiB budget: the caller
-// batches paths by scratch size, so a batch reaches 8 paths only for columns below roughly
-// 512 MiB (4 GiB / 8) - bigger columns pay the general route. The k_merged_max_paths cap
-// keeps admitted groups' records within the 48 KiB shared-memory bound, so the global record
-// fallback (allocated outside memory_budget_bytes) is unreachable via admission and remains
-// only as a defensive fallback in launch_merged_named.
+// Shallow admission: depth <= 2 and >= 8 paths; the 32-row floor is below. Production hit
+// rate under the plugin's 4 GiB budget: the caller batches paths by scratch size, so a batch
+// reaches 8 paths only for columns below roughly 512 MiB (4 GiB / 8) - bigger columns pay the
+// general route. The k_merged_max_paths cap keeps admitted groups' records within the 48 KiB
+// shared-memory bound, so the global record fallback (allocated outside memory_budget_bytes)
+// is unreachable via admission and remains only as a defensive fallback in
+// launch_merged_named. Wide-flat groups (about one distinct path per distinct root) admit
+// here: the merged member scan filters each node's candidates by length bucket and 8-byte
+// signature before the full byte compare, so a wide root no longer pays the linear candidate
+// scans that once made these shapes lose to the general route, and merged measured faster
+// than general on every previously denied flat shape.
 inline constexpr std::size_t k_merged_max_depth = 2;
 inline constexpr std::size_t k_merged_min_paths = 8;
-// Minimum fan-out: admit only when distinct paths per distinct root >= 63/20 = 3.15.
-inline constexpr std::size_t k_merged_min_fanout_num = 63;  // distinct roots multiplier
-inline constexpr std::size_t k_merged_min_fanout_den = 20;  // distinct paths multiplier
-// The fan-out floor counts the group's dedup'd depth<=2 paths (deeper paths split off to the
-// general kernel and are not counted): a wide-trie shape (many distinct roots, e.g. 16 paths
-// over 16 roots) pays the merged walk's per-root overhead without amortizing it, and measured
-// 1.5-2.5x slower than the general route. 33 paths over 3 roots (11/root) and the nested
-// family's shallow group (120 paths over 38 roots, 3.16/root) admit; the reviewer's 16-path
-// flat-mixed shape (1/root) and flat-wide groups of 124 paths over 40 roots (3.1/root,
-// measured 3.13x slower merged) deny and fall to the general route. Pure depth-1 groups have
-// one distinct root per distinct path (ratio 1) and only admit when a shared first-segment
-// name gives them fan-out.
 // 48 KiB of shared memory holds 4 warps/block x 16 B per record = 768 paths; admission caps a
 // group at this many paths so every admitted group's records stay in shared memory.
 inline constexpr std::size_t k_merged_max_paths = 768;
@@ -1043,8 +1034,8 @@ struct merged_trie_view {
   int32_t const* max_name_len;        // [nodes]; unused when the row is bypassed
 };
 
-// R=1 stores an aligned 8-byte head plus a 1-byte kind at offset 8; the record rounds to a 16-byte
-// stride. R=2 packs all fields in 8 bytes; both layouts require 8-byte alignment.
+// R=1 uses an aligned 8-byte head and separate 4-byte kind word in a 16-byte stride.
+// R=2 packs all fields in 8 bytes; both layouts require 8-byte alignment.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
@@ -2108,9 +2099,8 @@ struct launch_grouped_staging {
 /**
  * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
  * A depth-three-to-five group needs 32 rows and eight deep paths, then absorbs shallow paths;
- * otherwise shallow admission requires 32 rows, eight paths, and at least 3.15 distinct paths
- * per distinct root (first-segment) name; shallow and deep admission share the
- * k_merged_max_paths cap and overflow stays general.
+ * otherwise shallow admission requires 32 rows and eight paths at depth <= 2; shallow and deep
+ * admission share the k_merged_max_paths cap and overflow stays general.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
  * Host/device paths share batch order; zeroed error storage has path flags plus one depth flag.
  * Reuses caller-owned staging for upload lifetimes: a retry call passes the same object, and
@@ -2148,10 +2138,9 @@ void launch_grouped(
   staging.group_staging.clear();
   if (!is_retry) { staging.merged_routed.assign(num_outputs, 0); }
 
-  // Shallow groups admit at 8 paths when the fan-out floor holds (>= 3.15 distinct paths per
-  // distinct root); depth-3-to-5 paths route to the deep group, which admits separately below
-  // and absorbs shallow paths. Both share the k_merged_max_paths cap (capped overflow keeps
-  // its batch order among the general paths).
+  // Shallow groups admit at 8 paths; depth-3-to-5 paths route to the deep group, which admits
+  // separately below and absorbs shallow paths. Both share the k_merged_max_paths cap (capped
+  // overflow keeps its batch order among the general paths).
   std::vector<std::size_t> general_indices;
   std::vector<std::size_t> merged_shallow_indices;
   std::vector<std::size_t> merged_deep_indices;
@@ -2250,28 +2239,15 @@ void launch_grouped(
   }
 
   if (merged_plans.empty() && !merged_shallow_indices.empty()) {
-    // Cheap row/path-count rejections first: the dedup sets below allocate, so groups that
-    // fail the floors must not pay for them.
-    if (merged_shallow_indices.size() >= k_merged_min_paths &&
+    std::size_t max_inst_count = 0;
+    for (auto idx : merged_shallow_indices) {
+      max_inst_count = std::max(max_inst_count, json_paths[idx].size());
+    }
+    if (max_inst_count <= k_merged_max_depth &&
+        merged_shallow_indices.size() >= k_merged_min_paths &&
         static_cast<std::size_t>(input.size()) >= k_min_rows_per_family) {
-      std::size_t max_inst_count = 0;
-      std::set<std::string_view> distinct_roots;
-      using path_vector = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
-      std::set<path_vector> distinct_paths;
-      for (auto idx : merged_shallow_indices) {
-        max_inst_count = std::max(max_inst_count, json_paths[idx].size());
-        distinct_roots.insert(std::get<1>(json_paths[idx].front()));
-        distinct_paths.emplace(json_paths[idx].begin(), json_paths[idx].end());
-      }
-      if (max_inst_count <= k_merged_max_depth &&
-          distinct_paths.size() * k_merged_min_fanout_den >=
-            distinct_roots.size() * k_merged_min_fanout_num) {
-        merged_plans.emplace_back(build_merged_named_plan(
-          json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
-      } else {
-        general_indices.insert(
-          general_indices.end(), merged_shallow_indices.begin(), merged_shallow_indices.end());
-      }
+      merged_plans.emplace_back(build_merged_named_plan(
+        json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
     } else {
       general_indices.insert(
         general_indices.end(), merged_shallow_indices.begin(), merged_shallow_indices.end());
