@@ -636,16 +636,17 @@ multi_paths named_depth2(std::vector<std::string> const& keys)
   return paths;
 }
 
-/// The shared 8-key depth-2 batch of the abort and malformed-input tests. Three roots keep
-/// the batch merged-route admissible (paths >= 3.15 x distinct roots); every abort case rides
-/// the `$.a.v` chain (see MergedRouteDuplicateFirstValueAborts).
+/// The shared 8-key depth-2 batch of the abort and malformed-input tests. The raw group is
+/// 8 paths over 3 roots (2.67 < 3.15), so `run_merged_vs_general`'s fan-out deficit padding
+/// is what admits it to the merged route; every abort case rides the `$.a.v` chain (see
+/// MergedRouteDuplicateFirstValueAborts).
 multi_paths const eight_key_paths = named_depth2({"a", "a", "a", "a", "b", "b", "zz", "zz"});
 
 void pad_paths(multi_paths& paths, int from)
 {
-  // Pads reuse existing roots (pad0 repeats the caller's first root) with fresh children; the
-  // helper's fan-out deficit padding, not the pad0 choice, is what keeps the 8-path/3-root
-  // group admissible under the 3.15 gate.
+  // Pads ride the new root `pad0` (the callers' own roots are a/b/zz or k/u) plus fresh
+  // children; `pad0` adds a distinct root, and the helper's fan-out deficit padding supplies
+  // the path count that keeps the small groups admissible under the 3.15 gate.
   paths.resize(8);
   for (int p = from; p < 8; ++p) {
     paths[p] = named({"pad0", "v" + std::to_string(p)});
@@ -1031,8 +1032,8 @@ TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
 
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], expect, true));
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", true));
-  // Pads reuse existing roots, so the padded group keeps the caller's fan-out ratio and stays
-  // admissible (the helper's deficit padding supplies the required path count).
+  // The pads ride the added `pad0` root; with 8 paths over 3 roots (2.67 < 3.15) admission
+  // comes from the helper's fan-out deficit padding reaching 10 distinct paths (200 >= 189).
   for (std::size_t col = 2; col < 8; ++col) {
     SCOPED_TRACE("retry pad column " + std::to_string(col));
     EXPECT_EQ(batch_out[col]->null_count(), 64);
