@@ -48,9 +48,11 @@ namespace {
 constexpr std::size_t ki_b = 1'024;
 
 // Nested layouts served by gjo_scenario_generators.hpp — NESTED_135 (the
-// largest fused call, 135 distinct paths) and NESTED_33 (the narrower
-// per-branch extraction, 33 paths).
-enum class scenario_id : int32_t { NESTED_135 = 0, NESTED_33 = 1 };
+// largest fused call, 135 distinct paths), NESTED_33 (the narrower
+// per-branch extraction, 33 paths), and FLAT_MIXED_16 (15 top-level fields
+// plus one depth-two path: the mixed flat+nested shape admission must not
+// pull onto the merged route).
+enum class scenario_id : int32_t { NESTED_135 = 0, NESTED_33 = 1, FLAT_MIXED_16 = 2 };
 
 }  // namespace
 
@@ -71,25 +73,41 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   auto const seed       = static_cast<uint64_t>(state.get_int64("seed"));
   auto const scenario   = static_cast<scenario_id>(state.get_int64("scenario"));
   auto const budget     = state.get_int64("memory_budget_bytes");
+  auto const override_r = state.get_int64("parallel_override");
 
   auto const& table = scenario == scenario_id::NESTED_135 ? nested_table_135() : nested_table_33();
-  auto const paths  = nested_build_paths(table, scenario == scenario_id::NESTED_135 ? 135 : 33);
+  multi_paths base_paths;
+  std::size_t members = 0;
+  if (scenario == scenario_id::FLAT_MIXED_16) {
+    // The reviewer shape fixes 16 paths and varies the member count: the num_paths=50 cell
+    // builds rows of 50 top-level members, every other num_paths value 150 members.
+    base_paths = flat_mixed_build_paths();
+    members    = num_paths == 50 ? 50 : 150;
+  } else {
+    base_paths = nested_build_paths(table, scenario == scenario_id::NESTED_135 ? 135 : 33);
+  }
+  auto const mixed = scenario == scenario_id::FLAT_MIXED_16;
   multi_paths tiled;
   tiled.reserve(num_paths);
-  for (std::size_t i = 0; i < num_paths; ++i) {
-    tiled.push_back(paths[i % paths.size()]);
+  for (std::size_t i = 0; i < (mixed ? base_paths.size() : num_paths); ++i) {
+    tiled.push_back(base_paths[i % base_paths.size()]);
   }
 
   // Keep generated rows parseable at small requested sizes.
   auto const num_rows  = std::max<std::size_t>(size_bytes / (10 * ki_b), 8);
   auto const row_bytes = std::max<std::size_t>(size_bytes / num_rows, 16);
 
+  // The FLAT_MIXED_16 row shape depends on the member count (derived from num_paths), so the
+  // cache key must distinguish member counts via the flavor field; other scenarios derive rows
+  // from the table alone.
   auto const input = spark_rapids_jni::bench::get_or_generate_input(
     spark_rapids_jni::bench::make_input_cache_key(
-      static_cast<std::uint64_t>(scenario), size_bytes, seed),
+      static_cast<std::uint64_t>(scenario), size_bytes, seed, members),
     [&] {
       std::mt19937_64 rng{seed};
-      auto rows = nested_build_rows(rng, table, num_rows, row_bytes, seed);
+      auto rows = scenario == scenario_id::FLAT_MIXED_16
+                    ? flat_mixed_build_rows(rng, num_rows, members, row_bytes, seed)
+                    : nested_build_rows(rng, table, num_rows, row_bytes, seed);
       return cudf::test::strings_column_wrapper(rows.begin(), rows.end()).release();
     });
 
@@ -102,7 +120,7 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   state.add_element_count(num_paths, "paths");
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     [[maybe_unused]] auto const output = spark_rapids_jni::get_json_object_multiple_paths(
-      cudf::strings_column_view{input}, tiled, budget, -1);
+      cudf::strings_column_view{input}, tiled, budget, override_r);
   });
 }
 
@@ -110,8 +128,14 @@ NVBENCH_BENCH(BM_get_json_object_multiple_paths)
   .set_name("get_json_object_multiple_paths")
   .add_int64_axis("scenario",
                   {static_cast<nvbench::int64_t>(scenario_id::NESTED_135),
-                   static_cast<nvbench::int64_t>(scenario_id::NESTED_33)})
+                   static_cast<nvbench::int64_t>(scenario_id::NESTED_33),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_MIXED_16)})
   .add_int64_axis("size_bytes", {10 * 1'024 * 1'024, 100 * 1'024 * 1'024})
-  .add_int64_axis("num_paths", {1, 8, 32, 33, 135})
+  .add_int64_axis("num_paths", {1, 8, 32, 33, 50, 135})
   .add_int64_axis("seed", {1, 2})
-  .add_int64_axis("memory_budget_bytes", {-1, 4LL * 1'024 * 1'024 * 1'024});
+  .add_int64_axis("memory_budget_bytes", {-1, 4LL * 1'024 * 1'024 * 1'024})
+  // parallel_override exercises the fixed-size batching path: -1 takes the scratch-size
+  // budget loop (or collapses to one batch when budget <= 0), 123 forces 123-path batches
+  // (NESTED_135 then runs two batches and its shallow family may admit differently per
+  // batch - the pair is NOT route-identical for that cell and must not be read as an A/B).
+  .add_int64_axis("parallel_override", {-1, 123});
