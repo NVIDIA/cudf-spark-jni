@@ -1692,6 +1692,65 @@ TEST_F(GetJsonObjectTest, MergedRoutePathCapOverflowParity)
   cap_overflow_case(true);
 }
 
+TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
+{
+  // Deep-first mixed batch: 8 depth-3 paths enter the deep bucket first, then 768 depth-1/2
+  // paths reach the shallow branch. Both branches must count the union against
+  // k_merged_max_paths: the shallow branch checked only its own bucket, so 768 shallow paths
+  // rode on top of the 8 deep paths and the deep gate folded them into one 776-path plan,
+  // tripping the plan-build bound on valid input. With the shared cap the last 8 shallow
+  // paths spill to the general evaluator, the deep gate absorbs exactly 8 + 760 = 768, and
+  // every column still returns correct values.
+  auto const rows = [&] {
+    std::string row = "{";
+    for (int p = 0; p < 8; ++p) {
+      if (p > 0) { row += ","; }
+      row += R"("d)" + std::to_string(p) + R"(":{"x":{"y":"V)" + std::to_string(p) + R"("}})";
+    }
+    for (int p = 0; p < 768; ++p) {
+      row += R"(,"s)" + std::to_string(p) + R"(":"W)" + std::to_string(p) + R"(")";
+    }
+    row += "}";
+    return same_rows(64, row);
+  }();
+
+  multi_paths paths;
+  paths.reserve(776);
+  for (int p = 0; p < 8; ++p) {  // deep first: the deep bucket fills before shallow arrives
+    paths.push_back(named({"d" + std::to_string(p), "x", "y"}));
+  }
+  for (int p = 0; p < 768; ++p) {
+    paths.push_back(named({"s" + std::to_string(p)}));
+  }
+
+  auto const input_col = col_from(rows);
+  auto const input     = cudf::strings_column_view{input_col};
+  auto const out       = run_fused(input, paths);
+  ASSERT_EQ(out.size(), paths.size());
+  for (int p = 0; p < 8; ++p) {
+    SCOPED_TRACE(testing::Message() << "deep path d" << p);
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[p], "V" + std::to_string(p), true));
+  }
+  for (int p = 0; p < 768; ++p) {
+    SCOPED_TRACE(testing::Message() << "shallow path s" << p);
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[8 + p], "W" + std::to_string(p), true));
+  }
+
+  // Every sampled column must match its path's single-path oracle regardless of route.
+  for (int const p : {0, 7}) {
+    SCOPED_TRACE(testing::Message() << "deep oracle d" << p);
+    auto const single =
+      spark_rapids_jni::get_json_object(input, {named({"d" + std::to_string(p), "x", "y"})});
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[p], single));
+  }
+  for (int const p : {0, 759, 767}) {
+    SCOPED_TRACE(testing::Message() << "shallow oracle s" << p);
+    auto const single =
+      spark_rapids_jni::get_json_object(input, {named({"s" + std::to_string(p)})});
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[8 + p], single));
+  }
+}
+
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
 {
   auto const expanding = R"({"k":{"a":')" + std::string(30, '"') + R"('}})";

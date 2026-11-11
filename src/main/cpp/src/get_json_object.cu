@@ -2159,7 +2159,11 @@ void launch_grouped(
     // Only pure-NAMED depths <= 2 or <= 5 route shallow/deep; all else stays general.
     if (!has_wc && !has_index && has_named) {
       auto const depth = json_paths[idx].size();
-      if (depth <= k_merged_max_depth && merged_shallow_indices.size() < k_merged_max_paths) {
+      if (depth <= k_merged_max_depth &&
+          merged_shallow_indices.size() + merged_deep_indices.size() < k_merged_max_paths) {
+        // Both branches count the union: the deep gate absorbs shallow paths into one plan, so
+        // either bucket admitted alone could push the combined size past the plan-build bound.
+        // Overflow keeps its batch order among the general paths.
         merged_shallow_indices.push_back(idx);
       } else if (depth <= k_merged_deep_max_depth &&
                  merged_shallow_indices.size() + merged_deep_indices.size() < k_merged_max_paths) {
