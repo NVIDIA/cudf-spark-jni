@@ -21,6 +21,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <cuda/stream>
 
@@ -35,7 +36,7 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
    * @brief Perform the main groupby computation for HLLPP UDF.
    */
   [[nodiscard]] std::unique_ptr<cudf::column> operator()(
-    cuda::stream_ref stream, rmm::device_async_resource_ref mr) const override
+    cuda::stream_ref stream, cudf::memory_resources mr) const override
   {
     auto const group_values = get_grouped_values();
     if (group_values.size() == 0) { return get_empty_output(stream, mr); }
@@ -44,10 +45,10 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
     if (is_merge) {
       // group by intermidate result, group_values are struct of long columns
       return spark_rapids_jni::group_merge_hyper_log_log_plus_plus(
-        group_values, num_groups, group_labels, precision, stream, mr);
+        group_values, num_groups, group_labels, precision, stream, mr.get_output_mr());
     } else {
       return spark_rapids_jni::group_hyper_log_log_plus_plus(
-        group_values, num_groups, group_labels, precision, stream, mr);
+        group_values, num_groups, group_labels, precision, stream, mr.get_output_mr());
     }
   }
 
@@ -55,7 +56,7 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
    * @brief Create an empty column when the input is empty.
    */
   [[nodiscard]] std::unique_ptr<cudf::column> get_empty_output(
-    cuda::stream_ref stream, rmm::device_async_resource_ref mr) const override
+    cuda::stream_ref stream, cudf::memory_resources mr) const override
   {
     int num_registers       = 1 << precision;
     int num_long_cols       = num_registers / REGISTERS_PER_LONG + 1;
@@ -120,14 +121,16 @@ struct hllpp_reduct_udf : cudf::reduce_host_udf {
     cudf::data_type,                                           /** output_dtype is useless */
     std::optional<std::reference_wrapper<cudf::scalar const>>, /** init is useless */
     cuda::stream_ref stream,
-    rmm::device_async_resource_ref mr) const override
+    cudf::memory_resources mr) const override
   {
-    if (input.size() == 0) { return get_empty_scalar(stream, mr); }
+    if (input.size() == 0) { return get_empty_scalar(stream, mr.get_output_mr()); }
     if (is_merge) {
       // input is struct of long columns
-      return spark_rapids_jni::reduce_merge_hyper_log_log_plus_plus(input, precision, stream, mr);
+      return spark_rapids_jni::reduce_merge_hyper_log_log_plus_plus(
+        input, precision, stream, mr.get_output_mr());
     } else {
-      return spark_rapids_jni::reduce_hyper_log_log_plus_plus(input, precision, stream, mr);
+      return spark_rapids_jni::reduce_hyper_log_log_plus_plus(
+        input, precision, stream, mr.get_output_mr());
     }
   }
 
