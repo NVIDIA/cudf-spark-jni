@@ -2194,6 +2194,8 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     };
 
     auto const record_subtree = [&](int32_t slot, int32_t begin, int32_t end) {
+      // Non-owner lanes must not pay the certify scan; their record write is dropped anyway.
+      if (!records_owner) { return; }
       // A certificate borrows input through gather; false only selects normalized serialization.
       bool const raw = certify_raw_subtree(str.data() + begin, end - begin);
       record_slot(slot, begin, end, raw ? k_merged_kind_subtree_raw : k_merged_kind_subtree);
