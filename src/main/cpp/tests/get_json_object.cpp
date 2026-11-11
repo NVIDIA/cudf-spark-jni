@@ -1904,6 +1904,110 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
   }
 }
 
+TEST_F(GetJsonObjectTest, MergedRouteValueKindParity)
+{
+  // The merged route's terminal kinds: rows whose 16 member values cycle through an
+  // escaped string (its writer must emit the escaped bytes verbatim), a bare number,
+  // a boolean, and an array (raw copy without re-tokenization). Every column checks
+  // parity with its single-path oracle.
+  std::vector<std::string> rows;
+  rows.reserve(64);
+  for (int r = 0; r < 64; ++r) {
+    std::string row = "{";
+    for (int i = 0; i < 16; ++i) {
+      if (i > 0) { row += ','; }
+      auto const kind = (r + i) % 4;
+      if (kind == 0) {
+        row += R"("f)" + std::to_string(i) + R"(":"q\"s)" + std::to_string(r) + R"(")";
+      } else if (kind == 1) {
+        row += R"("f)" + std::to_string(i) + R"(":)" + std::to_string(r * 100 + i);
+      } else if (kind == 2) {
+        row += R"("f)" + std::to_string(i) + R"(":)" + ((r % 2 == 0) ? "true" : "false");
+      } else {
+        row += R"("f)" + std::to_string(i) + R"(":[1,)" + std::to_string(r) + "]";
+      }
+    }
+    row += '}';
+    rows.push_back(row);
+  }
+
+  multi_paths paths;
+  paths.reserve(16);
+  for (int i = 0; i < 16; ++i) {
+    paths.push_back(named({"f" + std::to_string(i)}));
+  }
+  auto const input_col  = col_from(rows);
+  auto const input      = cudf::strings_column_view{input_col};
+  auto const merged_out = run_fused(input, paths);
+  ASSERT_EQ(merged_out.size(), paths.size());
+  for (std::size_t col = 0; col < paths.size(); ++col) {
+    SCOPED_TRACE("value-kind column " + std::to_string(col));
+    multi_paths one;
+    one.push_back(paths[col]);
+    auto const single = run_fused(input, one);
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(merged_out[col], single[0]));
+  }
+  // Spot-check the four kinds on row 0 (kind = (r + i) % 4): column i takes kind i.
+  auto const [vals0, mask0] = cudf::test::to_host<std::string>(merged_out[0]->view());
+  auto const [vals1, mask1] = cudf::test::to_host<std::string>(merged_out[1]->view());
+  auto const [vals2, mask2] = cudf::test::to_host<std::string>(merged_out[2]->view());
+  auto const [vals3, mask3] = cudf::test::to_host<std::string>(merged_out[3]->view());
+  // kind 0: the escaped JSON string q"s0 decodes to a bare quote in the output value.
+  ASSERT_EQ(vals0[0], "q\"s0");
+  // kind 1: bare number emitted verbatim (row 0, column 1 → r*100+i = 1).
+  ASSERT_EQ(vals1[0], "1");
+  // kind 2: boolean emitted verbatim.
+  ASSERT_EQ(vals2[0], "true");
+  // kind 3: array copied raw.
+  ASSERT_EQ(vals3[0], "[1,0]");
+  for (auto const* m : {&mask0, &mask1, &mask2, &mask3}) {
+    // An empty validity vector means the column is non-nullable (all rows valid).
+    ASSERT_TRUE(m->empty() || ((*m)[0] & 1));
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteRetryGeneralOverflowParity)
+{
+  // A merged-route row whose object value expands past its first-pass slot engages the
+  // retry launch on the merged path while the general route evaluates the same input;
+  // both routes must agree on every checked column.
+  std::vector<std::string> rows;
+  rows.reserve(64);
+  for (int r = 0; r < 64; ++r) {
+    if (r == 3) {
+      // This row's subtree value is a quote bomb: the subtree writer re-emits each inner
+      // double quote as a two-byte escape, so the output expands past the row's first-pass
+      // slot and triggers the retry launch in the merged evaluator.
+      rows.push_back(R"({"a":{"b":')" + std::string(120, '"') + R"('}})");
+    } else {
+      rows.push_back(R"({"a":"v)" + std::to_string(r) + R"("})");
+    }
+  }
+
+  multi_paths merged_paths;
+  merged_paths.reserve(9);
+  merged_paths.push_back(named({"a"}));
+  for (int i = 0; i < 8; ++i) {
+    merged_paths.push_back(named({"fill" + std::to_string(i)}));
+  }
+  auto const [merged_out, general_out] = run_merged_vs_general(rows, merged_paths);
+  for (std::size_t col = 0; col < merged_out.size() && col < general_out.size(); ++col) {
+    SCOPED_TRACE("retry parity column " + std::to_string(col));
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(merged_out[col], general_out[col]));
+  }
+  // Row 3's subtree bomb survives the retry intact (each inner quote re-emitted escaped):
+  auto const [vals, mask] = cudf::test::to_host<std::string>(merged_out[0]->view());
+  std::string bomb_out    = R"({"b":")";
+  for (int i = 0; i < 120; ++i) {
+    bomb_out += R"(\")";
+  }
+  bomb_out += R"("})";
+  ASSERT_EQ(vals[3], bomb_out);
+  // An empty validity vector means the column is non-nullable (all rows valid); row 3 is
+  // word 0, bit 3 of the validity bitmask.
+  ASSERT_TRUE(mask.empty() || ((mask[0] >> 3) & 1));
+}
+
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
 {
   auto const expanding = R"({"k":{"a":')" + std::string(30, '"') + R"('}})";

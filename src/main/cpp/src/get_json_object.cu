@@ -1374,7 +1374,8 @@ prepared_output_metadata prepare_output_metadata(
   auto const total_sizes_bytes = static_cast<std::size_t>(num_paths) * sizeof(int64_t);
   auto const error_bytes       = static_cast<std::size_t>(num_err);
   auto const readback_bytes    = valid_counts_size + total_sizes_bytes + error_bytes;
-  rmm::device_uvector<std::byte> d_packed_readback(readback_bytes, stream, mr);
+  rmm::device_uvector<std::byte> d_packed_readback(
+    readback_bytes, stream, cudf::get_current_device_resource_ref());
   auto* const d_valid_counts = reinterpret_cast<cudf::size_type*>(d_packed_readback.data());
   auto* const d_total_sizes =
     reinterpret_cast<int64_t*>(d_packed_readback.data() + valid_counts_size);
@@ -1504,7 +1505,8 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
   auto const* h_total_sizes  = prepared.h_total_sizes();
   auto const* h_valid_counts = prepared.h_valid_counts();
 
-  // Match the factory's int32 offset overflow threshold before exposing columns.
+  // Mirror the factory's int32 overflow threshold before exposing columns; large-strings
+  // builds would need an INT64 offsets branch here as well.
   auto const threshold = cudf::strings::get_offset64_threshold();
   for (int64_t p = 0; p < num_paths; ++p) {
     CUDF_EXPECTS(h_total_sizes[p] < threshold,
@@ -1626,8 +1628,7 @@ constexpr int8_t k_merged_kind_dead = 3;
 /**
  * R=2 record: begin occupies bits 0..31, exclusive end bits 32..60, and kind bits 61..63.
  * begin=-1 is unset; kind=dead prevents a failed first occurrence from being resurrected.
- * The launcher admits this layout only when row bytes fit the 29-bit end field; updates use
- * one atomic word.
+ * The launcher admits this layout only when row bytes fit 29 end bits; updates are one plain word.
  */
 struct merged_path_packed {
   uint64_t word;
@@ -1635,7 +1636,7 @@ struct merged_path_packed {
 
 inline constexpr int64_t k_packed_end_max = static_cast<int64_t>((uint64_t{1} << 29) - 1);
 
-// Row barriers bracket initialization/reset; these ordinary stores must not race atomic reads.
+// Row barriers bracket initialization/reset; these ordinary stores must not race record reads.
 __device__ __forceinline__ void merged_rec_init(merged_path_out& r)
 {
   r = merged_path_out{-1, -1, 0};
@@ -1647,7 +1648,7 @@ __device__ __forceinline__ void merged_rec_set(merged_path_out& r,
 {
   // R=1: only row_lane 0 publishes, so plain stores suffice and the post-walk __syncwarp makes
   // both fields visible to the other lanes before materialization.
-  // R=2: the packed record is one 8-byte word, published with atomics for the same reason.
+  // R=2: the packed record is one 8-byte word published with plain stores for the same reason.
   static_assert(offsetof(merged_path_out, val_begin) == 0 &&
                   offsetof(merged_path_out, val_end) == 4 &&
                   offsetof(merged_path_out, val_kind) == 8,
@@ -1710,48 +1711,36 @@ __device__ __forceinline__ void merged_rec_set(merged_path_packed& r,
                                                int32_t end,
                                                int8_t kind)
 {
-  // Only row_lane 0 publishes to each path's distinct packed record; the atomic exchange keeps
-  // the single 8-byte word consistent with the atomic reads of merged_rec_word.
+  // Only row_lane 0 of the record's own half-warp publishes, and the sibling half-warp walks a
+  // different row's records, so this thread is the record's sole writer; the post-walk
+  // __syncwarp(row_mask) orders the plain store before the other lanes' plain reads.
   uint64_t const image = static_cast<uint64_t>(static_cast<uint32_t>(begin)) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(end)) << 32) |
                          (static_cast<uint64_t>(static_cast<uint8_t>(kind)) << 61);
-  (void)atomicExch(reinterpret_cast<unsigned long long*>(&r.word), image);
+  r.word = image;
 }
-// Read the packed record atomically while other row lanes can publish it.
-__device__ __forceinline__ uint64_t merged_rec_word(merged_path_packed const& r)
-{
-  return cuda::atomic_ref<unsigned long long, cuda::thread_scope_device>(
-           *reinterpret_cast<unsigned long long*>(const_cast<uint64_t*>(&r.word)))
-    .load(cuda::std::memory_order_relaxed);
-}
+// Read the packed record; only the record's single writer precedes it, and the walk barrier
+// orders that store before these loads.
+__device__ __forceinline__ uint64_t merged_rec_word(merged_path_packed const& r) { return r.word; }
 __device__ __forceinline__ bool merged_rec_is_set(merged_path_packed const& r)
 {
   return static_cast<int32_t>(static_cast<uint32_t>(merged_rec_word(r))) >= 0;
 }
 __device__ __forceinline__ void merged_rec_mark_dead(merged_path_packed& r)
 {
-  // A dead record must never resurrect, and a set record must never be killed: publish
-  // kind=dead only if the record is still unset, as one atomic 8-byte transition. The CAS
-  // predicate is re-checked on the freshly loaded value every attempt.
-  unsigned long long* const addr = reinterpret_cast<unsigned long long*>(&r.word);
-  // Seed the CAS predicate from an atomic load; row_lane 0 is the only writer.
-  unsigned long long old = merged_rec_word(r);
-  unsigned long long assumed;
-  do {
-    if (static_cast<int32_t>(static_cast<uint32_t>(old)) >= 0) { return; }
-    assumed = old;
-    unsigned long long const dead =
-      (old & ~(7ull << 61)) |
-      (static_cast<uint64_t>(static_cast<uint8_t>(k_merged_kind_dead)) << 61);
-    old = atomicCAS(addr, assumed, dead);
-  } while (old != assumed);
+  // A dead record must never resurrect, and an already-set record must never be killed. The
+  // record has a single writer (row_lane 0 of its own half-warp), so the check-then-store is
+  // race-free: dead-mark and first-set both happen inside this lane's walk.
+  if (static_cast<int32_t>(static_cast<uint32_t>(merged_rec_word(r))) >= 0) { return; }
+  r.word = (merged_rec_word(r) & ~(7ull << 61)) |
+           (static_cast<uint64_t>(static_cast<uint8_t>(k_merged_kind_dead)) << 61);
 }
 __device__ __forceinline__ int8_t merged_rec_kind(merged_path_packed const& r)
 {
   return static_cast<int8_t>((merged_rec_word(r) >> 61) & 7);
 }
-// The packed variant decodes all fields from one atomic 8-byte word; only row_lane 0 publishes,
-// so the atomic load covers the pre-barrier reset/init ordering.
+// The packed variant decodes all fields from one 8-byte word; only row_lane 0 publishes
+// (see merged_rec_set), and the walk barrier covers the pre-barrier reset/init ordering.
 __device__ __forceinline__ merged_rec_view merged_rec_load(merged_path_packed const& r)
 {
   uint64_t const word = merged_rec_word(r);
@@ -3101,6 +3090,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
   // The flat pair storage stays alive through the retry: the retry kernel overwrites the
   // flagged paths' pairs in place, and the rebuild below reads them after the retry.
+  // Clearing here releases only first-pass scratch_buffers; the retry-stage pair storage is
+  // a separate vector cleared after the rebuild.
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
@@ -3141,7 +3132,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     output[out_idx] =
       cudf::strings::detail::make_strings_column(out_sview.begin(), out_sview.end(), stream, mr);
   }
-  // First-pass scratch and views are unreferenced by the rebuilt columns or the retry.
+  // First-pass scratch and retry-stage views are unreferenced by the rebuilt columns.
   scratch_buffers.clear();
   (void)out_stringviews.release();
   return output;
