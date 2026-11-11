@@ -35,8 +35,8 @@ struct hllpp_groupby_udf : cudf::groupby_host_udf {
   /**
    * @brief Perform the main groupby computation for HLLPP UDF.
    */
-  [[nodiscard]] std::unique_ptr<cudf::column> operator()(
-    cuda::stream_ref stream, cudf::memory_resources mr) const override
+  [[nodiscard]] std::unique_ptr<cudf::column> operator()(cuda::stream_ref stream,
+                                                         cudf::memory_resources mr) const override
   {
     auto const group_values = get_grouped_values();
     if (group_values.size() == 0) { return get_empty_output(stream, mr); }
