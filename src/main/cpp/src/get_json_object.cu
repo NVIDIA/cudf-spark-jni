@@ -1545,6 +1545,90 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
   }
   return output;
 }
+
+/**
+ * Builds a path subset from one prepared metadata owner: subset order p reads owner path
+ * src_indices[p]. Reuses the owner's already-prepared offsets/masks/totals/validity (and its
+ * already_synced ordering) so a caller whose subset was prepared with the full batch — e.g. the
+ * retry's unflagged paths — skips a second prepare pass entirely. Packed-readback entries are
+ * read at mapped owner indices; the owner's layout stays untouched. src_indices must be unique
+ * and within the owner's path range; pairs_by_path holds the subset's spans in subset order.
+ * Moves the mapped offsets/masks into the results.
+ */
+std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
+  prepared_output_metadata&& prepared,
+  std::vector<std::size_t> const& src_indices,
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> const&
+    pairs_by_path,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto const num_paths = static_cast<int64_t>(src_indices.size());
+  CUDF_EXPECTS(static_cast<int64_t>(pairs_by_path.size()) == num_paths,
+               "Subset finish requires one span per mapped path");
+  for (auto const src : src_indices) {
+    CUDF_EXPECTS(src < static_cast<std::size_t>(prepared.num_paths),
+                 "Subset index exceeds the prepared metadata path range");
+  }
+
+  auto const rows = prepared.rows;
+  if (num_paths == 0) { return {}; }
+  if (rows == 0) {
+    std::vector<std::unique_ptr<cudf::column>> output;
+    output.reserve(pairs_by_path.size());
+    for (std::size_t i = 0; i < pairs_by_path.size(); ++i) {
+      output.emplace_back(cudf::make_empty_column(cudf::type_id::STRING));
+    }
+    return output;
+  }
+
+  // Sync only when the caller has not already ordered the packed readback.
+  if (!prepared.already_synced) { stream.sync(); }
+  auto const* h_total_sizes  = prepared.h_total_sizes();
+  auto const* h_valid_counts = prepared.h_valid_counts();
+
+  // Mirror the factory's int32 overflow threshold before exposing columns; large-strings
+  // builds would need an INT64 offsets branch here as well.
+  auto const threshold = cudf::strings::get_offset64_threshold();
+  for (int64_t p = 0; p < num_paths; ++p) {
+    CUDF_EXPECTS(h_total_sizes[src_indices[p]] < threshold,
+                 "Size of output exceeds the column size limit",
+                 std::overflow_error);
+  }
+
+  std::vector<rmm::device_uvector<char>> chars_buffers;
+  chars_buffers.reserve(pairs_by_path.size());
+  std::vector<gather_entry> h_entries;
+  h_entries.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    auto const src = src_indices[p];
+    chars_buffers.emplace_back(
+      rmm::device_uvector<char>(static_cast<std::size_t>(h_total_sizes[src]), stream, mr));
+    // Skip empty chars buffers in the gather table to avoid zero-byte CUB descriptors.
+    if (h_total_sizes[src] == 0) { continue; }  // skip-emission
+    h_entries.emplace_back(
+      gather_entry{pairs_by_path[p].data(),
+                   chars_buffers.back().data(),
+                   prepared.offsets_cols[src]->view().data<cudf::size_type>()});
+  }
+  // Pair lengths must sum to the scanned total; the factory trusts this producer too.
+  gather_chars_for_group(h_entries, rows, stream);
+
+  std::vector<std::unique_ptr<cudf::column>> output;
+  output.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    auto const src        = src_indices[p];
+    auto const null_count = static_cast<cudf::size_type>(rows - h_valid_counts[src]);
+    output.emplace_back(cudf::make_strings_column(
+      static_cast<cudf::size_type>(rows),
+      std::move(prepared.offsets_cols[src]),
+      std::move(chars_buffers[p]).release(),
+      null_count,
+      null_count > 0 ? std::move(prepared.null_masks[src])
+                     : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr)));
+  }
+  return output;
+}
 }  // namespace
 
 namespace {
@@ -3076,17 +3160,21 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
   auto no_oob_stringviews = assemble_stringviews(no_oob_indices.begin(), no_oob_indices.size());
   // Same admission gate as the happy site: a small batch builds retry columns
-  // with make_strings_column_batch, a large one reuses the packed machinery.
-  auto no_oob_output =
-    (!use_packed_readback)
-      ? cudf::make_strings_column_batch(no_oob_stringviews, stream, mr)
-      : finish_output_columns(prepare_output_metadata(input, no_oob_stringviews, stream, mr),
-                              no_oob_stringviews,
-                              stream,
-                              mr);
-  for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
-    auto const out_idx = no_oob_indices[idx];
-    output[out_idx]    = std::move(no_oob_output[idx]);
+  // with make_strings_column_batch, a large one reuses the packed machinery. The packed
+  // branch finishes the unflagged subset from the first-pass metadata (already synced) so
+  // the subset's offsets/masks/readback are not prepared a second time; prepared_metadata
+  // stays alive through the mapped finish and dies at function end.
+  if (!use_packed_readback) {
+    auto no_oob_output = cudf::make_strings_column_batch(no_oob_stringviews, stream, mr);
+    for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
+      output[no_oob_indices[idx]] = std::move(no_oob_output[idx]);
+    }
+  } else {
+    auto no_oob_output = finish_output_columns(
+      std::move(*prepared_metadata), no_oob_indices, no_oob_stringviews, stream, mr);
+    for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
+      output[no_oob_indices[idx]] = std::move(no_oob_output[idx]);
+    }
   }
 
   // The flat pair storage stays alive through the retry: the retry kernel overwrites the

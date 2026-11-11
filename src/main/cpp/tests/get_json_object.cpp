@@ -2265,3 +2265,42 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
     }
   }
 }
+
+// The packed retry's unflagged subset finish must reuse the first-pass metadata: >= 8 paths
+// (the packed gate) with one flagged and fifteen unflagged paths keeps the subset non-trivial
+// on both sides, and per-path single-path oracles catch any metadata mix-up in the map.
+TEST_F(GetJsonObjectTest, MergedRetryMixedFlaggedUnflaggedParity)
+{
+  auto const bomb      = std::string(30, '"');
+  auto const expanding = R"({"k":{"a":')" + bomb + R"('},"u":{"v":"U"}})";  // 58 B; $.k -> 68 B
+  ASSERT_EQ(expanding.size(), 58u);
+  ASSERT_GT(quote_bomb_value(30).size(), expanding.size());  // exceeds the first-pass row slot
+  std::vector<std::string> rows(33, R"({"k":"s","u":{"v":"U"},"e":""})");
+  rows[0] = expanding;  // overflows its slot, so $.k is retried
+  cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
+
+  // Sixteen NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass and
+  // the packed readback gate, so exactly one flagged path retries while fifteen finish from
+  // the first-pass metadata.
+  std::vector<std::vector<path_spec>> paths{
+    {named_path("k")}, {named_path("u"), named_path("v")}, {named_path("e")}};
+  for (int i = 3; i < 16; ++i) {
+    paths.push_back({named_path("missing" + std::to_string(i))});
+  }
+
+  auto const input_view = cudf::strings_column_view{input};
+  auto const out = spark_rapids_jni::get_json_object_multiple_paths(input_view, paths, -1, -1);
+  ASSERT_EQ(out.size(), paths.size());
+  // Oracle: evaluate each path alone; a single-path call stays on the general engine.
+  for (std::size_t col = 0; col < paths.size(); ++col) {
+    SCOPED_TRACE("mixed retry column " + std::to_string(col));
+    auto const single =
+      spark_rapids_jni::get_json_object_multiple_paths(input_view, {paths[col]}, -1, 1);
+    ASSERT_EQ(single.size(), 1u);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*single[0], *out[col]);
+  }
+  // Row 0's flagged path carries the retry's expanded output.
+  auto const [vals, mask] = cudf::test::to_host<std::string>(out[0]->view());
+  ASSERT_EQ(vals[0], quote_bomb_value(30));
+  EXPECT_TRUE(row_valid(*out[0], mask, 0));
+}
