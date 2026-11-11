@@ -86,7 +86,7 @@
       "git_tag" : "cd54ddc5a7905df21b02ac88497d6dfda26b4249",
       "git_url" : "https://github.com/rapidsai/rmm.git",
       "source_subdir" : "cpp",
-      "version" : "26.12"
+      "version" : "27.02"
     },
     "rtcx" : 
     {
