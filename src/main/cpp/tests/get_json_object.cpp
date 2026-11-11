@@ -651,7 +651,8 @@ multi_paths const eight_key_paths =
 
 void pad_paths(multi_paths& paths, int from)
 {
-  // Distinct depth-2 pads only add null columns; they ride root `pad0`, which is not a row key.
+  // Distinct depth-2 pads only add null columns; each pad is a fresh two-segment path whose
+  // first segment is not one of the caller's row keys.
   paths.resize(8);
   for (int p = from; p < 8; ++p) {
     paths[p] = named({"pad" + std::to_string(p), "v"});
