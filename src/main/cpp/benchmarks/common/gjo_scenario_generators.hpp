@@ -483,68 +483,70 @@ inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
 
 /**
  * @brief Paths for the wide flat+nested shape: 64 distinct depth-two paths
- * `f{i}.c{i}` (64 roots, one queried child path per root), measured over
- * 150-member rows.
+ * `f{root}.c{child}` spread over 2 roots (32 children per root), measured
+ * over 150-member rows.
  */
 inline multi_paths flat_mixed_64_build_paths()
 {
+  constexpr int num_roots      = 2;
+  constexpr int paths_per_root = 32;
   multi_paths paths;
-  paths.reserve(64);
-  for (int i = 0; i < 64; ++i) {
-    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1},
-                              path_tuple{instruction_t::NAMED, "c" + std::to_string(i), -1}});
+  paths.reserve(num_roots * paths_per_root);
+  for (int root = 0; root < num_roots; ++root) {
+    for (int child = 0; child < paths_per_root; ++child) {
+      paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(root), -1},
+                                path_tuple{instruction_t::NAMED, "c" + std::to_string(child), -1}});
+    }
   }
   return paths;
 }
 
 /**
- * @brief The reviewer's wide-flat shape: `num_paths` distinct depth-2 paths spread over 40
- * distinct roots (124/40 = 3.1 paths per root) over rows whose top-level members are exactly
- * those 40 roots.
+ * @brief Paths for the value-kind shape: 16 top-level members whose values cycle through
+ * escaped string, integer, boolean, and array so the merged route's terminal kinds
+ * (escaped-string writer, raw number/boolean, subtree copy) are all exercised.
  */
-inline multi_paths flat_wide_build_paths(std::size_t num_paths)
+inline multi_paths value_kinds_build_paths()
 {
-  constexpr std::size_t num_roots = 40;
-  CUDF_EXPECTS(num_paths >= num_roots, "flat-wide needs at least one path per root");
   multi_paths paths;
-  paths.reserve(num_paths);
-  // Child c<k> repeats across roots, so all 40 roots see the full child set.
-  for (std::size_t p = 0; p < num_paths; ++p) {
-    std::size_t const root  = p % num_roots;
-    std::size_t const child = p / num_roots;
-    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(root), -1},
-                              path_tuple{instruction_t::NAMED, "c" + std::to_string(child), -1}});
+  paths.reserve(16);
+  for (int i = 0; i < 16; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
   }
   return paths;
 }
 
-/**
- * @brief Rows for the wide flat+nested shape: `member_count` top-level
- * members whose first 64 carry one queried child each (`f{m}` holding
- * `c{m}`), one trailing `zz_nested` object, and filler members absorbing
- * the row budget like `flat_mixed_build_rows` does.
- */
-inline std::vector<std::string> flat_mixed_64_build_rows(std::mt19937_64& rng,
-                                                         std::size_t num_rows,
-                                                         std::size_t member_count,
-                                                         std::size_t row_bytes,
-                                                         std::uint64_t seed)
+inline std::vector<std::string> value_kinds_build_rows(std::mt19937_64& rng,
+                                                       std::size_t num_rows,
+                                                       std::size_t row_bytes,
+                                                       std::uint64_t seed)
 {
   std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  auto const escaped       = [](std::string v) {
+    std::string out;
+    for (char c : v) {
+      if (c == '"' || c == '\\') { out += '\\'; }
+      out += c;
+    }
+    return out;
+  };
   std::vector<std::string> rows;
   rows.reserve(num_rows);
   for (std::size_t r = 0; r < num_rows; ++r) {
     std::string row = "{";
-    for (std::size_t m = 0; m < member_count; ++m) {
-      if (m > 0) { row += ','; }
-      if (m < 64) {
-        // Root f<m> holds exactly the queried child c<m>, so every path hits.
-        row += "\"f" + std::to_string(m) + "\":{\"c" + std::to_string(m) + "\":\"v" +
-               std::to_string((r + salt) % 1000) + "\"}";
-      } else if (m == member_count - 1) {
-        row += "\"zz_nested\":{\"x\":\"n" + std::to_string((r + salt) % 1000) + "\"}";
+    for (int i = 0; i < 16; ++i) {
+      if (i > 0) { row += ','; }
+      auto const kind = (r + i) % 4;
+      if (kind == 0) {
+        row += "\"f" + std::to_string(i) + "\":\"" +
+               escaped("q\"s" + std::to_string((r + salt) % 1000)) + "\"";
+      } else if (kind == 1) {
+        row += "\"f" + std::to_string(i) + "\":" + std::to_string((r + salt) % 100000);
+      } else if (kind == 2) {
+        row += "\"f" + std::to_string(i) + "\":";
+        row += ((r + salt) % 2 == 0) ? "true" : "false";
       } else {
-        row += "\"fill_m" + std::to_string(m) + "\":\"" + random_string(rng, 12) + "\"";
+        row += "\"f" + std::to_string(i) + "\":[1," + std::to_string((r + salt) % 100) + "]";
       }
     }
     row += '}';
@@ -554,29 +556,80 @@ inline std::vector<std::string> flat_mixed_64_build_rows(std::mt19937_64& rng,
 }
 
 /**
- * @brief Rows for the flat-wide shape: each row is an object whose members are the 40 queried
- * roots, each mapped to a child object. A trailing `fill` member absorbs the remaining
- * `row_bytes` budget via `pad_row_to`, matching the other scenarios' row sizing.
+ * @brief The wide-flat merged-route shape: a single root whose 124 members are
+ * queried directly, so the group is 124 depth-one paths over one root.
  */
-inline std::vector<std::string> flat_wide_build_rows(std::mt19937_64& rng,
-                                                     std::size_t num_rows,
-                                                     std::size_t row_bytes,
-                                                     std::uint64_t seed)
+inline multi_paths flat_wide_124_build_paths()
 {
-  constexpr std::size_t num_roots = 40;
-  std::uint64_t const salt        = seed * 0x9E3779B97F4A7C15ULL;
+  multi_paths paths;
+  paths.reserve(124);
+  for (int i = 0; i < 124; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
+  }
+  return paths;
+}
+
+/**
+ * @brief Rows for the wide-flat merged-route shape: each row is a flat object
+ * whose 124 queried members `f0`..`f123` carry string values. A trailing
+ * `fill` member absorbs the remaining `row_bytes` budget via `pad_row_to`,
+ * matching the other scenarios' row sizing.
+ */
+inline std::vector<std::string> flat_wide_124_build_rows(std::mt19937_64& rng,
+                                                         std::size_t num_rows,
+                                                         std::size_t row_bytes,
+                                                         std::uint64_t seed)
+{
+  constexpr std::size_t num_members = 124;
+  std::uint64_t const salt          = seed * 0x9E3779B97F4A7C15ULL;
   std::vector<std::string> rows;
   rows.reserve(num_rows);
   for (std::size_t r = 0; r < num_rows; ++r) {
     std::string row = "{";
-    for (std::size_t m = 0; m < num_roots; ++m) {
+    for (std::size_t m = 0; m < num_members; ++m) {
       if (m > 0) { row += ','; }
-      row += "\"f" + std::to_string(m) + "\":{";
-      for (std::size_t c = 0; c < 4; ++c) {
-        if (c > 0) { row += ','; }
-        row += "\"c" + std::to_string(c) + "\":\"v" + std::to_string((r + salt + c) % 1000) + "\"";
+      row += "\"f" + std::to_string(m) + "\":\"v" + std::to_string((r + salt) % 1000) + "\"";
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
+/**
+ * @brief Rows for the wide flat+nested shape: `member_count` top-level
+ * members whose first two roots `f0`/`f1` each hold the 32 queried children
+ * `c0`..`c31`, one trailing `zz_nested` object, and filler members absorbing
+ * the row budget like `flat_mixed_build_rows` does.
+ */
+inline std::vector<std::string> flat_mixed_64_build_rows(std::mt19937_64& rng,
+                                                         std::size_t num_rows,
+                                                         std::size_t member_count,
+                                                         std::size_t row_bytes,
+                                                         std::uint64_t seed)
+{
+  constexpr std::size_t num_roots      = 2;
+  constexpr std::size_t paths_per_root = 32;
+  std::uint64_t const salt             = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < num_roots) {
+        // Root f<m> holds every queried child c0..c31, so all of its paths hit.
+        row += "\"f" + std::to_string(m) + "\":{";
+        for (std::size_t c = 0; c < paths_per_root; ++c) {
+          if (c > 0) { row += ','; }
+          row += "\"c" + std::to_string(c) + "\":\"v" + std::to_string((r + salt) % 1000) + "\"";
+        }
+        row += '}';
+      } else if (m == member_count - 1) {
+        row += "\"zz_nested\":{\"x\":\"n" + std::to_string((r + salt) % 1000) + "\"}";
+      } else {
+        row += "\"fill_m" + std::to_string(m) + "\":\"" + random_string(rng, 12) + "\"";
       }
-      row += '}';
     }
     row += '}';
     rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
