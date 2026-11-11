@@ -1598,7 +1598,7 @@ struct merged_trie_view {
   int32_t const* max_name_len;        // [nodes]; unused when the row is bypassed
 };
 
-// R=1 uses an aligned 8-byte head and a 1-byte kind at offset 8; the record rounds to a 16-byte
+// R=1 stores an aligned 8-byte head plus a 1-byte kind at offset 8; the record rounds to a 16-byte
 // stride. R=2 packs all fields in 8 bytes; both layouts require 8-byte alignment.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
