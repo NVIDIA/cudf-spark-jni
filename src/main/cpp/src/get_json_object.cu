@@ -1266,7 +1266,9 @@ __device__ __forceinline__ bool signature_match(merged_trie_view const& trie,
  * Certifies byte-identical serialization of a parsed subtree; this is not a JSON validator.
  * Requires double-quoted strings/keys, canonical simple escapes, compact separators and unchanged
  * integers/literals. Single quotes, exterior whitespace, controls, Unicode/slash escapes, floats
- * and -0 return false for writer normalization. A true result permits a borrowed input view.
+ * and -0 return false for writer normalization. Bytes >= 0x80 are assumed to serialize verbatim;
+ * if the writer ever changes that (e.g. astral characters), raw eligibility must change with it.
+ * A true result permits a borrowed input view.
  */
 __device__ __forceinline__ bool certify_raw_subtree(char const* data, int32_t len)
 {
