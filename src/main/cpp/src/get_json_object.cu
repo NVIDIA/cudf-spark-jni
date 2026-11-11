@@ -1430,9 +1430,9 @@ prepared_output_metadata prepare_output_metadata(
   {
     // Each grid block owns one path's word slice; pair metadata bounds fit 32-bit grid indices.
     auto const num_blocks_per_path =
-      static_cast<int32_t>(cudf::util::div_rounding_up_safe<int64_t>(rows, validity_block_size));
+      static_cast<int32_t>(cudf::detail::div_rounding_up_safe<int64_t>(rows, validity_block_size));
     auto const words_per_block = static_cast<int32_t>(
-      cudf::util::div_rounding_up_safe<int64_t>(words_per_path, num_blocks_per_path));
+      cudf::detail::div_rounding_up_safe<int64_t>(words_per_path, num_blocks_per_path));
     auto const total_blocks = num_paths * num_blocks_per_path;  // bounded, see note above
     auto const grid =
       cudf::detail::grid_1d{total_blocks * validity_block_size, validity_block_size};
