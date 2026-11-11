@@ -482,6 +482,60 @@ inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
 }
 
 /**
+ * @brief Rows for the value-kind shape: 16 top-level members whose values cycle through
+ * escaped string, integer, boolean, and array so the merged route's terminal kinds
+ * (escaped-string writer, raw number/boolean, subtree copy) are all exercised.
+ */
+inline multi_paths value_kinds_build_paths()
+{
+  multi_paths paths;
+  paths.reserve(16);
+  for (int i = 0; i < 16; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
+  }
+  return paths;
+}
+
+inline std::vector<std::string> value_kinds_build_rows(std::mt19937_64& rng,
+                                                       std::size_t num_rows,
+                                                       std::size_t row_bytes,
+                                                       std::uint64_t seed)
+{
+  std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  auto const escaped       = [](std::string v) {
+    std::string out;
+    for (char c : v) {
+      if (c == '"' || c == '\\') { out += '\\'; }
+      out += c;
+    }
+    return out;
+  };
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (int i = 0; i < 16; ++i) {
+      if (i > 0) { row += ','; }
+      auto const kind = (r + i) % 4;
+      if (kind == 0) {
+        row += "\"f" + std::to_string(i) + "\":\"" +
+               escaped("q\"s" + std::to_string((r + salt) % 1000)) + "\"";
+      } else if (kind == 1) {
+        row += "\"f" + std::to_string(i) + "\":" + std::to_string((r + salt) % 100000);
+      } else if (kind == 2) {
+        row += "\"f" + std::to_string(i) + "\":";
+        row += ((r + salt) % 2 == 0) ? "true" : "false";
+      } else {
+        row += "\"f" + std::to_string(i) + "\":[1," + std::to_string((r + salt) % 100) + "]";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
+/**
  * @brief The reviewer's wide-flat shape: `num_paths` distinct depth-2 paths spread over 40
  * distinct roots (124/40 = 3.1 paths per root) over rows whose top-level members are exactly
  * those 40 roots.

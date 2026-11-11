@@ -58,7 +58,8 @@ enum class scenario_id : int32_t {
   NESTED_135    = 0,
   NESTED_33     = 1,
   FLAT_MIXED_16 = 2,
-  FLAT_WIDE     = 3
+  FLAT_WIDE     = 3,
+  VALUE_KINDS   = 4
 };
 
 }  // namespace
@@ -94,11 +95,14 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
     // The wide-flat shape is the reviewer's 124/40 layout (124 depth-2 paths, 40 roots,
     // 3.1 paths per root); the num_paths axis does not apply to it.
     base_paths = flat_wide_build_paths(124);
+  } else if (scenario == scenario_id::VALUE_KINDS) {
+    base_paths = value_kinds_build_paths();
   } else {
     base_paths = nested_build_paths(table, scenario == scenario_id::NESTED_135 ? 135 : 33);
   }
-  auto const fixed_paths =
-    scenario == scenario_id::FLAT_MIXED_16 || scenario == scenario_id::FLAT_WIDE;
+  auto const fixed_paths = scenario == scenario_id::FLAT_MIXED_16 ||
+                           scenario == scenario_id::FLAT_WIDE ||
+                           scenario == scenario_id::VALUE_KINDS;
   multi_paths tiled;
   tiled.reserve(fixed_paths ? base_paths.size() : num_paths);
   for (std::size_t i = 0; i < (fixed_paths ? base_paths.size() : num_paths); ++i) {
@@ -121,6 +125,8 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
                     ? flat_mixed_build_rows(rng, num_rows, members, row_bytes, seed)
                   : scenario == scenario_id::FLAT_WIDE
                     ? flat_wide_build_rows(rng, num_rows, row_bytes, seed)
+                  : scenario == scenario_id::VALUE_KINDS
+                    ? value_kinds_build_rows(rng, num_rows, row_bytes, seed)
                     : nested_build_rows(rng, table, num_rows, row_bytes, seed);
       return cudf::test::strings_column_wrapper(rows.begin(), rows.end()).release();
     });
@@ -144,7 +150,8 @@ NVBENCH_BENCH(BM_get_json_object_multiple_paths)
                   {static_cast<nvbench::int64_t>(scenario_id::NESTED_135),
                    static_cast<nvbench::int64_t>(scenario_id::NESTED_33),
                    static_cast<nvbench::int64_t>(scenario_id::FLAT_MIXED_16),
-                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE)})
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE),
+                   static_cast<nvbench::int64_t>(scenario_id::VALUE_KINDS)})
   .add_int64_axis("size_bytes", {10 * 1'024 * 1'024, 100 * 1'024 * 1'024})
   .add_int64_axis("num_paths", {1, 8, 32, 33, 50, 135})
   .add_int64_axis("seed", {1, 2})
