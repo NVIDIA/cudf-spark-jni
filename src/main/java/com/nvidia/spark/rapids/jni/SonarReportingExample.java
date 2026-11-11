@@ -28,11 +28,15 @@ final class SonarReportingExample {
     return value == value;
   }
 
-  static int guardedDivision(int denominator) {
-    // Repair the High finding while retaining the intentional Medium example above.
-    if (denominator == 0) {
-      throw new IllegalArgumentException("denominator must not be zero");
-    }
-    return 1 / denominator;
+  static int intentionalHighSeverityFinding() {
+    // Intentionally triggers javabugs:S3518 (High); this unused example must not be called.
+    int zero = 0;
+    return 1 / zero;
+  }
+
+  static int secondIntentionalHighSeverityFinding() {
+    // A second unused division-by-zero finding validates the exact High count.
+    int zero = 0;
+    return 42 / zero;
   }
 }
