@@ -61,7 +61,7 @@ main-cuda13.4.3-rockylinux8
 Each tag contains `linux/amd64` and `linux/arm64`; Docker selects the host platform,
 or callers can specify `--platform`. CUDA 12 and CUDA 13 remain distinct tags.
 
-Versioned tags use only major.minor: `26.12.0-SNAPSHOT` and `26.12.1` both use
+Versioned tags use only major.minor: `27.02.0-SNAPSHOT` and `26.12.1` both use
 `26.12-`. Patch versions and snapshot suffixes do not create new tags. The image
 version label contains a recipe fingerprint of the Dockerfile,
 platform, resolved build arguments and explicit `recipe-inputs` files. The shared
