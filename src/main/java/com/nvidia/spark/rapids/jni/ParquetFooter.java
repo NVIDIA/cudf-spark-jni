@@ -210,8 +210,8 @@ public class ParquetFooter implements AutoCloseable {
   }
 
   /**
-     * Read a parquet thrift footer from a buffer and filter it like the java code would. The buffer
-   * should only include the thrift footer itself. This includes filtering out row groups that do
+   * Read a parquet footer from a buffer and filter it like the java code would. The buffer
+   * should only include the footer itself. This includes filtering out row groups that do
    * not fall within the partition and pruning columns that are not needed.
    * @param buffer the buffer to parse the footer out from.
    * @param partOffset for a split the start of the split
