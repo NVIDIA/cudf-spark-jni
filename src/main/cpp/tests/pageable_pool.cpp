@@ -24,7 +24,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -270,6 +272,55 @@ TEST(PageablePool, BothFreeListStrategiesRecoverFullPool)
     pool.deallocate_sync(third, kPoolSize / 2);
     void* whole = pool.allocate_sync(kPoolSize);
     EXPECT_EQ(first, whole);
+    pool.deallocate_sync(whole, kPoolSize);
+  }
+}
+
+TEST(PageablePool, VariedAllocationsPreserveLiveDataAndRecoverPool)
+{
+  struct allocation {
+    unsigned char* data;
+    std::size_t size;
+    unsigned char pattern;
+  };
+  for (bool use_indexed : {true, false}) {
+    auto pool = make_pool(kPoolSize, 1, use_indexed);
+    std::vector<allocation> live;
+    std::mt19937 rng{0x5eed};
+    for (int step = 0; step < 3000; ++step) {
+      if (!live.empty() && (live.size() >= 96 || rng() % 3 == 0)) {
+        auto const index = rng() % live.size();
+        auto const a     = live[index];
+        EXPECT_TRUE(all_eq(a.data, a.size, a.pattern)) << "step " << step;
+        pool.deallocate_sync(a.data, a.size);
+        live.erase(live.begin() + index);
+      } else {
+        auto const size = static_cast<std::size_t>(1 + rng() % 32768);
+        auto* data      = static_cast<unsigned char*>(pool.allocate_sync(size));
+        ASSERT_NE(data, nullptr);
+        auto const begin = reinterpret_cast<std::uintptr_t>(data);
+        auto const end   = begin + size;
+        for (auto const& a : live) {
+          auto const other_begin = reinterpret_cast<std::uintptr_t>(a.data);
+          auto const other_end   = other_begin + a.size;
+          EXPECT_TRUE(end <= other_begin || other_end <= begin) << "step " << step;
+        }
+        auto const pattern = static_cast<unsigned char>(step % 251 + 1);
+        std::memset(data, pattern, size);
+        live.push_back({data, size, pattern});
+      }
+      if (step % 97 == 0) {
+        for (auto const& a : live) {
+          EXPECT_TRUE(all_eq(a.data, a.size, a.pattern)) << "step " << step;
+        }
+      }
+    }
+    for (auto const& a : live) {
+      EXPECT_TRUE(all_eq(a.data, a.size, a.pattern));
+      pool.deallocate_sync(a.data, a.size);
+    }
+    void* whole = pool.allocate_sync(kPoolSize);
+    ASSERT_NE(whole, nullptr);
     pool.deallocate_sync(whole, kPoolSize);
   }
 }

@@ -96,8 +96,8 @@ class indexed_free_list {
     // Reuse the first block's nodes. The keys and values are pointer/integer/block
     // types, so changing them and reinserting into the same containers cannot
     // allocate or throw. The merged span cannot collide with another free block.
-    auto addr_node = by_addr_.extract(first->pointer());
     auto size_node = by_size_.extract({first->size(), first->pointer()});
+    auto addr_node = by_addr_.extract(first->pointer());
     if (second != nullptr) { erase_indexed(*second); }
     addr_node.key()    = merged.pointer();
     addr_node.mapped() = merged;
