@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -28,24 +29,47 @@
 namespace spark_rapids_jni {
 namespace bench {
 
-using input_cache_key = std::uint64_t;
+using input_cache_key = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t>;
+
+// std::hash has no tuple overload, so the shared map carries its own hasher: each field is
+// diffused (splitmix64 finalizer) and FNV-combined; a collision only costs one regeneration in
+// this benchmark-local map.
+struct input_cache_key_hash {
+  std::size_t operator()(input_cache_key const& key) const noexcept
+  {
+    auto const mix = [](std::uint64_t v) {
+      v ^= v >> 33;
+      v *= 0xff51afd7ed558ccdULL;
+      v ^= v >> 33;
+      return v;
+    };
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (std::uint64_t v :
+         {std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key)}) {
+      h = (h ^ mix(v)) * 0x100000001b3ULL;
+    }
+    return static_cast<std::size_t>(h);
+  }
+};
+
+using input_cache_map =
+  std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>, input_cache_key_hash>;
 
 /**
- * @brief Pack (scenario, flavor, size_bytes, seed) into one cache key:
- * 8 / 8 / 32 / 16 bits at shifts 56 / 48 / 16 / 0 respectively.
+ * @brief Build the process-cache key `(scenario, size_bytes, seed, flavor)`.
  *
- * `scenario` distinguishes input shapes at the same byte size (row kind, `max_depth`); `flavor`
- * distinguishes row-shape variants within one scenario (e.g. the mixed shape's member count);
- * `size_bytes` is packed in KiB units so 32 bits cover up to 4 TiB; `seed` distinguishes
- * generator seeds. All fields are disjoint, so distinct tuples map to distinct keys.
+ * Every field is carried at full width: `size_bytes` is NOT truncated to KiB units, so
+ * distinct requested byte counts never share an entry even when they round to the same
+ * KiB value. `scenario` distinguishes input shapes at the same byte size (row kind,
+ * `max_depth`); `flavor` distinguishes row-shape variants within one scenario (e.g. the
+ * flat shapes' member counts); `seed` distinguishes generator seeds.
  */
 constexpr input_cache_key make_input_cache_key(std::uint64_t scenario,
                                                std::uint64_t size_bytes,
                                                std::uint64_t seed,
                                                std::uint64_t flavor = 0)
 {
-  return (scenario & 0xFFULL) << 56 | (flavor & 0xFFULL) << 48 |
-         ((size_bytes >> 10) & 0xFFFF'FFFFULL) << 16 | (seed & 0xFFFFULL);
+  return {scenario, size_bytes, seed, flavor};
 }
 
 /**
@@ -56,7 +80,8 @@ constexpr input_cache_key make_input_cache_key(std::uint64_t scenario,
  * and the driver reclaims them at process exit. Defined in `gjo_input_cache.cpp` so every
  * translation unit shares one map.
  */
-std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>>& input_cache();
+std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>, input_cache_key_hash>&
+input_cache();
 
 template <typename Generate>
 cudf::column_view get_or_generate_input(input_cache_key key, Generate&& generate)
