@@ -1027,7 +1027,8 @@ struct merged_trie_view {
   int32_t const* flat_name_len;  // [total children]
 };
 
-// R=1 stores an aligned 8-byte head plus a separate 4-byte kind word in a 16-byte stride.
+// R=1 stores an aligned 8-byte head plus a 1-byte kind at offset 8; the record rounds to a 16-byte
+// stride.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
@@ -1199,8 +1200,9 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
   auto const warp_in_block = threadIdx.x / warp_lanes;
   rec_t* row_out = row_scratch == nullptr ? smem_row_out + (warp_in_block * R + half) * num_paths
                                           : row_scratch + static_cast<int64_t>(row_idx) * num_paths;
-  // All lanes walk the row (the cooperative skip depends on it), but only row_lane 0
-  // touches the records; __syncwarp(row_mask) hands its results to the other lanes.
+  // All lanes walk the row because the shared-memory plan serves the whole group, not one
+  // row; only row_lane 0 touches the records, and __syncwarp(row_mask) hands its results
+  // to the other lanes.
   bool const records_owner = row_lane == 0;
   if (records_owner) {
     for (int32_t i = 0; i < num_paths; ++i) {
