@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -71,8 +71,14 @@ fi
 
 source "$PROJECT_BUILD_DIR/buildcpp-env.sh"
 
-CMAKE_NETRC=${CMAKE_NETRC:-IGNORED}
-CMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}
+# Keep libcudfjni's defaults, but only override libcudf/sparkjni when the caller
+# supplies netrc settings. CMake does not inherit these environment variables.
+netrc_args=("-DCMAKE_NETRC=${CMAKE_NETRC:-IGNORED}"
+            "-DCMAKE_NETRC_FILE=${CMAKE_NETRC_FILE:-$HOME/.netrc}")
+optional_netrc_args=()
+if [[ -n "${CMAKE_NETRC:-}" || -n "${CMAKE_NETRC_FILE:-}" ]]; then
+  optional_netrc_args=("${netrc_args[@]}")
+fi
 
 if [[ "$GPU_ARCHS" != "DEPRECATED" ]]; then
     CMAKE_CUDA_ARCHITECTURES="$GPU_ARCHS"    
@@ -113,6 +119,7 @@ if [[ $LIBCUDF_BUILD_CONFIGURE == true || ! -f $LIBCUDF_BUILD_PATH/CMakeCache.tx
     -DCMAKE_BUILD_TYPE="$CUDF_BUILD_TYPE" \
     -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
     -DCMAKE_INSTALL_PREFIX="$LIBCUDF_INSTALL_PATH" \
+    "${optional_netrc_args[@]}" \
     -DCUDF_DEPENDENCY_PIN_MODE="$LIBCUDF_DEPENDENCY_MODE" \
     -DCUDA_STATIC_CUFILE=ON \
     -DCUDA_STATIC_RUNTIME=ON \
@@ -147,8 +154,7 @@ CUDF_INSTALL_DIR="$LIBCUDF_INSTALL_PATH" cmake \
   -DCUDF_JNI_LIBCUDF_STATIC=ON \
   -DCUDF_USE_PER_THREAD_DEFAULT_STREAM="$CUDF_USE_PER_THREAD_DEFAULT_STREAM" \
   -DCMAKE_CUDA_ARCHITECTURES="$CMAKE_CUDA_ARCHITECTURES" \
-  -DCMAKE_NETRC="$CMAKE_NETRC" \
-  -DCMAKE_NETRC_FILE="$CMAKE_NETRC_FILE" \
+  "${netrc_args[@]}" \
   -DRMM_LOGGING_LEVEL="$RMM_LOGGING_LEVEL" \
   -DUSE_GDS="$USE_GDS" \
   -C="$CUDF_PIN_PATH/setup.cmake"
@@ -172,6 +178,7 @@ CUDF_ROOT="$CUDF_PATH" \
     -DBUILD_BENCHMARKS="$BUILD_BENCHMARKS" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS="$CMAKE_EXPORT_COMPILE_COMMANDS" \
     -DBUILD_FAULTINJ="$BUILD_FAULTINJ" \
+    "${optional_netrc_args[@]}" \
     -DBUILD_PROFILER="$BUILD_PROFILER" \
     -DBUILD_TESTS="$BUILD_TESTS" \
     -DCUDF_DEPENDENCY_PIN_MODE=pinned \

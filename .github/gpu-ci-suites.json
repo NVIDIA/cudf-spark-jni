@@ -1,0 +1,23 @@
+{
+  "suites": {
+    "jni": {
+      "enabled": true,
+      "comment": "Omitted paths means all files: require CUDA 12/13 native/Java tests and fuzzing except documentation and the unrelated workflows listed below. GPU workflows/helpers, this catalog and image recipes remain covered. To pause, set enabled to false and record the reason here.",
+      "exclude_paths": [
+        "**/*.md",
+        ".github/**/*.md",
+        ".mvn/**/*.md",
+        ".github/workflows/add-to-project.yml",
+        ".github/workflows/auto-merge.yml",
+        ".github/workflows/signoff-check.yml",
+        ".github/workflows/sync-clang-format-version.yml",
+        ".github/workflows/image-build.yml",
+        ".github/workflows/image-cleanup.yml",
+        ".github/workflows/cpu-ci.yml",
+        ".github/workflows/shell-check.yml",
+        ".github/workflows/blossom-ci.yml"
+      ],
+      "jobs": ["gpu-test"]
+    }
+  }
+}
