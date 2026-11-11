@@ -917,28 +917,39 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthPartitionParity)
   paths.push_back(named({"deep3", "m1", "m2"}));
   paths.push_back(named({"deep5", "l1", "l2", "l3", "l4"}));
 
-  // Eight shallow paths are the merged oracle; two deep paths stay general.
-  auto const merged_only = first_n(paths, 8);
-  auto const deep_only   = multi_paths(paths.begin() + 8, paths.end());
+  // The 8 shallow paths alone sit below the merged route's admission floor; pad them with
+  // same-root depth-2 paths (fan-out >= 3.15 paths/root) so the merged oracle below really
+  // runs the merged kernel. Pad columns carry no assertions.
+  auto const shallow_paths = named_depth2({"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"});
+  multi_paths padded_shallow(shallow_paths);
+  std::vector<std::string> const pad_roots = {"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"};
+  int constexpr deficit = 26 - 8;  // ceil(3.15 * 8 roots) = 26 distinct eligible paths
+  for (int p = 0; p < deficit; ++p) {
+    padded_shallow.push_back(named({pad_roots[p % pad_roots.size()], "mpad" + std::to_string(p)}));
+  }
 
-  auto const mixed_out  = run_fused(cudf::strings_column_view{col_from(rows)}, paths);
-  auto const merged_out = run_fused(cudf::strings_column_view{col_from(rows)}, merged_only);
+  auto const deep_only = multi_paths(paths.begin() + 8, paths.end());
+
+  multi_paths mixed = padded_shallow;
+  mixed.push_back(named({"deep3", "m1", "m2"}));
+  mixed.push_back(named({"deep5", "l1", "l2", "l3", "l4"}));
+  auto const mixed_out  = run_fused(cudf::strings_column_view{col_from(rows)}, mixed);
+  auto const merged_out = run_fused(cudf::strings_column_view{col_from(rows)}, padded_shallow);
   auto const deep_out   = run_fused(cudf::strings_column_view{col_from(rows)}, deep_only);
-  ASSERT_EQ(mixed_out.size(), 10u);
-  ASSERT_EQ(merged_out.size(), 8u);
+  ASSERT_EQ(mixed_out.size(), 28u);
+  ASSERT_EQ(merged_out.size(), 26u);
   ASSERT_EQ(deep_out.size(), 2u);
 
-  for (std::size_t col = 0; col < 10; ++col) {
+  for (std::size_t col = 0; col < 8; ++col) {
     SCOPED_TRACE("mixed column " + std::to_string(col));
-    std::string const expected = col < 8 ? std::string("v") + std::to_string(col)
-                                         : (col == 8 ? std::string("D3") : std::string("D5"));
+    std::string const expected = std::string("v") + std::to_string(col);
     ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*mixed_out[col], expected, true));
   }
 
   expect_first7_parity(mixed_out, merged_out, 8);
-  for (std::size_t col = 8; col < 10; ++col) {
+  for (std::size_t col = 26; col < 28; ++col) {
     SCOPED_TRACE("deep parity column " + std::to_string(col));
-    expect_columns_parity(mixed_out[col], deep_out[col - 8]);
+    expect_columns_parity(mixed_out[col], deep_out[col - 26]);
   }
 }
 
@@ -1085,9 +1096,33 @@ TEST_F(GetJsonObjectTest, MergedRouteRejectsDepthErrors)
   auto const nested = std::string(65, '[') + "0" + std::string(65, ']');
 
   auto const merged_col = col_from(same_rows(32, R"({"a":{"v":)" + nested + "}}"));
-  EXPECT_THROW(run_fused(cudf::strings_column_view{merged_col},
-                         named_depth2({"a", "b", "c", "d", "e", "f", "g", "h"})),
-               cudf::logic_error);
+  // Pad to 16 pushed depth-2 paths riding the single root so the merged route actually
+  // admits this batch (>= 16 paths, fan-out 16/1 >= 3.15) and the throw surfaces in it.
+  multi_paths paths = named_depth2({"a", "a", "a", "a", "a", "a", "a", "a"});
+  for (int p = 0; p < 8; ++p) {
+    paths.push_back(named({"a", "mpad" + std::to_string(p)}));
+  }
+  EXPECT_THROW(run_fused(cudf::strings_column_view{merged_col}, paths), cudf::logic_error);
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteDeadPathDepthErrorDoesNotThrow)
+{
+  auto const nested = std::string(65, '[') + "0" + std::string(65, ']');
+
+  // First-occurrence-wins kills every path: root "a" matches the scalar "1", so the depth
+  // overflow in the duplicate's subtree is walked under an already-dead path and must not
+  // throw (the merged rule throws on a depth error only if some path is still live).
+  auto const merged_col = col_from(same_rows(32, R"({"a":1,"a":{"v":)" + nested + "}}"));
+  multi_paths paths     = named_depth2({"a", "a", "a", "a", "a", "a", "a", "a"});
+  for (int p = 0; p < 8; ++p) {
+    paths.push_back(named({"a", "mpad" + std::to_string(p)}));
+  }
+  auto const out = run_fused(cudf::strings_column_view{merged_col}, paths);
+  ASSERT_EQ(out.size(), 16u);
+  for (auto const& col : out) {
+    // 32 rows here; assert all-null (no valid values) without the 64-row helper.
+    ASSERT_EQ(col->null_count(), col->size());
+  }
 }
 
 TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
