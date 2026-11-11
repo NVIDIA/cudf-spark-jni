@@ -3211,19 +3211,29 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   // Identical input and paths must reproduce the measured lengths; still check for overflow.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
-  // Rebuild each retried column from its own post-retry pairs while the flat pair storage is
-  // still alive; the release below may only happen after the last consumer is enqueued.
-  for (std::size_t i = 0; i < oob_indices.size(); ++i) {
-    auto const out_idx   = oob_indices[i];
+  // Rebuild the retried columns from their post-retry pairs while the flat pair storage is
+  // still alive; the release below may only happen after the last consumer is enqueued. One
+  // batched factory call syncs all sizes once instead of twice per column.
+  std::vector<std::pair<stringview_pair const*, cudf::size_type>> retry_ranges;
+  retry_ranges.reserve(oob_indices.size());
+  for (auto const out_idx : oob_indices) {
     auto const out_sview = stringview_span_of(out_idx);
     // Rebuild from the retry's committed pairs: the pre-retry offsets only size the scratch
     // slots, so adopting them as logical offsets would leak unwritten trailing bytes into rows.
-    output[out_idx] =
-      cudf::strings::detail::make_strings_column(out_sview.begin(), out_sview.end(), stream, mr);
+    retry_ranges.emplace_back(out_sview.data(), static_cast<cudf::size_type>(out_sview.size()));
   }
+  auto retry_output = cudf::strings::detail::make_strings_column_batch(
+    retry_ranges,
+    [&out_stringviews, count = retry_ranges.size()](std::size_t idx) {
+      if (idx + 1 == count) { (void)out_stringviews.release(); }
+    },
+    stream,
+    mr);
   // The rebuilt columns no longer reference the first-pass scratch buffers or the retry-stage
-  // views; out_stringviews's release below is the last consumer boundary.
-  (void)out_stringviews.release();
+  // views; out_stringviews's release above is the last consumer boundary.
+  for (std::size_t i = 0; i < oob_indices.size(); ++i) {
+    output[oob_indices[i]] = std::move(retry_output[i]);
+  }
   return output;
 }
 
