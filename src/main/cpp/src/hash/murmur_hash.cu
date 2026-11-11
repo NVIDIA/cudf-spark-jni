@@ -92,17 +92,18 @@ class murmur_device_row_hasher {
   /**
    * @brief Computes the hash value of an element in the given column.
    *
-   * When the column is non-nested, this is a simple wrapper around the element_hasher.
+   * When the column is non-nested, this is a simple wrapper around the element hasher.
    * When the column is nested, this uses a seed value to serially compute each
    * nested element, with the output hash becoming the seed for the next value.
    * This requires constructing a new hash functor for each nested element,
    * using the new seed from the previous element's hash. The hash of a null
-   * element is the input seed (the previous element's hash).
+   * element is the input seed (the previous element's hash). A DICTIONARY32 element, at the top
+   * level or nested, is hashed as its STRING key.
    */
   template <template <typename> class hash_fn>
   class element_hasher_adapter {
    public:
-    using hash_functor = cudf::detail::row::hash::element_hasher<hash_fn, Nullate>;
+    using hash_functor = dictionary_aware_element_hasher<hash_fn, Nullate>;
     using result_type  = typename hash_functor::result_type;
 
     __device__ element_hasher_adapter(Nullate check_nulls, result_type seed) noexcept
@@ -186,6 +187,8 @@ void check_hash_compatibility(cudf::table_view const& input)
   for (cudf::column_view const& c : input) {
     check_column(c);
   }
+
+  check_dictionary_keys(input);
 }
 
 }  // namespace
@@ -205,7 +208,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
   // Return early if there's nothing to hash
   if (input.num_columns() == 0 || input.num_rows() == 0) { return output; }
 
-  // Lists of structs are not supported
+  // Lists of structs and non-STRING dictionary keys are not supported
   check_hash_compatibility(input);
 
   bool const nullable = has_nested_nulls(input);

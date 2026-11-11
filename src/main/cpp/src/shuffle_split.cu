@@ -607,6 +607,21 @@ std::pair<size_t, size_t> count_flattened_columns(InputIter begin, InputIter end
 }
 
 /**
+ * @brief Returns true if any column in the range, or any of its descendants, is a DICTIONARY32.
+ *
+ * @param begin First column in the range
+ * @param end Last column in the range
+ */
+template <typename InputIter>
+bool contains_dictionary(InputIter begin, InputIter end)
+{
+  return std::any_of(begin, end, [](column_view const& col) {
+    return col.type().id() == cudf::type_id::DICTIONARY32 ||
+           contains_dictionary(col.child_begin(), col.child_end());
+  });
+}
+
+/**
  * @brief Sizes of each of the data sections in a partition.
  *
  * Sizes include padding.
@@ -805,6 +820,9 @@ shuffle_split_output shuffle_split(cudf::table_view const& input,
 
   // empty inputs
   CUDF_EXPECTS(input.num_columns() != 0, "Encountered input with no columns.");
+  CUDF_EXPECTS(!contains_dictionary(input.begin(), input.end()),
+               "DICTIONARY32 columns are not supported by shuffle_split; decode them to STRING "
+               "before kudo serialization");
   if (input.num_rows() == 0) {
     rmm::device_uvector<size_t> empty_offsets(1, stream, mr);
     thrust::fill(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),

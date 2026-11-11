@@ -32,6 +32,9 @@ import static java.util.Objects.requireNonNull;
  * A utility class for visiting a schema or a list of host columns.
  */
 public class Visitors {
+    private static final String DICTIONARY32_UNSUPPORTED = "DICTIONARY32 columns must be decoded " +
+        "with ColumnView.dictionaryDecode() before kudo serialization";
+
     /**
      * Visiting a schema in post order. For more details, see {@link SchemaVisitor}.
      *
@@ -77,6 +80,8 @@ public class Visitors {
                 visitSchemaInner(schema.getChild(0), visitor);
                 visitor.visitList(schema);
                 break;
+            case DICTIONARY32:
+                throw new UnsupportedOperationException(DICTIONARY32_UNSUPPORTED);
             default:
                 visitor.visit(schema);
                 break;
@@ -97,6 +102,8 @@ public class Visitors {
                 T childResult = visitSchemaInner(schema.getChild(0), visitor);
                 return visitor.visitList(schema, preVisitResult, childResult);
             }
+            case DICTIONARY32:
+                throw new UnsupportedOperationException(DICTIONARY32_UNSUPPORTED);
             default:
                 return visitor.visit(schema);
         }
@@ -134,6 +141,8 @@ public class Visitors {
                 visitColumn(col.getChildColumnView(0), visitor);
                 visitor.visitList(col);
                 return;
+            case DICTIONARY32:
+                throw new UnsupportedOperationException(DICTIONARY32_UNSUPPORTED);
             default:
                 visitor.visit(col);
         }
