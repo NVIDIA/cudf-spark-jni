@@ -93,17 +93,17 @@ class indexed_free_list {
                        block_type const* first,
                        block_type const* second = nullptr)
   {
-    // Prepare both new nodes before removing either neighbor. If an allocation
-    // fails, the original free blocks remain available in both indexes.
-    std::map<char*, block_type> staged_addr;
-    std::set<std::pair<std::size_t, char*>> staged_size;
-    staged_addr.emplace(merged.pointer(), merged);
-    staged_size.emplace(merged.size(), merged.pointer());
-
-    erase_indexed(*first);
+    // Reuse the first block's nodes. The keys and values are pointer/integer/block
+    // types, so changing them and reinserting into the same containers cannot
+    // allocate or throw. The merged span cannot collide with another free block.
+    auto addr_node = by_addr_.extract(first->pointer());
+    auto size_node = by_size_.extract({first->size(), first->pointer()});
     if (second != nullptr) { erase_indexed(*second); }
-    by_addr_.insert(staged_addr.extract(staged_addr.begin()));
-    by_size_.insert(staged_size.extract(staged_size.begin()));
+    addr_node.key()    = merged.pointer();
+    addr_node.mapped() = merged;
+    size_node.value()  = {merged.size(), merged.pointer()};
+    by_addr_.insert(std::move(addr_node));
+    by_size_.insert(std::move(size_node));
   }
 
   void erase_indexed(block_type const& b)

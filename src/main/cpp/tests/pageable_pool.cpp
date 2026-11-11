@@ -21,6 +21,8 @@
 #include <gtest/gtest.h>
 #include <sys/mman.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <thread>
@@ -32,14 +34,17 @@ namespace {
 
 constexpr std::size_t kPoolSize = 4 * 1024 * 1024;  // 4 MiB
 
-pageable_pool_resource make_pool(std::size_t size = kPoolSize, int threads = 1)
+pageable_pool_resource make_pool(std::size_t size = kPoolSize,
+                                 int threads      = 1,
+                                 bool use_indexed = true)
 {
   // Explicit any_resource construction is required because the converting constructor
   // of any_resource is not implicit in this CCCL version.
   return pageable_pool_resource(
     cuda::mr::any_synchronous_resource<cuda::mr::host_accessible>(pageable_memory_resource{}),
     size,
-    threads);
+    threads,
+    use_indexed);
 }
 
 testing::AssertionResult all_eq(unsigned char const* data,
@@ -227,6 +232,46 @@ TEST(PageablePool, IndexedFreeListCoalescesBothNeighbors)
   EXPECT_EQ(backing, original_block.pointer());
   EXPECT_EQ(original_block.pointer(), indexed_block.pointer());
   EXPECT_EQ(original_block.size(), indexed_block.size());
+}
+
+TEST(PageablePool, IndexedFreeListCoalescesEveryFourBlockOrder)
+{
+  alignas(rmm::CUDA_ALLOCATION_ALIGNMENT) char backing[4096];
+  std::array<std::size_t, 4> order{0, 1, 2, 3};
+  do {
+    rmm::mr::detail::coalescing_free_list original;
+    detail::indexed_free_list indexed;
+    for (auto const index : order) {
+      rmm::mr::detail::block const b{backing + index * 1024, 1024, false};
+      original.insert(b);
+      indexed.insert(b);
+    }
+    auto const expected = original.get_block(4096);
+    auto const actual   = indexed.get_block(4096);
+    ASSERT_TRUE(expected.is_valid());
+    ASSERT_TRUE(actual.is_valid());
+    EXPECT_EQ(expected.pointer(), actual.pointer());
+    EXPECT_EQ(expected.size(), actual.size());
+    EXPECT_TRUE(indexed.is_empty());
+  } while (std::next_permutation(order.begin(), order.end()));
+}
+
+TEST(PageablePool, BothFreeListStrategiesRecoverFullPool)
+{
+  for (bool use_indexed : {true, false}) {
+    auto pool    = make_pool(kPoolSize, 1, use_indexed);
+    void* first  = pool.allocate_sync(kPoolSize / 4);
+    void* second = pool.allocate_sync(kPoolSize / 4);
+    void* third  = pool.allocate_sync(kPoolSize / 2);
+    EXPECT_THROW(
+      { [[maybe_unused]] void* ignored = pool.allocate_sync(1); }, pageable_pool_exhausted);
+    pool.deallocate_sync(second, kPoolSize / 4);
+    pool.deallocate_sync(first, kPoolSize / 4);
+    pool.deallocate_sync(third, kPoolSize / 2);
+    void* whole = pool.allocate_sync(kPoolSize);
+    EXPECT_EQ(first, whole);
+    pool.deallocate_sync(whole, kPoolSize);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -121,16 +121,18 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
    */
   pageable_pool_resource(cuda::mr::any_synchronous_resource<cuda::mr::host_accessible> upstream,
                          std::size_t size,
-                         int pretouch_threads)
+                         int pretouch_threads,
+                         bool use_indexed_free_list = true)
     : upstream_(std::move(upstream)),
       pool_size_(size),
-      base_(upstream_.allocate_sync(size, system_page_size()))
+      base_(upstream_.allocate_sync(size, system_page_size())),
+      use_indexed_free_list_(use_indexed_free_list)
   {
     try {
       pretouch_parallel(base_, pool_size_, pretouch_threads);
       // is_head=false: all sub-blocks live within one contiguous upstream
       // allocation and may coalesce freely across their boundaries.
-      free_list_.insert(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
+      insert_free_block(rmm::mr::detail::block{static_cast<char*>(base_), pool_size_, false});
     } catch (...) {
       upstream_.deallocate_sync(base_, pool_size_, system_page_size());
       throw;
@@ -161,10 +163,10 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
     bytes = align_up(bytes);
     if (bytes == 0 || bytes > pool_size_) { throw pageable_pool_exhausted{}; }
     std::lock_guard<std::mutex> lock(mtx_);
-    auto blk = free_list_.get_block(bytes);
+    auto blk = get_free_block(bytes);
     if (!blk.is_valid()) { throw pageable_pool_exhausted{}; }
     if (blk.size() > bytes) {
-      free_list_.insert(rmm::mr::detail::block{blk.pointer() + bytes, blk.size() - bytes, false});
+      insert_free_block(rmm::mr::detail::block{blk.pointer() + bytes, blk.size() - bytes, false});
     }
     return blk.pointer();
   }
@@ -179,7 +181,7 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   {
     if (bytes == 0) { return; }
     std::lock_guard<std::mutex> lock(mtx_);
-    free_list_.insert(rmm::mr::detail::block{static_cast<char*>(ptr), align_up(bytes), false});
+    insert_free_block(rmm::mr::detail::block{static_cast<char*>(ptr), align_up(bytes), false});
   }
 
   bool operator==(pageable_pool_resource const& other) const noexcept { return this == &other; }
@@ -192,6 +194,21 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   std::size_t pool_size() const noexcept { return pool_size_; }
 
  private:
+  void insert_free_block(rmm::mr::detail::block const& block)
+  {
+    if (use_indexed_free_list_) {
+      indexed_free_list_.insert(block);
+    } else {
+      linear_free_list_.insert(block);
+    }
+  }
+
+  rmm::mr::detail::block get_free_block(std::size_t bytes)
+  {
+    return use_indexed_free_list_ ? indexed_free_list_.get_block(bytes)
+                                  : linear_free_list_.get_block(bytes);
+  }
+
   static void pretouch_parallel(void* base, std::size_t bytes, int threads)
   {
     std::size_t const page_size  = system_page_size();
@@ -251,7 +268,9 @@ class pageable_pool_resource : public cuda::mr::memory_resource_base<pageable_po
   std::size_t pool_size_;
   void* base_;
   std::mutex mtx_;
-  detail::indexed_free_list free_list_;
+  bool use_indexed_free_list_;
+  detail::indexed_free_list indexed_free_list_;
+  rmm::mr::detail::coalescing_free_list linear_free_list_;
 };
 
 static_assert(
