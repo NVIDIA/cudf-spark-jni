@@ -23,14 +23,17 @@ on:
 
 permissions: {}
 
+# Temporary overnight stress test: keep each approved invocation independent.
+# Restore the per-PR group when this validation finishes.
 concurrency:
-  group: sonar-runner-pilot-${{ github.event.pull_request.number }}
+  group: sonar-runner-pilot-${{ github.event.pull_request.number }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   authorize:
     if: >-
-      github.event.label.name == 'sonar-runner-pilot' &&
+      (github.event.label.name == 'sonar-runner-pilot' ||
+       github.event.label.name == 'sonar-runner-pilot-overlap') &&
       github.event.pull_request.number == 5400 &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -60,7 +63,7 @@ jobs:
             const approve = require('./ci/sonar-pilot-approval.js');
             await approve({github, context, core, initial: true});
       - name: Mark this Sonar scope pending using common PR 77
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@732a29325629ff5e1795d5bdee178877684f8197
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@1e1fe06dbcbc4895500e34589ee19139bd6bd819
         with:
           phase: pending
           project: ${{ vars.SONAR_PROJECT_KEY }}
@@ -88,7 +91,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NVIDIA/spark-rapids-common
-          ref: 732a29325629ff5e1795d5bdee178877684f8197
+          ref: 1e1fe06dbcbc4895500e34589ee19139bd6bd819
           persist-credentials: false
           path: common
       # Pre-merge validation only: the production action requires a published image.
@@ -191,7 +194,7 @@ jobs:
         if: always() && steps.analyze.outcome != 'skipped'
         continue-on-error: true
         timeout-minutes: 12
-        uses: NVIDIA/spark-rapids-common/sonar-check/collect@732a29325629ff5e1795d5bdee178877684f8197
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@1e1fe06dbcbc4895500e34589ee19139bd6bd819
         with:
           project: ${{ vars.SONAR_PROJECT_KEY }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -231,7 +234,7 @@ jobs:
           digest-mismatch: error
       - name: Report the check and summary using common PR 77
         if: always()
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@732a29325629ff5e1795d5bdee178877684f8197
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@1e1fe06dbcbc4895500e34589ee19139bd6bd819
         with:
           result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
           project: ${{ vars.SONAR_PROJECT_KEY }}

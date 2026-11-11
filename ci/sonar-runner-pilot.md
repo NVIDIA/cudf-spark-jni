@@ -3,9 +3,14 @@
 Test-only validation on dummy PR #5400. Do not merge the deliberate Java findings.
 A maintainer applies `sonar-runner-pilot` to approve the current same-repository
 head. New commits require a new label event; ordinary pushes do not run the pilot.
+For the temporary overnight test, `sonar-runner-pilot-overlap` starts a second
+invocation while the primary approval label stays present. Each run has a separate
+concurrency group, so earlier runs remain active. Both runs use the same approved
+head; wait for both to finish before changing the fixture. Restore per-PR
+serialization and remove the overlap trigger after this validation.
 
 The workflow validates common PR #77 at the reviewed commit
-`732a29325629ff5e1795d5bdee178877684f8197` with this path:
+`1e1fe06dbcbc4895500e34589ee19139bd6bd819` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
