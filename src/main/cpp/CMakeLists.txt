@@ -44,7 +44,7 @@ rapids_cuda_init_architectures(SPARK_RAPIDS_JNI)
 
 project(
   SPARK_RAPIDS_JNI
-  VERSION 26.12.00
+  VERSION 27.02.00
   LANGUAGES CXX CUDA
 )
 
