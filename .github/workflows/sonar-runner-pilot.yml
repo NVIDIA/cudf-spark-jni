@@ -215,6 +215,11 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Inject a pilot process failure after result upload
+        run: |
+          echo 'Intentional pilot process failure after successful Sonar collection.'
+          exit 23
+
   report:
     needs: [authorize, security, compile, scan]
     if: always() && needs.authorize.result == 'success' && needs.authorize.outputs.sha != ''

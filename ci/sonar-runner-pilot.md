@@ -30,6 +30,10 @@ core by immutable local image ID. This validates the proposed image and source
 policy; it does not validate the public `scan-scripts` action's registry pull.
 Production consumers must use that action with the published prebuilt image.
 
+The final test intentionally fails the scan job after uploading a passing Sonar
+result. The reporter must fail the check with retry guidance and create no PR
+comment. This test-only failure is not a production workflow change.
+
 ## Settings
 
 - Variable `SONAR_PROJECT_KEY`: existing Sonar project.
