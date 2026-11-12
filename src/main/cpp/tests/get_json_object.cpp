@@ -899,12 +899,12 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthPartitionParity)
   paths.push_back(named({"deep5", "l1", "l2", "l3", "l4"}));
 
   // The 8 shallow paths alone sit below the merged route's admission floor; pad them with
-  // same-root depth-2 paths (fan-out >= 3.15 paths/root) so the merged oracle below really
-  // runs the merged kernel. Pad columns carry no assertions.
+  // same-root depth-2 paths so the merged oracle below really runs the merged kernel. Pad
+  // columns carry no assertions.
   auto const shallow_paths = named_depth2({"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"});
   multi_paths padded_shallow(shallow_paths);
   std::vector<std::string> const pad_roots = {"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"};
-  int constexpr deficit = 26 - 8;  // ceil(3.15 * 8 roots) = 26 distinct eligible paths
+  int constexpr deficit = 26 - 8;  // 8 eligible + 18 pads = 26 paths over 8 roots
   for (int p = 0; p < deficit; ++p) {
     padded_shallow.push_back(named({pad_roots[p % pad_roots.size()], "mpad" + std::to_string(p)}));
   }
@@ -1450,7 +1450,7 @@ TEST_F(GetJsonObjectTest, MergedRouteRejectsDepthErrors)
 
   auto const merged_col = col_from(same_rows(32, R"({"a":{"v":)" + nested + "}}"));
   // Pad to 16 pushed depth-2 paths riding the single root so the merged route actually
-  // admits this batch (>= 16 paths, fan-out 16/1 >= 3.15) and the throw surfaces in it.
+  // admits this batch (>= 16 paths) and the throw surfaces in it.
   multi_paths paths = named_depth2({"a", "a", "a", "a", "a", "a", "a", "a"});
   for (int p = 0; p < 8; ++p) {
     paths.push_back(named({"a", "mpad" + std::to_string(p)}));
@@ -1542,9 +1542,9 @@ TEST_F(GetJsonObjectTest, MergedRouteReviewerShapeRoutingParity)
   // shallow NAMED paths over 16 distinct roots) ADMITS the merged route: the removed fan-out
   // floor was calibrated against the merged walk's obsolete linear per-member candidate scans,
   // and merged measured faster than general on this shape class. Its output must equal
-  // single-path evaluation — routing, not admission, is the contract under test.
-  // Control: 16 distinct depth-1 paths also admit now (no fan-out floor); their columns must
-  // still match single-path evaluation.
+  // single-path evaluation — routing, not admission, is the contract under test. The control
+  // below (16 distinct depth-1 paths) also admits now; its columns must still match
+  // single-path evaluation.
   auto const rows =
     same_rows(64,
               R"({"f0":{"a":"A0"},"f1":{"a":"A1"},"f2":{"a":"A2"},"f3":{"a":"A3"},"f4":{"a":"A4"},)"
@@ -1570,7 +1570,7 @@ TEST_F(GetJsonObjectTest, MergedRouteReviewerShapeRoutingParity)
     ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[col], single[0]));
   }
 
-  // Control: 16 distinct DEPTH-1 paths admit too (the fan-out floor is gone) — parity only.
+  // Control: 16 distinct depth-1 paths admit too (the fan-out floor is gone) — parity only.
   multi_paths depth1_only;
   depth1_only.reserve(16);
   for (int i = 0; i < 16; ++i) {
