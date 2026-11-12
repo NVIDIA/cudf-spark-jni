@@ -975,13 +975,14 @@ bool check_error(cudf::detail::host_vector<int8_t> const& error_check)
 
 namespace {
 
-// One decoded-name trie walk per pure-NAMED group; first duplicate wins, dead paths stay dead.
-// Parse errors null all paths; depth overflow throws only when a path is not already dead.
+// The merged route evaluates one decoded-name trie walk per pure-NAMED group; the first
+// duplicate wins, dead paths stay dead. Parse errors null all paths; depth overflow throws
+// only when a path is not already dead.
 
-// Shallow admission: depth <= 2 and >= 16 paths with >= 3.15 paths per distinct root; the 32-row
-// floor is below. The path floors match the benchmark's 33- and 135-path layouts. Production
+// Shallow admission: depth <= 2 and >= 16 paths with >= 3.15 paths per distinct root; the
+// 32-row floor is below. The path floors match the benchmark's 33- and 135-path layouts. Production
 // hit rate under the plugin's 4 GiB budget: the caller batches paths by scratch size, so a
-// batch reaches 16 paths only for columns below roughly 256 MiB (4 GiB / 16) - bigger columns
+// batch reaches 16 paths only for columns below roughly 256 MiB (4 GiB / 16); bigger columns
 // pay the general route. The k_merged_max_paths cap keeps admitted groups' records within the
 // 48 KiB shared-memory bound, so the global record fallback (allocated outside
 // memory_budget_bytes) is unreachable via admission and remains only as a defensive fallback
@@ -996,7 +997,7 @@ inline constexpr std::size_t k_merged_min_fanout_den = 20;  // distinct paths mu
 // a wide-trie shape (many distinct roots, e.g. 16 paths over 16 roots) pays the merged walk's
 // per-root overhead without amortizing it, and measured 1.5-2.5x slower than the general
 // route. 33 paths over 3 roots (11/root) and the nested family's shallow group (120 paths
-// over 38 roots, 3.16/root) admit; the reviewer's 16-path flat-mixed shape (1/root) and
+// over 38 roots, 3.16/root) admit; the 16-path flat-mixed shape (1/root) and
 // flat-wide groups of 124 paths over 40 roots (3.1/root, measured 3.13x slower merged) deny
 // and fall to the general route. Pure depth-1 groups have one distinct root per distinct path
 // (ratio 1) and only admit when a shared first-segment name gives them fan-out.
@@ -1027,8 +1028,8 @@ struct merged_trie_view {
   int32_t const* flat_name_len;  // [total children]
 };
 
-// R=1 stores an aligned 8-byte head plus a 1-byte kind at offset 8; the record rounds to a 16-byte
-// stride.
+// The active record is 12 bytes: an aligned 8-byte head ([val_begin, val_end) packed low/high)
+// plus a 1-byte kind at offset 8; alignment pads it to a 16-byte stride in arrays.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
@@ -1250,7 +1251,7 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
         auto const pid = trie.terminal_ids[vb + t];
         // First duplicate wins; dead paths never resurrect. The merged route keeps
         // first-match-wins like the general route; scan-all alignment is a pending upstream
-        // semantic change (see k_merged_kind_dead).
+        // semantic change.
         if (records_owner) {
           merged_path_out const& rec = row_out[pid];
           if (!merged_rec_is_set(rec) && merged_rec_kind(rec) != k_merged_kind_dead) {
@@ -1609,10 +1610,10 @@ merged_group_plan build_merged_named_plan(
 
   merged_group_plan plan{
     std::move(h_blob),
-    0,  // blob_off: set by the merged packer (launch_grouped)
+    0,  // blob_off: set when the packer places the blob into the grouped upload pack
     offsets,
     merged_trie_view{},
-    rmm::device_uvector<merged_path_out>(0, stream),  // global fallback: allocated lazily
+    rmm::device_uvector<merged_path_out>(0, stream),  // row scratch: grown lazily on overflow
     num_paths,
     max_trie_depth};
   return plan;
@@ -1709,7 +1710,7 @@ struct launch_grouped_staging {
 
 /**
  * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
- * Shallow admission requires 32 rows, 16 paths, and at least 3.15 distinct paths per distinct
+ * Shallow admission requires 32 rows, 16 paths, and at least 63/20 distinct paths per distinct
  * root (first-segment) name; a group caps at k_merged_max_paths paths with the overflow
  * staying general.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
@@ -1748,9 +1749,9 @@ void launch_grouped(
   staging.group_staging.clear();
   if (!is_retry) { staging.merged_routed.assign(num_outputs, 0); }
 
-  // Admission needs 16+ paths and >= 3.15 distinct paths per distinct root (first-segment)
-  // name; a group caps at k_merged_max_paths
-  // (capped overflow keeps its batch order among the general paths).
+  // Admission needs 16+ paths and >= 63/20 distinct paths per distinct root (first-segment)
+  // name; a group caps at k_merged_max_paths paths (capped overflow keeps its batch order
+  // among the general paths).
   std::vector<std::size_t> general_indices;
   std::vector<std::size_t> merged_shallow_indices;
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
@@ -2076,9 +2077,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
-  // validity. The retry must use the same evaluator as the first pass: the general evaluator
-  // writes more per row, so its rows would overflow exact-size retry slots sized from the
-  // merged route's own write footprints.
+  // validity. The retry must reuse the first pass's evaluator: the two write different per-row
+  // extents, so slots sized from one route's footprints overflow under the other route.
   d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, cudf::get_current_device_resource_ref());
   thrust::uninitialized_fill(
