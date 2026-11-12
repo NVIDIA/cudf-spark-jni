@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 
-COMMON_SHA = "962872d1f2f2647df7da157941b8496c3bd25a9f"
+COMMON_SHA = "2c257f7386ee0d5ac80f6a3510f022ba1024b815"
 
 
 def main():
