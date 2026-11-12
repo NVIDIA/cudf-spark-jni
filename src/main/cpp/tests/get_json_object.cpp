@@ -20,6 +20,7 @@
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/cudf_gtest.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
@@ -28,14 +29,21 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
+
+#include <rmm/error.hpp>
+#include <rmm/mr/callback_memory_resource.hpp>
+
+#include <cuda/memory_resource>
+#include <cuda/stream>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -542,7 +550,8 @@ using path_tuple  = std::tuple<path_instruction_type, std::string, int32_t>;
 using path_list   = std::vector<path_tuple>;
 using multi_paths = std::vector<path_list>;
 
-// The merged route's shallow admission floor (paths >= 16) as the test helper's pad target.
+// The merged route's shallow admission floor as the test helper's pad target (>= the >= 8
+// path floor; 16 keeps the pre-lowered-floor oracle shapes below admission).
 inline constexpr std::size_t k_merged_min_test_paths = 16;
 
 // Parity helpers compare raw validity, offsets, and chars bytes.
@@ -636,20 +645,17 @@ multi_paths named_depth2(std::vector<std::string> const& keys)
   return paths;
 }
 
-/// The shared 8-key depth-2 batch of the abort and malformed-input tests. The raw group is
-/// 8 paths over 3 roots but only 3 distinct paths (2.67 < 3.15), so `run_merged_vs_general`'s
-/// padding is what admits it to the merged route (the 16-path floor dominates the deficit);
-/// every abort case rides the `$.a.v` chain.
-multi_paths const eight_key_paths = named_depth2({"a", "a", "a", "a", "b", "b", "zz", "zz"});
+/// The shared 8-key depth-2 batch of the abort and malformed-input tests.
+multi_paths const eight_key_paths =
+  named_depth2({"a", "b", "zz", "yyy", "xxxx", "aaaaaa", "bbbbbbb", "cccccccc"});
 
 void pad_paths(multi_paths& paths, int from)
 {
-  // Pads ride the new root `pad0` (the callers' own roots are a/b/zz or k/u) plus fresh
-  // children; `pad0` adds one distinct root, and the helper's deficit padding (dominated by
-  // the 16-path floor) supplies the path count that clears the 3.15 fan-out gate.
+  // Distinct depth-2 pads only add null columns; each pad is a fresh two-segment path whose
+  // first segment is not one of the caller's row keys.
   paths.resize(8);
   for (int p = from; p < 8; ++p) {
-    paths[p] = named({"pad0", "v" + std::to_string(p)});
+    paths[p] = named({"pad" + std::to_string(p), "v"});
   }
 }
 
@@ -668,6 +674,20 @@ bool row_valid(cudf::column const& col, std::vector<cudf::bitmask_type> const& m
   return col.null_count() == 0 || (!mask.empty() && cudf::bit_is_set(mask.data(), row));
 }
 
+void expect_rows_or_null(cudf::column const& col, char const* expected)
+{
+  auto const [vals, mask] = cudf::test::to_host<std::string>(col.view());
+  ASSERT_EQ(vals.size(), 64u);
+  for (int r = 0; r < 64; ++r) {
+    if (expected == nullptr) {
+      EXPECT_FALSE(row_valid(col, mask, r)) << "row " << r;
+    } else {
+      EXPECT_TRUE(row_valid(col, mask, r)) << "row " << r;
+      EXPECT_EQ(vals[r], expected) << "row " << r;
+    }
+  }
+}
+
 /// The first `n` paths of `paths` as a general-routed oracle batch (`n` is below the merged
 /// route's path floors).
 multi_paths first_n(multi_paths const& paths, std::size_t n)
@@ -680,14 +700,12 @@ using multi_outputs = std::vector<std::unique_ptr<cudf::column>>;
 std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::string> const& rows,
                                                               multi_paths const& merged_paths)
 {
-  // The merged route admits a shallow NAMED group (depth <= 2) of >= 16 paths and >= 32 rows
-  // only when paths >= 3.15 x distinct first-segment roots. The oracle stays the original
-  // first 7 paths on the general route. Pads extend the group so distinct paths >= max(16,
-  // ceil(3.15 x distinct roots)) by round-robin over the caller's own roots, so the padded
-  // group keeps the caller's root count and admission holds; pad columns carry no assertions.
-  // Shallow admission counts only all-NAMED paths of depth <= 2, so a depth-3 call-site path
-  // stays general and does not count. Every call site passes 64 rows (>= the 32-row admission
-  // floor).
+  // The merged route admits a shallow NAMED group (depth <= 2) of >= 8 paths and >= 32 rows.
+  // The oracle stays the original first 7 paths on the general route (general_count guards
+  // the assertion size against smaller call sites). Pads extend the merged side so the
+  // eligible count reaches the test floor; pad columns carry no assertions. Shallow admission
+  // counts only all-NAMED paths of depth <= 2, so a depth-3 call-site path stays general and
+  // does not count. Every call site passes 64 rows (>= the 32-row floor).
   auto const general_count = std::min<std::size_t>(7, merged_paths.size());
   auto const general_paths = first_n(merged_paths, general_count);
   auto padded              = merged_paths;
@@ -696,41 +714,22 @@ std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::s
              return std::get<0>(t) == path_instruction_type::NAMED;
            });
   };
-  // Admission dedups paths, so the fan-out deficit must count DISTINCT eligible path
-  // vectors, not raw entries (call sites may pass duplicates).
-  std::set<path_list> distinct_eligible;
-  for (auto const& path : merged_paths) {
-    if (eligible(path)) { distinct_eligible.insert(path); }
-  }
-  int eligible_count = static_cast<int>(distinct_eligible.size());
-  // Pads reuse existing roots (adding no distinct root, so admission arithmetic stays
-  // caller-controlled) and round-robin over them so every root keeps the shared fan-out;
-  // the gate needs >= 3.15 paths per root, so the deficit is computed from the caller's
-  // distinct-root count, not from k_merged_min_test_paths alone. Pad columns carry no
-  // assertions.
-  std::vector<std::string> pad_roots;
-  for (auto const& path : merged_paths) {
-    if (eligible(path)) { pad_roots.push_back(std::get<1>(path.front())); }
-  }
-  CUDF_EXPECTS(!pad_roots.empty(), "merged-vs-general needs an eligible caller path to pad from");
-  int const distinct_roots =
-    static_cast<int>(std::set<std::string>(pad_roots.begin(), pad_roots.end()).size());
-  int const fanout_deficit =
-    std::max(0, static_cast<int>(std::ceil(distinct_roots * 63.0 / 20.0)) - eligible_count);
-  int const deficit = std::max<int>(fanout_deficit, k_merged_min_test_paths - eligible_count);
+  int eligible_count = static_cast<int>(std::count_if(
+    padded.begin(), padded.end(), [&](path_list const& path) { return eligible(path); }));
+  int const deficit  = std::max(0, static_cast<int>(k_merged_min_test_paths) - eligible_count);
   padded.reserve(padded.size() + deficit);
   for (int p = 0; p < deficit; ++p) {
-    padded.push_back(named({pad_roots[p % pad_roots.size()], "mpad" + std::to_string(p)}));
+    padded.push_back(named({"mpad" + std::to_string(p), "v"}));
   }
   auto merged_out  = run_fused(cudf::strings_column_view{col_from(rows)}, padded);
   auto general_out = run_fused(cudf::strings_column_view{col_from(rows)}, general_paths);
-  CUDF_EXPECTS(merged_out.size() == padded.size() && general_out.size() == general_count,
+  CUDF_EXPECTS(merged_out.size() == padded.size() && general_out.size() == general_paths.size(),
                "merged-vs-general output shape mismatch");
   return {std::move(merged_out), std::move(general_out)};
 }
 
-/// Parity of the first `n` columns (the oracle's size, at most 7 = the merged-vs-general
-/// helper's default); both column counts must be at least `n`.
+/// Parity of the first `n` columns (default 7 = the general oracle's size); both
+/// column counts must be at least `n`.
 void expect_first7_parity(multi_outputs const& merged,
                           multi_outputs const& general,
                           std::size_t n     = 7,
@@ -759,17 +758,11 @@ std::string quote_bomb_value(int n)
 
 TEST_F(GetJsonObjectTest, MergedRouteEmptyRowsParity)
 {
-  // Empty rows must null every path rather than leave unwritten stringviews. The 8 distinct
-  // paths over 4 roots (2.0 < 3.15) fail the fan-out gate on their own, so the helper's
-  // padding admits the group; the w-children cover the same roots' alternate children (all
-  // miss), and only $.k0.v matches an object row.
+  // Empty rows must null every path rather than leave unwritten stringviews.
   auto const rows = alt_rows(64, R"({"k0":{"v":"v0"},"k1":{"v":"v1"}})", "");
 
-  auto merged_paths = named_depth2({"k0", "k0", "k1", "k1", "miss0", "miss0", "miss1", "miss1"});
-  // Per-column `w` children cover the same re-rooted keys' second half.
-  for (std::size_t col : {std::size_t{1}, std::size_t{3}, std::size_t{5}, std::size_t{7}}) {
-    merged_paths[col] = named({std::get<1>(merged_paths[col].front()), "w"});
-  }
+  auto const merged_paths = named_depth2(
+    {"k0", "k1", "missing2", "missing3", "missing4", "missing5", "missing6", "missing7"});
   auto const [merged_out, general_out] = run_merged_vs_general(rows, merged_paths);
 
   for (std::size_t col = 0; col < 8; ++col) {
@@ -780,11 +773,9 @@ TEST_F(GetJsonObjectTest, MergedRouteEmptyRowsParity)
       bool const is_valid = row_valid(*merged_out[col], mask, r);
       if (r % 2 == 1) {
         EXPECT_FALSE(is_valid) << "empty row " << r;
-      } else if (col == 0 || col == 2) {
-        // The matching paths: $.k0.v (col 0) and $.k1.v (col 2). All other re-rooted children
-        // miss the row and stay null on object rows too.
+      } else if (col < 2) {
         EXPECT_TRUE(is_valid) << "object row " << r;
-        EXPECT_EQ(vals[r], col == 0 ? "v0" : "v1") << "object row " << r;
+        EXPECT_EQ(vals[r], "v" + std::to_string(col)) << "object row " << r;
       }
     }
   }
@@ -795,21 +786,12 @@ TEST_F(GetJsonObjectTest, MergedRouteEmptyRowsParity)
 TEST_F(GetJsonObjectTest, MergedRouteSortBeforeFlattenParity)
 {
   // Children are flat and length-sorted, so equal-length candidates stay contiguous; a late
-  // short key like `z` must still match after longer siblings. The original 4 distinct roots
-  // stay (a depth-3 re-root would fall to the general route); the pads ride those same 4
-  // roots with fresh children so the group reaches 16 paths at 4 roots and still admits.
+  // short key like `z` must still match after longer siblings.
   auto const rows =
     same_rows(64, R"({"a":{"v":"A"},"bbb":{"v":"B"},"seven0":{"v":"w"},"z":{"v":"Z"}})");
 
-  multi_paths merged_paths = named_depth2({"a", "bbb", "seven0", "z"});
-  merged_paths.reserve(16);
-  for (int p = 0; p < 12; ++p) {
-    merged_paths.push_back(named({p % 4 == 0   ? "a"
-                                  : p % 4 == 1 ? "bbb"
-                                  : p % 4 == 2 ? "seven0"
-                                               : "z",
-                                  "mpad" + std::to_string(p)}));
-  }
+  auto const merged_paths =
+    named_depth2({"a", "bbb", "seven0", "z", "zzz", "yyyy", "aaaaaa", "bbbbbbb"});
   auto const [merged_out, general_out] = run_merged_vs_general(rows, merged_paths);
 
   for (std::size_t col : {std::size_t{0}, std::size_t{3}}) {
@@ -823,9 +805,7 @@ TEST_F(GetJsonObjectTest, MergedRouteSortBeforeFlattenParity)
 
 TEST_F(GetJsonObjectTest, MergedRouteDuplicateFirstValueAborts)
 {
-  // A first non-object value aborts `$.a.v`; a later duplicate cannot resurrect it. The 4-root
-  // shared batch keeps the abort chain while staying merged-route admissible; `$.b.v` proves
-  // the abort kills only the aborted path.
+  // A first non-object value aborts `$.a.v`; a later duplicate cannot resurrect it.
   struct Case {
     char const* label;
     char const* row;
@@ -845,7 +825,7 @@ TEST_F(GetJsonObjectTest, MergedRouteDuplicateFirstValueAborts)
 
     ASSERT_EQ(merged_out[0]->null_count(), 64)
       << "$.a.v must abort on the " << c.label << " first value";
-    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[4], "B", true));
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[1], "B", true));
 
     expect_first7_parity(merged_out, general_out);
   }
@@ -919,12 +899,12 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthPartitionParity)
   paths.push_back(named({"deep5", "l1", "l2", "l3", "l4"}));
 
   // The 8 shallow paths alone sit below the merged route's admission floor; pad them with
-  // same-root depth-2 paths (fan-out >= 3.15 paths/root) so the merged oracle below really
-  // runs the merged kernel. Pad columns carry no assertions.
+  // same-root depth-2 paths so the merged oracle below really runs the merged kernel. Pad
+  // columns carry no assertions.
   auto const shallow_paths = named_depth2({"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"});
   multi_paths padded_shallow(shallow_paths);
   std::vector<std::string> const pad_roots = {"k0", "k1", "k2", "k3", "m4", "m5", "m6", "m7"};
-  int constexpr deficit = 26 - 8;  // ceil(3.15 * 8 roots) = 26 distinct eligible paths
+  int constexpr deficit = 26 - 8;  // 8 eligible + 18 pads = 26 paths over 8 roots
   for (int p = 0; p < deficit; ++p) {
     padded_shallow.push_back(named({pad_roots[p % pad_roots.size()], "mpad" + std::to_string(p)}));
   }
@@ -997,6 +977,255 @@ TEST_F(GetJsonObjectTest, MergedRouteProductionConflictShapesParity)
   expect_first7_parity(batch_out, general_out);
 }
 
+TEST_F(GetJsonObjectTest, MergedRouteSignatureBucketParity)
+{
+  // Colliding signatures, long tails, empty names, and escaped keys must resolve distinctly.
+  auto const rows = same_rows(64,
+                              R"({"fieldOne":{"v":"1"},"fieldTwo":{"v":"2"},"fieldOnX":{"v":"3"},)"
+                              R"("aaaaLongTailX":{"v":"X"},"aaaaLongTailY":{"v":"Y"},"":{"v":"E"},)"
+                              R"("b":{"v":"B"},"\u0062":"escaped-b","z":{"v":"Z"}})");
+
+  auto const paths = named_depth2(
+    {"fieldOne", "fieldTwo", "fieldOnX", "aaaaLongTailX", "aaaaLongTailY", "", "b", "z", "q"});
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  char const* expected[] = {"1", "2", "3", "X", "Y", "E", "B", "Z", nullptr};
+  for (std::size_t col = 0; col < 9; ++col) {
+    SCOPED_TRACE("signature column " + std::to_string(col) + " (" +
+                 (expected[col] ? expected[col] : "null") + ")");
+    ASSERT_NO_FATAL_FAILURE(expect_rows_or_null(*batch_out[col], expected[col]));
+  }
+
+  expect_first7_parity(batch_out, general_out);
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteSignatureSingletonBucket)
+{
+  // Singleton buckets must match full names despite shared signature bytes at other lengths.
+  auto const rows = same_rows(
+    64, R"({"abcde":{"v":"short"},"abcdeXYZ":{"v":"long"},"abcdeXY":{"v":"mid"},"u":{"v":"U"}})");
+
+  auto const paths = named_depth2({"abcde", "abcdeXYZ", "abcdeXY", "u", "v", "w", "x", "y"});
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  char const* expected[] = {"short", "long", "mid", "U", nullptr, nullptr, nullptr, nullptr};
+  for (std::size_t col = 0; col < 8; ++col) {
+    SCOPED_TRACE("singleton column " + std::to_string(col));
+    ASSERT_NO_FATAL_FAILURE(expect_rows_or_null(*batch_out[col], expected[col]));
+  }
+
+  expect_first7_parity(batch_out, general_out);
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteLongNameMetadataFootprint)
+{
+  auto const input = col_from(same_rows(32, R"({"k1":{"v":"hit"}})"));
+  std::string const long_name(64 * 1'024, 'L');
+  cuda::mr::any_resource<cuda::mr::device_accessible> upstream{
+    cudf::get_current_device_resource_ref()};
+  // Tiny rows need less than 8 MiB per request; a group-wide length stride exceeds 250 MiB.
+  constexpr std::size_t request_ceiling = 8 * 1'024 * 1'024;
+  for (bool const long_at_root : {true, false}) {
+    SCOPED_TRACE(long_at_root ? "long root" : "long singleton leaf");
+    multi_paths paths;
+    paths.reserve(1'000);
+    for (int p = 0; p < 1'000; ++p) {
+      paths.push_back(named({"k" + std::to_string(p), "v"}));
+    }
+    std::get<1>(paths[0][long_at_root ? 0 : 1]) = long_name;
+    std::atomic<std::size_t> oversized_request{0};
+    rmm::mr::callback_memory_resource capped_mr{
+      [&](cuda::stream_ref allocation_stream, std::size_t bytes, std::size_t alignment, void*)
+        -> void* {
+        if (bytes > request_ceiling) {
+          oversized_request.store(bytes);
+          throw rmm::bad_alloc{"Long-name trie metadata exceeds the test resource ceiling"};
+        }
+        return upstream.allocate(allocation_stream, bytes, alignment);
+      },
+      [&](cuda::stream_ref allocation_stream,
+          void* ptr,
+          std::size_t bytes,
+          std::size_t alignment,
+          void*) { upstream.deallocate(allocation_stream, ptr, bytes, alignment); }};
+    cudf::test::scoped_current_device_resource current_mr{capped_mr};
+    std::vector<std::unique_ptr<cudf::column>> out;
+    EXPECT_NO_THROW(out = run_fused(cudf::strings_column_view{input}, paths));
+    cudf::get_default_stream().sync();
+    ASSERT_EQ(oversized_request.load(), 0u);
+    ASSERT_EQ(out.size(), paths.size());
+    auto const hit = col_from(same_rows(32, "hit"));
+    for (std::size_t col = 0; col < paths.size(); ++col) {
+      SCOPED_TRACE("column " + std::to_string(col));
+      if (col == 1) {
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(hit, out[col]->view());
+      } else {
+        EXPECT_EQ(out[col]->null_count(), 32);
+      }
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteLongNameMatching)
+{
+  std::string const long_name(64 * 1'024, 'L');
+  auto collision                  = long_name;
+  auto absent                     = long_name;
+  collision[long_name.size() / 2] = 'M';
+  absent[long_name.size() / 2]    = 'N';
+  auto const escaped_name         = R"(\u004c)" + long_name.substr(1);
+  for (bool const long_at_root : {true, false}) {
+    auto const long_path = [&](std::string const& key) {
+      return long_at_root ? named({key, "v"}) : named({"r", key});
+    };
+    auto const paths = multi_paths{long_path(long_name),
+                                   long_path(collision),
+                                   long_path(absent),
+                                   long_path(long_name),
+                                   named({"short", "v"}),
+                                   named({"short", "vv"}),
+                                   named({"short", ""}),
+                                   named({"short", "missing"}),
+                                   named({"solo", long_name}),
+                                   named({"tail", "v"})};
+    for (int spelling = 0; spelling < 6; ++spelling) {
+      SCOPED_TRACE(std::string(long_at_root ? "root " : "leaf ") + std::to_string(spelling));
+      auto const quote  = spelling == 2 ? '\'' : '"';
+      auto const& key   = spelling == 1 ? escaped_name : long_name;
+      auto const member = [&](std::string const& name, std::string const& value) {
+        auto const payload = long_at_root ? R"({"v":)" + value + "}" : value;
+        return quote + name + quote + ":" + payload;
+      };
+      auto first = member(key, spelling == 3 ? "null" : R"("long")");
+      if (spelling == 4) { first = quote + key + quote + ":0"; }
+      auto const members = member(collision, R"("other")") + "," + first + "," +
+                           member(long_name, R"("later")") + "," +
+                           member(long_name + "L", R"("wrong")");
+      auto row = long_at_root ? "{" + members : R"({"r":{)" + members + "}";
+      row += R"(,"short":{"v":"short","vv":"two","":"empty","too-long":"wrong"},)"
+             R"("solo":{")" +
+             key + R"(":"single"},"tail":{"v":"tail"}})";
+      if (spelling == 5) { row = R"({"tail":{"v":"tail"},")" + long_name; }
+      auto const input = col_from(same_rows(64, row));
+      auto const out   = run_fused(cudf::strings_column_view{input}, paths);
+      ASSERT_EQ(out.size(), paths.size());
+      auto const long_value = spelling == 3 || (spelling == 4 && long_at_root) ? nullptr
+                              : spelling == 4                                  ? "0"
+                                                                               : "long";
+      std::array<char const*, 10> expected{long_value,
+                                           "other",
+                                           nullptr,
+                                           long_value,
+                                           "short",
+                                           "two",
+                                           "empty",
+                                           nullptr,
+                                           "single",
+                                           "tail"};
+      if (spelling == 5) { expected.fill(nullptr); }
+      for (std::size_t col = 0; col < paths.size(); ++col) {
+        SCOPED_TRACE("column " + std::to_string(col));
+        ASSERT_NO_FATAL_FAILURE(expect_rows_or_null(*out[col], expected[col]));
+        auto const single = run_fused(cudf::strings_column_view{input}, {paths[col]});
+        ASSERT_EQ(single.size(), 1u);
+        ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[col], single[0]));
+      }
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteCertifiedSubtreeParity)
+{
+  // Compact canonical subtrees are byte-identical to the writer's output.
+  auto const compact = R"({"a":[1,2,{"b":"x\"y\\z","c":true,"d":null,"e":-12}],"f":0})";
+  auto const rows    = same_rows(64, R"({"k":)" + std::string(compact) + R"(,"u":{"v":"U"}})");
+
+  // Query a parent subtree and a separate depth-2 companion in the same batch.
+  multi_paths paths{named({"k"}), named({"u", "v"})};
+  pad_paths(paths, 2);
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], compact, true));
+
+  expect_first7_parity(batch_out, general_out, 7, "certified parity column ");
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteUncertifiedSubtreeFallbacks)
+{
+  // Every uncertified subtree falls back to writer output with general-route parity.
+
+  for (auto const& [label, sub] : std::vector<std::pair<std::string, std::string>>{
+         {"whitespace", R"({ "a" : [1, 2] })"},
+         {"unicode-escape", R"({"a":"\u4e2d\u56FD"})"},
+         {"escaped-slash", R"({"a":"http:\/\/x"})"},
+         {"float-1.0", R"({"a":1.0})"},
+         {"float-1e3", R"({"a":1e3})"},
+         {"float-minus-0", R"({"a":-0})"},
+         {"control-char", std::string(R"({"a":"x")") + '\x01' + std::string(R"("})")},
+         {"single-quote", R"({'a':1})"}}) {
+    SCOPED_TRACE("uncertified case " + label);
+    auto const rows = same_rows(64, R"({"k":)" + sub + R"(,"u":{"v":"U"}})");
+    multi_paths paths{named({"k"}), named({"u", "v"})};
+    pad_paths(paths, 2);
+    auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+    expect_first7_parity(batch_out, general_out, 7, "fallback parity column ");
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteCertifiedSubtreeDeepNesting)
+{
+  // The certificate must handle deeply nested compact subtrees.
+  std::string const deep = R"({"a":[[[[{"b":1}]]]],"c":{"d":{"e":true}}})";
+  auto const rows        = same_rows(64, R"({"k":)" + deep + R"(,"u":{"v":"U"}})");
+
+  multi_paths paths{named({"k"}), named({"u", "v"})};
+  pad_paths(paths, 2);
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], deep, false));
+  expect_first7_parity(batch_out, general_out, 7, "deep parity column ");
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteCertifiedSubtreeDupAndNullAborts)
+{
+  // First duplicate wins, null aborts, and parent/child paths coexist with certification.
+  auto const rows = same_rows(64,
+                              R"({"dup":{"x":[1,"s",true]},"dup":"second","n":null,)"
+                              R"("n":{"y":{"z":2}},"a":{"b":{"c":[false,null]}},"q":"tail"})");
+
+  multi_paths paths{named({"dup"}), named({"n"}), named({"a", "b"})};
+  pad_paths(paths, 3);
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], R"({"x":[1,"s",true]})", false));
+  ASSERT_EQ(batch_out[1]->null_count(), 64) << "$.n must abort on the null first value";
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[2], R"({"c":[false,null]})", false));
+
+  expect_first7_parity(batch_out, general_out, 7, "dup/abort parity column ");
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteCertifiedCanonicalSpellings)
+{
+  // Canonical escapes and negative single-digit integers must preserve writer-byte parity.
+  std::string const esc = R"({"a":"\b\f\n\r\t"})";
+  std::string const neg = R"({"a":[-1,-2,-3,-9]})";
+  auto const rows       = alt_rows(64,
+                             R"({"k":)" + esc + R"(,"j":)" + neg + R"(,"u":{"v":"U"}})",
+                             R"({"k":)" + neg + R"(,"j":)" + esc + R"(,"u":{"v":"U"}})");
+
+  multi_paths paths{named({"k"}), named({"j"}), named({"u", "v"})};
+  pad_paths(paths, 3);
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  auto const k_vals = std::get<0>(cudf::test::to_host<std::string>(batch_out[0]->view()));
+  auto const j_vals = std::get<0>(cudf::test::to_host<std::string>(batch_out[1]->view()));
+  for (int r = 0; r < 64; ++r) {
+    EXPECT_EQ(k_vals[r], (r % 2 == 0) ? esc : neg) << "row " << r;
+    EXPECT_EQ(j_vals[r], (r % 2 == 0) ? neg : esc) << "row " << r;
+  }
+  expect_first7_parity(batch_out, general_out, 7, "canonical-spelling parity column ");
+}
+
 TEST_F(GetJsonObjectTest, GeneralGroupMoreThan32Paths)
 {
   // Forty array INDEX paths must all be evaluated, including paths beyond one warp.
@@ -1025,6 +1254,99 @@ TEST_F(GetJsonObjectTest, GeneralGroupMoreThan32Paths)
   }
 }
 
+TEST_F(GetJsonObjectTest, UnifiedDeepTrieRidesMergedRoute)
+{
+  // Eight deep NAMED paths must share the merged trie with shallow companions.
+  auto const row =
+    R"({"l1":{"l2":{"l3":{"t":"d3","l4":{"l5":"d5","x":"never"}}}},"dup":{"a":1,"a":2,"b":{"c":"bc"}}})";
+  auto const rows = same_rows(64, row);
+
+  multi_paths paths;
+  paths.reserve(10);
+  paths.push_back(named({"l1", "l2", "l3", "t"}));
+  paths.push_back(named({"l1", "l2", "l3", "l4", "l5"}));
+  paths.push_back(named({"l1", "l2", "l3", "l4", "x"}));
+  paths.push_back(named({"dup", "a"}));
+  paths.push_back(named({"dup", "b"}));
+  paths.push_back(named({"dup", "b", "c"}));
+  // Four missing chains keep the deep-path count at eight.
+  for (int p = 0; p < 4; ++p) {
+    paths.push_back(named({"l1", "l2", "miss" + std::to_string(p)}));
+  }
+  ASSERT_EQ(paths.size(), 10u);
+
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+  char const* const expected[] = {
+    "d3", "d5", "never", "1", R"({"c":"bc"})", "bc", nullptr, nullptr, nullptr, nullptr};
+
+  expect_first7_parity(batch_out, general_out, 7, "unified merged column ");
+  for (std::size_t col = 0; col < 10; ++col) {
+    SCOPED_TRACE("unified merged golden " + std::to_string(col));
+    ASSERT_NO_FATAL_FAILURE(expect_rows_or_null(*batch_out[col], expected[col]));
+  }
+}
+
+TEST_F(GetJsonObjectTest, UnifiedDeepTrieNullAbortAtDepth)
+{
+  // A first null intermediate must abort the depth-five chain despite a later duplicate.
+  auto const rows = same_rows(64, R"({"a":{"b":{"c":null,"c":{"d":{"e":"v"}}}}})");
+
+  multi_paths paths;
+  paths.push_back(named({"a", "b", "c", "d", "e"}));
+  for (int p = 0; p < 7; ++p) {
+    paths.push_back(named({"a", "b", "z" + std::to_string(p)}));
+  }
+  ASSERT_EQ(paths.size(), 8u);
+
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+  expect_columns_parity(batch_out[0], general_out[0]);
+  SCOPED_TRACE("null-abort chain");
+  ASSERT_EQ(batch_out[0]->null_count(), 64) << "null-abort chain must abort";
+}
+
+TEST_F(GetJsonObjectTest, DeepGateRejectionRoutesGeneral)
+{
+  // Fewer than eight deep paths must remain general and match their oracle.
+  auto const row  = R"({"a":{"b":{"c":{"d":"deep"}}}})";
+  auto const rows = same_rows(64, row);
+
+  multi_paths paths;
+  paths.reserve(9);
+  paths.push_back(named({"a", "b", "c", "d"}));
+  // Seven shallow companions keep the deep-path count below the gate.
+  for (int p = 0; p < 7; ++p) {
+    paths.push_back(named({"p" + std::to_string(p), "v"}));
+  }
+  ASSERT_EQ(paths.size(), 8u);
+
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+  expect_first7_parity(batch_out, general_out, 7, "deep-gate-reject column ");
+  SCOPED_TRACE("deep path column");
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], "deep", false));
+}
+
+TEST_F(GetJsonObjectTest, DepthBeyondFiveStaysGeneral)
+{
+  // Depth-six NAMED paths must stay general regardless of batch size.
+  auto const row  = R"({"a":{"b":{"c":{"d":{"e":{"f":"six"}}}}}})";
+  auto const rows = same_rows(64, row);
+
+  multi_paths paths;
+  paths.reserve(10);
+  paths.push_back(named({"a", "b", "c", "d", "e", "f"}));
+  // Nine depth-3 companions trip the deep gate; the depth-6 path remains general.
+  for (int p = 0; p < 9; ++p) {
+    paths.push_back(named({"l1", "l2", "m" + std::to_string(p)}));
+  }
+  auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], "six", false));
+  for (std::size_t col = 1; col < 7; ++col) {
+    SCOPED_TRACE("depth-6 companion column " + std::to_string(col));
+    expect_columns_parity(batch_out[col], general_out[col]);
+  }
+}
+
 TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
 {
   // An oversized subtree retries while companion outputs keep their values.
@@ -1038,20 +1360,49 @@ TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
   ASSERT_EQ(row.size(), 58u) << "anatomy comment drifted";
   ASSERT_EQ(expect.size(), 68u) << "anatomy comment drifted";
 
-  multi_paths paths{named({"k"}), named({"u", "v"})};  // depth-1 subtree + depth-2 companion
+  multi_paths paths{named({"k"}), named({"u", "v"})};  // depth-1 subtree + companion
   pad_paths(paths, 2);
   auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
 
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], expect, true));
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", true));
-  // The pads ride the added `pad0` root; with 8 distinct paths over 3 roots (2.67 < 3.15)
-  // the fan-out deficit alone is only 2, so admission comes from the 16-path floor: the
-  // helper pads to 16 distinct paths (320 >= 189).
   for (std::size_t col = 2; col < 8; ++col) {
     SCOPED_TRACE("retry pad column " + std::to_string(col));
     EXPECT_EQ(batch_out[col]->null_count(), 64);
   }
   expect_first7_parity(batch_out, general_out, 7, "retry parity column ");
+}
+
+TEST_F(GetJsonObjectTest, UnquotedObjectKeySubtreeParity)
+{
+  // Unquoted object keys must use normalized writer bytes, never certified raw bytes.
+  struct UnquotedCase {
+    std::string label;
+    std::string sub;
+    std::string expected;
+  };
+  auto const cases = std::vector<UnquotedCase>{
+    {"numeric-key", R"({"a":{1231:2}})", R"({"23":2})"},
+    {"single-quoted-outer", R"({'a':{1231:2}})", R"({"23":2})"},
+    {"mixed-keys", R"({"a":{1231:2,"b":3}})", R"({"23":2,"b":3})"},
+    {"array-element", R"({"a":[{1231:2}]})", R"([{"23":2}])"},
+    {"nested-unquoted", R"({"a":{"b":{1231:2}}})", R"({"b":{"23":2}})"},
+  };
+
+  for (auto const& c : cases) {
+    SCOPED_TRACE("unquoted-key case " + c.label);
+    auto const row  = std::string(R"({"k":)") + c.sub + std::string(R"(,"u":{"v":"U"}})");
+    auto const rows = same_rows(64, row);
+
+    multi_paths paths{named({"k", "a"}), named({"u", "v"})};
+    pad_paths(paths, 2);
+
+    auto const [batch_out, general_out] = run_merged_vs_general(rows, paths);
+
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], c.expected, true));
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", false));
+    expect_first7_parity(batch_out, general_out, 7, "unquoted-key parity column ");
+  }
 }
 
 TEST_F(GetJsonObjectTest, LastNonNullWideNamedBatches)
@@ -1099,7 +1450,7 @@ TEST_F(GetJsonObjectTest, MergedRouteRejectsDepthErrors)
 
   auto const merged_col = col_from(same_rows(32, R"({"a":{"v":)" + nested + "}}"));
   // Pad to 16 pushed depth-2 paths riding the single root so the merged route actually
-  // admits this batch (>= 16 paths, fan-out 16/1 >= 3.15) and the throw surfaces in it.
+  // admits this batch (>= 16 paths) and the throw surfaces in it.
   multi_paths paths = named_depth2({"a", "a", "a", "a", "a", "a", "a", "a"});
   for (int p = 0; p < 8; ++p) {
     paths.push_back(named({"a", "mpad" + std::to_string(p)}));
@@ -1129,18 +1480,17 @@ TEST_F(GetJsonObjectTest, MergedRouteDeadPathDepthErrorDoesNotThrow)
 
 TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
 {
-  // Admits the merged evaluator (>= 16 shallow NAMED paths, paths >= 3.15 x distinct roots, rows
-  // >= 32) and checks every column against a single-path evaluation. Covers duplicate keys
-  // (first wins), escaped names, shared prefixes, depth-2 paths, nulls. All 20 paths ride the
-  // shared roots `r` and `q` so the wide fan-out denial cannot exclude the merged route.
+  // Admits the merged evaluator (>= k_merged_min_paths shallow NAMED paths, rows >= 32) and
+  // checks every column against a single-path evaluation. Covers duplicate keys (first wins),
+  // escaped names, shared prefixes, depth-2 paths, nulls.
   auto const rows = same_rows(64,
-                              R"({"r":{"a":"A","ab":"AB","abc":"ABC","dup":"first","dup":"second",)"
+                              R"({"a":"A","ab":"AB","abc":"ABC","dup":"first","dup":"second",)"
                               R"("key\"q":"escaped","n":null,"plain":"P",)"
-                              R"("x":{"y":"XY"},"x":0,"zz":"ZZ"},"q":{}})");
+                              R"("x":{"y":"XY"},"x":0,"zz":"ZZ"})");
 
   multi_paths paths;
   paths.reserve(20);
-  // 18 depth-1 NAMED paths (>= k_merged_min_paths = 16) under the shared roots:
+  // 18 depth-1 NAMED paths (>= k_merged_min_paths = 8) under the shared roots:
   for (char const* k : {"a",
                         "ab",
                         "abc",
@@ -1159,11 +1509,11 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
                         "missing6",
                         "missing7",
                         "missing8"}) {
-    paths.push_back(named({"r", k}));
+    paths.push_back(named({k}));
   }
-  // 2 depth-2 NAMED paths ($.r.x.y and $.q.x.y):
-  paths.push_back(named({"r", "x", "y"}));
-  paths.push_back(named({"q", "x", "y"}));
+  // 2 depth-2 NAMED paths ($.x.y):
+  paths.push_back(named({"x", "y"}));
+  paths.push_back(named({"x", "y"}));
 
   auto const merged_out = run_fused(cudf::strings_column_view{col_from(rows)}, paths);
   ASSERT_EQ(merged_out.size(), paths.size());
@@ -1179,20 +1529,22 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
   }
 
   // Spot-check the documented semantics on the first row.
-  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[0], "A", true));      // r.a
-  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[1], "AB", true));     // r.ab (shared prefix)
-  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[2], "ABC", true));    // r.abc (shared prefix)
-  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[3], "first", true));  // r.dup: first wins
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[0], "A", true));      // a
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[1], "AB", true));     // ab (shared prefix)
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[2], "ABC", true));    // abc (shared prefix)
+  ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[3], "first", true));  // dup: first wins
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*merged_out[5], "escaped", true));
 }
 
-TEST_F(GetJsonObjectTest, MergedRouteRootFanoutRoutingParity)
+TEST_F(GetJsonObjectTest, MergedRouteReviewerShapeRoutingParity)
 {
-  // The flat-wide shape: 15 distinct top-level roots plus one depth-2 member (16
-  // paths over 16 distinct roots) fails the 3.15 fan-out floor, so the group takes the general
-  // route — its output must still equal single-path evaluation. The same paths over a single
-  // shared root admit the merged route and must produce identical output: routing, not
-  // admission, is the contract under test.
+  // The reviewer's flat-wide shape: 15 distinct top-level roots plus one depth-2 member (16
+  // shallow NAMED paths over 16 distinct roots) ADMITS the merged route: the removed fan-out
+  // floor was calibrated against the merged walk's obsolete linear per-member candidate scans,
+  // and merged measured faster than general on this shape class. Its output must equal
+  // single-path evaluation — routing, not admission, is the contract under test. The control
+  // below (16 distinct depth-1 paths) also admits now; its columns must still match
+  // single-path evaluation.
   auto const rows =
     same_rows(64,
               R"({"f0":{"a":"A0"},"f1":{"a":"A1"},"f2":{"a":"A2"},"f3":{"a":"A3"},"f4":{"a":"A4"},)"
@@ -1200,34 +1552,43 @@ TEST_F(GetJsonObjectTest, MergedRouteRootFanoutRoutingParity)
               R"("f10":{"a":"A10"},"f11":{"a":"A11"},"f12":{"a":"A12"},"f13":{"a":"A13"},)"
               R"("f14":{"a":"A14"},"r":{"f15":{"a":"D2"}}})");
 
-  // 15 depth-1 paths under 15 distinct top-level roots plus one depth-2 path ($.r.f15):
-  // 16 shallow NAMED paths over 16 distinct roots — exactly the denied shape.
-  multi_paths wide;
-  wide.reserve(16);
+  // 15 depth-1 paths under 15 distinct top-level roots plus one depth-2 path ($.r.f15).
+  multi_paths reviewer_shape;
+  reviewer_shape.reserve(16);
   for (int i = 0; i < 15; ++i) {
-    wide.push_back(named({"f" + std::to_string(i)}));
+    reviewer_shape.push_back(named({"f" + std::to_string(i)}));
   }
-  wide.push_back(named({"r", "f15"}));
+  reviewer_shape.push_back(named({"r", "f15"}));
 
-  multi_paths shared;
-  shared.reserve(16);
-  for (int i = 0; i < 15; ++i) {
-    shared.push_back(named({"r", "f" + std::to_string(i)}));
+  auto const out = run_fused(cudf::strings_column_view{col_from(rows)}, reviewer_shape);
+  ASSERT_EQ(out.size(), reviewer_shape.size());
+  for (std::size_t col = 0; col < reviewer_shape.size(); ++col) {
+    SCOPED_TRACE("reviewer-shape parity column " + std::to_string(col));
+    auto const single =
+      run_fused(cudf::strings_column_view{col_from(rows)}, multi_paths{reviewer_shape[col]});
+    ASSERT_EQ(single.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[col], single[0]));
   }
-  shared.push_back(named({"r", "f15"}));
 
-  for (auto const& [label, paths] :
-       std::array{std::pair{"wide", wide}, std::pair{"shared", shared}}) {
-    SCOPED_TRACE(testing::Message() << "shape=" << label);
-    auto const out = run_fused(cudf::strings_column_view{col_from(rows)}, paths);
-    ASSERT_EQ(out.size(), paths.size());
-    for (std::size_t col = 0; col < paths.size(); ++col) {
-      SCOPED_TRACE("fanout parity column " + std::to_string(col));
-      auto const single =
-        run_fused(cudf::strings_column_view{col_from(rows)}, multi_paths{paths[col]});
-      ASSERT_EQ(single.size(), 1u);
-      ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[col], single[0]));
-    }
+  // Control: 16 distinct depth-1 paths admit too (the fan-out floor is gone) — parity only.
+  multi_paths depth1_only;
+  depth1_only.reserve(16);
+  for (int i = 0; i < 16; ++i) {
+    depth1_only.push_back(named({"g" + std::to_string(i)}));
+  }
+  auto const d1_rows =
+    same_rows(64,
+              R"({"g0":"v0","g1":"v1","g2":"v2","g3":"v3","g4":"v4","g5":"v5",)"
+              R"("g6":"v6","g7":"v7","g8":"v8","g9":"v9","g10":"v10","g11":"v11",)"
+              R"("g12":"v12","g13":"v13","g14":"v14","g15":"v15"})");
+  auto const d1_out = run_fused(cudf::strings_column_view{col_from(d1_rows)}, depth1_only);
+  ASSERT_EQ(d1_out.size(), depth1_only.size());
+  for (std::size_t col = 0; col < depth1_only.size(); ++col) {
+    SCOPED_TRACE("depth-1 parity column " + std::to_string(col));
+    auto const single =
+      run_fused(cudf::strings_column_view{col_from(d1_rows)}, multi_paths{depth1_only[col]});
+    ASSERT_EQ(single.size(), 1u);
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(d1_out[col], single[0]));
   }
 }
 
@@ -1237,22 +1598,19 @@ TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
   // bound): a batch of exactly the cap stays one merged group; overflow paths route through the
   // general evaluator and must keep correct values. Paths sort lexicographically before batching
   // and the batch keeps the first N, so the lexicographically last names spill: p99, then p98.
-  // All 770 paths share one root (depth-2 `r.pN` over rows `{"r":{"pN":...}}`) so the fan-out
-  // gate admits the group instead of denying it; with distinct roots the ratio is 1.0 and the
-  // group silently falls to the general route, leaving the cap unexercised.
-  std::string row = R"({"r":{)";
+  std::string row = "{";
   for (int p = 0; p <= 769; ++p) {
     if (p > 0) { row += ","; }
     row += R"("p)" + std::to_string(p) + R"(":"V)" + std::to_string(p) + R"(")";
   }
-  row += "}}";
+  row += "}";
   auto const rows = same_rows(64, row);
 
   auto build = [](int count) {
     multi_paths paths;
     paths.reserve(count);
     for (int p = 0; p < count; ++p) {
-      paths.push_back(named({"r", "p" + std::to_string(p)}));
+      paths.push_back(named({"p" + std::to_string(p)}));
     }
     return paths;
   };
@@ -1279,12 +1637,118 @@ TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
   auto const input_col = col_from(rows);
   auto const input     = cudf::strings_column_view{input_col};
   SCOPED_TRACE("spilled path p99");
-  auto const spill_p99 = spark_rapids_jni::get_json_object(input, {named({"r", "p99"})});
+  auto const spill_p99 = spark_rapids_jni::get_json_object(input, {named({"p99"})});
   ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over_out[99], spill_p99));
   SCOPED_TRACE("spilled paths p98, p99");
-  auto const spill_p98 = spark_rapids_jni::get_json_object(input, {named({"r", "p98"})});
+  auto const spill_p98 = spark_rapids_jni::get_json_object(input, {named({"p98"})});
   ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[98], spill_p98));
   ASSERT_NO_FATAL_FAILURE(expect_columns_parity(over2_out[99], spill_p99));
+}
+
+TEST_F(GetJsonObjectTest, MergedRoutePathCapOverflowParity)
+{
+  // Shared-cap overflow: 776 pure-NAMED paths exceed k_merged_max_paths, so the excess 8 must
+  // spill to the general evaluator. Before the shallow+deep shared cap, a depth-2 spill landed
+  // in the deep bucket and the deep branch folded it into one 776-path plan, tripping the
+  // plan-build bound. The batch sorts paths lexicographically, so the lexicographically last
+  // names spill (p92-p99); each checked column compares against its own path's
+  // single-path oracle regardless of which route served it.
+  auto const cap_overflow_case = [&](bool deep) {
+    std::string row = "{";
+    for (int p = 0; p < 776; ++p) {
+      if (p > 0) { row += ","; }
+      row += R"("p)" + std::to_string(p) + R"(":)";
+      row += deep ? R"({"v":{"w":"V)" + std::to_string(p) + R"("}})"
+                  : R"({"v":"V)" + std::to_string(p) + R"("})";
+    }
+    row += "}";
+    auto const rows = same_rows(64, row);
+
+    multi_paths paths;
+    paths.reserve(776);
+    for (int p = 0; p < 776; ++p) {
+      auto const key = "p" + std::to_string(p);
+      paths.push_back(deep ? named({key, "v", "w"}) : named({key, "v"}));
+    }
+    auto const input_col = col_from(rows);
+    auto const input     = cudf::strings_column_view{input_col};
+    auto const out       = run_fused(input, paths);
+    ASSERT_EQ(out.size(), paths.size());
+    for (std::size_t col = 0; col < out.size(); ++col) {
+      SCOPED_TRACE(testing::Message() << (deep ? "deep " : "shallow ") << "path " << col);
+      ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[col], "V" + std::to_string(col), true));
+    }
+    for (int const p : {92, 93, 94, 95, 96, 97, 98, 99}) {
+      SCOPED_TRACE(testing::Message() << "oracle path p" << p);
+      auto const key    = "p" + std::to_string(p);
+      auto const path   = deep ? named({key, "v", "w"}) : named({key, "v"});
+      auto const single = spark_rapids_jni::get_json_object(input, {path});
+      ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[p], single));
+    }
+  };
+  SCOPED_TRACE("depth-2 spill to general");
+  cap_overflow_case(false);
+  SCOPED_TRACE("depth-3 spill to general");
+  cap_overflow_case(true);
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
+{
+  // Deep-first mixed batch: 8 depth-3 paths enter the deep bucket first, then 768 depth-1/2
+  // paths reach the shallow branch. Both branches must count the union against
+  // k_merged_max_paths: the shallow branch checked only its own bucket, so 768 shallow paths
+  // rode on top of the 8 deep paths and the deep gate folded them into one 776-path plan,
+  // tripping the plan-build bound on valid input. With the shared cap the last 8 shallow
+  // paths spill to the general evaluator, the deep gate absorbs exactly 8 + 760 = 768, and
+  // every column still returns correct values.
+  auto const rows = [&] {
+    std::string row = "{";
+    for (int p = 0; p < 8; ++p) {
+      if (p > 0) { row += ","; }
+      row += R"("d)" + std::to_string(p) + R"(":{"x":{"y":"V)" + std::to_string(p) + R"("}})";
+    }
+    for (int p = 0; p < 768; ++p) {
+      row += R"(,"s)" + std::to_string(p) + R"(":"W)" + std::to_string(p) + R"(")";
+    }
+    row += "}";
+    return same_rows(64, row);
+  }();
+
+  multi_paths paths;
+  paths.reserve(776);
+  for (int p = 0; p < 8; ++p) {  // deep first: the deep bucket fills before shallow arrives
+    paths.push_back(named({"d" + std::to_string(p), "x", "y"}));
+  }
+  for (int p = 0; p < 768; ++p) {
+    paths.push_back(named({"s" + std::to_string(p)}));
+  }
+
+  auto const input_col = col_from(rows);
+  auto const input     = cudf::strings_column_view{input_col};
+  auto const out       = run_fused(input, paths);
+  ASSERT_EQ(out.size(), paths.size());
+  for (int p = 0; p < 8; ++p) {
+    SCOPED_TRACE(testing::Message() << "deep path d" << p);
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[p], "V" + std::to_string(p), true));
+  }
+  for (int p = 0; p < 768; ++p) {
+    SCOPED_TRACE(testing::Message() << "shallow path s" << p);
+    ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[8 + p], "W" + std::to_string(p), true));
+  }
+
+  // Every sampled column must match its path's single-path oracle regardless of route.
+  for (int const p : {0, 7}) {
+    SCOPED_TRACE(testing::Message() << "deep oracle d" << p);
+    auto const single =
+      spark_rapids_jni::get_json_object(input, {named({"d" + std::to_string(p), "x", "y"})});
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[p], single));
+  }
+  for (int const p : {0, 759, 767}) {
+    SCOPED_TRACE(testing::Message() << "shallow oracle s" << p);
+    auto const single =
+      spark_rapids_jni::get_json_object(input, {named({"s" + std::to_string(p)})});
+    ASSERT_NO_FATAL_FAILURE(expect_columns_parity(out[8 + p], single));
+  }
 }
 
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
@@ -1343,11 +1807,10 @@ void run_retry_row_rejected_after_match(int32_t parallel_override)
   rows[0]  = expanding;  // overflows its slot, so $.k is retried
   rows[32] = malformed;  // last row: its retry slot ends the exact-size retry buffer
 
-  // 16 NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass. The pads
-  // ride root `k`, so the group holds paths >= 3.15 x distinct roots (k and u).
+  // 16 NAMED paths with a depth-2 member and >= 32 rows admit the merged first pass.
   std::vector<std::vector<path_spec>> paths{{named_path("k")}, {named_path("u"), named_path("v")}};
   for (int i = 2; i < 16; ++i) {
-    paths.push_back({named_path("k"), named_path("missing" + std::to_string(i))});
+    paths.push_back({named_path("missing" + std::to_string(i))});
   }
   cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
 
@@ -1393,11 +1856,10 @@ void run_retry_multiple_paths_after_match(int32_t parallel_override)
   rows[32] = malformed;  // last row: matches both paths, then fails and nulls them
 
   // 16 NAMED paths with a depth-2 member and at least 32 rows admit the merged first pass, so
-  // both flagged paths retry through one merged kernel with per-path offsets. The pads ride
-  // root `k`, so the group holds paths >= 3.15 x distinct roots (k and u).
+  // both flagged paths retry through one merged kernel with per-path offsets.
   std::vector<std::vector<path_spec>> paths{{named_path("k")}, {named_path("u"), named_path("v")}};
   for (int i = 2; i < 16; ++i) {
-    paths.push_back({named_path("k"), named_path("missing" + std::to_string(i))});
+    paths.push_back({named_path("missing" + std::to_string(i))});
   }
   cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
 
@@ -1428,6 +1890,65 @@ void run_retry_multiple_paths_after_match(int32_t parallel_override)
 TEST_F(GetJsonObjectTest, MergedRetryMultiplePathsAfterMatch)
 {
   run_retry_multiple_paths_after_match(-1);
+}
+
+// A merged first pass that admitted the deep stack must retry its deep-routed paths through the
+// deep trie: the route record distinguishes shallow from deep merged paths, and the retry
+// rebuilds the trie at the recorded depth instead of tripping the shallow plan's depth limit.
+// Row 0's expanding `$.d.e.f` subtree outgrows its first-pass row slot, so the deep-flagged route
+// OOBs and the retry rebuilds that flagged deep route at the deep trie depth.
+void run_merged_retry_deep_route(int32_t parallel_override)
+{
+  auto const bomb      = std::string(40, '"');
+  auto const expanding = R"({"d":{"e":{"f":{"a":')" + bomb + R"('}}},"g":"DEEP"})";
+  auto const malformed = R"({"d":{"e":{"f":{"a":')" + bomb + R"('}}},"g":"DEEP","z":x})";
+  ASSERT_EQ(expanding.size(), 77u);  // the 88-byte `$.d.e.f` subtree exceeds it
+  ASSERT_EQ(malformed.size(), 83u);  // last row: its retry slot ends the exact-size retry buffer
+  auto const expanded = quote_bomb_value(40);
+  ASSERT_GT(expanded.size(), expanding.size());
+  std::vector<std::string> rows(33, R"({"d":{"e":{"f":"x","g":"DEEP"}}})");
+  rows[0]  = expanding;
+  rows[32] = malformed;
+  cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
+
+  // Eight depth-3..5 NAMED paths admit the deep merged stack (>= k_deep_merged_min_paths, rows
+  // >= 32) and the shallow companions are absorbed; no route-assertion hook exists, so deep
+  // admission holds by construction.
+  std::vector<std::vector<path_spec>> paths;
+  paths.push_back({named_path("d"), named_path("e"), named_path("f")});  // OOB on row 0
+  paths.push_back({named_path("d"), named_path("e"), named_path("g")});
+  for (int p = 0; p < 4; ++p) {
+    paths.push_back({named_path("d"), named_path("e"), named_path("miss" + std::to_string(p))});
+  }
+  paths.push_back({named_path("d"), named_path("e"), named_path("f"), named_path("q")});
+  paths.push_back(
+    {named_path("d"), named_path("e"), named_path("f"), named_path("q"), named_path("r")});
+  // Shallow companions absorbed into the deep merged plan.
+  paths.push_back({named_path("d"), named_path("e")});
+  for (int p = 0; p < 7; ++p) {
+    paths.push_back({named_path("missing" + std::to_string(p))});
+  }
+  ASSERT_EQ(paths.size(), 16u);
+
+  auto const input_view = cudf::strings_column_view{input};
+  auto const out =
+    spark_rapids_jni::get_json_object_multiple_paths(input_view, paths, -1, parallel_override);
+  ASSERT_EQ(out.size(), paths.size());
+  // Oracle: evaluate each path alone; a single-path call stays on the general engine.
+  for (std::size_t col = 0; col < paths.size(); ++col) {
+    SCOPED_TRACE("deep retry column " + std::to_string(col));
+    auto const single = spark_rapids_jni::get_json_object_multiple_paths(
+      input_view, {paths[col]}, -1, parallel_override);
+    ASSERT_EQ(single.size(), 1u);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*single[0], *out[col]);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRetryDeepRouteAfterMatch) { run_merged_retry_deep_route(-1); }
+
+TEST_F(GetJsonObjectTest, MergedRetryDeepRouteAfterMatchGeneralControl)
+{
+  run_merged_retry_deep_route(1);
 }
 
 TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
@@ -1465,11 +1986,10 @@ TEST_F(GetJsonObjectTest, NonEmptyNullsMergedRetry)
     expected_column(std::vector<std::string>(rows.size()), std::vector<bool>(rows.size(), false));
 
   // Sixteen NAMED paths, a depth-2 member and at least 32 rows admit the merged first pass.
-  // The pads ride root `k`, so the group holds paths >= 3.15 x distinct roots (k, u, e).
   std::vector<std::vector<path_spec>> paths{
     {named_path("k")}, {named_path("u"), named_path("v")}, {named_path("e")}};
   for (int i = 3; i < 16; ++i) {
-    paths.push_back({named_path("k"), named_path("missing" + std::to_string(i))});
+    paths.push_back({named_path("missing" + std::to_string(i))});
   }
   for (auto const offset : std::array<cudf::size_type, 2>{0, 1}) {
     SCOPED_TRACE(testing::Message() << "offset=" << offset);
