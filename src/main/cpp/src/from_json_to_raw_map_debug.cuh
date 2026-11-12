@@ -65,47 +65,41 @@ void print_debug(Buffer const& input,
                  std::string const& separator,
                  cuda::stream_ref stream)
 {
-  if constexpr (debug_from_json) {
-    auto const h_input = cudf::detail::make_host_vector(input, stream);
-    std::stringstream ss;
-    ss << name << ":\n";
-    for (size_t i = 0; i < h_input.size(); ++i) {
-      ss << static_cast<U>(h_input[i]);
-      if (separator.size() > 0 && i + 1 < h_input.size()) { ss << separator; }
-    }
-    std::cerr << ss.str() << std::endl;
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
+  std::stringstream ss;
+  ss << name << ":\n";
+  for (size_t i = 0; i < h_input.size(); ++i) {
+    ss << static_cast<U>(h_input[i]);
+    if (separator.size() > 0 && i + 1 < h_input.size()) { ss << separator; }
   }
+  std::cerr << ss.str() << std::endl;
 }
 
 // Print the content of the input map given by a device vector.
 template <typename Buffer, typename U = int>
 void print_map_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  if constexpr (debug_from_json) {
-    auto const h_input = cudf::detail::make_host_vector(input, stream);
-    std::stringstream ss;
-    ss << name << ":\n";
-    for (size_t i = 0; i < h_input.size(); ++i) {
-      ss << i << " => " << static_cast<U>(h_input[i]) << "\n";
-    }
-    std::cerr << ss.str() << std::endl;
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
+  std::stringstream ss;
+  ss << name << ":\n";
+  for (size_t i = 0; i < h_input.size(); ++i) {
+    ss << i << " => " << static_cast<U>(h_input[i]) << "\n";
   }
+  std::cerr << ss.str() << std::endl;
 }
 
 // Print the content of the input pairs given by a device vector.
 template <typename Buffer, typename U = int>
 void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  if constexpr (debug_from_json) {
-    auto const h_input = cudf::detail::make_host_vector(input, stream);
-    std::stringstream ss;
-    ss << name << ":\n";
-    for (size_t i = 0; i < h_input.size(); ++i) {
-      ss << "[ " << static_cast<int>(h_input[i].first) << ", "
-         << static_cast<int>(h_input[i].second) << " ]\n";
-    }
-    std::cerr << ss.str() << std::endl;
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
+  std::stringstream ss;
+  ss << name << ":\n";
+  for (size_t i = 0; i < h_input.size(); ++i) {
+    ss << "[ " << static_cast<int>(h_input[i].first) << ", " << static_cast<int>(h_input[i].second)
+       << " ]\n";
   }
+  std::cerr << ss.str() << std::endl;
 }
 
 // Print the final output map data (Spark's MapType, i.e., List<Struct<String,String>>).
@@ -114,67 +108,65 @@ void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
                             std::unique_ptr<cudf::column> const& extracted_values,
                             cuda::stream_ref stream)
 {
-  if constexpr (debug_from_json) {
-    if (extracted_keys->size() == 0) {
-      std::cerr << "Extract keys-values are all empty.\n" << std::endl;
-      return;
-    }
+  if (extracted_keys->size() == 0) {
+    std::cerr << "Extract keys-values are all empty.\n" << std::endl;
+    return;
+  }
 
-    auto const keys_sv        = cudf::strings_column_view{extracted_keys->view()};
-    auto const values_sv      = cudf::strings_column_view{extracted_values->view()};
-    auto const keys_offsets   = keys_sv.offsets();
-    auto const values_offsets = values_sv.offsets();
+  auto const keys_sv        = cudf::strings_column_view{extracted_keys->view()};
+  auto const values_sv      = cudf::strings_column_view{extracted_values->view()};
+  auto const keys_offsets   = keys_sv.offsets();
+  auto const values_offsets = values_sv.offsets();
 
-    auto const h_extracted_keys_child = cudf::detail::make_host_vector(
-      cudf::device_span<char const>{keys_sv.chars_begin(stream),
-                                    static_cast<size_t>(keys_sv.chars_size(stream))},
-      stream);
-    auto const h_extracted_keys_offsets = cudf::detail::make_host_vector(
-      cudf::device_span<int const>{keys_offsets.data<int>(),
-                                   static_cast<size_t>(keys_offsets.size())},
-      stream);
+  auto const h_extracted_keys_child = cudf::detail::make_host_vector(
+    cudf::device_span<char const>{keys_sv.chars_begin(stream),
+                                  static_cast<size_t>(keys_sv.chars_size(stream))},
+    stream);
+  auto const h_extracted_keys_offsets = cudf::detail::make_host_vector(
+    cudf::device_span<int const>{keys_offsets.data<int>(),
+                                 static_cast<size_t>(keys_offsets.size())},
+    stream);
 
-    auto const h_extracted_values_child = cudf::detail::make_host_vector(
-      cudf::device_span<char const>{values_sv.chars_begin(stream),
-                                    static_cast<size_t>(values_sv.chars_size(stream))},
-      stream);
-    auto const h_extracted_values_offsets = cudf::detail::make_host_vector(
-      cudf::device_span<int const>{values_offsets.data<int>(),
-                                   static_cast<size_t>(values_offsets.size())},
-      stream);
+  auto const h_extracted_values_child = cudf::detail::make_host_vector(
+    cudf::device_span<char const>{values_sv.chars_begin(stream),
+                                  static_cast<size_t>(values_sv.chars_size(stream))},
+    stream);
+  auto const h_extracted_values_offsets = cudf::detail::make_host_vector(
+    cudf::device_span<int const>{values_offsets.data<int>(),
+                                 static_cast<size_t>(values_offsets.size())},
+    stream);
 
-    auto const h_list_offsets = cudf::detail::make_host_vector(
-      cudf::device_span<cudf::size_type const>{list_offsets->view().begin<cudf::size_type>(),
-                                               static_cast<std::size_t>(list_offsets->size())},
-      stream);
-    CUDF_EXPECTS(h_list_offsets.back() == extracted_keys->size(),
-                 "Invalid list offsets computation.");
+  auto const h_list_offsets = cudf::detail::make_host_vector(
+    cudf::device_span<cudf::size_type const>{list_offsets->view().begin<cudf::size_type>(),
+                                             static_cast<std::size_t>(list_offsets->size())},
+    stream);
+  CUDF_EXPECTS(h_list_offsets.back() == extracted_keys->size(),
+               "Invalid list offsets computation.");
 
-    std::stringstream ss;
-    ss << "Extract keys-values:\n";
+  std::stringstream ss;
+  ss << "Extract keys-values:\n";
 
-    for (size_t i = 0; i + 1 < h_list_offsets.size(); ++i) {
-      ss << "List " << i << ": [" << h_list_offsets[i] << ", " << h_list_offsets[i + 1] << "]\n";
-      for (cudf::size_type string_idx = h_list_offsets[i]; string_idx < h_list_offsets[i + 1];
-           ++string_idx) {
-        {
-          auto const string_begin = h_extracted_keys_offsets[string_idx];
-          auto const string_end   = h_extracted_keys_offsets[string_idx + 1];
-          auto const size         = string_end - string_begin;
-          auto const ptr          = &h_extracted_keys_child[string_begin];
-          ss << "\t\"" << std::string(ptr, size) << "\" : ";
-        }
-        {
-          auto const string_begin = h_extracted_values_offsets[string_idx];
-          auto const string_end   = h_extracted_values_offsets[string_idx + 1];
-          auto const size         = string_end - string_begin;
-          auto const ptr          = &h_extracted_values_child[string_begin];
-          ss << "\"" << std::string(ptr, size) << "\"\n";
-        }
+  for (size_t i = 0; i + 1 < h_list_offsets.size(); ++i) {
+    ss << "List " << i << ": [" << h_list_offsets[i] << ", " << h_list_offsets[i + 1] << "]\n";
+    for (cudf::size_type string_idx = h_list_offsets[i]; string_idx < h_list_offsets[i + 1];
+         ++string_idx) {
+      {
+        auto const string_begin = h_extracted_keys_offsets[string_idx];
+        auto const string_end   = h_extracted_keys_offsets[string_idx + 1];
+        auto const size         = string_end - string_begin;
+        auto const ptr          = &h_extracted_keys_child[string_begin];
+        ss << "\t\"" << std::string(ptr, size) << "\" : ";
+      }
+      {
+        auto const string_begin = h_extracted_values_offsets[string_idx];
+        auto const string_end   = h_extracted_values_offsets[string_idx + 1];
+        auto const size         = string_end - string_begin;
+        auto const ptr          = &h_extracted_values_child[string_begin];
+        ss << "\"" << std::string(ptr, size) << "\"\n";
       }
     }
-    std::cerr << ss.str() << std::endl;
   }
+  std::cerr << ss.str() << std::endl;
 }
 
 }  // namespace spark_rapids_jni
