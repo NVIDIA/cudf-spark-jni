@@ -23,18 +23,16 @@ on:
 
 permissions: {}
 
-# Temporary overnight stress test: keep each approved invocation independent.
-# Restore the per-PR group when this validation finishes.
+# Keep each PR serialized; separate pilot PRs can exercise both runners.
 concurrency:
-  group: sonar-runner-pilot-${{ github.event.pull_request.number }}-${{ github.run_id }}
+  group: sonar-runner-pilot-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   authorize:
     if: >-
-      (github.event.label.name == 'sonar-runner-pilot' ||
-       github.event.label.name == 'sonar-runner-pilot-overlap') &&
-      github.event.pull_request.number == 5400 &&
+      github.event.label.name == 'sonar-runner-pilot' &&
+      contains(fromJSON('[5400, 5431]'), github.event.pull_request.number) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -63,7 +61,7 @@ jobs:
             const approve = require('./ci/sonar-pilot-approval.js');
             await approve({github, context, core, initial: true});
       - name: Mark this Sonar scope pending using common PR 77
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@962872d1f2f2647df7da157941b8496c3bd25a9f
         with:
           phase: pending
           project: ${{ vars.SONAR_PROJECT_KEY }}
@@ -91,7 +89,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NVIDIA/spark-rapids-common
-          ref: 1880e18b4b702c6368da40ac09122b0bbdd7cdf7
+          ref: 962872d1f2f2647df7da157941b8496c3bd25a9f
           persist-credentials: false
           path: common
       # Pre-merge validation only: the production action requires a published image.
@@ -145,7 +143,7 @@ jobs:
 
   scan:
     needs: [authorize, security, compile]
-    # Paired pilot builds may overlap; Sonar needs chronological analyses per PR.
+    # Sonar needs chronological analysis and collection for each PR.
     concurrency:
       group: sonar-runner-pilot-scan-${{ github.event.pull_request.number }}
       cancel-in-progress: false
@@ -198,7 +196,7 @@ jobs:
         if: always() && steps.analyze.outcome != 'skipped'
         continue-on-error: true
         timeout-minutes: 12
-        uses: NVIDIA/spark-rapids-common/sonar-check/collect@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@962872d1f2f2647df7da157941b8496c3bd25a9f
         with:
           project: ${{ vars.SONAR_PROJECT_KEY }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -238,7 +236,7 @@ jobs:
           digest-mismatch: error
       - name: Report the check and summary using common PR 77
         if: always()
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@962872d1f2f2647df7da157941b8496c3bd25a9f
         with:
           result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
           project: ${{ vars.SONAR_PROJECT_KEY }}

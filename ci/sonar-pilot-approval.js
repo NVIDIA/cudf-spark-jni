@@ -19,7 +19,7 @@ module.exports = async function approve({github, context, core, initial = false}
   });
   const sha = process.env.APPROVED_SHA || eventPR.head.sha;
   const base = process.env.APPROVED_BASE || eventPR.base.ref;
-  if (pr.number !== 5400 || pr.state !== 'open' ||
+  if (![5400, 5431].includes(pr.number) || pr.state !== 'open' ||
       pr.head.repo?.full_name !== `${owner}/${repo}` ||
       pr.head.sha !== sha || pr.base.ref !== base ||
       !pr.labels.some(label => label.name === 'sonar-runner-pilot')) {
