@@ -39,6 +39,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/hierarchy>
@@ -1455,7 +1456,7 @@ struct merged_group_plan {
   // SoA section offsets are relative to the blob's packed device base.
   std::array<std::size_t, 13> sec{};
   merged_trie_view view{};
-  rmm::device_uvector<merged_path_out> row_scratch;  // rows * num_paths
+  cuda::device_buffer<merged_path_out> row_scratch;  // rows * num_paths
   int32_t num_paths{0};
   int max_trie_depth{0};
 };
@@ -1613,7 +1614,8 @@ merged_group_plan build_merged_named_plan(
     0,  // blob_off: set when the packer places the blob into the grouped upload pack
     offsets,
     merged_trie_view{},
-    rmm::device_uvector<merged_path_out>(0, stream),  // row scratch: grown lazily on overflow
+    // row scratch: grown lazily on overflow
+    cuda::device_buffer<merged_path_out>{stream, cudf::get_current_device_resource_ref()},
     num_paths,
     max_trie_depth};
   return plan;
@@ -1670,9 +1672,10 @@ void launch_merged_named(cudf::column_device_view const& input,
                                                              static_cast<std::size_t>(block_size));
   if (row_scratch) {
     plan.row_scratch =
-      rmm::device_uvector<merged_path_out>(static_cast<int64_t>(input.size()) * plan.num_paths,
-                                           stream,
-                                           cudf::get_current_device_resource_ref());
+      cuda::device_buffer<merged_path_out>(stream,
+                                           cudf::get_current_device_resource_ref(),
+                                           static_cast<int64_t>(input.size()) * plan.num_paths,
+                                           cuda::no_init);
   }
   // Only R=1 launches; the 16-byte-strided global-scratch fallback is R=1-only too.
   auto* scratch     = row_scratch ? plan.row_scratch.data() : nullptr;
@@ -1696,7 +1699,7 @@ void launch_merged_named(cudf::column_device_view const& input,
  */
 struct launch_grouped_staging {
   std::optional<cudf::detail::host_vector<std::byte>> h_prewalk_pack;
-  rmm::device_buffer d_prewalk_pack;
+  std::optional<cuda::device_buffer<std::byte>> d_prewalk_pack;
   std::vector<std::vector<json_path_processing_data>> group_staging;
   std::vector<merged_group_plan> merged_plans;
   // Per batch position, 1 when the path launched through the merged kernel. The two evaluators
@@ -1876,10 +1879,10 @@ void launch_grouped(
     pack_bytes += align8(group.size() * sizeof(json_path_processing_data));
   }
   staging.h_prewalk_pack = cudf::detail::make_pinned_vector_async<std::byte>(pack_bytes, stream);
-  staging.d_prewalk_pack =
-    rmm::device_buffer(pack_bytes, stream, cudf::get_current_device_resource_ref());
+  staging.d_prewalk_pack = cuda::device_buffer<std::byte>(
+    stream, cudf::get_current_device_resource_ref(), pack_bytes, cuda::no_init);
   auto* const h_base = staging.h_prewalk_pack->data();
-  auto* const d_base = static_cast<std::byte*>(staging.d_prewalk_pack.data());
+  auto* const d_base = static_cast<std::byte*>(staging.d_prewalk_pack->data());
 
   std::size_t off = 0;
   for (auto& plan : merged_plans) {
@@ -2030,7 +2033,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   json_paths_retry.reserve(oob_count);
   launch_staging.merged_routed.clear();
   launch_staging.merged_routed.reserve(oob_count);
-  rmm::device_uvector<int8_t> d_retry_error_check(oob_count + 1, stream);
+  cuda::device_buffer<int8_t> d_retry_error_check(
+    stream, cudf::get_current_device_resource_ref(), oob_count + 1, cuda::no_init);
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
     auto& out_sview = out_stringviews[idx];
 
