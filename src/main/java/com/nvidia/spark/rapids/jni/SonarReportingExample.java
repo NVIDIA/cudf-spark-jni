@@ -23,14 +23,14 @@ final class SonarReportingExample {
   private SonarReportingExample() {
   }
 
-  static boolean intentionallyCompareWithSelf(int value) {
-    // Intentionally triggers java:S1764: identical operands in a comparison.
-    return value == value;
+  static boolean isPositive(int value) {
+    return value > 0;
   }
 
-  static int intentionalHighSeverityFinding() {
-    // Intentionally triggers javabugs:S3518 (High); this unused example must not be called.
-    int zero = 0;
-    return 1 / zero;
+  static int guardedDivision(int denominator) {
+    if (denominator == 0) {
+      throw new IllegalArgumentException("denominator must not be zero");
+    }
+    return 1 / denominator;
   }
 }
