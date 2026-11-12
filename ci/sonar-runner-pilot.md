@@ -1,19 +1,14 @@
 # Sonar runner pilot
 
-Test-only validation on dummy PR #5400. Do not merge the deliberate Java findings.
-A maintainer applies `sonar-runner-pilot` to approve the current same-repository
+Test-only validation on dummy PRs #5400 and #5431. Do not merge the Java fixtures.
+A maintainer applies `sonar-runner-pilot` to approve each current same-repository
 head. New commits require a new label event; ordinary pushes do not run the pilot.
-For the temporary overnight test, `sonar-runner-pilot-overlap` starts a second
-invocation while the primary approval label stays present. Each run has a separate
-concurrency group, so earlier runs remain active. Both runs use the same approved
-head. Build jobs can overlap, while scan jobs serialize for the PR through server
-processing and result collection to prevent out-of-order analysis rejection.
-Keep at most two runs active: the concurrency group supports one running scan and
-one pending scan. Wait for both runs to finish before changing the fixture.
-Restore per-PR workflow serialization and remove the overlap trigger after validation.
+Each PR serializes its complete workflow and Sonar analysis/collection. The two
+PRs can run concurrently without sharing Sonar analysis state. Keep one active
+run per PR and wait for terminal results before changing its fixture.
 
 The workflow validates common PR #77 at the reviewed commit
-`1880e18b4b702c6368da40ac09122b0bbdd7cdf7` with this path:
+`962872d1f2f2647df7da157941b8496c3bd25a9f` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
@@ -24,8 +19,9 @@ The workflow validates common PR #77 at the reviewed commit
    fail the check. The earlier division-by-zero example validates failure; the
    repaired version retains only a Medium finding to validate a passing check.
 
-The shared reporter sets `Sonar check / PR #5400 / <scope>` pending after approval
-and updates that same context after scanning. The scope binds the Sonar server,
+The shared reporter sets `Sonar check / PR #N / <scope>` pending after approval
+and updates that same context after scanning. Infrastructure/process failures
+fail the check with retry guidance and do not post PR comments. The scope binds the Sonar server,
 project, and target branch, keeping unrelated Sonar checks independent.
 
 The common scanner image is not published yet. This unmerged pilot explicitly
