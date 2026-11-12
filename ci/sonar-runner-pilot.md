@@ -6,11 +6,14 @@ head. New commits require a new label event; ordinary pushes do not run the pilo
 For the temporary overnight test, `sonar-runner-pilot-overlap` starts a second
 invocation while the primary approval label stays present. Each run has a separate
 concurrency group, so earlier runs remain active. Both runs use the same approved
-head; wait for both to finish before changing the fixture. Restore per-PR
-serialization and remove the overlap trigger after this validation.
+head. Build jobs can overlap, while scan jobs serialize for the PR through server
+processing and result collection to prevent out-of-order analysis rejection.
+Keep at most two runs active: the concurrency group supports one running scan and
+one pending scan. Wait for both runs to finish before changing the fixture.
+Restore per-PR workflow serialization and remove the overlap trigger after validation.
 
 The workflow validates common PR #77 at the reviewed commit
-`1e1fe06dbcbc4895500e34589ee19139bd6bd819` with this path:
+`1880e18b4b702c6368da40ac09122b0bbdd7cdf7` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.

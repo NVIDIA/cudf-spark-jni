@@ -63,7 +63,7 @@ jobs:
             const approve = require('./ci/sonar-pilot-approval.js');
             await approve({github, context, core, initial: true});
       - name: Mark this Sonar scope pending using common PR 77
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@1e1fe06dbcbc4895500e34589ee19139bd6bd819
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
         with:
           phase: pending
           project: ${{ vars.SONAR_PROJECT_KEY }}
@@ -91,7 +91,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NVIDIA/spark-rapids-common
-          ref: 1e1fe06dbcbc4895500e34589ee19139bd6bd819
+          ref: 1880e18b4b702c6368da40ac09122b0bbdd7cdf7
           persist-credentials: false
           path: common
       # Pre-merge validation only: the production action requires a published image.
@@ -145,6 +145,10 @@ jobs:
 
   scan:
     needs: [authorize, security, compile]
+    # Paired pilot builds may overlap; Sonar needs chronological analyses per PR.
+    concurrency:
+      group: sonar-runner-pilot-scan-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, spark-sonar-internal]
     timeout-minutes: 30
     outputs:
@@ -194,7 +198,7 @@ jobs:
         if: always() && steps.analyze.outcome != 'skipped'
         continue-on-error: true
         timeout-minutes: 12
-        uses: NVIDIA/spark-rapids-common/sonar-check/collect@1e1fe06dbcbc4895500e34589ee19139bd6bd819
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
         with:
           project: ${{ vars.SONAR_PROJECT_KEY }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -234,7 +238,7 @@ jobs:
           digest-mismatch: error
       - name: Report the check and summary using common PR 77
         if: always()
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@1e1fe06dbcbc4895500e34589ee19139bd6bd819
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@1880e18b4b702c6368da40ac09122b0bbdd7cdf7
         with:
           result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
           project: ${{ vars.SONAR_PROJECT_KEY }}
