@@ -1025,6 +1025,36 @@ struct element_classify_fn {
 
 }  // namespace
 
+// Instantiate every debug helper used above even when debug calls are discarded. This keeps
+// errors in their dependent template bodies visible in builds without DEBUG_FROM_JSON.
+template void print_debug<rmm::device_uvector<TreeDepthT>>(rmm::device_uvector<TreeDepthT> const&,
+                                                           std::string const&,
+                                                           std::string const&,
+                                                           cuda::stream_ref);
+template void print_debug<rmm::device_uvector<NodeIndexT>>(rmm::device_uvector<NodeIndexT> const&,
+                                                           std::string const&,
+                                                           std::string const&,
+                                                           cuda::stream_ref);
+template void print_debug<rmm::device_uvector<node_kind>>(rmm::device_uvector<node_kind> const&,
+                                                          std::string const&,
+                                                          std::string const&,
+                                                          cuda::stream_ref);
+template void print_debug<cuda::device_buffer<PdaTokenT>>(cuda::device_buffer<PdaTokenT> const&,
+                                                          std::string const&,
+                                                          std::string const&,
+                                                          cuda::stream_ref);
+template void print_debug<cuda::device_buffer<SymbolOffsetT>>(
+  cuda::device_buffer<SymbolOffsetT> const&,
+  std::string const&,
+  std::string const&,
+  cuda::stream_ref);
+template void print_map_debug<rmm::device_uvector<NodeIndexT>>(
+  rmm::device_uvector<NodeIndexT> const&, std::string const&, cuda::stream_ref);
+template void print_pair_debug<rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>>(
+  rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> const&,
+  std::string const&,
+  cuda::stream_ref);
+
 std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view const& input,
                                                    json_parse_options options,
                                                    cuda::stream_ref stream,
