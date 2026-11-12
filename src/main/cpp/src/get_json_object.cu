@@ -135,7 +135,7 @@ class json_generator {
 
   // Container copies validate each child through the matching close token.
   // The merged walk's CoopSkip=true parser and the general route's CoopSkip=false parser share
-  // this writer; the body is parser-mode-agnostic.
+  // this writer.
   template <bool CoopSkip>
   __device__ bool copy_current_structure(json_parser_impl<CoopSkip>& parser, char* out_begin)
   {
@@ -1035,8 +1035,8 @@ struct merged_trie_view {
   int32_t const* max_name_len;        // [nodes]; unused when the row is bypassed
 };
 
-// R=1 uses an aligned 8-byte head and a 1-byte kind at offset 8; the record rounds to a 16-byte
-// stride. R=2 packs all fields in 8 bytes; both layouts require 8-byte alignment.
+// R=1 uses an aligned 8-byte head and a 1-byte kind at offset 8, rounding to a 16-byte stride;
+// R=2 packs all fields in 8 bytes. Both layouts require 8-byte alignment.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
@@ -1054,8 +1054,8 @@ struct alignas(8) merged_path_out {
 constexpr int8_t k_merged_kind_subtree  = 0;
 constexpr int8_t k_merged_kind_string   = 1;
 constexpr int8_t k_merged_kind_terminal = 2;
-// Raw string or integer kinds point into input only if writer output is byte-identical.
-// Floats and -0 normalize and must use the writer instead.
+// Raw kinds point into input only when writer output is byte-identical; floats and -0 normalize
+// and must use the writer instead.
 constexpr int8_t k_merged_kind_string_raw   = 4;
 constexpr int8_t k_merged_kind_terminal_raw = 5;
 // Certified raw subtrees bypass reparsing and point directly into input bytes.
@@ -1066,7 +1066,8 @@ constexpr int8_t k_merged_kind_dead = 3;
 /**
  * R=2 record: begin occupies bits 0..31, exclusive end bits 32..60, and kind bits 61..63.
  * begin=-1 is unset; kind=dead prevents a failed first occurrence from being resurrected.
- * The launcher admits this layout only when row bytes fit 29 end bits; updates use one atomic word.
+ * The launcher admits this layout only when row bytes fit the 29-bit end field; updates use
+ * one atomic word.
  */
 struct merged_path_packed {
   uint64_t word;
@@ -1086,7 +1087,7 @@ __device__ __forceinline__ void merged_rec_set(merged_path_out& r,
 {
   // R=1: only row_lane 0 publishes, so plain stores suffice and the post-walk __syncwarp makes
   // both fields visible to the other lanes before materialization.
-  // R=2: the packed record is one 8-byte word published with atomics for the same reason.
+  // R=2: the packed record is one 8-byte word, published with atomics for the same reason.
   static_assert(offsetof(merged_path_out, val_begin) == 0 &&
                   offsetof(merged_path_out, val_end) == 4 &&
                   offsetof(merged_path_out, val_kind) == 8,
@@ -1115,7 +1116,7 @@ __device__ __forceinline__ int8_t merged_rec_kind(merged_path_out const& r)
   return static_cast<int8_t>(merged_rec_kind_word(r) & 0xffu);
 }
 
-// R=1 uses separate atomic-free loads for head and kind, not one record snapshot.
+// R=1 loads the head and kind separately; no atomic record snapshot.
 struct merged_rec_view {
   int32_t begin;
   int32_t end;
@@ -1169,10 +1170,9 @@ __device__ __forceinline__ bool merged_rec_is_set(merged_path_packed const& r)
 }
 __device__ __forceinline__ void merged_rec_mark_dead(merged_path_packed& r)
 {
-  // A dead record must never resurrect, and an already-set record must never
-  // be killed: publish kind=dead only if the record is still unset, as one
-  // atomic 8-byte transition. CAS-loop: the predicate is re-checked on the
-  // freshly loaded value every attempt, so only a truly-unset record flips.
+  // A dead record must never resurrect, and a set record must never be killed: publish
+  // kind=dead only if the record is still unset, as one atomic 8-byte transition. The CAS
+  // predicate is re-checked on the freshly loaded value every attempt.
   unsigned long long* const addr = reinterpret_cast<unsigned long long*>(&r.word);
   // Seed the CAS predicate from an atomic load; row_lane 0 is the only writer.
   unsigned long long old = merged_rec_word(r);
@@ -1190,8 +1190,8 @@ __device__ __forceinline__ int8_t merged_rec_kind(merged_path_packed const& r)
 {
   return static_cast<int8_t>((merged_rec_word(r) >> 61) & 7);
 }
-// The packed variant decodes all fields from one atomic 8-byte word; only row_lane 0 publishes
-// (see merged_rec_set), so the atomic load here covers the pre-barrier reset/init ordering.
+// The packed variant decodes all fields from one atomic 8-byte word; only row_lane 0 publishes,
+// so the atomic load covers the pre-barrier reset/init ordering.
 __device__ __forceinline__ merged_rec_view merged_rec_load(merged_path_packed const& r)
 {
   uint64_t const word = merged_rec_word(r);
@@ -1231,9 +1231,9 @@ __device__ __forceinline__ int32_t merged_exact_scan(merged_trie_view const& tri
   return -1;
 }
 
-// Packs the first and last nonoverlapping bytes, up to four each; matching still needs full bytes.
-// E.g. abcde packs abcd in the low half and e in the high half; there is no repeated overlap.
-// Host/device use the same formula; equal signatures alone never certify equal names.
+// Packs the first and last nonoverlapping bytes, up to four each; equal signatures alone never
+// certify equal names. E.g. abcde packs abcd in the low half and e in the high half; there is
+// no repeated overlap. Host and device use the same formula.
 __host__ __device__ inline uint64_t name_sig(char const* p, int32_t n)
 {
   uint64_t sig     = 0;
@@ -1265,11 +1265,11 @@ __device__ __forceinline__ bool signature_match(merged_trie_view const& trie,
 
 /**
  * Certifies byte-identical serialization of a parsed subtree; this is not a JSON validator.
- * Requires double-quoted strings/keys, canonical simple escapes, compact separators and unchanged
- * integers/literals. Single quotes, exterior whitespace, controls, Unicode/slash escapes, floats
- * and -0 return false for writer normalization. Bytes >= 0x80 are assumed to serialize verbatim;
- * if the writer ever changes that (e.g. astral characters), raw eligibility must change with it.
- * A true result permits a borrowed input view.
+ * Requires double-quoted strings/keys, canonical simple escapes, compact separators, and
+ * unchanged integers/literals. Single quotes, exterior whitespace, controls, Unicode/slash
+ * escapes, floats, and -0 return false for writer normalization. Bytes >= 0x80 are assumed to
+ * serialize verbatim; if the writer ever changes that (e.g. astral characters), raw eligibility
+ * must change with it. A true result permits a borrowed input view.
  */
 __device__ __forceinline__ bool certify_raw_subtree(char const* data, int32_t len)
 {
@@ -1296,7 +1296,8 @@ __device__ __forceinline__ bool certify_raw_subtree(char const* data, int32_t le
       } else if (static_cast<uint8_t>(b) < 0x20) {
         return false;
       } else {
-        // run >= 1: data[i] is safe (M3); the outer scanner consumes the stop byte.
+        // run >= 1: data[i] is safe because the aligned head load masks bytes before the
+        // cursor; the outer scanner consumes the stop byte.
         char_range_reader r{char_range(data + i, len - i)};
         i += json_parser::swar_safe_run<true>(r, nullptr, '"', false);
         if (i >= len) { return false; }  // unterminated string: parse would have failed
@@ -1305,11 +1306,11 @@ __device__ __forceinline__ bool certify_raw_subtree(char const* data, int32_t le
       continue;
     }
     if (expect_obj_key) {
-      // Only a quoted key or an immediate empty-object close is canonical.
+      // Only a quoted key or an immediate `{"}` empty-object close is canonical.
       if (b != '"' && !(b == '}' && i > 0 && data[i - 1] == '{')) { return false; }
     }
     if (b == '"') {
-      expect_obj_key = false;  // this '"' opens the key itself when the gate passed
+      expect_obj_key = false;  // this quote opens the key itself when the gate passed
       in_string      = true;
       ++i;
     } else if (b == '{' || b == '[') {
@@ -1407,7 +1408,8 @@ __device__ inline int32_t merged_scan_member(json_parser_impl<true>& p,
   p.next_token();
   if (json_token::FIELD_NAME != p.get_current_token() || cnt == 0) { return -1; }
 
-  // Escaped names need decoded comparison; raw-length buckets are sound only without backslashes.
+  // Escaped names need decoded comparison; raw-length buckets are sound only without
+  // backslashes.
   char_range const raw  = p.current_range();
   int32_t const tok_len = raw.size();  // raw, incl. quotes
   if (tok_len < 2 || p.current_token_is_escaped_field_name()) {
@@ -1457,12 +1459,12 @@ __device__ __forceinline__ void kill_subtree_unmatched(merged_trie_view const& t
  * selections; a row barrier separates the walk from lane-strided output writing. Unselected
  * records produce null views.
  *
- * The first matching key owns its entire path subtree, even for null or a missing deeper member;
- * a path ending at an object can coexist with paths below it, and its range completes on object
- * close. Parse failure nulls all paths; depth overflow sets the host flag only if a path is not
- * already dead. The caller supplies group-ordered path_data and a bound trie, retaining both
- * through completion. Null row_scratch selects shared memory records; otherwise its storage
- * holds rows * num_paths records.
+ * The first matching key owns its entire path subtree, even for null or a missing deeper
+ * member; a path ending at an object can coexist with paths below it, and its range completes
+ * on object close. Parse failure nulls all paths; depth overflow sets the host flag only if a
+ * path is not already dead. The caller supplies group-ordered path_data and a bound trie,
+ * retaining both through completion. Null row_scratch selects shared memory records; otherwise
+ * its storage holds rows * num_paths records.
  */
 template <int block_size, int max_trie_depth, int R>
 __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
@@ -2031,7 +2033,7 @@ void launch_merged_named(cudf::column_device_view const& input,
   // The admission gate estimates a walk round from the launch bounds, not measured residency.
   auto constexpr k_resident_warps_per_sm = k_merged_min_blocks_per_sm * warps_per_block;
 
-  // R=2 needs more than one R=1 walk round and a row within the packed end bound.
+  // R=2 pays off only above one R=1 walk round, and needs a row within the packed end bound.
   auto const rows = static_cast<std::size_t>(input.size());
   // R=1 uses 16-byte records; R=2 uses two 8-byte records per warp.
   auto const smem_r1 =

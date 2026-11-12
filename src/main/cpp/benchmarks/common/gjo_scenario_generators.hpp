@@ -571,9 +571,8 @@ inline multi_paths flat_wide_124_build_paths()
 
 /**
  * @brief Rows for the wide-flat merged-route shape: each row is a flat object
- * whose 124 queried members `f0`..`f123` carry string values. A trailing
- * `fill` member absorbs the remaining `row_bytes` budget via `pad_row_to`,
- * matching the other scenarios' row sizing.
+ * whose 124 queried members `f0`..`f123` carry string values; `pad_row_to`
+ * absorbs the remaining `row_bytes` budget like the other scenarios.
  */
 inline std::vector<std::string> flat_wide_124_build_rows(std::mt19937_64& rng,
                                                          std::size_t num_rows,

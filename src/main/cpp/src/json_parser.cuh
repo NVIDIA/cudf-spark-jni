@@ -186,7 +186,6 @@ __device__ __forceinline__ int swar_lowest_flag_offset32(uint32_t flags)
  * Success covers the first root value; trailing bytes are ignored. Malformed input reports ERROR,
  * and nesting overflow also sets max_nesting_depth_exceeded for the caller's error policy.
  * CoopSkip=true supports collective skip; only the identical-state merged walk arms it.
- * Unarmed parsers permit lane-specific values; CoopSkip=false remains serial.
  */
 template <bool CoopSkip = false>
 class json_parser_impl {
@@ -673,8 +672,8 @@ class json_parser_impl {
    * Requires an opening single or double quote; scans bytes without validating UTF-8.
    * Returns {success, decoded name matched, raw cursor after the closing quote}.
    * Matching is false with a null name; failure returns {false, false, nullptr}.
-   * Only the merged walk arms collective skip; named lanes share cursor, quote, width and mask.
-   * A negative coop_lane selects serial skip; otherwise it is group-relative.
+   * Only the merged walk arms collective skip; named lanes share cursor, quote, width, and
+   * mask. A negative coop_lane selects serial skip; otherwise it is group-relative.
    * Initialize non-null has_backslash to false; true marks raw backslashes, not byte changes.
    */
   static __device__ inline cuda::std::tuple<bool, bool, char const*> try_parse_string(
@@ -875,9 +874,9 @@ class json_parser_impl {
 
  public:
   /**
-   * All lanes of one aligned 16- or 32-lane row group enter with identical cursor, quote and mask.
-   * group_lane is group-relative; complete aligned words, including the masked head, must be
-   * readable. Short ranges use the scalar tail. True stops on the first quote or backslash;
+   * All lanes of one aligned 16- or 32-lane row group enter with identical cursor, quote, and
+   * mask. group_lane is group-relative; complete aligned words, including the masked head, must
+   * be readable. Short ranges use the scalar tail. True stops on the first quote or backslash;
    * false exhausts the range. Scalar parsing consumes the stop; clear windows always advance.
    */
   static __device__ inline bool coop_skip_safe_run(
@@ -1353,9 +1352,10 @@ class json_parser_impl {
 
  public:
   /**
-   * Arms only the identical-state merged walk; lane is the absolute warp lane, width is 16 or 32,
-   * and mask names exactly that aligned row group. Every named lane must reach each collective.
-   * General evaluation and lane-strided materialization stay unarmed, even with CoopSkip=true.
+   * Arms only the identical-state merged walk; lane is the absolute warp lane, width is 16 or
+   * 32, and mask names exactly that aligned row group. Every named lane must reach each
+   * collective. General evaluation and lane-strided materialization stay unarmed, even with
+   * CoopSkip=true.
    */
   __device__ inline void enable_warp_cooperative_skip(int lane, int width, unsigned mask)
   {
@@ -1396,7 +1396,8 @@ class json_parser_impl {
   // Requires CoopSkip=true and VALUE_STRING; reports raw backslashes, not decoded-byte changes.
   __device__ inline bool current_token_is_escaped_string() const { return token_has_backslash; }
 
-  // Requires CoopSkip=true and FIELD_NAME; false permits raw-byte comparison and length buckets.
+  // Requires CoopSkip=true and FIELD_NAME; false permits raw-byte comparison and length
+  // buckets.
   __device__ inline bool current_token_is_escaped_field_name() const
   {
     return token_has_backslash_field_name;
@@ -1585,7 +1586,7 @@ class json_parser_impl {
   unsigned _coop_mask = 0u;
 };
 
-// General evaluation uses the serial specialization; merged materialization stays unarmed.
+// General evaluation uses the serial specialization.
 using json_parser = json_parser_impl<>;
 
 }  // namespace spark_rapids_jni

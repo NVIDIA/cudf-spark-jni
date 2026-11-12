@@ -97,8 +97,8 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
     base_paths = flat_mixed_build_paths();
     members    = num_paths == 50 ? 50 : 150;
   } else if (scenario == scenario_id::FLAT_WIDE_124) {
-    // The wide-flat merged-route shape fixes 124 depth-one paths over one root; the num_paths
-    // axis does not apply to it.
+    // The wide-flat merged-route shape fixes 124 depth-one paths over one root; num_paths does
+    // not apply to it.
     base_paths = flat_wide_124_build_paths();
   } else if (scenario == scenario_id::VALUE_KINDS) {
     base_paths = value_kinds_build_paths();
@@ -132,7 +132,7 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   // The flat rows depend on the member count (the 16-path mixed shape derives it from
   // `num_paths`; the other flat scenarios fix it), so the cache key must distinguish member
   // counts via the flavor field; the nested scenarios derive rows from the table alone
-  // (FLAT_WIDE_124's rows are the fixed 124 members for every axis value).
+  // (FLAT_WIDE_124's rows keep their fixed 124 members for every axis value).
   auto const input = spark_rapids_jni::bench::get_or_generate_input(
     spark_rapids_jni::bench::make_input_cache_key(
       static_cast<std::uint64_t>(scenario), size_bytes, seed, members),
