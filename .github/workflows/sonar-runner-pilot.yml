@@ -61,7 +61,7 @@ jobs:
             const approve = require('./ci/sonar-pilot-approval.js');
             await approve({github, context, core, initial: true});
       - name: Mark this Sonar scope pending using common PR 77
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@2c257f7386ee0d5ac80f6a3510f022ba1024b815
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@ec16071dddc80f7796c4af2c99fef1b9e1b54555
         with:
           phase: pending
           project: ${{ vars.SONAR_PROJECT_KEY }}
@@ -89,7 +89,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: NVIDIA/spark-rapids-common
-          ref: 2c257f7386ee0d5ac80f6a3510f022ba1024b815
+          ref: ec16071dddc80f7796c4af2c99fef1b9e1b54555
           persist-credentials: false
           path: common
       # Pre-merge validation only: the production action requires a published image.
@@ -192,7 +192,7 @@ jobs:
         if: always() && steps.analyze.outcome != 'skipped'
         continue-on-error: true
         timeout-minutes: 12
-        uses: NVIDIA/spark-rapids-common/sonar-check/collect@2c257f7386ee0d5ac80f6a3510f022ba1024b815
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@ec16071dddc80f7796c4af2c99fef1b9e1b54555
         with:
           project: ${{ vars.SONAR_PROJECT_KEY }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -232,7 +232,7 @@ jobs:
           digest-mismatch: error
       - name: Report the check and summary using common PR 77
         if: always()
-        uses: NVIDIA/spark-rapids-common/sonar-check/report@2c257f7386ee0d5ac80f6a3510f022ba1024b815
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@ec16071dddc80f7796c4af2c99fef1b9e1b54555
         with:
           result-path: ${{ runner.temp }}/sonar-report/sonar-result.json
           project: ${{ vars.SONAR_PROJECT_KEY }}

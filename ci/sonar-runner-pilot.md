@@ -7,7 +7,7 @@ The workflow serializes each PR through Sonar processing and result collection.
 Different PRs may scan concurrently in production; this pilot allows only #5433.
 
 The workflow validates common PR #77 at the reviewed commit
-`2c257f7386ee0d5ac80f6a3510f022ba1024b815` with this path:
+`ec16071dddc80f7796c4af2c99fef1b9e1b54555` with this path:
 
 1. A hosted job scans the exact approved source without executing its build.
 2. A `spark-sonar-internal` worker compiles Java without Sonar credentials.
