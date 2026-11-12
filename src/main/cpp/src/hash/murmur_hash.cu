@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "integer_utils.cuh"
 #include "murmur_hash.cuh"
 #include "nvtx_ranges.hpp"
 
@@ -249,9 +250,7 @@ std::unique_ptr<cudf::column> murmur_hash3_32_pmod(cudf::table_view const& input
     input,
     seed,
     [num_partitions] __device__(int32_t hash) {
-      // Correct negative remainders without overflowing for large partition counts.
-      auto const remainder = hash % num_partitions;
-      return remainder < 0 ? remainder + num_partitions : remainder;
+      return integer_utils::floor_mod(hash, num_partitions);
     },
     stream,
     mr);
