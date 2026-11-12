@@ -995,8 +995,8 @@ namespace {
 // Accumulate per-path character totals in 64 bits before narrowing offsets.
 using scan_accum_t = int64_t;
 
-// Splits path-major scan indices into (path, row), with one terminal slot after every row segment.
-// seg32 uses 32-bit div/mod only when the full path count times (rows + 1) fits signed 31 bits.
+// Splits path-major scan indices into (path, row), one terminal slot per row segment.
+// seg32 enables 32-bit div/mod only when paths * (rows + 1) fits signed 31 bits.
 struct scan_index_split {
   int64_t seg;  // rows + 1
   int32_t seg32{};
@@ -1011,8 +1011,8 @@ struct scan_index_split {
   }
 };
 
-// Each path contributes its row lengths plus a final zero, so an exclusive scan emits its total.
-// A depth error makes pair records unreadable; return zeros without touching those records.
+// Reads each path's row lengths plus a final zero, so an exclusive scan emits the path total.
+// A depth error leaves pair records unwritten; yield zeros without dereferencing them.
 struct batched_lengths_fn {
   cuda::std::pair<char const*, cudf::size_type> const* const* pair_ptrs;
   scan_index_split split_idx;
@@ -1028,9 +1028,9 @@ struct batched_lengths_fn {
 };
 
 /**
- * CUB output proxy for path-major scan results: scatter offsets to each path's destination column.
- * The terminal slot stores an independent int64 total before narrowing the offset to T; callers
- * must check that total before exposing offsets. Each target has rows + 1 writable entries.
+ * CUB output proxy for path-major scan results: scatters offsets to each path's destination
+ * column. The terminal slot captures an independent int64 total before the offset narrows to T;
+ * callers must check that total before exposing offsets. Each target holds rows + 1 entries.
  */
 template <typename T>
 struct scattered_scan_output_iterator {
@@ -1107,9 +1107,10 @@ struct scattered_scan_output_iterator {
 constexpr cudf::size_type validity_block_size = 256;
 
 /**
- * Produces validity from non-null row-pair pointers; a depth flag suppresses unwritten pair reads.
- * Blocks own disjoint mask-word slices and atomically add one count each to a zeroed path counter.
- * Supply 256 threads per block and mask words covering every row, including the tail.
+ * Produces validity from non-null row-pair pointers; a depth flag suppresses unwritten pair
+ * reads. Blocks own disjoint mask-word slices and atomically add one count each to a zeroed
+ * per-path counter. Requires 256 threads per block and mask words covering every row, tail
+ * included.
  */
 CUDF_KERNEL void batched_validity_kernel(
   int64_t rows,
@@ -1121,7 +1122,7 @@ CUDF_KERNEL void batched_validity_kernel(
   cudf::size_type* valid_counts,
   int8_t const* depth_error)
 {
-  // Grid bounds keep block-to-path index arithmetic in 32 bits.
+  // Keeping total_blocks below 2^31 preserves 32-bit block-to-path index arithmetic.
   auto const path       = blockIdx.x / num_blocks_per_path;
   auto const first_word = (blockIdx.x % num_blocks_per_path) * words_per_block;
   auto const last_word =
@@ -1134,7 +1135,7 @@ CUDF_KERNEL void batched_validity_kernel(
   bool const has_depth_error = depth_error != nullptr && *depth_error != 0;
   for (int64_t w = first_word + warp_in_block; w < last_word; w += warps_per_block) {
     auto const row = w * cudf::detail::warp_size + lane;
-    // Mask the last partial word; cache the path's warp-uniform pair pointer.
+    // The last word is partial beyond `rows`; cache the path's warp-uniform pair pointer.
     auto const* path_pairs = pair_ptrs[path];
     bool const is_valid    = !has_depth_error && row < rows && path_pairs[row].first != nullptr;
 
@@ -1152,8 +1153,8 @@ CUDF_KERNEL void batched_validity_kernel(
   if (threadIdx.x == 0) { atomicAdd(valid_counts + path, block_count); }
 }
 
-// Borrowed gather descriptor: row pairs may point into scratch or input; offsets select dst ranges.
-// Keep all three device allocations alive until the queued gather has consumed them.
+// Borrowed gather descriptor: pairs may point into scratch or input; offsets select dst ranges.
+// All three referenced allocations must stay alive until the queued gather completes.
 struct gather_entry {
   cuda::std::pair<char const*, cudf::size_type> const* pairs;
   char* dst;
@@ -1217,9 +1218,9 @@ void gather_chars_for_group_impl(gather_entry const* entries,
 
 /**
  * Enqueues one batched gather over equal-row-count paths using already checked int32 offsets.
- * Null pairs have zero lengths; valid pairs borrow readable source bytes through gather completion.
- * The local uploaded descriptor table is ordered before return on nonlegacy streams, including
- * per-thread default streams; this synchronization protects host staging, not a final host read.
+ * Null pairs carry zero lengths; valid pairs borrow readable source bytes until gather
+ * completion. The local descriptor upload is ordered before return on nonlegacy streams,
+ * including per-thread default streams; this sync protects host staging, not a final host read.
  */
 void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
                             int64_t rows,
@@ -1229,8 +1230,8 @@ void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
   auto const num_buffers = static_cast<int64_t>(h_entries.size()) * rows;
   auto d_entries         = cudf::detail::make_device_uvector_async(
     h_entries, stream, cudf::get_current_device_resource_ref());
-  // h_entries belongs to the finisher; delay destruction until upload completes on explicit/PTDS
-  // streams. A null handle is not the legacy stream when per-thread default streams are enabled.
+  // h_entries belongs to the finisher; delay its destruction until the upload completes on
+  // explicit/PTDS streams. A null handle is not the legacy stream when PTDS is enabled.
   if (stream.get() != cudaStreamLegacy && (stream.get() != nullptr || cudf::is_ptds_enabled())) {
     stream.sync();
   }
@@ -1243,7 +1244,7 @@ void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
   gather_chars_for_group_impl(d_entries.data(), rows, num_buffers, stream);
 }
 
-// Returns padded int32-count bytes so the following int64 totals stay eight-byte aligned.
+// Rounds the int32-count bytes up to eight-byte alignment for the int64 totals that follow.
 [[nodiscard]] std::size_t valid_counts_bytes(int64_t num_paths)
 {
   return (static_cast<std::size_t>(num_paths) * sizeof(cudf::size_type) + sizeof(int64_t) - 1) &
@@ -1251,10 +1252,10 @@ void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
 }
 
 /**
- * Owns offsets, masks, pointer tables and one packed counts/totals/errors readback per path group.
- * Host accessors need a synchronized preparation stream; already_synced records
- * that ordering, not merely that readback was queued. Keep host pointer-table sources until then.
- * Row pairs and their character sources are borrowed; they remain alive through the final gather.
+ * Owns offsets, masks, pointer tables, and one packed counts/totals/errors readback per group.
+ * Host accessors require a synchronized preparation stream; `already_synced` records that
+ * ordering, not merely that readback was queued. Keep host pointer-table sources until then.
+ * Row pairs and their character sources are borrowed; they stay alive through the final gather.
  */
 struct prepared_output_metadata {
   std::vector<std::unique_ptr<cudf::column>> offsets_cols;
@@ -1267,7 +1268,7 @@ struct prepared_output_metadata {
   cudf::detail::host_vector<std::byte> h_packed_readback;
   int64_t num_err{};
   bool already_synced{};
-  // Keep H2D pointer-table sources alive through the sync on non-default streams.
+  // Keep host pointer tables alive through the non-default-stream sync they feed.
   std::vector<cuda::std::pair<char const*, cudf::size_type> const*> h_pair_ptrs;
   std::vector<cudf::bitmask_type*> h_mask_ptrs;
   std::vector<int32_t*> h_targets32;
@@ -1283,7 +1284,7 @@ struct prepared_output_metadata {
   {
     return reinterpret_cast<cudf::size_type const*>(h_packed_readback.data());
   }
-  // Error markers: per-path OOB slots followed by a depth-exceeded slot.
+  // Error markers: per-path OOB slots then the depth-exceeded slot.
   [[nodiscard]] int8_t const* h_error_check() const
   {
     return num_err > 0 ? reinterpret_cast<int8_t const*>(
@@ -1293,15 +1294,17 @@ struct prepared_output_metadata {
   }
 };
 
-// Small batches avoid packed metadata setup; the same gate controls success and retry outputs.
+// Batches below this size skip the packed-metadata setup; the same gate governs success and
+// retry outputs.
 constexpr std::size_t packed_readback_min_paths = 8;
 
 /**
- * Queues offsets/validity for equal-sized pair spans and one packed host readback; no sync.
- * The returned owner retains asynchronous pointer-table sources. If supplied, error_check_slots is
- * caller-initialized per-path size flags followed by one depth flag; depth failures suppress reads
- * of unwritten pair records. Oversized scratch is never gathered here: callers check flags first.
- * No paths/rows queues no readback and returns num_err=0. Retain pairs and errors through ordering.
+ * Queues offsets/validity for equal-sized pair spans plus one packed host readback; no sync.
+ * The returned owner retains asynchronous pointer-table sources. When supplied,
+ * `error_check_slots` holds caller-initialized per-path size flags followed by one depth flag;
+ * depth failures suppress reads of unwritten pair records. Oversized scratch is never gathered
+ * here: callers check flags first. No paths or rows queues no readback and returns num_err=0.
+ * Retain pairs and errors through ordering.
  */
 prepared_output_metadata prepare_output_metadata(
   cudf::column_device_view const& input,
@@ -1383,7 +1386,7 @@ prepared_output_metadata prepare_output_metadata(
     num_err > 0
       ? reinterpret_cast<int8_t*>(d_packed_readback.data() + valid_counts_size + total_sizes_bytes)
       : nullptr;
-  // Zero valid counts before atomicAdds; scans fill totals and callers initialize errors.
+  // Zero valid counts before atomicAdds; scans fill totals and callers pre-initialize errors.
   thrust::uninitialized_fill(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     reinterpret_cast<std::byte*>(d_valid_counts),
@@ -1394,14 +1397,15 @@ prepared_output_metadata prepare_output_metadata(
       d_error_slots, error_check_slots.data(), error_bytes, cudaMemcpyDefault, stream.get()));
   }
 
-  // Only flat counts below 2^31 use 32-bit indexing; accumulation remains 64-bit.
+  // Only flat counts below 2^31 take 32-bit indexing; accumulation stays 64-bit.
   auto const idx32 = num_paths * seg < (int64_t{1} << 31);
   scan_index_split const split_idx{seg, idx32 ? static_cast<int32_t>(seg) : 0};
   auto const lengths_it =
     thrust::make_transform_iterator(thrust::make_counting_iterator(int64_t{0}),
                                     cuda::proclaim_return_type<scan_accum_t>(batched_lengths_fn{
                                       d_pair_ptrs.data(), split_idx, depth_error}));
-  // Scan-by-key parallelizes the flat index space; the same gate chooses key width.
+  // Scan-by-key parallelizes across paths in the flat index space; the same 31-bit gate
+  // picks the key width.
   auto const keys32_it = thrust::make_transform_iterator(
     thrust::make_counting_iterator(int64_t{0}),
     cuda::proclaim_return_type<int32_t>(
@@ -1414,7 +1418,7 @@ prepared_output_metadata prepare_output_metadata(
   auto const scan_out_it = scattered_scan_output_iterator<cudf::size_type>{
     d_targets32.data(), split_idx, 0, d_total_sizes};
 
-  // CUB's flat item count stays 64-bit even on the 32-bit key path.
+  // CUB's flat item count stays 64-bit even when the key width is 32-bit.
   auto const scan_num_items           = num_paths * seg;
   auto const run_exclusive_sum_by_key = [&](auto const& keys_it) {
     auto const scan = [](auto&&... args) { return cub::DeviceScan::ExclusiveSumByKey(args...); };
@@ -1428,7 +1432,8 @@ prepared_output_metadata prepare_output_metadata(
   }
 
   {
-    // Each grid block owns one path's word slice; pair metadata bounds fit 32-bit grid indices.
+    // Each block owns one path's word slice; total_blocks stays below 2^31 (see the kernel
+    // comment above).
     auto const num_blocks_per_path =
       static_cast<int32_t>(cudf::detail::div_rounding_up_safe<int64_t>(rows, validity_block_size));
     auto const words_per_block = static_cast<int32_t>(
@@ -1448,7 +1453,7 @@ prepared_output_metadata prepare_output_metadata(
     CUDF_CUDA_TRY(cudaGetLastError());
   }
 
-  // Retain pinned D2H buffers through the caller or retry finisher's ordering sync.
+  // The pinned D2H buffer must outlive the caller's or retry finisher's ordering sync.
   auto h_packed_readback = cudf::detail::make_pinned_vector_async<std::byte>(
     static_cast<std::size_t>(readback_bytes), stream);
   CUDF_CUDA_TRY(cudaMemcpyAsync(h_packed_readback.data(),
@@ -1464,7 +1469,7 @@ prepared_output_metadata prepare_output_metadata(
                                   std::move(d_packed_readback),
                                   std::move(h_packed_readback),
                                   num_err,
-                                  false,  // the caller sets this after its error-readback sync
+                                  false,  // the caller sets this after its own error-readback sync
                                   std::move(h_pair_ptrs),
                                   std::move(h_mask_ptrs),
                                   std::move(h_targets32),
@@ -1473,10 +1478,10 @@ prepared_output_metadata prepare_output_metadata(
 }
 
 /**
- * Builds columns only after the caller has accepted depth/size flags for these paths.
- * Synchronizes the prepared readback unless already ordered, then rejects totals at the int32
- * factory threshold before allocating chars or exposing narrowed offsets. Pairs must retain the
- * same lengths/order used by preparation and readable input/scratch bytes through queued gather.
+ * Builds columns only after the caller accepts depth/size flags for these paths. Synchronizes
+ * the prepared readback unless already ordered, then rejects totals at the int32 factory
+ * threshold before allocating chars or exposing narrowed offsets. Pairs must keep the same
+ * lengths/order used by preparation, with readable input/scratch bytes through queued gather.
  * Moves offsets/masks into the results; zero paths returns none, zero rows returns empty strings.
  */
 std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
@@ -1501,13 +1506,13 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
     return output;
   }
 
-  // already_synced avoids a second sync on success; retry synchronizes here.
+  // already_synced skips a second sync on the success path; the retry path syncs here.
   if (!prepared.already_synced) { stream.sync(); }
   auto const* h_total_sizes  = prepared.h_total_sizes();
   auto const* h_valid_counts = prepared.h_valid_counts();
 
-  // Mirror the factory's int32 overflow threshold before exposing columns; large-strings
-  // builds would need an INT64 offsets branch here as well.
+  // Mirror the strings-column factory's int32 overflow threshold before exposing columns; a
+  // large-strings build would need an INT64 offsets branch here as well.
   auto const threshold = cudf::strings::get_offset64_threshold();
   for (int64_t p = 0; p < num_paths; ++p) {
     CUDF_EXPECTS(h_total_sizes[p] < threshold,
@@ -1528,7 +1533,7 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
                                         chars_buffers.back().data(),
                                         offsets_cols[p]->view().data<cudf::size_type>()});
   }
-  // Pair lengths must sum to the scanned total; the factory trusts this producer too.
+  // Pair lengths must sum to the scanned total; the strings-column factory trusts this producer.
   gather_chars_for_group(h_entries, rows, stream);
 
   std::vector<std::unique_ptr<cudf::column>> output;
@@ -1550,9 +1555,9 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
  * Builds a path subset from one prepared metadata owner: subset order p reads owner path
  * src_indices[p]. Reuses the owner's already-prepared offsets/masks/totals/validity (and its
  * already_synced ordering) so a caller whose subset was prepared with the full batch — e.g. the
- * retry's unflagged paths — skips a second prepare pass entirely. Packed-readback entries are
- * read at mapped owner indices; the owner's layout stays untouched. src_indices must be unique
- * and within the owner's path range; pairs_by_path holds the subset's spans in subset order.
+ * retry's unflagged paths — skips a second prepare pass. Packed-readback entries are read at
+ * mapped owner indices; the owner's layout stays untouched. src_indices must be unique and
+ * within the owner's path range; pairs_by_path holds the subset's spans in subset order.
  * Moves the mapped offsets/masks into the results.
  */
 std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
@@ -1587,8 +1592,8 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
   auto const* h_total_sizes  = prepared.h_total_sizes();
   auto const* h_valid_counts = prepared.h_valid_counts();
 
-  // Mirror the factory's int32 overflow threshold before exposing columns; large-strings
-  // builds would need an INT64 offsets branch here as well.
+  // Mirror the strings-column factory's int32 overflow threshold before exposing columns; a
+  // large-strings build would need an INT64 offsets branch here as well.
   auto const threshold = cudf::strings::get_offset64_threshold();
   for (int64_t p = 0; p < num_paths; ++p) {
     CUDF_EXPECTS(h_total_sizes[src_indices[p]] < threshold,
@@ -1611,7 +1616,7 @@ std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
                    chars_buffers.back().data(),
                    prepared.offsets_cols[src]->view().data<cudf::size_type>()});
   }
-  // Pair lengths must sum to the scanned total; the factory trusts this producer too.
+  // Pair lengths must sum to the scanned total; the strings-column factory trusts this producer.
   gather_chars_for_group(h_entries, rows, stream);
 
   std::vector<std::unique_ptr<cudf::column>> output;
@@ -1713,7 +1718,7 @@ constexpr int8_t k_merged_kind_dead = 3;
 /**
  * R=2 record: begin occupies bits 0..31, exclusive end bits 32..60, and kind bits 61..63.
  * begin=-1 is unset; kind=dead prevents a failed first occurrence from being resurrected.
- * The launcher admits this layout only when row bytes fit 29 end bits; updates are one plain word.
+ * The launcher admits this layout only when row bytes fit 29 end bits; updates are plain stores.
  */
 struct merged_path_packed {
   uint64_t word;
@@ -1796,16 +1801,16 @@ __device__ __forceinline__ void merged_rec_set(merged_path_packed& r,
                                                int32_t end,
                                                int8_t kind)
 {
-  // Only row_lane 0 of the record's own half-warp publishes, and the sibling half-warp walks a
+  // Only row_lane 0 of the record's half-warp publishes, and the sibling half-warp walks a
   // different row's records, so this thread is the record's sole writer; the post-walk
-  // __syncwarp(row_mask) orders the plain store before the other lanes' plain reads.
+  // __syncwarp(row_mask) orders the plain store before the sibling lanes' plain reads.
   uint64_t const image = static_cast<uint64_t>(static_cast<uint32_t>(begin)) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(end)) << 32) |
                          (static_cast<uint64_t>(static_cast<uint8_t>(kind)) << 61);
   r.word = image;
 }
-// Read the packed record; only the record's single writer precedes it, and the walk barrier
-// orders that store before these loads.
+// Read the packed record; the record's sole writer precedes these loads, and the walk barrier
+// orders that store first.
 __device__ __forceinline__ uint64_t merged_rec_word(merged_path_packed const& r) { return r.word; }
 __device__ __forceinline__ bool merged_rec_is_set(merged_path_packed const& r)
 {
@@ -1814,7 +1819,7 @@ __device__ __forceinline__ bool merged_rec_is_set(merged_path_packed const& r)
 __device__ __forceinline__ void merged_rec_mark_dead(merged_path_packed& r)
 {
   // A dead record must never resurrect, and an already-set record must never be killed. The
-  // record has a single writer (row_lane 0 of its own half-warp), so the check-then-store is
+  // record has a sole writer (row_lane 0 of its own half-warp), so check-then-store is
   // race-free: dead-mark and first-set both happen inside this lane's walk.
   if (static_cast<int32_t>(static_cast<uint32_t>(merged_rec_word(r))) >= 0) { return; }
   r.word = (merged_rec_word(r) & ~(7ull << 61)) |
@@ -1824,8 +1829,8 @@ __device__ __forceinline__ int8_t merged_rec_kind(merged_path_packed const& r)
 {
   return static_cast<int8_t>((merged_rec_word(r) >> 61) & 7);
 }
-// The packed variant decodes all fields from one 8-byte word; only row_lane 0 publishes
-// (see merged_rec_set), and the walk barrier covers the pre-barrier reset/init ordering.
+// The packed variant decodes all fields from one 8-byte word; only the record's sole writer
+// publishes (see merged_rec_set), and the walk barrier covers the pre-barrier reset/init ordering.
 __device__ __forceinline__ merged_rec_view merged_rec_load(merged_path_packed const& r)
 {
   uint64_t const word = merged_rec_word(r);
@@ -2194,7 +2199,7 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     };
 
     auto const record_subtree = [&](int32_t slot, int32_t begin, int32_t end) {
-      // Non-owner lanes must not pay the certify scan; their record write is dropped anyway.
+      // Non-owner lanes skip the certify scan; their record write would be dropped anyway.
       if (!records_owner) { return; }
       // A certificate borrows input through gather; false only selects normalized serialization.
       bool const raw = certify_raw_subtree(str.data() + begin, end - begin);
@@ -3072,8 +3077,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  launch_staging,
                  stream);
 
-  // Check errors before consuming prepared totals; one sync orders both readbacks.
-  // Below the gate, error readback and both output sites keep the factory path.
+  // Check errors before consuming prepared totals; one sync orders both readbacks. Below the
+  // gate, error readback and both output sites stay on the strings-column factory path.
   bool const use_packed_readback = num_outputs >= packed_readback_min_paths;
   std::optional<prepared_output_metadata> prepared_metadata;
   if (use_packed_readback) {
@@ -3081,7 +3086,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
       input, all_stringviews, stream, mr, cudf::device_span<int8_t>{d_error_check});
   }
 
-  // Both routes order H2D sources; a small batch reads error markers directly.
+  // Both routes order their H2D sources; a small batch reads error markers directly.
   bool has_no_oob = false;
   cudf::host_span<int8_t const> error_markers;
   std::optional<cudf::detail::host_vector<int8_t>> h_error_check;
@@ -3161,11 +3166,11 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
   auto no_oob_stringviews = assemble_stringviews(no_oob_indices.begin(), no_oob_indices.size());
-  // Same admission gate as the happy site: a small batch builds retry columns
-  // with make_strings_column_batch, a large one reuses the packed machinery. The packed
-  // branch finishes the unflagged subset from the first-pass metadata (already synced) so
-  // the subset's offsets/masks/readback are not prepared a second time; prepared_metadata
-  // stays alive through the mapped finish and dies at function end.
+  // Same admission gate as the happy path: a small batch builds retry columns with
+  // make_strings_column_batch, a large one reuses the packed machinery. The packed branch
+  // finishes the unflagged subset from the first-pass metadata (already synced), so the
+  // subset's offsets/masks/readback are not prepared a second time; prepared_metadata stays
+  // alive through the mapped finish and dies at function end.
   if (!use_packed_readback) {
     auto no_oob_output = cudf::make_strings_column_batch(no_oob_stringviews, stream, mr);
     for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
@@ -3179,10 +3184,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     }
   }
 
-  // The flat pair storage stays alive through the retry: the retry kernel overwrites the
-  // flagged paths' pairs in place, and the rebuild below reads them after the retry.
-  // Clearing here releases the first-pass per-path scratch buffers; the flat pair storage the
-  // retry reads lives in out_stringviews and stays alive until the rebuild.
+  // The flat pair storage in out_stringviews stays alive through the retry: the retry kernel
+  // overwrites the flagged paths' pairs in place, and the rebuild below reads them after the
+  // retry. Clearing here releases only the first-pass per-path scratch buffers.
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
@@ -3214,14 +3218,14 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
   // Rebuild the retried columns from their post-retry pairs while the flat pair storage is
-  // still alive; the release below may only happen after the last consumer is enqueued. One
-  // batched factory call syncs all sizes once instead of twice per column.
+  // alive; the release below must wait for the last consumer. One batched factory call syncs
+  // all sizes once instead of twice per column.
   std::vector<std::pair<stringview_pair const*, cudf::size_type>> retry_ranges;
   retry_ranges.reserve(oob_indices.size());
   for (auto const out_idx : oob_indices) {
     auto const out_sview = stringview_span_of(out_idx);
-    // Rebuild from the retry's committed pairs: the pre-retry offsets only size the scratch
-    // slots, so adopting them as logical offsets would leak unwritten trailing bytes into rows.
+    // Rebuild from the retry's committed pairs: pre-retry offsets only size the scratch slots,
+    // so adopting them as logical offsets would leak unwritten trailing bytes into rows.
     retry_ranges.emplace_back(out_sview.data(), static_cast<cudf::size_type>(out_sview.size()));
   }
   auto retry_output = cudf::strings::detail::make_strings_column_batch(

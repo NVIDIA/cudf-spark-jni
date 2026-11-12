@@ -1422,7 +1422,8 @@ TEST_F(GetJsonObjectTest, DegenerateEmptyAndAllNullInputs)
 
 TEST_F(GetJsonObjectTest, SingleOutputBypassRoutes)
 {
-  // A single path bypasses batching both normally and after an OOB retry.
+  // A single path skips the merged route and the packed-readback gate (both need >= 8 paths)
+  // both normally and after an OOB retry.
   {
     auto const rows = alt_rows(64, R"({"k":{"v":"even"}})", R"({"x":{"v":"odd"}})");
     auto out        = run_fused(cudf::strings_column_view{col_from(rows)}, named_depth2({"k"}));
@@ -1503,7 +1504,8 @@ TEST_F(GetJsonObjectTest, L2FixProdShapeSharedStringviewsParity)
   ASSERT_EQ(out135.size(), 135u);
 
   // Every column of both outputs is compared elementwise (values + validity) against a
-  // single-path evaluation of the same query; 300 rows (> 256) forces a partial final word.
+  // single-path evaluation of the same query. 300 rows exceeds the 256-row validity block, so
+  // the final mask word of each path is partial and exercises the tail-mask path.
   std::mt19937_64 rng33{7};
   auto const rows33_wide = nested_build_rows(rng33, nested_table_33(), 300, 4 * 1024, 7);
   rng33.seed(7);
@@ -1906,9 +1908,9 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
 
 TEST_F(GetJsonObjectTest, MergedRouteValueKindParity)
 {
-  // The merged route's terminal kinds: rows whose 16 member values cycle through an
-  // escaped string (its writer must emit the escaped bytes verbatim), a bare number,
-  // a boolean, and an array (raw copy without re-tokenization). Every column checks
+  // The merged route's terminal kinds: rows whose 16 member values cycle through an escaped
+  // string (the writer decodes validated escapes, so the output carries a bare quote), a bare
+  // number, a boolean, and an array (raw copy without re-tokenization). Every column checks
   // parity with its single-path oracle.
   std::vector<std::string> rows;
   rows.reserve(64);
@@ -2306,10 +2308,10 @@ TEST_F(GetJsonObjectTest, MergedRetryMixedFlaggedUnflaggedParity)
 }
 
 // The R=2 packed walk engages when rows exceed one resident walk round (rows >
-// sm_count * k_resident_warps_per_sm with 8 resident blocks x 4 warps per SM, so 960 rows on a
-// 30-SM GPU and 4224 on a 132-SM H100); rows are queried off the device so the threshold holds
-// wherever this runs. An expanding row forces the retry through the packed subset finish and
-// the batched rebuild on top of the R=2 walk.
+// sm_count * k_resident_warps_per_sm with 8 resident blocks x 4 warps per block, so 960 rows on
+// a 30-SM GPU and 4224 on a 132-SM H100); the test queries sm_count from the device so the
+// threshold holds on any GPU. An expanding row forces the retry through the packed subset
+// finish and the batched rebuild on top of the R=2 walk.
 TEST_F(GetJsonObjectTest, MergedRouteR2RowsParity)
 {
   int current_device = 0;
