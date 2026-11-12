@@ -22,6 +22,7 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
+#include <cudf/detail/utilities/buffer_factories.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -1180,7 +1181,8 @@ void run_cub_two_phase(Operation operation, cuda::stream_ref stream, Args const&
 {
   std::size_t bytes = 0;
   CUDF_CUDA_TRY(operation(nullptr, bytes, args..., stream.get()));
-  rmm::device_buffer temp(bytes, stream);
+  auto temp = cuda::device_buffer<std::byte>(
+    stream, cudf::get_current_device_resource_ref(), bytes, cuda::no_init);
   CUDF_CUDA_TRY(operation(temp.data(), bytes, args..., stream.get()));
 }
 
@@ -1261,11 +1263,11 @@ void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
 struct prepared_output_metadata {
   std::vector<std::unique_ptr<cudf::column>> offsets_cols;
   std::vector<cuda::device_buffer<cudf::bitmask_type>> null_masks;
-  rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type> const*> d_pair_ptrs;
-  rmm::device_uvector<cudf::bitmask_type*> d_mask_ptrs;
-  rmm::device_uvector<int32_t*> d_targets32;
+  cuda::device_buffer<cuda::std::pair<char const*, cudf::size_type> const*> d_pair_ptrs;
+  cuda::device_buffer<cudf::bitmask_type*> d_mask_ptrs;
+  cuda::device_buffer<int32_t*> d_targets32;
   // Pinned readback layout: [valid_counts][8-aligned total_sizes][error_check].
-  rmm::device_uvector<std::byte> d_packed_readback;
+  cuda::device_buffer<std::byte> d_packed_readback;
   cudf::detail::host_vector<std::byte> h_packed_readback;
   int64_t num_err{};
   bool already_synced{};
@@ -1321,14 +1323,15 @@ prepared_output_metadata prepare_output_metadata(
   auto const num_err   = static_cast<int64_t>(error_check_slots.size());
 
   if (num_paths == 0 || rows == 0) {
-    // device_uvector requires a stream-bound zero-size allocation even for empty outputs.
+    // Buffers must carry the allocation stream even when they hold no elements.
     return prepared_output_metadata{
       {},
       {},
-      rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type> const*>(0, stream),
-      rmm::device_uvector<cudf::bitmask_type*>(0, stream),
-      rmm::device_uvector<int32_t*>(0, stream),
-      rmm::device_uvector<std::byte>(0, stream),
+      cuda::device_buffer<cuda::std::pair<char const*, cudf::size_type> const*>{
+        stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<cudf::bitmask_type*>{stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<int32_t*>{stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<std::byte>{stream, cudf::get_current_device_resource_ref()},
       cudf::detail::host_vector<std::byte>(0, {cudf::get_pinned_memory_resource(), stream}),
       0,      // degenerate: no packed readback was enqueued; the caller reads d_error_check itself
       false,  // nothing was enqueued; the finisher's degenerate paths return before any sync
@@ -1367,19 +1370,19 @@ prepared_output_metadata prepare_output_metadata(
     h_mask_ptrs.emplace_back(null_masks.back().data());
     h_targets32.emplace_back(offsets_cols.back()->mutable_view().data<cudf::size_type>());
   }
-  auto d_pair_ptrs = cudf::detail::make_device_uvector_async(
+  auto d_pair_ptrs = cudf::detail::make_device_buffer_async(
     h_pair_ptrs, stream, cudf::get_current_device_resource_ref());
-  auto d_mask_ptrs = cudf::detail::make_device_uvector_async(
+  auto d_mask_ptrs = cudf::detail::make_device_buffer_async(
     h_mask_ptrs, stream, cudf::get_current_device_resource_ref());
-  auto d_targets32 = cudf::detail::make_device_uvector_async(
+  auto d_targets32 = cudf::detail::make_device_buffer_async(
     h_targets32, stream, cudf::get_current_device_resource_ref());
 
   auto const valid_counts_size = valid_counts_bytes(num_paths);
   auto const total_sizes_bytes = static_cast<std::size_t>(num_paths) * sizeof(int64_t);
   auto const error_bytes       = static_cast<std::size_t>(num_err);
   auto const readback_bytes    = valid_counts_size + total_sizes_bytes + error_bytes;
-  rmm::device_uvector<std::byte> d_packed_readback(
-    readback_bytes, stream, cudf::get_current_device_resource_ref());
+  auto d_packed_readback       = cuda::device_buffer<std::byte>(
+    stream, cudf::get_current_device_resource_ref(), readback_bytes, cuda::no_init);
   auto* const d_valid_counts = reinterpret_cast<cudf::size_type*>(d_packed_readback.data());
   auto* const d_total_sizes =
     reinterpret_cast<int64_t*>(d_packed_readback.data() + valid_counts_size);
@@ -2732,6 +2735,7 @@ void launch_merged_named(cudf::column_device_view const& input,
  */
 struct launch_grouped_staging {
   std::optional<cudf::detail::host_vector<std::byte>> h_prewalk_pack;
+  // `cuda::device_buffer` has no default ctor; empty until `launch_grouped` populates it.
   std::optional<cuda::device_buffer<std::byte>> d_prewalk_pack;
   std::vector<std::vector<json_path_processing_data>> group_staging;
   std::vector<merged_group_plan> merged_plans;
@@ -3022,8 +3026,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   using stringview_pair = cuda::std::pair<char const*, cudf::size_type>;
   auto const rows       = static_cast<std::size_t>(input.size());
   // `second` = write footprint for OOB rows, else committed result length.
-  rmm::device_uvector<stringview_pair> out_stringviews(num_outputs * rows, stream);
-  std::vector<rmm::device_uvector<char>> scratch_buffers;
+  auto out_stringviews =
+    cuda::device_buffer<stringview_pair>(stream, mr, num_outputs * rows, cuda::no_init);
+  std::vector<cuda::device_buffer<char>> scratch_buffers;
   scratch_buffers.reserve(num_outputs);
   std::vector<json_path_processing_data> h_path_data;
   h_path_data.reserve(num_outputs);
@@ -3050,7 +3055,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
       CUDF_FAIL("JSON Path has depth exceeds the maximum allowed value.");
     }
 
-    scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
+    scratch_buffers.emplace_back(
+      cuda::device_buffer<char>(stream, mr, scratch_size, cuda::no_init));
     h_path_data.emplace_back(json_path_processing_data{d_json_paths[idx],
                                                        in_offsets,
                                                        base_offset,
@@ -3198,7 +3204,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
 
   // The flat pair storage in out_stringviews stays alive through the retry: the retry kernel
   // overwrites the flagged paths' pairs in place, and the rebuild below reads them after the
-  // retry. Clearing here releases only the first-pass per-path scratch buffers.
+  // retry. Clearing here frees only the first-pass per-path scratch buffers.
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
@@ -3230,8 +3236,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
   // Rebuild the retried columns from their post-retry pairs while the flat pair storage is
-  // alive; the release below must wait for the last consumer. One batched factory call syncs
-  // all sizes once instead of twice per column.
+  // alive; the deallocation below must wait for the last consumer. One batched factory call
+  // syncs all sizes once instead of twice per column.
   std::vector<std::pair<stringview_pair const*, cudf::size_type>> retry_ranges;
   retry_ranges.reserve(oob_indices.size());
   for (auto const out_idx : oob_indices) {
@@ -3243,12 +3249,12 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   auto retry_output = cudf::strings::detail::make_strings_column_batch(
     retry_ranges,
     [&out_stringviews, count = retry_ranges.size()](std::size_t idx) {
-      if (idx + 1 == count) { (void)out_stringviews.release(); }
+      if (idx + 1 == count) { out_stringviews.destroy(); }
     },
     stream,
     mr);
   // The rebuilt columns no longer reference the first-pass scratch buffers or the retry-stage
-  // views; out_stringviews's release above is the last consumer boundary.
+  // views; the deallocation above is the last consumer boundary.
   for (std::size_t i = 0; i < oob_indices.size(); ++i) {
     output[oob_indices[i]] = std::move(retry_output[i]);
   }
