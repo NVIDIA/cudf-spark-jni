@@ -1,11 +1,10 @@
 # Sonar runner pilot
 
-Test-only validation on dummy PRs #5400 and #5431. Do not merge the Java fixtures.
-A maintainer applies `sonar-runner-pilot` to approve each current same-repository
+Test-only validation on dummy PR #5400. Do not merge the deliberate Java findings.
+A maintainer applies `sonar-runner-pilot` to approve the current same-repository
 head. New commits require a new label event; ordinary pushes do not run the pilot.
-Each PR serializes its complete workflow and Sonar analysis/collection. The two
-PRs can run concurrently without sharing Sonar analysis state. Keep one active
-run per PR and wait for terminal results before changing its fixture.
+The workflow serializes each PR through Sonar processing and result collection.
+Different PRs may scan concurrently in production; this pilot allows only #5400.
 
 The workflow validates common PR #77 at the reviewed commit
 `962872d1f2f2647df7da157941b8496c3bd25a9f` with this path:

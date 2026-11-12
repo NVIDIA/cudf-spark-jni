@@ -23,7 +23,7 @@ on:
 
 permissions: {}
 
-# Keep each PR serialized; separate pilot PRs can exercise both runners.
+# Serialize this PR through scanning and collection to preserve analysis order.
 concurrency:
   group: sonar-runner-pilot-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -32,7 +32,7 @@ jobs:
   authorize:
     if: >-
       github.event.label.name == 'sonar-runner-pilot' &&
-      contains(fromJSON('[5400, 5431]'), github.event.pull_request.number) &&
+      github.event.pull_request.number == 5400 &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -143,10 +143,6 @@ jobs:
 
   scan:
     needs: [authorize, security, compile]
-    # Sonar needs chronological analysis and collection for each PR.
-    concurrency:
-      group: sonar-runner-pilot-scan-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, spark-sonar-internal]
     timeout-minutes: 30
     outputs:
