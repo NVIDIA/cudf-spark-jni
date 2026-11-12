@@ -282,9 +282,7 @@ rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
   CUDF_EXPECTS(cuda::std::distance(node_levels.begin(), copy_end) == num_nodes,
                "Node level count mismatch.");
 
-#ifdef DEBUG_FROM_JSON
   print_debug(node_levels, "Node levels", ", ", stream);
-#endif
   return node_levels;
 }
 
@@ -303,9 +301,7 @@ rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
   CUDF_EXPECTS(cuda::std::distance(node_token_ids.begin(), copy_end) == num_nodes,
                "Invalid computation for node-to-token-index map.");
 
-#ifdef DEBUG_FROM_JSON
   print_map_debug(node_token_ids, "Node-to-token-index map", stream);
-#endif
   return node_token_ids;
 }
 
@@ -409,9 +405,7 @@ rmm::device_uvector<NodeIndexT> compute_parent_node_ids(
   auto const node_levels = compute_node_levels(num_nodes, tokens, stream);
   propagate_parent_to_siblings(node_levels, parent_node_ids, stream);
 
-#ifdef DEBUG_FROM_JSON
   print_debug(parent_node_ids, "Parent node ids", ", ", stream);
-#endif
   return parent_node_ids;
 }
 
@@ -457,9 +451,7 @@ rmm::device_uvector<node_kind> check_key_or_value_nodes(
         return node_kind::none;
       }));
 
-#ifdef DEBUG_FROM_JSON
   print_debug(key_or_value, "Nodes are key/value (1==key, 2==value)", ", ", stream);
-#endif
   return key_or_value;
 }
 
@@ -519,14 +511,14 @@ tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
     stream,
     cudf::get_current_device_resource_ref());
 
-#ifdef DEBUG_FROM_JSON
   print_debug(tokens, "Tokens", ", ", stream);
   print_debug(token_positions, "Token positions", ", ", stream);
-  std::cerr << "normalize_single_quotes: " << options.normalize_single_quotes << std::endl;
-  std::cerr << "allow_leading_zeros: " << options.allow_leading_zeros << std::endl;
-  std::cerr << "allow_nonnumeric_numbers: " << options.allow_nonnumeric_numbers << std::endl;
-  std::cerr << "allow_unquoted_control: " << options.allow_unquoted_control << std::endl;
-#endif
+  if constexpr (debug_from_json) {
+    std::cerr << "normalize_single_quotes: " << options.normalize_single_quotes << std::endl;
+    std::cerr << "allow_leading_zeros: " << options.allow_leading_zeros << std::endl;
+    std::cerr << "allow_nonnumeric_numbers: " << options.allow_nonnumeric_numbers << std::endl;
+    std::cerr << "allow_unquoted_control: " << options.allow_unquoted_control << std::endl;
+  }
 
   auto const num_nodes = static_cast<cudf::size_type>(
     thrust::count_if(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
@@ -699,9 +691,7 @@ rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> compute_node_
     node_ranges.begin(),
     node_ranges_fn{tokens, token_positions, node_token_ids, parent_node_ids, key_or_value});
 
-#ifdef DEBUG_FROM_JSON
   print_pair_debug(node_ranges, "Node ranges", stream);
-#endif
   return node_ranges;
 }
 
@@ -803,9 +793,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
                        atomicAdd(&child_counts[parent_id], 1);
                      }
                    });
-#ifdef DEBUG_FROM_JSON
   print_debug(node_child_counts, "Nodes' child keys counts", ", ", stream);
-#endif
 
   auto list_offsets   = rmm::device_uvector<cudf::size_type>(n_lists + 1, stream, mr);
   auto const copy_end = copy_if(
@@ -816,17 +804,13 @@ std::unique_ptr<cudf::column> compute_list_offsets(
     stream);
   CUDF_EXPECTS(cuda::std::distance(list_offsets.begin(), copy_end) == static_cast<int64_t>(n_lists),
                "Invalid list size computation.");
-#ifdef DEBUG_FROM_JSON
   print_debug(list_offsets, "Output list sizes (except the last one)", ", ", stream);
-#endif
 
   thrust::exclusive_scan(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                          list_offsets.begin(),
                          list_offsets.end(),
                          list_offsets.begin());
-#ifdef DEBUG_FROM_JSON
   print_debug(list_offsets, "Output list offsets", ", ", stream);
-#endif
   return std::make_unique<cudf::column>(
     std::move(list_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
 }
@@ -890,12 +874,10 @@ std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type> create_null_
             is_invalid_struct_begin{tokens, node_token_ids, token_positions},
             stream);
   auto const num_invalid = cuda::std::distance(invalid_indices.begin(), invalid_copy_end);
-#ifdef DEBUG_FROM_JSON
   print_debug(invalid_indices,
               "Invalid StructBegin nodes' indices (size = " + std::to_string(num_invalid) + ")",
               ", ",
               stream);
-#endif
 
   // In addition to `should_be_nullified` which identified the null and empty rows,
   // we also need to identify the rows containing invalid JSON objects.
@@ -919,12 +901,10 @@ std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type> create_null_
         cuda::std::distance(computed_line_begin.begin(), line_begin_copy_end);
       CUDF_EXPECTS(num_line_begin == num_rows, "Incorrect count of JSON objects.");
       line_begin_indices = computed_line_begin.data();
-#ifdef DEBUG_FROM_JSON
       print_debug(computed_line_begin,
                   "Line begin StructBegin indices (size = " + std::to_string(num_line_begin) + ")",
                   ", ",
                   stream);
-#endif
     }
 
     // Scatter the indices of the invalid StructBegin nodes into `should_be_nullified`.
@@ -1069,9 +1049,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto list_offsets =
     compute_list_offsets(input.size(), parent_node_ids, is_key_or_value_node, stream, mr);
 
-#ifdef DEBUG_FROM_JSON
   print_output_spark_map(list_offsets, extracted_keys, extracted_values, stream);
-#endif
 
   auto const num_pairs = extracted_keys->size();
   std::vector<std::unique_ptr<cudf::column>> out_keys_vals;
