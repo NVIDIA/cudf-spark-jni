@@ -637,16 +637,16 @@ multi_paths named_depth2(std::vector<std::string> const& keys)
 }
 
 /// The shared 8-key depth-2 batch of the abort and malformed-input tests. The raw group is
-/// 8 paths over 3 roots (2.67 < 3.15), so `run_merged_vs_general`'s fan-out deficit padding
-/// is what admits it to the merged route; every abort case rides the `$.a.v` chain (see
-/// MergedRouteDuplicateFirstValueAborts).
+/// 8 paths over 3 roots but only 3 distinct paths (2.67 < 3.15), so `run_merged_vs_general`'s
+/// padding is what admits it to the merged route (the 16-path floor dominates the deficit);
+/// every abort case rides the `$.a.v` chain.
 multi_paths const eight_key_paths = named_depth2({"a", "a", "a", "a", "b", "b", "zz", "zz"});
 
 void pad_paths(multi_paths& paths, int from)
 {
   // Pads ride the new root `pad0` (the callers' own roots are a/b/zz or k/u) plus fresh
-  // children; `pad0` adds a distinct root, and the helper's fan-out deficit padding supplies
-  // the path count that keeps the small groups admissible under the 3.15 gate.
+  // children; `pad0` adds one distinct root, and the helper's deficit padding (dominated by
+  // the 16-path floor) supplies the path count that clears the 3.15 fan-out gate.
   paths.resize(8);
   for (int p = from; p < 8; ++p) {
     paths[p] = named({"pad0", "v" + std::to_string(p)});
@@ -685,9 +685,9 @@ std::pair<multi_outputs, multi_outputs> run_merged_vs_general(std::vector<std::s
   // first 7 paths on the general route. Pads extend the group so distinct paths >= max(16,
   // ceil(3.15 x distinct roots)) by round-robin over the caller's own roots, so the padded
   // group keeps the caller's root count and admission holds; pad columns carry no assertions.
-  // Shallow admission counts
-  // only all-NAMED paths of depth <= 2, so a depth-3 call-site path stays general and does not
-  // count. Every call site passes 64 rows (>= the 32-row admission floor).
+  // Shallow admission counts only all-NAMED paths of depth <= 2, so a depth-3 call-site path
+  // stays general and does not count. Every call site passes 64 rows (>= the 32-row admission
+  // floor).
   auto const general_count = std::min<std::size_t>(7, merged_paths.size());
   auto const general_paths = first_n(merged_paths, general_count);
   auto padded              = merged_paths;
@@ -759,9 +759,10 @@ std::string quote_bomb_value(int n)
 
 TEST_F(GetJsonObjectTest, MergedRouteEmptyRowsParity)
 {
-  // Empty rows must null every path rather than leave unwritten stringviews. Four roots keep
-  // the group admissible; the w-children cover the same roots' alternate children (all miss),
-  // and only $.k0.v matches an object row.
+  // Empty rows must null every path rather than leave unwritten stringviews. The 8 distinct
+  // paths over 4 roots (2.0 < 3.15) fail the fan-out gate on their own, so the helper's
+  // padding admits the group; the w-children cover the same roots' alternate children (all
+  // miss), and only $.k0.v matches an object row.
   auto const rows = alt_rows(64, R"({"k0":{"v":"v0"},"k1":{"v":"v1"}})", "");
 
   auto merged_paths = named_depth2({"k0", "k0", "k1", "k1", "miss0", "miss0", "miss1", "miss1"});
@@ -1043,8 +1044,9 @@ TEST_F(GetJsonObjectTest, OutOfBoundWriteRetryRelaunch)
 
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[0], expect, true));
   ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*batch_out[1], "U", true));
-  // The pads ride the added `pad0` root; with 8 paths over 3 roots (2.67 < 3.15) admission
-  // comes from the helper's fan-out deficit padding reaching 10 distinct paths (200 >= 189).
+  // The pads ride the added `pad0` root; with 8 distinct paths over 3 roots (2.67 < 3.15)
+  // the fan-out deficit alone is only 2, so admission comes from the 16-path floor: the
+  // helper pads to 16 distinct paths (320 >= 189).
   for (std::size_t col = 2; col < 8; ++col) {
     SCOPED_TRACE("retry pad column " + std::to_string(col));
     EXPECT_EQ(batch_out[col]->null_count(), 64);
@@ -1159,7 +1161,7 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
                         "missing8"}) {
     paths.push_back(named({"r", k}));
   }
-  // 2 depth-2 NAMED paths ($.r.x.y):
+  // 2 depth-2 NAMED paths ($.r.x.y and $.q.x.y):
   paths.push_back(named({"r", "x", "y"}));
   paths.push_back(named({"q", "x", "y"}));
 
@@ -1186,7 +1188,7 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
 
 TEST_F(GetJsonObjectTest, MergedRouteRootFanoutRoutingParity)
 {
-  // The reviewer's flat-wide shape: 15 distinct top-level roots plus one depth-2 member (16
+  // The flat-wide shape: 15 distinct top-level roots plus one depth-2 member (16
   // paths over 16 distinct roots) fails the 3.15 fan-out floor, so the group takes the general
   // route — its output must still equal single-path evaluation. The same paths over a single
   // shared root admit the merged route and must produce identical output: routing, not

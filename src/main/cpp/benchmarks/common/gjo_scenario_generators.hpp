@@ -434,7 +434,7 @@ inline std::vector<nested_prefix_entry> const& nested_table_33()
  * short names plus one depth-two path `$.zz_nested.x`. The rows carry
  * `member_count` top-level members (filler string members absorb the row
  * budget), so the same 16 paths run over both the 50- and the 150-member
- * layouts from the caller's size axis.
+ * layouts selected on the caller's `num_paths` axis.
  */
 inline multi_paths flat_mixed_build_paths()
 {
@@ -534,8 +534,8 @@ inline std::vector<std::string> flat_mixed_64_build_rows(std::mt19937_64& rng,
 
 /**
  * @brief Paths for the wide flat shape: 15 top-level field paths (no nested
- * path) at a moderate path count, measured over rows of 600 top-level
- * members (filler members absorb the row budget).
+ * path), measured over rows of 600 top-level members (filler members absorb
+ * the row budget).
  */
 inline multi_paths flat_600_build_paths()
 {
