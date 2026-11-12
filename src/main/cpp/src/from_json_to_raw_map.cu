@@ -37,6 +37,7 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/device/device_select.cuh>
 #include <cuda/atomic>
+#include <cuda/buffer>
 #include <cuda/functional>
 #include <cuda/std/functional>
 #include <cuda/std/limits>
@@ -180,7 +181,7 @@ std::unique_ptr<cudf::column> make_empty_map(cuda::stream_ref stream,
 
 // Concatenating all input strings into one string, for which each input string is appended by a
 // delimiter character that does not exist in the input column.
-std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_strings(
+std::tuple<cuda::device_buffer<char>, char, std::unique_ptr<cudf::column>> unify_json_strings(
   cudf::strings_column_view const& input, cuda::stream_ref stream)
 {
   auto const default_mr = cudf::get_current_device_resource_ref();
@@ -188,14 +189,16 @@ std::tuple<rmm::device_buffer, char, std::unique_ptr<cudf::column>> unify_json_s
     concat_json(input, /*nullify_invalid_rows*/ true, stream, default_mr);
 
   if (concatenated_buff->size() == 0) {
-    return {std::move(*concatenated_buff), delimiter, std::move(should_be_nullified)};
+    return {
+      cuda::device_buffer<char>{stream, default_mr}, delimiter, std::move(should_be_nullified)};
   }
 
   // Append the delimiter to the end of the concatenated buffer.
   // This is to fix a bug when the last string is invalid
   // (https://github.com/nvidia/cudf/issues/16999).
   // The bug was fixed in libcudf's JSON reader by the same way like this.
-  auto unified_buff = rmm::device_buffer(concatenated_buff->size() + 1, stream, default_mr);
+  auto unified_buff =
+    cuda::device_buffer<char>(stream, default_mr, concatenated_buff->size() + 1, cuda::no_init);
   CUDF_CUDA_TRY(cudaMemcpyAsync(unified_buff.data(),
                                 concatenated_buff->data(),
                                 concatenated_buff->size(),
@@ -467,10 +470,10 @@ rmm::device_uvector<node_kind> check_key_or_value_nodes(
 // move preserves the underlying device allocation (no realloc), so the span stays valid across the
 // struct's move out of the helper.
 struct tokenized_input {
-  cudf::io::datasource::owning_buffer<rmm::device_buffer> concat_buff_wrapper;
+  cudf::io::datasource::owning_buffer<cuda::device_buffer<char>> concat_buff_wrapper;
   cudf::device_span<char const> preprocessed_input;
-  rmm::device_uvector<PdaTokenT> tokens;
-  rmm::device_uvector<SymbolOffsetT> token_positions;
+  cuda::device_buffer<PdaTokenT> tokens;
+  cuda::device_buffer<SymbolOffsetT> token_positions;
   std::unique_ptr<cudf::column> should_be_nullified;
   cudf::size_type num_nodes;
   rmm::device_uvector<NodeIndexT> node_token_ids;
@@ -487,7 +490,7 @@ tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
 {
   auto [concat_json_buff, delimiter, should_be_nullified] = unify_json_strings(input, stream);
   auto concat_buff_wrapper =
-    cudf::io::datasource::owning_buffer<rmm::device_buffer>(std::move(concat_json_buff));
+    cudf::io::datasource::owning_buffer<cuda::device_buffer<char>>(std::move(concat_json_buff));
   if (options.normalize_single_quotes) {
     cudf::io::json::detail::normalize_single_quotes(
       concat_buff_wrapper, delimiter, stream, cudf::get_current_device_resource_ref());

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,15 @@
 
 #ifdef DEBUG_FROM_JSON
 
+#include <cudf/column/column.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
 #include <cudf/strings/strings_column_view.hpp>
-
-//
-#include <rmm/device_uvector.hpp>
+#include <cudf/utilities/span.hpp>
 
 #include <cuda/stream>
 
-//
+#include <iostream>
 #include <sstream>
 
 namespace spark_rapids_jni {
@@ -58,14 +57,14 @@ std::string token_to_string(PdaTokenT const token_type)
 }
 
 // Print the content of the input device vector.
-template <typename T, typename U = int>
-void print_debug(rmm::device_uvector<T> const& input,
+template <typename Buffer, typename U = int>
+void print_debug(Buffer const& input,
                  std::string const& name,
                  std::string const& separator,
                  cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector_sync(
-    cudf::device_span<T const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(
+    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -76,13 +75,11 @@ void print_debug(rmm::device_uvector<T> const& input,
 }
 
 // Print the content of the input map given by a device vector.
-template <typename T, typename U = int>
-void print_map_debug(rmm::device_uvector<T> const& input,
-                     std::string const& name,
-                     cuda::stream_ref stream)
+template <typename Buffer, typename U = int>
+void print_map_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector_sync(
-    cudf::device_span<T const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(
+    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -92,13 +89,11 @@ void print_map_debug(rmm::device_uvector<T> const& input,
 }
 
 // Print the content of the input pairs given by a device vector.
-template <typename T, typename U = int>
-void print_pair_debug(rmm::device_uvector<T> const& input,
-                      std::string const& name,
-                      cuda::stream_ref stream)
+template <typename Buffer, typename U = int>
+void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector_sync(
-    cudf::device_span<T const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(
+    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -119,31 +114,30 @@ void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
     return;
   }
 
-  auto const keys_sv      = cudf::strings_column_view{extracted_keys->view()};
-  auto const values_sv    = cudf::strings_column_view{extracted_values->view()};
-  auto const keys_offsets = extracted_keys->child(cudf::strings_column_view::offsets_column_index);
-  auto const values_offsets =
-    extracted_values->child(cudf::strings_column_view::offsets_column_index);
+  auto const keys_sv        = cudf::strings_column_view{extracted_keys->view()};
+  auto const values_sv      = cudf::strings_column_view{extracted_values->view()};
+  auto const keys_offsets   = keys_sv.offsets();
+  auto const values_offsets = values_sv.offsets();
 
-  auto const h_extracted_keys_child = cudf::detail::make_host_vector_sync(
+  auto const h_extracted_keys_child = cudf::detail::make_host_vector(
     cudf::device_span<char const>{keys_sv.chars_begin(stream),
                                   static_cast<size_t>(keys_sv.chars_size(stream))},
     stream);
-  auto const h_extracted_keys_offsets = cudf::detail::make_host_vector_sync(
-    cudf::device_span<int const>{keys_offsets.view().data<int>(),
+  auto const h_extracted_keys_offsets = cudf::detail::make_host_vector(
+    cudf::device_span<int const>{keys_offsets.data<int>(),
                                  static_cast<size_t>(keys_offsets.size())},
     stream);
 
-  auto const h_extracted_values_child = cudf::detail::make_host_vector_sync(
+  auto const h_extracted_values_child = cudf::detail::make_host_vector(
     cudf::device_span<char const>{values_sv.chars_begin(stream),
                                   static_cast<size_t>(values_sv.chars_size(stream))},
     stream);
-  auto const h_extracted_values_offsets = cudf::detail::make_host_vector_sync(
-    cudf::device_span<int const>{values_offsets.view().data<int>(),
+  auto const h_extracted_values_offsets = cudf::detail::make_host_vector(
+    cudf::device_span<int const>{values_offsets.data<int>(),
                                  static_cast<size_t>(values_offsets.size())},
     stream);
 
-  auto const h_list_offsets = cudf::detail::make_host_vector_sync(
+  auto const h_list_offsets = cudf::detail::make_host_vector(
     cudf::device_span<cudf::size_type const>{list_offsets->view().begin<cudf::size_type>(),
                                              static_cast<std::size_t>(list_offsets->size())},
     stream);
