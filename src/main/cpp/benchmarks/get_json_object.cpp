@@ -51,11 +51,11 @@ constexpr std::size_t ki_b = 1'024;
 // Nested layouts served by gjo_scenario_generators.hpp — NESTED_135 (the
 // largest fused call, 135 distinct paths), NESTED_33 (the narrower
 // per-branch extraction, 33 paths), FLAT_MIXED_16 (15 top-level fields
-// plus one depth-two path: the mixed flat+nested shape admission must not
-// pull onto the merged route), FLAT_MIXED_64 (64 distinct depth-two paths
-// f{i}.c{i} over flat_mixed-style 150-member rows: a wide flat+nested
-// shape), and FLAT_600 (15 top-level paths over 600-member flat rows: the
-// wide flat row shape).
+// plus one depth-two path: 16 paths over 16 distinct roots, which the
+// merged route's fan-out gate denies), FLAT_MIXED_64 (64 distinct
+// depth-two paths f{i}.c{i} over flat_mixed-style 150-member rows: a wide
+// flat+nested shape), and FLAT_600 (15 top-level paths over 600-member
+// flat rows: the wide flat row shape).
 enum class scenario_id : int32_t {
   NESTED_135    = 0,
   NESTED_33     = 1,
@@ -162,7 +162,7 @@ NVBENCH_BENCH(BM_get_json_object_multiple_paths)
   .add_int64_axis("seed", {1, 2})
   .add_int64_axis("memory_budget_bytes", {-1, 4LL * 1'024 * 1'024 * 1'024})
   // parallel_override exercises the fixed-size batching path: -1 takes the scratch-size
-  // budget loop (or collapses to one batch when budget <= 0), 123 forces 123-path batches
-  // (NESTED_135 then runs two batches and its shallow family may admit differently per
-  // batch - the pair is NOT route-identical for that cell and must not be read as an A/B).
+  // budget loop (or collapses to one batch when budget <= 0), 123 forces 123-path batches.
+  // NESTED_135 then runs two batches whose shallow families may admit differently per batch,
+  // so that cell's pair is NOT route-identical and must not be read as an A/B.
   .add_int64_axis("parallel_override", {-1, 123});
