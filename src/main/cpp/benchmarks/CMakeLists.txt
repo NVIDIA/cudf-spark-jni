@@ -100,3 +100,6 @@ ConfigureBench(PROTOBUF_DECODE_BENCH
 
 ConfigureBench(FROM_JSON_BENCH
   from_json.cu)
+
+ConfigureBench(HASH_PMOD_BENCH
+  hash_pmod.cpp)
