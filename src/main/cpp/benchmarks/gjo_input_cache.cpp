@@ -19,12 +19,14 @@
 namespace spark_rapids_jni {
 namespace bench {
 
-std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>>& input_cache()
+std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>, input_cache_key_hash>&
+input_cache()
 {
   // Heap-allocated and never destroyed on purpose: freeing the cached device memory at static
   // teardown crashes (the CUDA runtime has already started exiting), so the columns leak and the
   // driver reclaims them at process exit.
-  static auto* cache = new std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>>();
+  static auto* cache =
+    new std::unordered_map<input_cache_key, std::unique_ptr<cudf::column>, input_cache_key_hash>();
   return *cache;
 }
 
