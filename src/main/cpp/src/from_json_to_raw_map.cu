@@ -282,7 +282,7 @@ rmm::device_uvector<TreeDepthT> compute_node_levels(std::size_t num_nodes,
   CUDF_EXPECTS(cuda::std::distance(node_levels.begin(), copy_end) == num_nodes,
                "Node level count mismatch.");
 
-  if constexpr (debug_from_json) { print_debug(node_levels, "Node levels", ", ", stream); }
+  if (debug_from_json) { print_debug(node_levels, "Node levels", ", ", stream); }
   return node_levels;
 }
 
@@ -301,9 +301,7 @@ rmm::device_uvector<NodeIndexT> compute_node_to_token_index_map(
   CUDF_EXPECTS(cuda::std::distance(node_token_ids.begin(), copy_end) == num_nodes,
                "Invalid computation for node-to-token-index map.");
 
-  if constexpr (debug_from_json) {
-    print_map_debug(node_token_ids, "Node-to-token-index map", stream);
-  }
+  if (debug_from_json) { print_map_debug(node_token_ids, "Node-to-token-index map", stream); }
   return node_token_ids;
 }
 
@@ -407,7 +405,7 @@ rmm::device_uvector<NodeIndexT> compute_parent_node_ids(
   auto const node_levels = compute_node_levels(num_nodes, tokens, stream);
   propagate_parent_to_siblings(node_levels, parent_node_ids, stream);
 
-  if constexpr (debug_from_json) { print_debug(parent_node_ids, "Parent node ids", ", ", stream); }
+  if (debug_from_json) { print_debug(parent_node_ids, "Parent node ids", ", ", stream); }
   return parent_node_ids;
 }
 
@@ -453,7 +451,7 @@ rmm::device_uvector<node_kind> check_key_or_value_nodes(
         return node_kind::none;
       }));
 
-  if constexpr (debug_from_json) {
+  if (debug_from_json) {
     print_debug(key_or_value, "Nodes are key/value (1==key, 2==value)", ", ", stream);
   }
   return key_or_value;
@@ -515,7 +513,7 @@ tokenized_input tokenize_and_classify(cudf::strings_column_view const& input,
     stream,
     cudf::get_current_device_resource_ref());
 
-  if constexpr (debug_from_json) {
+  if (debug_from_json) {
     print_debug(tokens, "Tokens", ", ", stream);
     print_debug(token_positions, "Token positions", ", ", stream);
     std::cerr << "normalize_single_quotes: " << options.normalize_single_quotes << std::endl;
@@ -695,7 +693,7 @@ rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> compute_node_
     node_ranges.begin(),
     node_ranges_fn{tokens, token_positions, node_token_ids, parent_node_ids, key_or_value});
 
-  if constexpr (debug_from_json) { print_pair_debug(node_ranges, "Node ranges", stream); }
+  if (debug_from_json) { print_pair_debug(node_ranges, "Node ranges", stream); }
   return node_ranges;
 }
 
@@ -797,9 +795,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
                        atomicAdd(&child_counts[parent_id], 1);
                      }
                    });
-  if constexpr (debug_from_json) {
-    print_debug(node_child_counts, "Nodes' child keys counts", ", ", stream);
-  }
+  if (debug_from_json) { print_debug(node_child_counts, "Nodes' child keys counts", ", ", stream); }
 
   auto list_offsets   = rmm::device_uvector<cudf::size_type>(n_lists + 1, stream, mr);
   auto const copy_end = copy_if(
@@ -810,7 +806,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
     stream);
   CUDF_EXPECTS(cuda::std::distance(list_offsets.begin(), copy_end) == static_cast<int64_t>(n_lists),
                "Invalid list size computation.");
-  if constexpr (debug_from_json) {
+  if (debug_from_json) {
     print_debug(list_offsets, "Output list sizes (except the last one)", ", ", stream);
   }
 
@@ -818,7 +814,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
                          list_offsets.begin(),
                          list_offsets.end(),
                          list_offsets.begin());
-  if constexpr (debug_from_json) { print_debug(list_offsets, "Output list offsets", ", ", stream); }
+  if (debug_from_json) { print_debug(list_offsets, "Output list offsets", ", ", stream); }
   return std::make_unique<cudf::column>(
     std::move(list_offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
 }
@@ -882,7 +878,7 @@ std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type> create_null_
             is_invalid_struct_begin{tokens, node_token_ids, token_positions},
             stream);
   auto const num_invalid = cuda::std::distance(invalid_indices.begin(), invalid_copy_end);
-  if constexpr (debug_from_json) {
+  if (debug_from_json) {
     print_debug(invalid_indices,
                 "Invalid StructBegin nodes' indices (size = " + std::to_string(num_invalid) + ")",
                 ", ",
@@ -911,7 +907,7 @@ std::pair<cuda::device_buffer<cudf::bitmask_type>, cudf::size_type> create_null_
         cuda::std::distance(computed_line_begin.begin(), line_begin_copy_end);
       CUDF_EXPECTS(num_line_begin == num_rows, "Incorrect count of JSON objects.");
       line_begin_indices = computed_line_begin.data();
-      if constexpr (debug_from_json) {
+      if (debug_from_json) {
         print_debug(
           computed_line_begin,
           "Line begin StructBegin indices (size = " + std::to_string(num_line_begin) + ")",
@@ -1025,36 +1021,6 @@ struct element_classify_fn {
 
 }  // namespace
 
-// Instantiate every debug helper used above even when debug calls are discarded. This keeps
-// errors in their dependent template bodies visible in builds without DEBUG_FROM_JSON.
-template void print_debug<rmm::device_uvector<TreeDepthT>>(rmm::device_uvector<TreeDepthT> const&,
-                                                           std::string const&,
-                                                           std::string const&,
-                                                           cuda::stream_ref);
-template void print_debug<rmm::device_uvector<NodeIndexT>>(rmm::device_uvector<NodeIndexT> const&,
-                                                           std::string const&,
-                                                           std::string const&,
-                                                           cuda::stream_ref);
-template void print_debug<rmm::device_uvector<node_kind>>(rmm::device_uvector<node_kind> const&,
-                                                          std::string const&,
-                                                          std::string const&,
-                                                          cuda::stream_ref);
-template void print_debug<cuda::device_buffer<PdaTokenT>>(cuda::device_buffer<PdaTokenT> const&,
-                                                          std::string const&,
-                                                          std::string const&,
-                                                          cuda::stream_ref);
-template void print_debug<cuda::device_buffer<SymbolOffsetT>>(
-  cuda::device_buffer<SymbolOffsetT> const&,
-  std::string const&,
-  std::string const&,
-  cuda::stream_ref);
-template void print_map_debug<rmm::device_uvector<NodeIndexT>>(
-  rmm::device_uvector<NodeIndexT> const&, std::string const&, cuda::stream_ref);
-template void print_pair_debug<rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>>>(
-  rmm::device_uvector<cuda::std::pair<SymbolOffsetT, SymbolOffsetT>> const&,
-  std::string const&,
-  cuda::stream_ref);
-
 std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view const& input,
                                                    json_parse_options options,
                                                    cuda::stream_ref stream,
@@ -1092,7 +1058,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
   auto list_offsets =
     compute_list_offsets(input.size(), parent_node_ids, is_key_or_value_node, stream, mr);
 
-  if constexpr (debug_from_json) {
+  if (debug_from_json) {
     print_output_spark_map(list_offsets, extracted_keys, extracted_values, stream);
   }
 

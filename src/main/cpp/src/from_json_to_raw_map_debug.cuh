@@ -29,34 +29,15 @@
 
 namespace spark_rapids_jni {
 
+constexpr bool debug_from_json = []() {
 #ifdef DEBUG_FROM_JSON
-constexpr bool debug_from_json = true;
+  return true;
 #else
-constexpr bool debug_from_json = false;
+  return false;
 #endif
+}();
 
 using namespace cudf::io::json;
-
-// Convert the token value into string name, for debugging purpose.
-std::string token_to_string(PdaTokenT const token_type)
-{
-  switch (token_type) {
-    case token_t::StructBegin: return "StructBegin";
-    case token_t::StructEnd: return "StructEnd";
-    case token_t::ListBegin: return "ListBegin";
-    case token_t::ListEnd: return "ListEnd";
-    case token_t::StructMemberBegin: return "StructMemberBegin";
-    case token_t::StructMemberEnd: return "StructMemberEnd";
-    case token_t::FieldNameBegin: return "FieldNameBegin";
-    case token_t::FieldNameEnd: return "FieldNameEnd";
-    case token_t::StringBegin: return "StringBegin";
-    case token_t::StringEnd: return "StringEnd";
-    case token_t::ValueBegin: return "ValueBegin";
-    case token_t::ValueEnd: return "ValueEnd";
-    case token_t::ErrorBegin: return "ErrorBegin";
-    default: return "Unknown";
-  }
-}
 
 // Print the content of the input device vector.
 template <typename Buffer, typename U = int>
@@ -103,10 +84,10 @@ void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream
 }
 
 // Print the final output map data (Spark's MapType, i.e., List<Struct<String,String>>).
-void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
-                            std::unique_ptr<cudf::column> const& extracted_keys,
-                            std::unique_ptr<cudf::column> const& extracted_values,
-                            cuda::stream_ref stream)
+inline void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
+                                   std::unique_ptr<cudf::column> const& extracted_keys,
+                                   std::unique_ptr<cudf::column> const& extracted_values,
+                                   cuda::stream_ref stream)
 {
   if (extracted_keys->size() == 0) {
     std::cerr << "Extract keys-values are all empty.\n" << std::endl;
