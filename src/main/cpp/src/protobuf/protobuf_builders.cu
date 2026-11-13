@@ -17,14 +17,12 @@
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
-#include <cudf/lists/detail/lists_column_factories.hpp>
 #include <cudf/lists/stream_compaction.hpp>
 #include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/unary.hpp>
 
 #include <cuda/iterator>
 #include <cuda/stream>
-#include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
 
@@ -222,73 +220,14 @@ std::unique_ptr<cudf::column> make_list_column_with_input_nulls(
                                  cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
-std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
-                                               cudf::size_type num_rows,
-                                               cuda::stream_ref stream,
-                                               rmm::device_async_resource_ref mr)
-{
-  if (num_rows == 0) { return cudf::make_empty_column(dtype); }
-
-  switch (dtype.id()) {
-    case cudf::type_id::BOOL8:
-    case cudf::type_id::INT8:
-    case cudf::type_id::UINT8:
-    case cudf::type_id::INT16:
-    case cudf::type_id::UINT16:
-    case cudf::type_id::INT32:
-    case cudf::type_id::UINT32:
-    case cudf::type_id::INT64:
-    case cudf::type_id::UINT64:
-    case cudf::type_id::FLOAT32:
-    case cudf::type_id::FLOAT64:
-      return cudf::make_fixed_width_column(dtype, num_rows, cudf::mask_state::ALL_NULL, stream, mr);
-    case cudf::type_id::STRING: {
-      rmm::device_uvector<cudf::strings::detail::string_index_pair> pairs(num_rows, stream, mr);
-      thrust::fill(rmm::exec_policy_nosync(stream, mr),
-                   pairs.data(),
-                   pairs.end(),
-                   cudf::strings::detail::string_index_pair{nullptr, 0});
-      return cudf::strings::detail::make_strings_column(pairs.data(), pairs.end(), stream, mr);
-    }
-    case cudf::type_id::LIST:
-      return cudf::lists::detail::make_all_nulls_lists_column(
-        num_rows, cudf::data_type{cudf::type_id::UINT8}, stream, mr);
-    case cudf::type_id::STRUCT: {
-      std::vector<std::unique_ptr<cudf::column>> empty_children;
-      auto null_mask = cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
-      return cudf::make_structs_column(
-        num_rows, std::move(empty_children), num_rows, std::move(null_mask), stream, mr);
-    }
-    default: CUDF_FAIL("Unsupported type for null column creation");
-  }
-}
-
 std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
                                                      cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   switch (dtype.id()) {
-    case cudf::type_id::LIST: {
-      auto offsets_col =
-        std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                       1,
-                                       rmm::device_buffer(sizeof(int32_t), stream, mr),
-                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                       0);
-      CUDF_CUDA_TRY(cudaMemsetAsync(
-        offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
-      auto child_col =
-        std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
-                                       0,
-                                       rmm::device_buffer{},
-                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                       0);
-      return cudf::make_lists_column(0,
-                                     std::move(offsets_col),
-                                     std::move(child_col),
-                                     0,
-                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
-    }
+    case cudf::type_id::LIST:  // bytes
+      return make_empty_list_column(
+        cudf::make_empty_column(cudf::data_type{cudf::type_id::UINT8}), stream, mr);
     case cudf::type_id::STRUCT: {
       std::vector<std::unique_ptr<cudf::column>> empty_children;
       return cudf::make_structs_column(0,
@@ -302,34 +241,12 @@ std::unique_ptr<cudf::column> make_empty_column_safe(cudf::data_type dtype,
   }
 }
 
-std::unique_ptr<cudf::column> make_null_list_column_with_child(
-  std::unique_ptr<cudf::column> child_col,
-  cudf::size_type num_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
-{
-  rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, mr);
-  thrust::fill(rmm::exec_policy_nosync(stream, mr), offsets.begin(), offsets.end(), 0);
-  auto offsets_col = make_offsets_column(num_rows, std::move(offsets));
-  auto null_mask   = cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
-  return cudf::make_lists_column(
-    num_rows, std::move(offsets_col), std::move(child_col), num_rows, std::move(null_mask));
-}
-
 std::unique_ptr<cudf::column> make_empty_list_column(std::unique_ptr<cudf::column> element_col,
                                                      cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
-  auto offsets_col =
-    std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
-                                   1,
-                                   rmm::device_buffer(sizeof(int32_t), stream, mr),
-                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                   0);
-  CUDF_CUDA_TRY(
-    cudaMemsetAsync(offsets_col->mutable_view().data<int32_t>(), 0, sizeof(int32_t), stream.get()));
   return cudf::make_lists_column(0,
-                                 std::move(offsets_col),
+                                 make_zero_offsets_column(0, stream, mr),
                                  std::move(element_col),
                                  0,
                                  cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
@@ -733,12 +650,16 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
   repeated_child_positions.reserve(num_child_fields);
   repeated_work_positions.reserve(num_child_fields);
   singular_message_positions.reserve(num_child_fields);
+  auto const child_output = [&](int child_idx) {
+    return materialize_output && schema_context.is_output(child_idx);
+  };
 
   for (int i = 0; i < num_child_fields; i++) {
     int child_idx = child_field_indices[i];
     if (schema[child_idx].is_repeated) {
       repeated_child_positions.push_back(i);
-      if (materialize_output || schema[child_idx].output_type == cudf::type_id::STRUCT) {
+      // Hidden repeated scalars were validated by the count scan; hidden messages still recurse.
+      if (child_output(child_idx) || schema[child_idx].output_type == cudf::type_id::STRUCT) {
         repeated_work_positions.push_back(i);
       }
     } else if (schema[child_idx].output_type == cudf::type_id::STRUCT) {
@@ -843,39 +764,36 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
         input, parent, fields, decode_ctx.error->data(), depth + 1, stream);
     });
 
-  std::vector<std::unique_ptr<cudf::column>> struct_children;
+  // Hidden children stay empty here; make_struct_column returns them as all-null columns.
+  std::vector<std::unique_ptr<cudf::column>> struct_children(num_child_fields);
   for (int ci = 0; ci < num_child_fields; ci++) {
     int child_schema_idx = child_field_indices[ci];
     auto const dt        = cudf::data_type{schema[child_schema_idx].output_type};
     bool has_def         = schema[child_schema_idx].has_default_value;
     bool is_repeated     = schema[child_schema_idx].is_repeated;
+    bool const output    = child_output(child_schema_idx);
+    auto& child          = struct_children[ci];
 
     if (is_repeated) {
-      if (!repeated_work.fields[ci].has_value()) { continue; }
-      auto child = build_repeated_child_list_column(input,
-                                                    parent,
-                                                    context,
-                                                    std::move(repeated_work.fields[ci].value()),
-                                                    materialize_output,
-                                                    stream,
-                                                    mr);
-      if (child != nullptr) { struct_children.push_back(std::move(child)); }
+      if (repeated_work.fields[ci].has_value()) {
+        child = build_repeated_child_list_column(
+          input, parent, context, std::move(repeated_work.fields[ci].value()), output, stream, mr);
+      }
       continue;
     }
 
     if (dt.id() == cudf::type_id::STRUCT) {
       auto const& gc_indices = schema_context.children(child_schema_idx);
       if (message_merge_work[ci].has_value()) {
-        auto child = build_merged_singular_struct_column(input,
-                                                         parent,
-                                                         gc_indices,
-                                                         context,
-                                                         std::move(*message_merge_work[ci]),
-                                                         depth + 1,
-                                                         materialize_output,
-                                                         stream,
-                                                         mr);
-        if (child != nullptr) { struct_children.push_back(std::move(child)); }
+        child = build_merged_singular_struct_column(input,
+                                                    parent,
+                                                    gc_indices,
+                                                    context,
+                                                    std::move(*message_merge_work[ci]),
+                                                    depth + 1,
+                                                    output,
+                                                    stream,
+                                                    mr);
         continue;
       }
 
@@ -888,20 +806,19 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
       rmm::device_uvector<field_location> d_gc_parent_locs(input.num_rows, stream, scratch_mr);
       launch_compute_grandchild_parent_locations(
         loc_provider, d_gc_parent_locs.data(), input.num_rows, decode_ctx.error->data(), stream);
-      auto child = build_nested_struct_column(
+      child = build_nested_struct_column(
         input,
         {d_gc_parent_locs.data(), d_gc_parent_locs.size(), parent.top_row_indices},
         gc_indices,
         context,
         depth + 1,
-        materialize_output,
+        output,
         stream,
         mr);
-      if (child != nullptr) { struct_children.push_back(std::move(child)); }
       continue;
     }
 
-    if (!materialize_output) { continue; }
+    if (!output) { continue; }
 
     nested_location_provider loc_provider{input.row_offsets,
                                           input.base_offset,
@@ -915,21 +832,21 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
     };
     auto const request =
       protobuf_field_decode_request{context, input.message_data, child_schema_idx, input.num_rows};
-    auto child = build_protobuf_field_values_column(
-      request, loc_provider, valid_fn, stream, materialize_output ? mr : scratch_mr);
-    if (child != nullptr) { struct_children.push_back(std::move(child)); }
+    child = build_protobuf_field_values_column(request, loc_provider, valid_fn, stream, mr);
   }
 
   if (!materialize_output) { return nullptr; }
 
   auto [struct_mask, struct_null_count] =
     make_null_mask_from_parent_locations(parent.locations, input.num_rows, stream, mr);
-  return cudf::make_structs_column(input.num_rows,
-                                   std::move(struct_children),
-                                   struct_null_count,
-                                   std::move(struct_mask),
-                                   stream,
-                                   mr);
+  return make_struct_column(schema_context,
+                            child_field_indices,
+                            input.num_rows,
+                            std::move(struct_children),
+                            struct_null_count,
+                            std::move(struct_mask),
+                            stream,
+                            mr);
 }
 
 std::unique_ptr<cudf::column> build_repeated_child_list_column(protobuf_input_view input,

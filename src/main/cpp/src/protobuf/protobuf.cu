@@ -17,6 +17,7 @@
 #include "nvtx_ranges.hpp"
 #include "protobuf/protobuf_kernels.cuh"
 
+#include <cudf/detail/structs/utilities.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
@@ -114,29 +115,84 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
 {
   auto const& field = schema[schema_idx];
   auto const dtype  = cudf::data_type{field.output_type};
+  auto null_mask    = [&] {
+    return cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
+  };
+  auto null_list = [&](std::unique_ptr<cudf::column> element) {
+    return cudf::make_lists_column(num_rows,
+                                   make_zero_offsets_column(num_rows, stream, mr),
+                                   std::move(element),
+                                   num_rows,
+                                   null_mask());
+  };
 
   if (field.is_repeated) {
-    std::unique_ptr<cudf::column> empty_child;
-    if (dtype.id() == cudf::type_id::STRUCT) {
-      empty_child = make_empty_struct_column_with_schema(schema, schema_idx, stream, mr);
-    } else {
-      empty_child = make_empty_column_safe(dtype, stream, mr);
-    }
-    return make_null_list_column_with_child(std::move(empty_child), num_rows, stream, mr);
+    return null_list(dtype.id() == cudf::type_id::STRUCT
+                       ? make_empty_struct_column_with_schema(schema, schema_idx, stream, mr)
+                       : make_empty_column_safe(dtype, stream, mr));
   }
 
-  if (dtype.id() == cudf::type_id::STRUCT) {
-    auto const& child_indices = schema.children(schema_idx);
-    std::vector<std::unique_ptr<cudf::column>> children;
-    for (auto const child_idx : child_indices) {
-      children.push_back(make_null_column_with_schema(schema, child_idx, num_rows, stream, mr));
+  switch (dtype.id()) {
+    case cudf::type_id::BOOL8:
+    case cudf::type_id::INT32:
+    case cudf::type_id::UINT32:
+    case cudf::type_id::INT64:
+    case cudf::type_id::UINT64:
+    case cudf::type_id::FLOAT32:
+    case cudf::type_id::FLOAT64:
+      return cudf::make_fixed_width_column(dtype, num_rows, cudf::mask_state::ALL_NULL, stream, mr);
+    case cudf::type_id::STRING:
+      return cudf::make_strings_column(num_rows,
+                                       make_zero_offsets_column(num_rows, stream, mr),
+                                       rmm::device_buffer{},
+                                       num_rows,
+                                       null_mask());
+    case cudf::type_id::LIST:  // bytes
+      return null_list(cudf::make_empty_column(cudf::data_type{cudf::type_id::UINT8}));
+    case cudf::type_id::STRUCT: {
+      std::vector<std::unique_ptr<cudf::column>> children;
+      for (auto const child_idx : schema.children(schema_idx)) {
+        children.push_back(make_null_column_with_schema(schema, child_idx, num_rows, stream, mr));
+      }
+      // The children are all null already; make_structs_column would push the nulls down again.
+      return cudf::create_structs_hierarchy(
+        num_rows, std::move(children), num_rows, null_mask(), stream, mr);
     }
-    auto null_mask = cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
-    return cudf::make_structs_column(
-      num_rows, std::move(children), num_rows, std::move(null_mask), stream, mr);
+    default:
+      CUDF_FAIL("Protobuf decode internal error: unsupported output type id=" +
+                std::to_string(static_cast<int>(dtype.id())));
   }
+}
 
-  return make_null_column(dtype, num_rows, stream, mr);
+std::unique_ptr<cudf::column> make_struct_column(
+  protobuf_schema const& schema,
+  std::vector<int> const& child_indices,
+  cudf::size_type num_rows,
+  std::vector<std::unique_ptr<cudf::column>> children,
+  cudf::size_type null_count,
+  cuda::device_buffer<cudf::bitmask_type> null_mask,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(children.size() == child_indices.size(),
+               "Protobuf decode internal error: struct child count mismatch");
+  for (std::size_t i = 0; i < children.size(); ++i) {
+    auto const schema_idx = child_indices[i];
+    auto& child           = children[i];
+    if (!schema.is_output(schema_idx)) {
+      child = make_null_column_with_schema(schema, schema_idx, num_rows, stream, mr);
+      continue;
+    }
+    CUDF_EXPECTS(child != nullptr,
+                 "Protobuf decode internal error: visible field " + std::to_string(schema_idx) +
+                   " was not decoded");
+    if (null_count > 0) {
+      child = cudf::structs::detail::superimpose_and_sanitize_nulls(
+        null_mask.data(), null_count, std::move(child), stream, mr);
+    }
+  }
+  return cudf::create_structs_hierarchy(
+    num_rows, std::move(children), null_count, std::move(null_mask), stream, mr);
 }
 
 bool is_encoding_compatible(nested_field_descriptor const& field, cudf::data_type const& type)
@@ -232,15 +288,12 @@ void validate_decode_context(protobuf_decode_context const& context)
       CUDF_EXPECTS(schema[field.parent_idx].output_type == cudf::type_id::STRUCT,
                    "protobuf decode context: parent must be STRUCT at field " + std::to_string(i),
                    std::invalid_argument);
-      if (!context.output_fields.empty()) {
-        // A field and its parent must share the same output flag: a hidden STRUCT cannot have
-        // visible descendants (the parent would have to be materialized anyway), and a visible
-        // STRUCT cannot have hidden children. Forbid the mismatch up front.
-        CUDF_EXPECTS(
-          context.output_fields[i] == context.output_fields[field.parent_idx],
-          "protobuf decode context: child output flag mismatch at field " + std::to_string(i),
-          std::invalid_argument);
-      }
+      // A hidden STRUCT is returned as all nulls, so it cannot have visible descendants.
+      CUDF_EXPECTS(context.output_fields.empty() || context.output_fields[field.parent_idx] ||
+                     !context.output_fields[i],
+                   "protobuf decode context: visible field under a hidden parent at field " +
+                     std::to_string(i),
+                   std::invalid_argument);
     }
 
     CUDF_EXPECTS(
@@ -371,25 +424,9 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
   auto const num_rows   = binary_input.size();
   auto const num_fields = static_cast<int>(schema.size());
 
+  auto const& top_level_indices = schema_context.children(-1);
   if (num_rows == 0) {
-    std::vector<std::unique_ptr<cudf::column>> empty_children;
-    for (int i = 0; i < num_fields; i++) {
-      if (schema[i].parent_idx != -1 || !schema_context.is_output(i)) { continue; }
-      auto field_type  = cudf::data_type{schema[i].output_type};
-      auto empty_child = (field_type.id() == cudf::type_id::STRUCT)
-                           ? make_empty_struct_column_with_schema(schema_context, i, stream, mr)
-                           : make_empty_column_safe(field_type, stream, mr);
-      if (schema[i].is_repeated) {
-        empty_child = make_empty_list_column(std::move(empty_child), stream, mr);
-      }
-      empty_children.push_back(std::move(empty_child));
-    }
-    return cudf::make_structs_column(0,
-                                     std::move(empty_children),
-                                     0,
-                                     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                     stream,
-                                     mr);
+    return make_empty_struct_column_from_children(schema_context, top_level_indices, stream, mr);
   }
 
   // Extract shared input data pointers (used by scalar, repeated, and nested sections)
@@ -854,14 +891,11 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     }
   }
 
-  // Assemble top_level_children in schema order (not processing order). Hidden fields are
-  // still decoded above (so validation errors surface), but dropped from the output struct.
+  // Assemble top_level_children in schema order (not processing order).
   std::vector<std::unique_ptr<cudf::column>> top_level_children;
-  for (int i = 0; i < num_fields; i++) {
-    if (schema[i].parent_idx != -1 || !schema_context.is_output(i)) { continue; }
-    top_level_children.push_back(
-      column_map[i] ? std::move(column_map[i])
-                    : make_null_column_with_schema(schema_context, i, num_rows, stream, mr));
+  top_level_children.reserve(top_level_indices.size());
+  for (auto const i : top_level_indices) {
+    top_level_children.push_back(std::move(column_map[i]));
   }
 
   {
@@ -906,8 +940,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     if (null_count > 0) { struct_mask = std::move(mask); }
   }
 
-  return cudf::make_structs_column(
-    num_rows, std::move(top_level_children), struct_null_count, std::move(struct_mask), stream, mr);
+  return make_struct_column(schema_context,
+                            top_level_indices,
+                            num_rows,
+                            std::move(top_level_children),
+                            struct_null_count,
+                            std::move(struct_mask),
+                            stream,
+                            mr);
 }
 
 }  // namespace detail
