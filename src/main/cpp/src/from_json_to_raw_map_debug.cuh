@@ -29,6 +29,7 @@
 
 namespace spark_rapids_jni {
 
+// Configure CMake with -DDEBUG_FROM_JSON=ON to enable debugging.
 constexpr bool debug_from_json = []() {
 #ifdef DEBUG_FROM_JSON
   return true;
