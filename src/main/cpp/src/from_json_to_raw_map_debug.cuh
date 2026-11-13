@@ -16,10 +16,6 @@
 
 #pragma once
 
-// #define DEBUG_FROM_JSON
-
-#ifdef DEBUG_FROM_JSON
-
 #include <cudf/column/column.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
@@ -33,28 +29,16 @@
 
 namespace spark_rapids_jni {
 
-using namespace cudf::io::json;
+// Configure CMake with -DDEBUG_FROM_JSON=ON to enable debugging.
+constexpr bool debug_from_json = []() {
+#ifdef DEBUG_FROM_JSON
+  return true;
+#else
+  return false;
+#endif
+}();
 
-// Convert the token value into string name, for debugging purpose.
-std::string token_to_string(PdaTokenT const token_type)
-{
-  switch (token_type) {
-    case token_t::StructBegin: return "StructBegin";
-    case token_t::StructEnd: return "StructEnd";
-    case token_t::ListBegin: return "ListBegin";
-    case token_t::ListEnd: return "ListEnd";
-    case token_t::StructMemberBegin: return "StructMemberBegin";
-    case token_t::StructMemberEnd: return "StructMemberEnd";
-    case token_t::FieldNameBegin: return "FieldNameBegin";
-    case token_t::FieldNameEnd: return "FieldNameEnd";
-    case token_t::StringBegin: return "StringBegin";
-    case token_t::StringEnd: return "StringEnd";
-    case token_t::ValueBegin: return "ValueBegin";
-    case token_t::ValueEnd: return "ValueEnd";
-    case token_t::ErrorBegin: return "ErrorBegin";
-    default: return "Unknown";
-  }
-}
+using namespace cudf::io::json;
 
 // Print the content of the input device vector.
 template <typename Buffer, typename U = int>
@@ -63,8 +47,7 @@ void print_debug(Buffer const& input,
                  std::string const& separator,
                  cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector(
-    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -78,8 +61,7 @@ void print_debug(Buffer const& input,
 template <typename Buffer, typename U = int>
 void print_map_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector(
-    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -92,8 +74,7 @@ void print_map_debug(Buffer const& input, std::string const& name, cuda::stream_
 template <typename Buffer, typename U = int>
 void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream_ref stream)
 {
-  auto const h_input = cudf::detail::make_host_vector(
-    cudf::device_span<typename Buffer::value_type const>{input.data(), input.size()}, stream);
+  auto const h_input = cudf::detail::make_host_vector(input, stream);
   std::stringstream ss;
   ss << name << ":\n";
   for (size_t i = 0; i < h_input.size(); ++i) {
@@ -104,10 +85,10 @@ void print_pair_debug(Buffer const& input, std::string const& name, cuda::stream
 }
 
 // Print the final output map data (Spark's MapType, i.e., List<Struct<String,String>>).
-void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
-                            std::unique_ptr<cudf::column> const& extracted_keys,
-                            std::unique_ptr<cudf::column> const& extracted_values,
-                            cuda::stream_ref stream)
+inline void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
+                                   std::unique_ptr<cudf::column> const& extracted_keys,
+                                   std::unique_ptr<cudf::column> const& extracted_values,
+                                   cuda::stream_ref stream)
 {
   if (extracted_keys->size() == 0) {
     std::cerr << "Extract keys-values are all empty.\n" << std::endl;
@@ -171,5 +152,3 @@ void print_output_spark_map(std::unique_ptr<cudf::column> const& list_offsets,
 }
 
 }  // namespace spark_rapids_jni
-
-#endif  // DEBUG_FROM_JSON
