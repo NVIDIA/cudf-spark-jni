@@ -331,6 +331,10 @@ validate_and_parse_exponent(char const* chars, int const len, bool strip)
       case ST_EXPONENT_SIGN:
       case ST_EXPONENT:
         if (chr > '9' || chr < '0') {
+          // trailing whitespace is allowed once the exponent has at least one digit
+          if (state == ST_EXPONENT && strip && is_whitespace(chr)) {
+            return ST_TRAILING_WHITESPACE;
+          }
           return ST_INVALID;
         } else {
           return ST_EXPONENT;
