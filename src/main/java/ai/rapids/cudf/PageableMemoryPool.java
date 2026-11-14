@@ -440,6 +440,11 @@ public final class PageableMemoryPool implements AutoCloseable {
     return getSingleton() != null;
   }
 
+  /** Whether plugin H2D routes should use the staged copy path. */
+  public static boolean isHostToDeviceStagingEnabled() {
+    return stagedH2DEnabled && stagedCopyExecutor != null && isInitialized();
+  }
+
   /** Whether plugin D2H routes should use the staged copy path. */
   public static boolean isDeviceToHostStagingEnabled() {
     return stagedD2HEnabled && stagedCopyExecutor != null && isInitialized();

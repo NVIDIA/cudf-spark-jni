@@ -111,6 +111,7 @@ public class PageableStagingDisabledTest {
     System.setProperty(PREFIX + "registered.buffers", "true");
     PageableMemoryPool.initialize(8192, 1);
     assertTrue(PageableMemoryPool.isDeviceToHostStagingEnabled());
+    assertTrue(PageableMemoryPool.isHostToDeviceStagingEnabled());
     assertNotNull(resource("stagedCopyExecutor"));
     assertNotNull(resource("asyncD2HPoller"));
     PageableMemoryPool.shutdown();
@@ -129,6 +130,7 @@ public class PageableStagingDisabledTest {
     assertNull(resource("asyncD2HPoller"));
     assertNull(resource("asyncD2HSlots"));
     assertFalse(PageableMemoryPool.isDeviceToHostStagingEnabled());
+    assertTrue(PageableMemoryPool.isHostToDeviceStagingEnabled());
   }
 
   private void checkPoolOnly(boolean registered) throws Exception {
@@ -141,6 +143,7 @@ public class PageableStagingDisabledTest {
     PageableMemoryPool.initialize(8192, 1);
     assertTrue(PageableMemoryPool.isInitialized());
     assertFalse(PageableMemoryPool.isDeviceToHostStagingEnabled());
+    assertFalse(PageableMemoryPool.isHostToDeviceStagingEnabled());
     for (String field : new String[] {"stagedCopyExecutor", "stagedCopyBuffers",
         "registeredStagedCopyBuffers", "asyncD2HPoller", "asyncD2HSlots",
         "freeAsyncD2HSlots", "pendingAsyncD2H"}) {
