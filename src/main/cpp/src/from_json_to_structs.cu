@@ -277,12 +277,11 @@ void nullify_rows(cudf::column& input,
 
   auto const use_word_updates =
     word_updates.size() * sizeof(mask_word_update) < row_indices.size() * sizeof(cudf::size_type);
+  // Synchronous uploads keep the host sources valid until the copy completes, including
+  // CUDA 13's stream-ordered source access, without pinned staging.
   if (use_word_updates) {
-    auto h_word_updates =
-      cudf::detail::make_empty_pinned_vector<mask_word_update>(word_updates.size(), stream);
-    h_word_updates.insert(h_word_updates.end(), word_updates.begin(), word_updates.end());
-    auto d_word_updates = cudf::detail::make_device_uvector_async(
-      h_word_updates, stream, cudf::get_current_device_resource_ref());
+    auto d_word_updates = cudf::detail::make_device_uvector(
+      word_updates, stream, cudf::get_current_device_resource_ref());
     thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      d_word_updates.begin(),
                      d_word_updates.end(),
@@ -290,11 +289,10 @@ void nullify_rows(cudf::column& input,
                        mask_ptr[update.word_index] &= ~update.bits_to_clear;
                      });
   } else {
-    auto h_row_indices =
-      cudf::detail::make_empty_pinned_vector<cudf::size_type>(row_indices.size(), stream);
-    h_row_indices.insert(h_row_indices.end(), row_indices.begin(), row_indices.end());
-    auto d_row_indices = cudf::detail::make_device_uvector_async(
-      h_row_indices, stream, cudf::get_current_device_resource_ref());
+    auto d_row_indices = cudf::detail::make_device_uvector(
+      cudf::host_span<cudf::size_type const>{row_indices.data(), row_indices.size()},
+      stream,
+      cudf::get_current_device_resource_ref());
     thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      d_row_indices.begin(),
                      d_row_indices.end(),
