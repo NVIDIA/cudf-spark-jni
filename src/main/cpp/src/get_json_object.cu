@@ -993,15 +993,19 @@ inline constexpr std::size_t k_merged_min_paths = 16;
 // Minimum fan-out: admit only when distinct paths per distinct root >= 63/20 = 3.15.
 inline constexpr std::size_t k_merged_min_fanout_num = 63;  // distinct roots multiplier
 inline constexpr std::size_t k_merged_min_fanout_den = 20;  // distinct paths multiplier
-// The fan-out floor counts the group's dedup'd
-// depth<=2 paths (deeper paths split off to the general kernel and are not counted):
-// a wide-trie shape (many distinct roots, e.g. 16 paths over 16 roots) pays the merged walk's
-// per-root overhead without amortizing it, and measured 1.5-2.5x slower than the general
-// route. 33 paths over 3 roots (11/root) and the nested family's shallow group (120 paths
-// over 38 roots, 3.16/root) admit; the 16-path flat-mixed shape (1/root) and
-// flat-wide groups of 124 paths over 40 roots (3.1/root, measured 3.13x slower merged) deny
-// and fall to the general route. Pure depth-1 groups have one distinct root per distinct path
-// (ratio 1) and only admit when a shared first-segment name gives them fan-out.
+// The fan-out floor counts the group's dedup'd depth<=2 paths (deeper paths split off to the
+// general kernel and are not counted). A wide-trie shape (many distinct roots, e.g. 16 paths
+// over 16 roots) pays the merged walk's per-root overhead without amortizing it, and measured
+// 1.5-2.5x slower than the general route. 33 paths over 3 roots (11/root) and the nested
+// family's shallow group (120 paths over 38 roots, 3.16/root) admit; the 16-path flat-mixed
+// shape (1/root) and flat-wide groups of 124 paths over 40 roots (3.1/root, measured 3.13x
+// slower merged) deny and fall to the general route. Pure depth-1 groups cannot admit: the
+// first-segment name of a 1-tuple path is the path itself, so distinct paths equals distinct
+// roots (ratio 1) and the fan-out comparison reads P*20 >= P*63, false for every nonempty
+// group. The 63/20 threshold is calibrated between the two measured endpoints 3.10 (124/40,
+// merged slower) and 3.158 (120/38, merged faster) — not a break-even; admission near it
+// holds by thin integer margins (120/38 admits by 6 of 2400), so one added root flips those
+// shapes. Deny-side failure is safe.
 // 48 KiB of shared memory holds 4 warps/block x 16 B per record = 768 paths; admission caps a
 // group at this many paths so every admitted group's records stay in shared memory.
 inline constexpr std::size_t k_merged_max_paths = 768;
@@ -1827,18 +1831,15 @@ void launch_grouped(
     // fail the floors must not pay for them.
     if (merged_shallow_indices.size() >= k_merged_min_paths &&
         static_cast<std::size_t>(input.size()) >= k_min_rows_per_family) {
-      std::size_t max_inst_count = 0;
       std::set<std::string_view> distinct_roots;
       using path_vector = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
       std::set<path_vector> distinct_paths;
       for (auto idx : merged_shallow_indices) {
-        max_inst_count = std::max(max_inst_count, json_paths[idx].size());
         distinct_roots.insert(std::get<1>(json_paths[idx].front()));
         distinct_paths.emplace(json_paths[idx].begin(), json_paths[idx].end());
       }
-      if (max_inst_count <= k_merged_max_depth &&
-          distinct_paths.size() * k_merged_min_fanout_den >=
-            distinct_roots.size() * k_merged_min_fanout_num) {
+      if (distinct_paths.size() * k_merged_min_fanout_den >=
+          distinct_roots.size() * k_merged_min_fanout_num) {
         merged_plans.emplace_back(build_merged_named_plan(
           json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
       } else {
