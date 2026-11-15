@@ -2365,7 +2365,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   bool use_last_non_null,
   int64_t max_row_size,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  rmm::device_async_resource_ref mr,
+  std::vector<char>* merged_routed_out = nullptr)
 {
   auto const [d_json_paths, h_json_paths, d_inst_names, h_inst_names] =
     construct_path_commands(json_paths, stream);
@@ -2421,6 +2422,14 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  /* is_retry */ false,
                  launch_staging,
                  stream);
+
+  // The route hook reports the first pass's per-path decision (0 general, 1 shallow, 2 deep);
+  // `merged_routed_prev` holds it once the retry snapshot is taken inside launch_grouped.
+  if (merged_routed_out != nullptr) {
+    CUDF_EXPECTS(launch_staging.merged_routed_prev.size() == num_outputs,
+                 "route hook size mismatch");
+    *merged_routed_out = launch_staging.merged_routed_prev;
+  }
 
   auto h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
   auto has_no_oob    = check_error(h_error_check);
@@ -2552,7 +2561,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   int32_t parallel_override,
   bool use_last_non_null,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  rmm::device_async_resource_ref mr,
+  std::vector<char>* merged_routed_out)
 {
   auto const num_outputs = json_paths.size();
 
@@ -2561,6 +2571,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
     for (std::size_t idx = 0; idx < num_outputs; ++idx) {
       output.emplace_back(std::make_unique<cudf::column>(input.parent(), stream, mr));
     }
+    // No batch launches, so no path reaches any merged kernel.
+    if (merged_routed_out != nullptr) { merged_routed_out->assign(num_outputs, 0); }
     return output;
   }
 
@@ -2582,9 +2594,13 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   auto const d_input_ptr = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
+  if (merged_routed_out != nullptr) { merged_routed_out->assign(num_outputs, 0); }
 
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;
   std::vector<std::size_t> output_ids;
+  // Per-batch route decisions gathered into the caller's output (batch position = output
+  // position within the batch); reused to avoid per-iteration allocation.
+  std::vector<char> batch_routes;
 
   std::size_t starting_path = 0;
   while (starting_path < num_outputs) {
@@ -2618,7 +2634,13 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
                                      use_last_non_null,
                                      max_row_size,
                                      stream,
-                                     mr);
+                                     mr,
+                                     merged_routed_out != nullptr ? &batch_routes : nullptr);
+    if (merged_routed_out != nullptr) {
+      for (std::size_t i = 0; i < batch_routes.size(); i++) {
+        (*merged_routed_out)[output_ids[i]] = batch_routes[i];
+      }
+    }
     for (std::size_t i = 0; i < tmp.size(); i++) {
       std::size_t out_i = output_ids[i];
       output[out_i]     = std::move(tmp[i]);

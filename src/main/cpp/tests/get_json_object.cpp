@@ -1751,6 +1751,191 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
   }
 }
 
+namespace {
+
+/// Run the multi-path call and capture the detail route hook: 0 general, 1 shallow merged,
+/// 2 deep merged, one entry per requested path in call order. Callers assert the returned
+/// sizes before indexing (gtest ASSERT_* cannot return from a non-void helper).
+std::pair<multi_outputs, std::vector<char>> run_fused_with_routes(
+  cudf::strings_column_view const& input, multi_paths const& paths)
+{
+  std::vector<char> routes;
+  auto out = spark_rapids_jni::detail::get_json_object(input,
+                                                       paths,
+                                                       -1,
+                                                       -1,
+                                                       false,
+                                                       cudf::get_default_stream(),
+                                                       cudf::get_current_device_resource_ref(),
+                                                       &routes);
+  return {std::move(out), std::move(routes)};
+}
+
+}  // namespace
+
+TEST_F(GetJsonObjectTest, MergedRouteFanoutPairRoutesMerged)
+{
+  // The reviewer's requested boundary pairs straddle the removed fan-out floor (25/8 = ratio
+  // 3.125 below the old 3.15 bar; 26/8 = 3.25 above it): both admit on this tip because the
+  // fan-out floor is gone and only the path/row floors gate. The pre-lowered-floor tip denied
+  // both; when the width-scaled floor lands above, these rows are narrow, so the pairs keep
+  // their outcomes there. Assert the route (not just parity) via the hook.
+  auto const row  = R"({"r0":{"a":"A"},"r1":{"a":"A"},"r2":{"a":"A"},"r3":{"a":"A"},)"
+                    R"("r4":{"a":"A"},"r5":{"a":"A"},"r6":{"a":"A"},"r7":{"a":"A"}})";
+  auto const rows = same_rows(64, row);
+
+  auto const build = [](int count) {
+    multi_paths paths;
+    paths.reserve(count);
+    for (int p = 0; p < count; ++p) {
+      paths.push_back(named({"r" + std::to_string(p % 8), "c" + std::to_string(p)}));
+    }
+    return paths;
+  };
+  auto const [denied_out, denied_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(25));
+  ASSERT_EQ(denied_out.size(), 25u);
+  ASSERT_EQ(denied_routes.size(), 25u);
+  for (std::size_t p = 0; p < 25; ++p) {
+    SCOPED_TRACE(testing::Message() << "25/8 route path " << p);
+    EXPECT_EQ(denied_routes[p], 1);
+  }
+
+  auto const [admitted_out, admitted_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(26));
+  ASSERT_EQ(admitted_out.size(), 26u);
+  ASSERT_EQ(admitted_routes.size(), 26u);
+  for (std::size_t p = 0; p < 26; ++p) {
+    SCOPED_TRACE(testing::Message() << "26/8 route path " << p);
+    EXPECT_EQ(admitted_routes[p], 1);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRoutePathFloorPairRoutes)
+{
+  // The 15/16-path pair the reviewer offered as a boundary check straddles the old 16-path
+  // floor: 16 admits on this tip (floor 8), so both legs route merged here.
+  auto const row  = R"({"r0":{"a":"A"},"r1":{"a":"A"},"r2":{"a":"A"},"r3":{"a":"A"},)"
+                    R"("r4":{"a":"A"},"r5":{"a":"A"},"r6":{"a":"A"},"r7":{"a":"A"}})";
+  auto const rows = same_rows(64, row);
+
+  auto const build = [](int count) {
+    multi_paths paths;
+    paths.reserve(count);
+    for (int p = 0; p < count; ++p) {
+      paths.push_back(named({"r" + std::to_string(p % 8), "c" + std::to_string(p)}));
+    }
+    return paths;
+  };
+  auto const [below_out, below_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(15));
+  ASSERT_EQ(below_out.size(), 15u);
+  ASSERT_EQ(below_routes.size(), 15u);
+  for (std::size_t p = 0; p < 15; ++p) {
+    SCOPED_TRACE(testing::Message() << "15-path route path " << p);
+    EXPECT_EQ(below_routes[p], 1);
+  }
+
+  auto const [at_out, at_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(16));
+  ASSERT_EQ(at_out.size(), 16u);
+  ASSERT_EQ(at_routes.size(), 16u);
+  for (std::size_t p = 0; p < 16; ++p) {
+    SCOPED_TRACE(testing::Message() << "16-path route path " << p);
+    EXPECT_EQ(at_routes[p], 1);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRoutePathFloorDenyBoundary)
+{
+  // This tip's real shallow deny boundary is the 8-path floor: 7 paths deny to the general
+  // route, 8 admit. Narrow rows keep the boundary stable under a width-scaled floor.
+  auto const rows = same_rows(64, R"({"k":{"a":"A"}})");
+
+  auto const build = [](int count) {
+    multi_paths paths;
+    paths.reserve(count);
+    for (int p = 0; p < count; ++p) {
+      paths.push_back(named({"k", "c" + std::to_string(p)}));
+    }
+    return paths;
+  };
+  auto const [below_out, below_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(7));
+  ASSERT_EQ(below_out.size(), 7u);
+  ASSERT_EQ(below_routes.size(), 7u);
+  for (std::size_t p = 0; p < 7; ++p) {
+    SCOPED_TRACE(testing::Message() << "7-path route path " << p);
+    EXPECT_EQ(below_routes[p], 0);
+  }
+
+  auto const [at_out, at_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, build(8));
+  ASSERT_EQ(at_out.size(), 8u);
+  ASSERT_EQ(at_routes.size(), 8u);
+  for (std::size_t p = 0; p < 8; ++p) {
+    SCOPED_TRACE(testing::Message() << "8-path route path " << p);
+    EXPECT_EQ(at_routes[p], 1);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteRowFloorDenyBoundary)
+{
+  // The 32-row floor is the other shallow deny leg: 31 rows deny to the general route, 32
+  // admit. Depth-2 paths keep every leg pure-NAMED.
+  auto const row   = R"({"k":{"a":"A"}})";
+  auto const build = [] {
+    multi_paths paths;
+    paths.reserve(8);
+    for (int p = 0; p < 8; ++p) {
+      paths.push_back(named({"k", "c" + std::to_string(p)}));
+    }
+    return paths;
+  };
+
+  auto const [below_out, below_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(same_rows(31, row))}, build());
+  ASSERT_EQ(below_out.size(), 8u);
+  ASSERT_EQ(below_routes.size(), 8u);
+  for (std::size_t p = 0; p < 8; ++p) {
+    SCOPED_TRACE(testing::Message() << "31-row route path " << p);
+    EXPECT_EQ(below_routes[p], 0);
+  }
+
+  auto const [at_out, at_routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(same_rows(32, row))}, build());
+  ASSERT_EQ(at_out.size(), 8u);
+  ASSERT_EQ(at_routes.size(), 8u);
+  for (std::size_t p = 0; p < 8; ++p) {
+    SCOPED_TRACE(testing::Message() << "32-row route path " << p);
+    EXPECT_EQ(at_routes[p], 1);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteHookMixedGroupRoutes)
+{
+  // Mixed group: an admitted shallow batch rides with wildcard/index paths that must stay
+  // general; the hook distinguishes them per path.
+  auto const rows = same_rows(64, R"({"k":{"a":"A"},"arr":[1,2,3]})");
+  multi_paths paths;
+  for (int p = 0; p < 9; ++p) {
+    paths.push_back(named({"k", "c" + std::to_string(p)}));
+  }
+  paths.push_back(std::vector<path_tuple>{{path_instruction_type::WILDCARD, "", 0},
+                                          {path_instruction_type::NAMED, "a", -1}});
+
+  auto const [out, routes] =
+    run_fused_with_routes(cudf::strings_column_view{col_from(rows)}, paths);
+  ASSERT_EQ(out.size(), 10u);
+  ASSERT_EQ(routes.size(), 10u);
+  for (int p = 0; p < 9; ++p) {
+    SCOPED_TRACE(testing::Message() << "mixed route path " << p);
+    EXPECT_EQ(routes[p], 1);
+  }
+  SCOPED_TRACE("mixed route wildcard path");
+  EXPECT_EQ(routes[9], 0);
+}
+
 TEST_F(GetJsonObjectTest, NonEmptyNullsRetry)
 {
   auto const expanding = R"({"k":{"a":')" + std::string(30, '"') + R"('}})";
