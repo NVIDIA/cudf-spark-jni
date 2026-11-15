@@ -46,6 +46,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -545,6 +546,7 @@ INSTANTIATE_TEST_SUITE_P(PaddingAndQuotes,
                          testing::Combine(testing::Range(0, 9), testing::Values('"', '\'')));
 
 using spark_rapids_jni::path_instruction_type;
+using spark_rapids_jni::gjo_scenarios::flat_wide_124_build_rows;
 using spark_rapids_jni::gjo_scenarios::nested_build_paths;
 using spark_rapids_jni::gjo_scenarios::nested_build_rows;
 using spark_rapids_jni::gjo_scenarios::nested_table_135;
@@ -610,6 +612,24 @@ std::vector<std::unique_ptr<cudf::column>> run_fused(cudf::strings_column_view c
                                                      multi_paths const& paths)
 {
   return spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1);
+}
+
+/// The `get_json_object.hpp` test-only route hook: one route char per requested path (0
+/// general, 1 shallow merged, 2 deep merged) from the fused call at `budget`.
+std::vector<char> run_routes(cudf::strings_column_view const& input,
+                             multi_paths const& paths,
+                             int64_t budget)
+{
+  std::vector<char> routes;
+  spark_rapids_jni::detail::get_json_object(input,
+                                            paths,
+                                            budget,
+                                            -1,
+                                            false,
+                                            cudf::get_default_stream(),
+                                            cudf::get_current_device_resource_ref(),
+                                            &routes);
+  return routes;
 }
 
 cudf::test::strings_column_wrapper col_from(std::vector<std::string> const& rows)
@@ -1744,6 +1764,38 @@ TEST_F(GetJsonObjectTest, MergedRouteReviewerShapeRoutingParity)
       run_fused(cudf::strings_column_view{col_from(d1_rows)}, multi_paths{depth1_only[col]});
     ASSERT_EQ(single.size(), 1u);
     ASSERT_NO_FATAL_FAILURE(expect_columns_parity(d1_out[col], single[0]));
+  }
+}
+
+// The scratch-budget splitter splits a wide-row request whose per-batch scratch demand leaves
+// each batch below the width-scaled floor: the per-path scratch slot here is 204800 B (max row
+// size x 10 plus the column's chars), so a 1 MiB budget splits the 124 eligible paths into
+// batches of six (plus a final four) - far below the 64 very-wide-row floor. The floor must
+// still see the request's 124 eligible paths, so every batch's shallow group admits and the
+// route hook records 1; a 2 MiB budget splits into batches of eleven, and -1 runs the request
+// unsplit (one 124-path batch).
+TEST_F(GetJsonObjectTest, MergedRouteRequestFloorSurvivesBatchSplit)
+{
+  std::mt19937_64 rng{20261115};
+  auto const rows = flat_wide_124_build_rows(rng, 40, 4'096, 20261115);
+  ASSERT_EQ(rows.size(), 40u);
+  ASSERT_EQ(rows.front().size(), 4'096u);
+  ASSERT_EQ(rows.back().size(), 4'096u);
+  auto const input_col = col_from(rows);
+  auto const input     = cudf::strings_column_view{input_col};
+  multi_paths paths;
+  paths.reserve(124);
+  for (int p = 0; p < 124; ++p) {
+    paths.push_back(named({"f" + std::to_string(p)}));
+  }
+
+  for (int64_t const budget : std::array<int64_t, 3>{-1, 1 << 20, 2 << 20}) {
+    auto const routes = run_routes(input, paths, budget);
+    SCOPED_TRACE(testing::Message() << "budget=" << budget);
+    ASSERT_EQ(routes.size(), paths.size());
+    for (std::size_t p = 0; p < routes.size(); ++p) {
+      EXPECT_EQ(routes[p], 1) << "path " << p << " budget " << budget;
+    }
   }
 }
 

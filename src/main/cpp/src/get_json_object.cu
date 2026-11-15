@@ -2757,8 +2757,10 @@ struct launch_grouped_staging {
  * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
  * A depth-three-to-five group needs 32 rows and eight deep paths, then absorbs shallow paths;
  * otherwise shallow admission requires 32 rows and a path floor scaled by max row size
- * (8/16/64 by row width) at depth <= 2; shallow and deep admission share the
- * k_merged_max_paths cap and overflow stays general.
+ * (8/16/64 by row width) at depth <= 2, met by max(request_shallow_paths, the batch's eligible
+ * count) because the caller's scratch-budget splitter can batch a wide-row request below its
+ * floor; shallow and deep admission share the k_merged_max_paths cap and overflow stays
+ * general.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
  * Host/device paths share batch order; zeroed error storage has path flags plus one depth flag.
  * Reuses caller-owned staging for upload lifetimes: a retry call passes the same object, and
@@ -2774,6 +2776,10 @@ void launch_grouped(
   std::vector<json_path_processing_data> const& h_path_data,
   cudf::device_span<json_path_processing_data> d_path_data,
   int64_t max_row_size,  // Row-size bound for the two-rows-per-warp gate.
+  // Eligible shallow NAMED paths in the caller's full request: the scratch-budget splitter can
+  // place a wide-row request's eligible group across several batches each below the floor, so
+  // the width-scaled floor compares max(this, the batch's count) or every batch denies.
+  std::size_t request_shallow_paths,
   bool use_last_non_null,
   bool is_retry,
   launch_grouped_staging& staging,
@@ -2906,11 +2912,14 @@ void launch_grouped(
     for (auto idx : merged_shallow_indices) {
       max_inst_count = std::max(max_inst_count, json_paths[idx].size());
     }
-    // Wide rows take more paths to amortize the merged walk's per-member parse.
+    // Wide rows take more paths to amortize the merged walk's per-member parse. The floor
+    // compares max(request_shallow_paths, the batch's eligible count): wide-row requests split
+    // by the scratch budget must be measured at request granularity or every batch denies.
     auto const min_paths = max_row_size <= k_narrow_row_bytes ? k_merged_min_paths
                            : max_row_size <= k_wide_row_bytes ? k_wide_row_min_paths
                                                               : k_very_wide_row_min_paths;
-    if (max_inst_count <= k_merged_max_depth && merged_shallow_indices.size() >= min_paths &&
+    if (max_inst_count <= k_merged_max_depth &&
+        std::max(request_shallow_paths, merged_shallow_indices.size()) >= min_paths &&
         static_cast<std::size_t>(input.size()) >= k_min_rows_per_family) {
       merged_plans.emplace_back(build_merged_named_plan(
         json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
@@ -3016,6 +3025,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
   int64_t scratch_size,
+  // Eligible shallow NAMED paths in the caller's full request: the scratch-budget splitter can
+  // place a wide-row request's eligible group across several batches each below the floor, so
+  // the width-scaled floor compares max(this, the batch's count) or every batch denies.
+  std::size_t request_shallow_paths,
   bool use_last_non_null,
   int64_t max_row_size,
   cuda::stream_ref stream,
@@ -3091,6 +3104,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  h_path_data,
                  d_path_data,
                  max_row_size,
+                 request_shallow_paths,
                  use_last_non_null,
                  /* is_retry */ false,
                  launch_staging,
@@ -3232,6 +3246,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  h_path_data,
                  d_path_data,
                  max_row_size,
+                 request_shallow_paths,
                  use_last_non_null,
                  /* is_retry */ true,
                  launch_staging,
@@ -3313,6 +3328,18 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
   if (merged_routed_out != nullptr) { merged_routed_out->assign(num_outputs, 0); }
 
+  // Request-level eligible shallow count: a wide-row request's eligible group can split across
+  // several scratch-budget batches each below the width-scaled floor, so the floor must be able
+  // to see the request's full count (max with the batch's own count inside launch_grouped).
+  // The classification mirrors launch_grouped's shallow bucket: pure NAMED, depth <= 2.
+  auto const request_shallow_paths = static_cast<std::size_t>(
+    std::count_if(sorted_indices.begin(), sorted_indices.end(), [&json_paths](std::size_t idx) {
+      auto const& path = json_paths[idx];
+      return path.size() <= 2 && std::all_of(path.begin(), path.end(), [](auto const& step) {
+               return std::get<0>(step) == path_instruction_type::NAMED;
+             });
+    }));
+
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;
   std::vector<std::size_t> output_ids;
   // Per-batch route decisions gathered into the caller's output (batch position = output
@@ -3326,6 +3353,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
     output_ids.resize(0);
     int count   = 0;
     long budget = 0;
+    // Batches collect paths until the budget would be exceeded: with positive budget, the
+    // loop consumes at least one path per batch, so a request whose scratch size exceeds the
+    // budget runs unsplit (one batch). Splitting only occurs when a request fits the budget
+    // whole but its scratch demand divides it into several batches.
     while (at < num_outputs &&
            (parallel_override > 0 ? count < parallel_override : budget < memory_budget_bytes)) {
       auto output_location = sorted_indices[at];
@@ -3343,6 +3374,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
                                      base_offset,
                                      batch,
                                      scratch_size,
+                                     request_shallow_paths,
                                      use_last_non_null,
                                      max_row_size,
                                      stream,
