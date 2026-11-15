@@ -51,18 +51,55 @@ constexpr std::size_t ki_b = 1'024;
 // Nested layouts served by gjo_scenario_generators.hpp — NESTED_135 (the
 // largest fused call, 135 distinct paths), NESTED_33 (the narrower
 // per-branch extraction, 33 paths), FLAT_MIXED_16 (15 top-level fields
-// plus one depth-two path: 16 paths over 16 distinct roots, which the
-// merged route's fan-out gate denies), FLAT_MIXED_64 (64 distinct
-// depth-two paths f{i}.c{i} over flat_mixed-style 150-member rows: a wide
-// flat+nested shape), and FLAT_600 (15 top-level paths over 600-member
-// flat rows: the wide flat row shape).
+// plus one depth-two path: the mixed flat+nested shape admission must not
+// pull onto the merged route), FLAT_WIDE_124 (124 depth-1 paths over 1 root:
+// the merged-route wide-flat shape), VALUE_KINDS (16 fixed paths over mixed
+// value kinds), FLAT_MIXED_64 (64 distinct depth-two paths f{root}.c{child}
+// over 2 roots of 32 children each, on flat_mixed-style 150-member rows: a
+// wide flat+nested shape), FLAT_600 (15 top-level paths over 600-member flat
+// rows: the wide flat row shape), FLAT_WIDE_150, FLAT_WIDE_600, FLAT_WIDE_2R
+// (wide objects with few queried roots, sized by the num_paths axis at 124
+// paths over 150 members, 124 paths over 600 members, and 2 roots x {16, 64}
+// paths x 150 members), and FLAT_WIDE_768 (4 x 200 members with 768 depth-2
+// paths, the shared-memory record-cap shape).
 enum class scenario_id : int32_t {
   NESTED_135    = 0,
   NESTED_33     = 1,
   FLAT_MIXED_16 = 2,
-  FLAT_MIXED_64 = 3,
-  FLAT_600      = 4
+  FLAT_WIDE_124 = 3,
+  VALUE_KINDS   = 4,
+  FLAT_MIXED_64 = 5,
+  FLAT_600      = 6,
+  FLAT_WIDE_150 = 7,
+  FLAT_WIDE_600 = 8,
+  FLAT_WIDE_2R  = 9,
+  FLAT_WIDE_768 = 10
 };
+
+// Which num_paths values the scenario consumes. Fixed-shape scenarios keep one true value so
+// the tiled path list equals their shape; the num_paths-sensitive wide scenarios select among
+// their measured cell sizes; the nested scenarios tile freely.
+inline std::vector<int64_t> const& scenario_num_paths(scenario_id scenario)
+{
+  using value_list = std::vector<int64_t>;
+  static value_list const fixed{50};          // any one value: the path list does not depend on it
+  static value_list const mixed_16{50, 150};  // selects the 50- vs 150-member row layouts
+  static value_list const wide_150{124};
+  static value_list const wide_600{124};
+  static value_list const wide_2r{16, 64};
+  static value_list const wide_768{768};
+  static value_list const nested{1, 8, 32, 33, 50, 135};
+  switch (scenario) {
+    case scenario_id::FLAT_MIXED_16: return mixed_16;
+    case scenario_id::FLAT_WIDE_150: return wide_150;
+    case scenario_id::FLAT_WIDE_600: return wide_600;
+    case scenario_id::FLAT_WIDE_2R: return wide_2r;
+    case scenario_id::FLAT_WIDE_768: return wide_768;
+    case scenario_id::NESTED_135:
+    case scenario_id::NESTED_33: return nested;
+    default: return fixed;
+  }
+}
 
 }  // namespace
 
@@ -85,6 +122,14 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
   auto const budget     = state.get_int64("memory_budget_bytes");
   auto const override_r = state.get_int64("parallel_override");
 
+  // Cells whose num_paths value the scenario does not consume are skipped rather than silently
+  // re-measured, so no two benchmark entries share identical inputs.
+  auto const& consumed = scenario_num_paths(scenario);
+  if (std::find(consumed.begin(), consumed.end(), state.get_int64("num_paths")) == consumed.end()) {
+    state.skip("num_paths value does not apply to this scenario");
+    return;
+  }
+
   auto const& table = scenario == scenario_id::NESTED_135 ? nested_table_135() : nested_table_33();
   multi_paths base_paths;
   std::size_t members = 0;
@@ -93,9 +138,15 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
     // builds rows of 50 top-level members, every other num_paths value 150 members.
     base_paths = flat_mixed_build_paths();
     members    = num_paths == 50 ? 50 : 150;
+  } else if (scenario == scenario_id::FLAT_WIDE_124) {
+    // The wide-flat merged-route shape fixes 124 depth-one paths over one root; num_paths does
+    // not apply to it.
+    base_paths = flat_wide_124_build_paths();
+  } else if (scenario == scenario_id::VALUE_KINDS) {
+    base_paths = value_kinds_build_paths();
   } else if (scenario == scenario_id::FLAT_MIXED_64) {
-    // The wide flat+nested shape fixes 64 depth-two paths and the 150-member layout; the
-    // num_paths axis does not apply to it.
+    // The wide flat+nested shape fixes 64 depth-two paths over 2 roots and the 150-member
+    // layout; the num_paths axis does not apply to it.
     base_paths = flat_mixed_64_build_paths();
     members    = 150;
   } else if (scenario == scenario_id::FLAT_600) {
@@ -103,11 +154,25 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
     // axis does not apply to it.
     base_paths = flat_600_build_paths();
     members    = 600;
+  } else if (scenario == scenario_id::FLAT_WIDE_150) {
+    base_paths = flat_wide_rooted_build_paths(num_paths, 1);
+    members    = 150;
+  } else if (scenario == scenario_id::FLAT_WIDE_600) {
+    base_paths = flat_wide_rooted_build_paths(num_paths, 1);
+    members    = 600;
+  } else if (scenario == scenario_id::FLAT_WIDE_2R) {
+    base_paths = flat_wide_rooted_build_paths(num_paths, 2);
+    members    = 150;
+  } else if (scenario == scenario_id::FLAT_WIDE_768) {
+    base_paths = flat_wide_rooted_build_paths(768, 4);
+    members    = 200;
   } else {
     base_paths = nested_build_paths(table, scenario == scenario_id::NESTED_135 ? 135 : 33);
   }
   auto const fixed_paths =
-    scenario != scenario_id::NESTED_135 && scenario != scenario_id::NESTED_33;
+    scenario == scenario_id::FLAT_MIXED_16 || scenario == scenario_id::FLAT_WIDE_124 ||
+    scenario == scenario_id::FLAT_MIXED_64 || scenario == scenario_id::FLAT_600 ||
+    scenario == scenario_id::VALUE_KINDS || scenario == scenario_id::FLAT_WIDE_768;
   multi_paths tiled;
   tiled.reserve(fixed_paths ? base_paths.size() : num_paths);
   for (std::size_t i = 0; i < (fixed_paths ? base_paths.size() : num_paths); ++i) {
@@ -120,18 +185,38 @@ void BM_get_json_object_multiple_paths(nvbench::state& state)
 
   // The flat rows depend on the member count (the 16-path mixed shape derives it from
   // `num_paths`; the other flat scenarios fix it), so the cache key must distinguish member
-  // counts via the flavor field; the nested scenarios derive rows from the table alone.
+  // counts via the flavor field; the nested scenarios derive rows from the table alone
+  // (FLAT_WIDE_124's rows keep their fixed 124 members for every axis value). The rooted wide
+  // scenarios route `num_paths` paths, so their flavor must distinguish the routed count: the
+  // rows' children layout differs per cell even at equal member counts.
+  auto const flavor =
+    scenario == scenario_id::FLAT_WIDE_150 || scenario == scenario_id::FLAT_WIDE_600 ||
+        scenario == scenario_id::FLAT_WIDE_2R || scenario == scenario_id::FLAT_WIDE_768
+      ? num_paths
+      : members;
   auto const input = spark_rapids_jni::bench::get_or_generate_input(
     spark_rapids_jni::bench::make_input_cache_key(
-      static_cast<std::uint64_t>(scenario), size_bytes, seed, members),
+      static_cast<std::uint64_t>(scenario), size_bytes, seed, flavor),
     [&] {
       std::mt19937_64 rng{seed};
       auto rows = scenario == scenario_id::FLAT_MIXED_16
                     ? flat_mixed_build_rows(rng, num_rows, members, row_bytes, seed)
+                  : scenario == scenario_id::FLAT_WIDE_124
+                    ? flat_wide_124_build_rows(rng, num_rows, row_bytes, seed)
                   : scenario == scenario_id::FLAT_MIXED_64
                     ? flat_mixed_64_build_rows(rng, num_rows, members, row_bytes, seed)
                   : scenario == scenario_id::FLAT_600
                     ? flat_600_build_rows(rng, num_rows, members, row_bytes, seed)
+                  : scenario == scenario_id::FLAT_WIDE_150
+                    ? flat_wide_rooted_build_rows(rng, num_rows, members, 1, tiled, row_bytes)
+                  : scenario == scenario_id::FLAT_WIDE_600
+                    ? flat_wide_rooted_build_rows(rng, num_rows, members, 1, tiled, row_bytes)
+                  : scenario == scenario_id::FLAT_WIDE_2R
+                    ? flat_wide_rooted_build_rows(rng, num_rows, members, 2, tiled, row_bytes)
+                  : scenario == scenario_id::FLAT_WIDE_768
+                    ? flat_wide_rooted_build_rows(rng, num_rows, members, 4, tiled, row_bytes)
+                  : scenario == scenario_id::VALUE_KINDS
+                    ? value_kinds_build_rows(rng, num_rows, row_bytes, seed)
                     : nested_build_rows(rng, table, num_rows, row_bytes, seed);
       return cudf::test::strings_column_wrapper(rows.begin(), rows.end()).release();
     });
@@ -155,10 +240,19 @@ NVBENCH_BENCH(BM_get_json_object_multiple_paths)
                   {static_cast<nvbench::int64_t>(scenario_id::NESTED_135),
                    static_cast<nvbench::int64_t>(scenario_id::NESTED_33),
                    static_cast<nvbench::int64_t>(scenario_id::FLAT_MIXED_16),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE_124),
                    static_cast<nvbench::int64_t>(scenario_id::FLAT_MIXED_64),
-                   static_cast<nvbench::int64_t>(scenario_id::FLAT_600)})
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_600),
+                   static_cast<nvbench::int64_t>(scenario_id::VALUE_KINDS),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE_150),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE_600),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE_2R),
+                   static_cast<nvbench::int64_t>(scenario_id::FLAT_WIDE_768)})
   .add_int64_axis("size_bytes", {10 * 1'024 * 1'024, 100 * 1'024 * 1'024})
-  .add_int64_axis("num_paths", {1, 8, 32, 33, 50, 135})
+  // Each scenario skips the num_paths values it does not consume (`scenario_num_paths`), so
+  // every measured cell's path list is real and the reported "paths" count names the actual
+  // routed paths.
+  .add_int64_axis("num_paths", {1, 8, 16, 32, 33, 50, 64, 124, 135, 150, 768})
   .add_int64_axis("seed", {1, 2})
   .add_int64_axis("memory_budget_bytes", {-1, 4LL * 1'024 * 1'024 * 1'024})
   // parallel_override exercises the fixed-size batching path: -1 takes the scratch-size
