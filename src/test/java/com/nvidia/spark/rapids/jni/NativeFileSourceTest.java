@@ -70,6 +70,8 @@ public class NativeFileSourceTest {
     }
   }
 
+  // KvikIO is in its POSIX compatibility mode in this JVM, so this reads through host memory and
+  // copies to the device; NativeFileSourceGdsTest covers reads through cuFile.
   @Test
   void readToDeviceReadsEachRange() throws IOException {
     Path file = writeFile(1000);

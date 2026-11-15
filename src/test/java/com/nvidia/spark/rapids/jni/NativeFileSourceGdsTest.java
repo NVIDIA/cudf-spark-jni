@@ -35,13 +35,23 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Reads with KvikIO in AUTO mode, which uses cuFile where it works and POSIX otherwise, so these
- * pass whether or not GDS is supported here. Runs in its own JVM, since the mode is fixed by the
- * first cuDF IO in the process.
+ * Tests reads with KvikIO in AUTO mode, where it reads through cuFile if it can and through POSIX
+ * if not.
+ * <ul>
+ *   <li>The data checks pass either way.</li>
+ *   <li>readsThroughCuFile is skipped when cuFile is not used. Set -Dgds.required=true to make it
+ *       fail instead, on machines that should have GDS.</li>
+ *   <li>This class runs in its own JVM, because the first cuDF IO in a process fixes KvikIO's
+ *       mode.</li>
+ * </ul>
  */
 public class NativeFileSourceGdsTest {
+  private static final boolean GDS_REQUIRED = Boolean.getBoolean("gds.required");
+
   private static final int FILE_SIZE = 9 << 20;
 
   // Aligned and unaligned offsets and lengths, a range large enough to be split across KvikIO's
@@ -103,6 +113,24 @@ public class NativeFileSourceGdsTest {
 
   @Test
   void readToDeviceReadsEachRange() {
+    readToDeviceAndCheck();
+  }
+
+  // Does not detect cuFile falling back to its own compatibility mode; see gds_stats for that.
+  @Test
+  void readsThroughCuFile() {
+    boolean direct;
+    try (NativeFileSource source = NativeFileSource.open(file.toString())) {
+      // 1 GiB, well above KvikIO's GDS threshold, so this asks only whether cuFile reads the file.
+      direct = source.isDeviceReadDirect(1L << 30);
+    }
+    System.out.println("KvikIO reads " + file + (direct ? " through cuFile" : " through POSIX"));
+    String message = "KvikIO is not reading " + file + " through cuFile";
+    if (GDS_REQUIRED) {
+      assertTrue(direct, message);
+    } else {
+      assumeTrue(direct, message);
+    }
     readToDeviceAndCheck();
   }
 

@@ -26,7 +26,7 @@ import ai.rapids.cudf.NativeDepsLoader;
  * A local file opened through libcudf's datasource, which reads it with KvikIO: with cuFile when
  * KvikIO opened the file in GDS mode, else through host memory. cuFile reads directly to the device
  * with GPUDirect Storage unless it falls back to its own compatibility mode, which stages through
- * host memory and is not observable.
+ * host memory and is not reported through this class.
  */
 public final class NativeFileSource implements AutoCloseable {
   static {

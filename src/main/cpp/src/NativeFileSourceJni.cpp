@@ -53,11 +53,15 @@ void read_ranges(JNIEnv* env,
                  jlongArray j_dst_addresses,
                  ReadAsync read_async)
 {
+  // Views of the Java arrays; the Java side has already checked each range fits the destination.
   cudf::jni::native_jlongArray const file_offsets(env, j_file_offsets);
   cudf::jni::native_jlongArray const lengths(env, j_lengths);
   cudf::jni::native_jlongArray const dst_addresses(env, j_dst_addresses);
   CUDF_EXPECTS(file_offsets.size() == lengths.size() && dst_addresses.size() == lengths.size(),
                "range arrays must have the same length");
+
+  // Validate every range before starting any read, so a bad range fails the call without writing
+  // to the destination. The length check is written as a subtraction so it cannot overflow.
   auto const file_size = source.size();
   for (int i = 0; i < lengths.size(); ++i) {
     CUDF_EXPECTS(file_offsets[i] >= 0 && lengths[i] >= 0 &&
@@ -67,9 +71,14 @@ void read_ranges(JNIEnv* env,
                  "read range is outside the file");
   }
 
+  // Each started read and the length it should return.
   std::vector<std::pair<std::future<std::size_t>, std::size_t>> reads;
   reads.reserve(lengths.size());
+  // The first failure, from starting a read or from one that was started.
   std::exception_ptr error;
+
+  // Start all the reads so KvikIO runs them concurrently. If starting one throws, stop starting
+  // more, but fall through to wait for those already running.
   try {
     for (int i = 0; i < lengths.size(); ++i) {
       if (lengths[i] == 0) { continue; }
@@ -82,8 +91,12 @@ void read_ranges(JNIEnv* env,
   } catch (...) {
     error = std::current_exception();
   }
+
+  // Wait for every started read, even after a failure: returning early would let the caller free
+  // the destination while reads are still writing to it. Keep only the first failure.
   for (auto& [read, length] : reads) {
     try {
+      // The ranges were checked against the file size, so fewer bytes means the read failed.
       if (read.get() != length && !error) {
         error = std::make_exception_ptr(cudf::logic_error("short read"));
       }
