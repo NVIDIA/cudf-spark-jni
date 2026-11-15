@@ -2311,7 +2311,9 @@ TEST_F(GetJsonObjectTest, MergedRetryMixedFlaggedUnflaggedParity)
 // sm_count * k_resident_warps_per_sm with 8 resident blocks x 4 warps per block, so 960 rows on
 // a 30-SM GPU and 4224 on a 132-SM H100); the test queries sm_count from the device so the
 // threshold holds on any GPU. An expanding row forces the retry through the packed subset
-// finish and the batched rebuild on top of the R=2 walk.
+// finish and the batched rebuild on top of the R=2 walk. Rows are row-dependent and carry
+// duplicate-key, null-abort, escaped-key, and wide-member rows: with identical rows a
+// half-warp swap or a width-16 cooperative-skip bug would go undetected.
 TEST_F(GetJsonObjectTest, MergedRouteR2RowsParity)
 {
   int current_device = 0;
@@ -2321,8 +2323,28 @@ TEST_F(GetJsonObjectTest, MergedRouteR2RowsParity)
   auto const bomb      = std::string(30, '"');
   auto const expanding = R"({"k":{"a":')" + bomb + R"('},"u":{"v":"U"}})";  // 58 B; $.k -> 68 B
   ASSERT_EQ(expanding.size(), 58u);
-  std::vector<std::string> rows(sm_count * 32 + 1, R"({"k":"s","u":{"v":"U"}})");
-  rows[0] = expanding;  // overflows its slot, so $.k is retried
+  std::string const dup_key    = R"({"k":"first","k":"second","u":{"v":"U"},"e":""})";
+  std::string const null_abort = R"({"k":null,"k":"later","u":{"v":"U"},"e":""})";
+  std::string const escaped    = R"({"\u006b":"esc","u":{"v":"U"},"e":""})";  // \u006b == k
+  std::string const wide       = [] {
+    std::string row = R"({"k":"wide","u":{"v":"U"},"e":"")";
+    for (int i = 0; i < 24; ++i) {
+      row += R"(,"m)" + std::to_string(i) + R"(":)" + R"("w)" + std::to_string(i) + R"(")";
+    }
+    row += "}";
+    return row;
+  }();
+  ASSERT_GT(wide.size(), 256u);
+  std::vector<std::string> rows;
+  rows.reserve(sm_count * 32 + 1);
+  for (int r = 0; r < sm_count * 32 + 1; ++r) {
+    rows.push_back(R"({"k":"s)" + std::to_string(r) + R"(","u":{"v":"U"},"e":""})");
+  }
+  rows[0] = expanding;   // overflows its slot, so $.k is retried
+  rows[1] = dup_key;     // first duplicate wins
+  rows[2] = null_abort;  // a null first value aborts $.k
+  rows[3] = escaped;     // escaped spelling still matches the k key
+  rows[4] = wide;        // wide member-dense row inside one half-warp
   cudf::test::strings_column_wrapper input(rows.begin(), rows.end());
 
   std::vector<std::vector<path_spec>> paths{
@@ -2342,8 +2364,17 @@ TEST_F(GetJsonObjectTest, MergedRouteR2RowsParity)
     ASSERT_EQ(single.size(), 1u);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*single[0], *out[col]);
   }
-  // Row 0's flagged path carries the retry's expanded output.
+  // Row 0's flagged path carries the retry's expanded output; the special rows resolve
+  // per their own semantics.
   auto const [vals, mask] = cudf::test::to_host<std::string>(out[0]->view());
   ASSERT_EQ(vals[0], quote_bomb_value(30));
   EXPECT_TRUE(row_valid(*out[0], mask, 0));
+  EXPECT_EQ(vals[1], "first");
+  EXPECT_FALSE(row_valid(*out[0], mask, 2));  // the null first value aborts $.k
+  EXPECT_EQ(vals[3], "esc");
+  EXPECT_EQ(vals[4], "wide");
+  // The remaining rows carry their own per-row k value.
+  for (int r = 5; r < sm_count * 32 + 1; ++r) {
+    EXPECT_EQ(vals[r], "s" + std::to_string(r)) << "row " << r;
+  }
 }
