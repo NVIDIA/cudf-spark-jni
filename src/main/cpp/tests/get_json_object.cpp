@@ -1131,8 +1131,10 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
 {
   // Admits the merged evaluator (>= 16 shallow NAMED paths, paths >= 3.15 x distinct roots, rows
   // >= 32) and checks every column against a single-path evaluation. Covers duplicate keys
-  // (first wins), escaped names, shared prefixes, depth-2 paths, nulls. All 20 paths ride the
-  // shared roots `r` and `q` so the wide fan-out denial cannot exclude the merged route.
+  // (first wins), escaped names, shared prefixes, depth-2 paths, nulls. 18 of the paths are
+  // depth 2 (merged) and 2 are depth 3, which exceed k_merged_max_depth and take the general
+  // route. All 20 share the roots `r` and `q` so the wide fan-out denial cannot exclude the
+  // merged route.
   auto const rows = same_rows(64,
                               R"({"r":{"a":"A","ab":"AB","abc":"ABC","dup":"first","dup":"second",)"
                               R"("key\"q":"escaped","n":null,"plain":"P",)"
@@ -1140,7 +1142,7 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
 
   multi_paths paths;
   paths.reserve(20);
-  // 18 depth-1 NAMED paths (>= k_merged_min_paths = 16) under the shared roots:
+  // 18 depth-2 NAMED paths (>= k_merged_min_paths = 16) under the shared roots:
   for (char const* k : {"a",
                         "ab",
                         "abc",
@@ -1161,7 +1163,7 @@ TEST_F(GetJsonObjectTest, MergedRouteSixteenNamedPathsParity)
                         "missing8"}) {
     paths.push_back(named({"r", k}));
   }
-  // 2 depth-2 NAMED paths ($.r.x.y and $.q.x.y):
+  // 2 depth-3 NAMED paths ($.r.x.y and $.q.x.y) that take the general route:
   paths.push_back(named({"r", "x", "y"}));
   paths.push_back(named({"q", "x", "y"}));
 
