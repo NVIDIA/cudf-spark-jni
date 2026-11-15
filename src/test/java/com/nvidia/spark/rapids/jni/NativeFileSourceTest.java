@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.Cuda;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DeviceMemoryBuffer;
 import ai.rapids.cudf.HostMemoryBuffer;
 import org.junit.jupiter.api.Test;
@@ -43,39 +44,99 @@ public class NativeFileSourceTest {
     return Files.write(tempDir.resolve("data.bin"), data);
   }
 
+  // Three ranges read out of file order, the last one ending at the end of the 1000-byte file.
+  private static final long[] FILE_OFFSETS = {100, 0, 900};
+  private static final long[] LENGTHS = {200, 50, 100};
+  private static final long[] DST_OFFSETS = {0, 300, 200};
+  private static final int DST_LENGTH = 350;
+
+  private static void assertRangesRead(HostMemoryBuffer dst) {
+    for (int r = 0; r < LENGTHS.length; r++) {
+      for (int i = 0; i < LENGTHS[r]; i++) {
+        assertEquals((byte) (FILE_OFFSETS[r] + i), dst.getByte(DST_OFFSETS[r] + i),
+            "range " + r + " byte " + i);
+      }
+    }
+  }
+
   @Test
-  void deviceReadReadsTheRange() throws IOException {
+  void readToHostReadsEachRange() throws IOException {
     Path file = writeFile(1000);
     try (NativeFileSource source = NativeFileSource.open(file.toString());
-         DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(300);
-         HostMemoryBuffer host = HostMemoryBuffer.allocate(200)) {
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(DST_LENGTH)) {
       assertEquals(1000, source.size());
-      assertEquals(200, source.deviceRead(100, dst, 50, 200, Cuda.DEFAULT_STREAM));
-      try (DeviceMemoryBuffer read = dst.slice(50, 200)) {
-        host.copyFromDeviceBuffer(read);
-      }
-      for (int i = 0; i < 200; i++) {
-        assertEquals((byte) (100 + i), host.getByte(i), "byte " + i);
-      }
+      source.readToHost(FILE_OFFSETS, LENGTHS, dst, DST_OFFSETS);
+      assertRangesRead(dst);
     }
   }
 
   @Test
-  void deviceReadStopsAtTheEndOfTheFile() throws IOException {
+  void readToDeviceReadsEachRange() throws IOException {
+    Path file = writeFile(1000);
+    try (NativeFileSource source = NativeFileSource.open(file.toString());
+         DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(DST_LENGTH);
+         HostMemoryBuffer host = HostMemoryBuffer.allocate(DST_LENGTH)) {
+      source.readToDevice(FILE_OFFSETS, LENGTHS, dst, DST_OFFSETS, Cuda.DEFAULT_STREAM);
+      host.copyFromDeviceBuffer(dst);
+      assertRangesRead(host);
+    }
+  }
+
+  @Test
+  void emptyRangesReadNothing() throws IOException {
     Path file = writeFile(100);
     try (NativeFileSource source = NativeFileSource.open(file.toString());
-         DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(100)) {
-      assertEquals(40, source.deviceRead(60, dst, 0, 100, Cuda.DEFAULT_STREAM));
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(10)) {
+      dst.setMemory(0, 10, (byte) -1);
+      source.readToHost(new long[0], new long[0], dst, new long[0]);
+      source.readToHost(new long[] {100}, new long[] {0}, dst, new long[] {10});
+      for (int i = 0; i < 10; i++) {
+        assertEquals((byte) -1, dst.getByte(i), "byte " + i);
+      }
     }
   }
 
   @Test
-  void deviceReadRejectsARangeOutsideTheBuffer() throws IOException {
+  void rangePastTheEndOfTheFileFailsTheBatchBeforeReading() throws IOException {
+    Path file = writeFile(100);
+    try (NativeFileSource source = NativeFileSource.open(file.toString());
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(60)) {
+      dst.setMemory(0, 60, (byte) -1);
+      assertThrows(CudfException.class, () -> source.readToHost(
+          new long[] {0, 60}, new long[] {10, 50}, dst, new long[] {0, 10}));
+      for (int i = 0; i < 60; i++) {
+        assertEquals((byte) -1, dst.getByte(i), "byte " + i);
+      }
+    }
+  }
+
+  @Test
+  void negativeFileOffsetThrows() throws IOException {
+    Path file = writeFile(100);
+    try (NativeFileSource source = NativeFileSource.open(file.toString());
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(10)) {
+      assertThrows(CudfException.class,
+          () -> source.readToHost(new long[] {-1}, new long[] {10}, dst, new long[] {0}));
+    }
+  }
+
+  @Test
+  void rangeOutsideTheBufferThrows() throws IOException {
     Path file = writeFile(100);
     try (NativeFileSource source = NativeFileSource.open(file.toString());
          DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(10)) {
+      assertThrows(IllegalArgumentException.class, () -> source.readToDevice(
+          new long[] {0}, new long[] {10}, dst, new long[] {5}, Cuda.DEFAULT_STREAM));
+    }
+  }
+
+  @Test
+  void mismatchedRangeArraysThrow() throws IOException {
+    Path file = writeFile(100);
+    try (NativeFileSource source = NativeFileSource.open(file.toString());
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(10)) {
       assertThrows(IllegalArgumentException.class,
-          () -> source.deviceRead(0, dst, 5, 10, Cuda.DEFAULT_STREAM));
+          () -> source.readToHost(new long[] {0, 5}, new long[] {5}, dst, new long[] {0}));
     }
   }
 
@@ -90,6 +151,12 @@ public class NativeFileSourceTest {
     try (NativeFileSource source = NativeFileSource.open(file.toString())) {
       assertFalse(source.isDeviceReadDirect(1 << 20));
     }
+  }
+
+  @Test
+  void setUpKvikioRejectsNoThreads() {
+    assertThrows(IllegalArgumentException.class,
+        () -> NativeFileSource.setUpKvikio(NativeFileSource.CompatMode.ON, 0));
   }
 
   @Test

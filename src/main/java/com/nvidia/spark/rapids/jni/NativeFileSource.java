@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.DeviceMemoryBuffer;
+import ai.rapids.cudf.HostMemoryBuffer;
+import ai.rapids.cudf.MemoryBuffer;
 import ai.rapids.cudf.NativeDepsLoader;
 
 /**
@@ -52,14 +54,18 @@ public final class NativeFileSource implements AutoCloseable {
   }
 
   /**
-   * Set KvikIO's compatibility mode for the process. libcudf reads the mode once, when it first
-   * sets up KvikIO, so this must be called before any other cuDF IO in the process; a later call
-   * has no effect.
+   * Set KvikIO's compatibility mode and thread pool size for the process, in place of the
+   * KVIKIO_COMPAT_MODE and KVIKIO_NTHREADS environment variables. libcudf sets up KvikIO once, so
+   * this must be called before any other cuDF IO in the process; a later call has no effect.
    *
    * @param mode the compatibility mode
+   * @param numThreads the number of threads KvikIO splits each read across, at least 1
    */
-  public static void setUpKvikio(CompatMode mode) {
-    setUpKvikioNative(mode.ordinal());
+  public static void setUpKvikio(CompatMode mode, int numThreads) {
+    if (numThreads < 1) {
+      throw new IllegalArgumentException("KvikIO needs at least 1 thread, got " + numThreads);
+    }
+    setUpKvikioNative(mode.ordinal(), numThreads);
   }
 
   /**
@@ -88,23 +94,53 @@ public final class NativeFileSource implements AutoCloseable {
   }
 
   /**
-   * Read bytes from the file into device memory, blocking until the read completes.
+   * Read byte ranges from the file into host memory. The reads run concurrently, and this blocks
+   * until all of them finish, even when one fails. Range {@code i} reads {@code lengths[i]} bytes
+   * at {@code fileOffsets[i]} into {@code dst} at {@code dstOffsets[i]}.
    *
-   * @param fileOffset the file offset to read from
+   * @param fileOffsets the file offset of each range
+   * @param lengths the length of each range; every range must lie within the file
    * @param dst the buffer to read into
-   * @param dstOffset the offset in {@code dst} to read to
-   * @param length the number of bytes to read
-   * @param stream the stream ordering the read; it is synchronized before the read starts
-   * @return the number of bytes read, fewer than {@code length} at the end of the file
+   * @param dstOffsets the offset in {@code dst} of each range
    */
-  public long deviceRead(long fileOffset, DeviceMemoryBuffer dst, long dstOffset, long length,
-      Cuda.Stream stream) {
-    if (dstOffset < 0 || length < 0 || dstOffset + length > dst.getLength()) {
-      throw new IllegalArgumentException("read of " + length + " bytes at offset " + dstOffset +
-          " does not fit a buffer of " + dst.getLength() + " bytes");
+  public void readToHost(long[] fileOffsets, long[] lengths, HostMemoryBuffer dst,
+      long[] dstOffsets) {
+    long[] dstAddresses = dstAddresses(fileOffsets, lengths, dst, dstOffsets);
+    readToHost(getHandle(), fileOffsets, lengths, dstAddresses);
+  }
+
+  /**
+   * Read byte ranges from the file into device memory. The reads run concurrently, and this blocks
+   * until all of them finish, even when one fails. Range {@code i} reads {@code lengths[i]} bytes
+   * at {@code fileOffsets[i]} into {@code dst} at {@code dstOffsets[i]}.
+   *
+   * @param fileOffsets the file offset of each range
+   * @param lengths the length of each range; every range must lie within the file
+   * @param dst the buffer to read into
+   * @param dstOffsets the offset in {@code dst} of each range
+   * @param stream the stream ordering the reads; it is synchronized before they start
+   */
+  public void readToDevice(long[] fileOffsets, long[] lengths, DeviceMemoryBuffer dst,
+      long[] dstOffsets, Cuda.Stream stream) {
+    long[] dstAddresses = dstAddresses(fileOffsets, lengths, dst, dstOffsets);
+    readToDevice(getHandle(), fileOffsets, lengths, dstAddresses, stream.getStream());
+  }
+
+  private static long[] dstAddresses(long[] fileOffsets, long[] lengths, MemoryBuffer dst,
+      long[] dstOffsets) {
+    if (fileOffsets.length != lengths.length || dstOffsets.length != lengths.length) {
+      throw new IllegalArgumentException("got " + fileOffsets.length + " file offsets, " +
+          lengths.length + " lengths and " + dstOffsets.length + " destination offsets");
     }
-    return deviceRead(getHandle(), fileOffset, length, dst.getAddress() + dstOffset,
-        stream.getStream());
+    long[] dstAddresses = new long[lengths.length];
+    for (int i = 0; i < lengths.length; i++) {
+      if (dstOffsets[i] < 0 || lengths[i] < 0 || dstOffsets[i] > dst.getLength() - lengths[i]) {
+        throw new IllegalArgumentException("read of " + lengths[i] + " bytes at offset " +
+            dstOffsets[i] + " does not fit a buffer of " + dst.getLength() + " bytes");
+      }
+      dstAddresses[i] = dst.getAddress() + dstOffsets[i];
+    }
+    return dstAddresses;
   }
 
   @Override
@@ -122,15 +158,18 @@ public final class NativeFileSource implements AutoCloseable {
     return handle;
   }
 
-  private static native void setUpKvikioNative(int mode);
+  private static native void setUpKvikioNative(int mode, int numThreads);
   private static native long openNative(String path);
 
   private static native long size(long handle);
 
   private static native boolean isDeviceReadDirect(long handle, long size);
 
-  private static native long deviceRead(long handle, long fileOffset, long length, long dstAddress,
-      long stream);
+  private static native void readToHost(long handle, long[] fileOffsets, long[] lengths,
+      long[] dstAddresses);
+
+  private static native void readToDevice(long handle, long[] fileOffsets, long[] lengths,
+      long[] dstAddresses, long stream);
 
   private static native void close(long handle);
 }

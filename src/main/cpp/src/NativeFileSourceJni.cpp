@@ -26,8 +26,12 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <future>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -36,18 +40,73 @@ cudf::io::datasource* as_source(jlong j_handle)
   return std::bit_cast<cudf::io::datasource*>(j_handle);
 }
 
+/**
+ * Start `read_async(file_offset, length, dst)` for every non-empty range, wait for all of them and
+ * rethrow the first failure. Each started read must finish before returning, since it writes into
+ * the caller's buffer.
+ */
+template <typename ReadAsync>
+void read_ranges(JNIEnv* env,
+                 cudf::io::datasource const& source,
+                 jlongArray j_file_offsets,
+                 jlongArray j_lengths,
+                 jlongArray j_dst_addresses,
+                 ReadAsync read_async)
+{
+  cudf::jni::native_jlongArray const file_offsets(env, j_file_offsets);
+  cudf::jni::native_jlongArray const lengths(env, j_lengths);
+  cudf::jni::native_jlongArray const dst_addresses(env, j_dst_addresses);
+  CUDF_EXPECTS(file_offsets.size() == lengths.size() && dst_addresses.size() == lengths.size(),
+               "range arrays must have the same length");
+  auto const file_size = source.size();
+  for (int i = 0; i < lengths.size(); ++i) {
+    CUDF_EXPECTS(file_offsets[i] >= 0 && lengths[i] >= 0 &&
+                   static_cast<std::size_t>(file_offsets[i]) <= file_size &&
+                   static_cast<std::size_t>(lengths[i]) <=
+                     file_size - static_cast<std::size_t>(file_offsets[i]),
+                 "read range is outside the file");
+  }
+
+  std::vector<std::pair<std::future<std::size_t>, std::size_t>> reads;
+  reads.reserve(lengths.size());
+  std::exception_ptr error;
+  try {
+    for (int i = 0; i < lengths.size(); ++i) {
+      if (lengths[i] == 0) { continue; }
+      auto const length = static_cast<std::size_t>(lengths[i]);
+      reads.emplace_back(read_async(static_cast<std::size_t>(file_offsets[i]),
+                                    length,
+                                    std::bit_cast<uint8_t*>(dst_addresses[i])),
+                         length);
+    }
+  } catch (...) {
+    error = std::current_exception();
+  }
+  for (auto& [read, length] : reads) {
+    try {
+      if (read.get() != length && !error) {
+        error = std::make_exception_ptr(cudf::logic_error("short read"));
+      }
+    } catch (...) {
+      if (!error) { error = std::current_exception(); }
+    }
+  }
+  if (error) { std::rethrow_exception(error); }
+}
+
 }  // namespace
 
 extern "C" {
 
 JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_NativeFileSource_setUpKvikioNative(
-  JNIEnv* env, jclass, jint j_mode)
+  JNIEnv* env, jclass, jint j_mode, jint j_num_threads)
 {
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
     cudf::io::kvikio_integration::set_up_kvikio(
-      std::nullopt, static_cast<cudf::io::kvikio_integration::compat_mode>(j_mode));
+      static_cast<uint32_t>(j_num_threads),
+      static_cast<cudf::io::kvikio_integration::compat_mode>(j_mode));
   }
   JNI_CATCH(env, );
 }
@@ -86,31 +145,63 @@ JNIEXPORT jboolean JNICALL Java_com_nvidia_spark_rapids_jni_NativeFileSource_isD
   JNI_CATCH(env, false);
 }
 
-JNIEXPORT jlong JNICALL
-Java_com_nvidia_spark_rapids_jni_NativeFileSource_deviceRead(JNIEnv* env,
+JNIEXPORT void JNICALL
+Java_com_nvidia_spark_rapids_jni_NativeFileSource_readToHost(JNIEnv* env,
                                                              jclass,
                                                              jlong j_handle,
-                                                             jlong j_file_offset,
-                                                             jlong j_length,
-                                                             jlong j_dst_address,
-                                                             jlong j_stream)
+                                                             jlongArray j_file_offsets,
+                                                             jlongArray j_lengths,
+                                                             jlongArray j_dst_addresses)
 {
-  JNI_NULL_CHECK(env, j_handle, "file source is null", 0);
-  JNI_NULL_CHECK(env, j_dst_address, "destination is null", 0);
+  JNI_NULL_CHECK(env, j_handle, "file source is null", );
+  JNI_NULL_CHECK(env, j_file_offsets, "file offsets are null", );
+  JNI_NULL_CHECK(env, j_lengths, "lengths are null", );
+  JNI_NULL_CHECK(env, j_dst_addresses, "destination addresses are null", );
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
     auto* const source = as_source(j_handle);
-    CUDF_EXPECTS(j_file_offset >= 0 && static_cast<std::size_t>(j_file_offset) <= source->size(),
-                 "file offset is out of range");
-    CUDF_EXPECTS(j_length >= 0, "read length must not be negative");
-    return static_cast<jlong>(
-      source->device_read(static_cast<std::size_t>(j_file_offset),
-                          static_cast<std::size_t>(j_length),
-                          std::bit_cast<uint8_t*>(j_dst_address),
-                          cuda::stream_ref{reinterpret_cast<cudaStream_t>(j_stream)}));
+    read_ranges(env,
+                *source,
+                j_file_offsets,
+                j_lengths,
+                j_dst_addresses,
+                [source](std::size_t file_offset, std::size_t length, uint8_t* dst) {
+                  return source->host_read_async(file_offset, length, dst);
+                });
   }
-  JNI_CATCH(env, 0);
+  JNI_CATCH(env, );
+}
+
+JNIEXPORT void JNICALL
+Java_com_nvidia_spark_rapids_jni_NativeFileSource_readToDevice(JNIEnv* env,
+                                                               jclass,
+                                                               jlong j_handle,
+                                                               jlongArray j_file_offsets,
+                                                               jlongArray j_lengths,
+                                                               jlongArray j_dst_addresses,
+                                                               jlong j_stream)
+{
+  JNI_NULL_CHECK(env, j_handle, "file source is null", );
+  JNI_NULL_CHECK(env, j_file_offsets, "file offsets are null", );
+  JNI_NULL_CHECK(env, j_lengths, "lengths are null", );
+  JNI_NULL_CHECK(env, j_dst_addresses, "destination addresses are null", );
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    auto* const source = as_source(j_handle);
+    CUDF_EXPECTS(source->supports_device_read(), "file source does not support device reads");
+    cuda::stream_ref const stream{reinterpret_cast<cudaStream_t>(j_stream)};
+    read_ranges(env,
+                *source,
+                j_file_offsets,
+                j_lengths,
+                j_dst_addresses,
+                [source, stream](std::size_t file_offset, std::size_t length, uint8_t* dst) {
+                  return source->device_read_async(file_offset, length, dst, stream);
+                });
+  }
+  JNI_CATCH(env, );
 }
 
 JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_NativeFileSource_close(JNIEnv* env,
