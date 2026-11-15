@@ -570,6 +570,87 @@ inline multi_paths flat_wide_124_build_paths()
 }
 
 /**
+ * @brief Paths for the wide few-root shape: `num_paths` depth-two paths spread round-robin
+ * over `num_roots` roots (each root keeps one child per member it queries), sized by the
+ * caller's `num_paths` axis. The rows must carry at least `num_roots` members so every root
+ * exists, and each queried root must carry every child its paths name so all paths hit.
+ */
+inline multi_paths flat_wide_rooted_build_paths(std::size_t num_paths, std::size_t num_roots)
+{
+  CUDF_EXPECTS(num_roots > 0, "wide few-root shapes need at least one root");
+  multi_paths paths;
+  paths.reserve(num_paths);
+  for (std::size_t p = 0; p < num_paths; ++p) {
+    paths.push_back(
+      path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(p % num_roots), -1},
+                path_tuple{instruction_t::NAMED, "c" + std::to_string(p), -1}});
+  }
+  return paths;
+}
+
+/**
+ * @brief Rows for the wide few-root shape: `member_count` top-level members; the first
+ * `num_roots` are objects holding one child per path named under that root, and the rest are
+ * filler string members absorbing the row budget via `pad_row_to` like the other flat rows.
+ */
+inline std::vector<std::string> flat_wide_rooted_build_rows(std::mt19937_64& rng,
+                                                            std::size_t num_rows,
+                                                            std::size_t member_count,
+                                                            std::size_t num_roots,
+                                                            multi_paths const& paths,
+                                                            std::size_t row_bytes)
+{
+  CUDF_EXPECTS(member_count >= num_roots, "rows must carry every rooted path's parent member");
+  // children[r] lists the child names pathed under root r, in query order (unique by
+  // construction: child names are "c" + the per-path index).
+  std::vector<std::vector<std::string>> children(num_roots);
+  for (auto const& path : paths) {
+    for (std::size_t r = 0; r < num_roots; ++r) {
+      if (std::get<1>(path[0]) == "f" + std::to_string(r)) {
+        children[r].push_back(std::get<1>(path[1]));
+        break;
+      }
+    }
+  }
+  // Each rooted child member carries at least 9 bytes ("cN":"x" plus comma), so the 600-member
+  // 124-child natural row (~10.7 KiB) can exceed a ~10 KiB `row_bytes` (filler values stay 1
+  // char, as in flat_600_build_rows); `pad_row_to` then returns the unpadded (slightly wider)
+  // row. The 4-root 768-child cell overshoots regardless: the rooted children alone approach
+  // the ~10 KiB budget, so a wider-than-budget row is inherent there.
+  std::size_t rooted_bytes = 2;  // braces
+  for (std::size_t r = 0; r < num_roots; ++r) {
+    rooted_bytes += 6 + 2 * std::to_string(r).size() + children[r].size() * 9;
+    for (auto const& child : children[r]) {
+      rooted_bytes += child.size();
+    }
+  }
+  CUDF_EXPECTS(rooted_bytes < 2 * row_bytes,
+               "rooted children exceed the row budget; widen row_bytes or trim members");
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < num_roots) {
+        row += "\"f" + std::to_string(m) + "\":{";
+        for (std::size_t c = 0; c < children[m].size(); ++c) {
+          if (c > 0) { row += ','; }
+          row += "\"" + children[m][c] + "\":\"x\"";
+        }
+        row += '}';
+      } else {
+        // 1-char filler values like flat_600_build_rows: keep the natural row near the budget.
+        row += "\"fill_m" + std::to_string(m) + "\":\"x\"";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
+/**
  * @brief Rows for the wide-flat merged-route shape: each row is a flat object
  * whose 124 queried members `f0`..`f123` carry string values; `pad_row_to`
  * absorbs the remaining `row_bytes` budget like the other scenarios.
