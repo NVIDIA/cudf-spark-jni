@@ -22,6 +22,7 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/offsets_iterator_factory.cuh>
+#include <cudf/detail/utilities/buffer_factories.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -29,9 +30,11 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/strings/detail/strings_children.cuh>
+#include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
@@ -39,18 +42,22 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cub/device/device_memcpy.cuh>
+#include <cub/device/device_scan.cuh>
 #include <cuda/atomic>
 #include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/hierarchy>
 #include <cuda/std/algorithm>
+#include <cuda/std/functional>
 #include <cuda/std/tuple>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
 #include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 #include <thrust/uninitialized_fill.h>
 
 #include <algorithm>
@@ -59,6 +66,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -974,35 +982,686 @@ cuda::std::pair<int64_t, int64_t> calc_scratch_size(
 }
 
 // The last marker is depth overflow: throw first; otherwise true means every size marker is zero.
-bool check_error(cudf::detail::host_vector<int8_t> const& error_check)
+bool check_error(cudf::host_span<int8_t const> error_check)
 {
   CUDF_EXPECTS(error_check.back() == 0,
                "The processed input has nesting depth exceeds depth limit.");
 
   // The checked depth marker is zero, so it can remain in the range.
   return std::none_of(
-    error_check.cbegin(), error_check.cend(), [](auto const val) { return val != 0; });
+    error_check.begin(), error_check.end(), [](auto const val) { return val != 0; });
 }
 
 namespace {
 
-// The merged route evaluates one decoded-name trie walk per pure-NAMED group; the first
-// duplicate wins, dead paths stay dead. Parse errors null all paths; depth overflow throws
-// only when a path is not already dead.
+// Accumulate per-path character totals in 64 bits before narrowing offsets.
+using scan_accum_t = int64_t;
 
-// Shallow admission: depth <= 2 and >= 8 paths; the 32-row floor is below. Production hit
-// rate under the plugin's 4 GiB budget: the caller batches paths by scratch size, so a batch
-// reaches 8 paths only for columns below roughly 512 MiB (4 GiB / 8) - bigger columns pay the
-// general route. The k_merged_max_paths cap keeps admitted groups' records within the 48 KiB
-// shared-memory bound, so the global record fallback (allocated outside memory_budget_bytes)
-// is unreachable via admission and remains only as a defensive fallback in
-// launch_merged_named. Wide-flat groups (about one distinct path per distinct root) admit
-// here: the merged member scan filters each node's candidates by length bucket and 8-byte
-// signature before the full byte compare, so a wide root no longer pays the linear candidate
-// scans that once made these shapes lose to the general route, and merged measured faster
-// than general on every previously denied flat shape.
+// Splits path-major scan indices into (path, row), one terminal slot per row segment.
+// seg32 enables 32-bit div/mod only when paths * (rows + 1) fits signed 31 bits.
+struct scan_index_split {
+  int64_t seg;  // rows + 1
+  int32_t seg32{};
+
+  __device__ cuda::std::pair<int64_t, int64_t> split(int64_t const i) const
+  {
+    if (seg32 > 0) {
+      auto const i32 = static_cast<int32_t>(i);
+      return {i32 / seg32, i32 % seg32};
+    }
+    return {i / seg, i % seg};
+  }
+};
+
+// Reads each path's row lengths plus a final zero, so an exclusive scan emits the path total.
+// A depth error leaves pair records unwritten; yield zeros without dereferencing them.
+struct batched_lengths_fn {
+  cuda::std::pair<char const*, cudf::size_type> const* const* pair_ptrs;
+  scan_index_split split_idx;
+  int8_t const* depth_error;
+
+  __device__ scan_accum_t operator()(int64_t const i) const
+  {
+    if (depth_error != nullptr && *depth_error != 0) { return 0; }
+    auto const [path, row] = split_idx.split(i);
+    if (row == split_idx.seg - 1) { return 0; }  // terminal zero
+    return pair_ptrs[path][row].second;
+  }
+};
+
+/**
+ * CUB output proxy for path-major scan results: scatters offsets to each path's destination
+ * column. The terminal slot captures an independent int64 total before the offset narrows to T;
+ * callers must check that total before exposing offsets. Each target holds rows + 1 entries.
+ */
+template <typename T>
+struct scattered_scan_output_iterator {
+  T* const* targets{};  // table of per-path destination pointers (const table from uvector)
+  scan_index_split split_idx;
+  int64_t idx{};
+  // Capture each segment's final 64-bit total without another scan.
+  int64_t* terminal_totals{};
+  using difference_type   = std::ptrdiff_t;
+  using value_type        = T;
+  using pointer           = void;
+  using reference         = scattered_scan_output_iterator const&;
+  using iterator_category = std::random_access_iterator_tag;
+
+  __device__ reference operator*() const { return *this; }
+  __device__ scattered_scan_output_iterator operator[](int64_t const offset) const
+  {
+    return *this + offset;
+  }
+  __device__ scattered_scan_output_iterator& operator++()
+  {
+    ++idx;
+    return *this;
+  }
+  __device__ scattered_scan_output_iterator operator++(int)
+  {
+    auto tmp{*this};
+    ++idx;
+    return tmp;
+  }
+  __device__ scattered_scan_output_iterator& operator+=(difference_type const offset)
+  {
+    idx += offset;
+    return *this;
+  }
+  __device__ scattered_scan_output_iterator operator+(difference_type const offset) const
+  {
+    return scattered_scan_output_iterator{targets, split_idx, idx + offset, terminal_totals};
+  }
+  __device__ scattered_scan_output_iterator& operator--()
+  {
+    --idx;
+    return *this;
+  }
+  __device__ scattered_scan_output_iterator operator-(difference_type const offset) const
+  {
+    return scattered_scan_output_iterator{targets, split_idx, idx - offset, terminal_totals};
+  }
+  __device__ difference_type operator-(scattered_scan_output_iterator const& other) const
+  {
+    return idx - other.idx;
+  }
+  __device__ bool operator==(scattered_scan_output_iterator const& other) const
+  {
+    return idx == other.idx;
+  }
+  __device__ bool operator!=(scattered_scan_output_iterator const& other) const
+  {
+    return idx != other.idx;
+  }
+
+  __device__ reference operator=(scan_accum_t const value) const
+  {
+    auto const [path, row] = split_idx.split(idx);
+    if (terminal_totals != nullptr && row == split_idx.seg - 1) {
+      // The terminal exclusive-scan slot holds the full path's byte total.
+      terminal_totals[path] = value;
+    }
+    targets[path][row] = static_cast<T>(value);
+    return *this;
+  }
+};
+
+constexpr cudf::size_type validity_block_size = 256;
+
+/**
+ * Produces validity from non-null row-pair pointers; a depth flag suppresses unwritten pair
+ * reads. Blocks own disjoint mask-word slices and atomically add one count each to a zeroed
+ * per-path counter. Requires 256 threads per block and mask words covering every row, tail
+ * included.
+ */
+CUDF_KERNEL void batched_validity_kernel(
+  int64_t rows,
+  cuda::std::pair<char const*, cudf::size_type> const* const* pair_ptrs,
+  cudf::bitmask_type* const* mask_ptrs,
+  int32_t words_per_path,
+  int32_t num_blocks_per_path,
+  int32_t words_per_block,
+  cudf::size_type* valid_counts,
+  int8_t const* depth_error)
+{
+  // Keeping total_blocks below 2^31 preserves 32-bit block-to-path index arithmetic.
+  auto const path       = blockIdx.x / num_blocks_per_path;
+  auto const first_word = (blockIdx.x % num_blocks_per_path) * words_per_block;
+  auto const last_word =
+    first_word + words_per_block < words_per_path ? first_word + words_per_block : words_per_path;
+  auto const lane            = threadIdx.x % cudf::detail::warp_size;
+  auto const warp_in_block   = threadIdx.x / cudf::detail::warp_size;
+  auto const warps_per_block = blockDim.x / cudf::detail::warp_size;
+
+  cudf::size_type warp_valid_count{0};
+  bool const has_depth_error = depth_error != nullptr && *depth_error != 0;
+  for (int64_t w = first_word + warp_in_block; w < last_word; w += warps_per_block) {
+    auto const row = w * cudf::detail::warp_size + lane;
+    // The last word is partial beyond `rows`; cache the path's warp-uniform pair pointer.
+    auto const* path_pairs = pair_ptrs[path];
+    bool const is_valid    = !has_depth_error && row < rows && path_pairs[row].first != nullptr;
+
+    cudf::bitmask_type const ballot = __ballot_sync(0xFFFF'FFFFu, is_valid);
+
+    if (lane == 0) {
+      mask_ptrs[path][w] = ballot;
+      warp_valid_count += __popc(ballot);
+    }
+  }
+
+  // The word loop is warp-uniform, allowing one counter update per block.
+  auto const block_count =
+    cudf::detail::single_lane_block_sum_reduce<validity_block_size, 0>(warp_valid_count);
+  if (threadIdx.x == 0) { atomicAdd(valid_counts + path, block_count); }
+}
+
+// Borrowed gather descriptor: pairs may point into scratch or input; offsets select dst ranges.
+// All three referenced allocations must stay alive until the queued gather completes.
+struct gather_entry {
+  cuda::std::pair<char const*, cudf::size_type> const* pairs;
+  char* dst;
+  int32_t const* offsets32;
+};
+
+// IdxT is int32 only when entries * rows fits 31 bits.
+template <typename IdxT>
+struct gather_fn {
+  gather_entry const* entries;
+  IdxT rows;
+  __device__ gather_entry const& entry(int64_t i) const
+  {
+    return entries[static_cast<IdxT>(i) / rows];
+  }
+  __device__ IdxT row(int64_t i) const { return static_cast<IdxT>(i) % rows; }
+};
+
+// Runs CUB's storage query then execution on one stream; temporary storage is stream-ordered.
+template <typename Operation, typename... Args>
+void run_cub_two_phase(Operation operation, cuda::stream_ref stream, Args const&... args)
+{
+  std::size_t bytes = 0;
+  CUDF_CUDA_TRY(operation(nullptr, bytes, args..., stream.get()));
+  auto temp = cuda::device_buffer<std::byte>(
+    stream, cudf::get_current_device_resource_ref(), bytes, cuda::no_init);
+  CUDF_CUDA_TRY(operation(temp.data(), bytes, args..., stream.get()));
+}
+
+// Each flat index names one (path, row) copy; IdxT must fit the index and offsets must be checked.
+// Enqueue after descriptor upload; results and source owners retain device storage through gather.
+template <typename IdxT>
+void gather_chars_for_group_impl(gather_entry const* entries,
+                                 IdxT rows,
+                                 int64_t num_buffers,
+                                 cuda::stream_ref stream)
+{
+  gather_fn<IdxT> const gather{entries, rows};
+  auto const src_fn = [gather] __device__(int64_t i) {
+    // The CUB workaround casts a read-only source pointer to char*.
+    return const_cast<char*>(gather.entry(i).pairs[gather.row(i)].first);
+  };
+  auto const dst_fn = [gather] __device__(int64_t i) {
+    auto const& entry = gather.entry(i);
+    return entry.dst + entry.offsets32[gather.row(i)];
+  };
+  auto const size_fn = [gather] __device__(int64_t i) {
+    return gather.entry(i).pairs[gather.row(i)].second;
+  };
+
+  auto const src_it = thrust::make_transform_iterator(thrust::make_counting_iterator(int64_t{0}),
+                                                      cuda::proclaim_return_type<char*>(src_fn));
+  auto const dst_it = thrust::make_transform_iterator(thrust::make_counting_iterator(int64_t{0}),
+                                                      cuda::proclaim_return_type<char*>(dst_fn));
+  auto const size_it =
+    thrust::make_transform_iterator(thrust::make_counting_iterator(int64_t{0}),
+                                    cuda::proclaim_return_type<cudf::size_type>(size_fn));
+
+  auto const copy = [](auto&&... args) { return cub::DeviceMemcpy::Batched(args...); };
+  run_cub_two_phase(copy, stream, src_it, dst_it, size_it, num_buffers);
+}
+
+/**
+ * Enqueues one batched gather over equal-row-count paths using already checked int32 offsets.
+ * Null pairs carry zero lengths; valid pairs borrow readable source bytes until gather
+ * completion. The local descriptor upload is ordered before return on nonlegacy streams,
+ * including per-thread default streams; this sync protects host staging, not a final host read.
+ */
+void gather_chars_for_group(std::vector<gather_entry> const& h_entries,
+                            int64_t rows,
+                            cuda::stream_ref stream)
+{
+  if (h_entries.empty()) { return; }
+  auto const num_buffers = static_cast<int64_t>(h_entries.size()) * rows;
+  auto d_entries         = cudf::detail::make_device_uvector_async(
+    h_entries, stream, cudf::get_current_device_resource_ref());
+  // h_entries belongs to the finisher; delay its destruction until the upload completes on
+  // explicit/PTDS streams. A null handle is not the legacy stream when PTDS is enabled.
+  if (stream.get() != cudaStreamLegacy && (stream.get() != nullptr || cudf::is_ptds_enabled())) {
+    stream.sync();
+  }
+
+  auto const idx32 = num_buffers < (int64_t{1} << 31);
+  if (idx32) {
+    return gather_chars_for_group_impl(
+      d_entries.data(), static_cast<int32_t>(rows), num_buffers, stream);
+  }
+  gather_chars_for_group_impl(d_entries.data(), rows, num_buffers, stream);
+}
+
+// Rounds the int32-count bytes up to eight-byte alignment for the int64 totals that follow.
+[[nodiscard]] std::size_t valid_counts_bytes(int64_t num_paths)
+{
+  return (static_cast<std::size_t>(num_paths) * sizeof(cudf::size_type) + sizeof(int64_t) - 1) &
+         ~(sizeof(int64_t) - 1);
+}
+
+/**
+ * Owns offsets, masks, pointer tables, and one packed counts/totals/errors readback per group.
+ * Host accessors require a synchronized preparation stream; `already_synced` records that
+ * ordering, not merely that readback was queued. Keep host pointer-table sources until then.
+ * Row pairs and their character sources are borrowed; they stay alive through the final gather.
+ */
+struct prepared_output_metadata {
+  std::vector<std::unique_ptr<cudf::column>> offsets_cols;
+  std::vector<cuda::device_buffer<cudf::bitmask_type>> null_masks;
+  cuda::device_buffer<cuda::std::pair<char const*, cudf::size_type> const*> d_pair_ptrs;
+  cuda::device_buffer<cudf::bitmask_type*> d_mask_ptrs;
+  cuda::device_buffer<int32_t*> d_targets32;
+  // Pinned readback layout: [valid_counts][8-aligned total_sizes][error_check].
+  cuda::device_buffer<std::byte> d_packed_readback;
+  cudf::detail::host_vector<std::byte> h_packed_readback;
+  int64_t num_err{};
+  bool already_synced{};
+  // Keep host pointer tables alive through the non-default-stream sync they feed.
+  std::vector<cuda::std::pair<char const*, cudf::size_type> const*> h_pair_ptrs;
+  std::vector<cudf::bitmask_type*> h_mask_ptrs;
+  std::vector<int32_t*> h_targets32;
+  int64_t num_paths;
+  int64_t rows;
+
+  [[nodiscard]] int64_t const* h_total_sizes() const
+  {
+    return reinterpret_cast<int64_t const*>(h_packed_readback.data() +
+                                            valid_counts_bytes(num_paths));
+  }
+  [[nodiscard]] cudf::size_type const* h_valid_counts() const
+  {
+    return reinterpret_cast<cudf::size_type const*>(h_packed_readback.data());
+  }
+  // Error markers: per-path OOB slots then the depth-exceeded slot.
+  [[nodiscard]] int8_t const* h_error_check() const
+  {
+    return num_err > 0 ? reinterpret_cast<int8_t const*>(
+                           h_packed_readback.data() + valid_counts_bytes(num_paths) +
+                           static_cast<std::size_t>(num_paths) * sizeof(int64_t))
+                       : nullptr;
+  }
+};
+
+// Batches below this size skip the packed-metadata setup; the same gate governs success and
+// retry outputs.
+constexpr std::size_t packed_readback_min_paths = 8;
+
+/**
+ * Queues offsets/validity for equal-sized pair spans plus one packed host readback; no sync.
+ * The returned owner retains asynchronous pointer-table sources. When supplied,
+ * `error_check_slots` holds caller-initialized per-path size flags followed by one depth flag;
+ * depth failures suppress reads of unwritten pair records. Oversized scratch is never gathered
+ * here: callers check flags first. No paths or rows queues no readback and returns num_err=0.
+ * Retain pairs and errors through ordering.
+ */
+prepared_output_metadata prepare_output_metadata(
+  cudf::column_device_view const& input,
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> const&
+    pairs_by_path,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr,
+  cudf::device_span<int8_t> error_check_slots = {})
+{
+  auto const num_paths = static_cast<int64_t>(pairs_by_path.size());
+  auto const rows      = static_cast<int64_t>(input.size());
+  auto const seg       = rows + 1;
+  auto const num_err   = static_cast<int64_t>(error_check_slots.size());
+
+  if (num_paths == 0 || rows == 0) {
+    // Buffers must carry the allocation stream even when they hold no elements.
+    return prepared_output_metadata{
+      {},
+      {},
+      cuda::device_buffer<cuda::std::pair<char const*, cudf::size_type> const*>{
+        stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<cudf::bitmask_type*>{stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<int32_t*>{stream, cudf::get_current_device_resource_ref()},
+      cuda::device_buffer<std::byte>{stream, cudf::get_current_device_resource_ref()},
+      cudf::detail::host_vector<std::byte>(0, {cudf::get_pinned_memory_resource(), stream}),
+      0,      // degenerate: no packed readback was enqueued; the caller reads d_error_check itself
+      false,  // nothing was enqueued; the finisher's degenerate paths return before any sync
+      {},
+      {},
+      {},
+      num_paths,
+      rows};
+  }
+
+  auto const* depth_error =
+    error_check_slots.empty() ? nullptr : error_check_slots.data() + error_check_slots.size() - 1;
+
+  std::vector<std::unique_ptr<cudf::column>> offsets_cols;
+  offsets_cols.reserve(pairs_by_path.size());
+  std::vector<cuda::device_buffer<cudf::bitmask_type>> null_masks;
+  null_masks.reserve(pairs_by_path.size());
+  std::vector<cuda::std::pair<char const*, cudf::size_type> const*> h_pair_ptrs;
+  std::vector<cudf::bitmask_type*> h_mask_ptrs;
+  std::vector<int32_t*> h_targets32;
+  h_pair_ptrs.reserve(pairs_by_path.size());
+  h_mask_ptrs.reserve(pairs_by_path.size());
+  h_targets32.reserve(pairs_by_path.size());
+
+  auto const words_per_path = (rows + cudf::detail::warp_size - 1) / cudf::detail::warp_size;
+  for (auto const& span : pairs_by_path) {
+    CUDF_EXPECTS(static_cast<int64_t>(span.size()) == rows, "Invalid pair span size");
+    offsets_cols.emplace_back(cudf::make_numeric_column(cudf::data_type{cudf::type_id::INT32},
+                                                        static_cast<cudf::size_type>(seg),
+                                                        cudf::mask_state::UNALLOCATED,
+                                                        stream,
+                                                        mr));
+    null_masks.emplace_back(cudf::create_null_mask(
+      static_cast<cudf::size_type>(rows), cudf::mask_state::UNINITIALIZED, stream, mr));
+    h_pair_ptrs.emplace_back(span.data());
+    h_mask_ptrs.emplace_back(null_masks.back().data());
+    h_targets32.emplace_back(offsets_cols.back()->mutable_view().data<cudf::size_type>());
+  }
+  auto d_pair_ptrs = cudf::detail::make_device_buffer_async(
+    h_pair_ptrs, stream, cudf::get_current_device_resource_ref());
+  auto d_mask_ptrs = cudf::detail::make_device_buffer_async(
+    h_mask_ptrs, stream, cudf::get_current_device_resource_ref());
+  auto d_targets32 = cudf::detail::make_device_buffer_async(
+    h_targets32, stream, cudf::get_current_device_resource_ref());
+
+  auto const valid_counts_size = valid_counts_bytes(num_paths);
+  auto const total_sizes_bytes = static_cast<std::size_t>(num_paths) * sizeof(int64_t);
+  auto const error_bytes       = static_cast<std::size_t>(num_err);
+  auto const readback_bytes    = valid_counts_size + total_sizes_bytes + error_bytes;
+  auto d_packed_readback       = cuda::device_buffer<std::byte>(
+    stream, cudf::get_current_device_resource_ref(), readback_bytes, cuda::no_init);
+  auto* const d_valid_counts = reinterpret_cast<cudf::size_type*>(d_packed_readback.data());
+  auto* const d_total_sizes =
+    reinterpret_cast<int64_t*>(d_packed_readback.data() + valid_counts_size);
+  auto* const d_error_slots =
+    num_err > 0
+      ? reinterpret_cast<int8_t*>(d_packed_readback.data() + valid_counts_size + total_sizes_bytes)
+      : nullptr;
+  // Zero valid counts before atomicAdds; scans fill totals and callers pre-initialize errors.
+  thrust::uninitialized_fill(
+    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+    reinterpret_cast<std::byte*>(d_valid_counts),
+    reinterpret_cast<std::byte*>(d_valid_counts) + valid_counts_size,
+    std::byte{0});
+  if (d_error_slots != nullptr) {
+    CUDF_CUDA_TRY(cudaMemcpyAsync(
+      d_error_slots, error_check_slots.data(), error_bytes, cudaMemcpyDefault, stream.get()));
+  }
+
+  // Only flat counts below 2^31 take 32-bit indexing; accumulation stays 64-bit.
+  auto const idx32 = num_paths * seg < (int64_t{1} << 31);
+  scan_index_split const split_idx{seg, idx32 ? static_cast<int32_t>(seg) : 0};
+  auto const lengths_it =
+    thrust::make_transform_iterator(thrust::make_counting_iterator(int64_t{0}),
+                                    cuda::proclaim_return_type<scan_accum_t>(batched_lengths_fn{
+                                      d_pair_ptrs.data(), split_idx, depth_error}));
+  // Scan-by-key parallelizes across paths in the flat index space; the same 31-bit gate
+  // picks the key width.
+  auto const keys32_it = thrust::make_transform_iterator(
+    thrust::make_counting_iterator(int64_t{0}),
+    cuda::proclaim_return_type<int32_t>(
+      [seg32 = static_cast<int32_t>(seg)] __device__(int64_t const i) {
+        return static_cast<int32_t>(i / seg32);
+      }));
+  auto const keys64_it = thrust::make_transform_iterator(
+    thrust::make_counting_iterator(int64_t{0}),
+    cuda::proclaim_return_type<int64_t>([seg] __device__(int64_t const i) { return i / seg; }));
+  auto const scan_out_it = scattered_scan_output_iterator<cudf::size_type>{
+    d_targets32.data(), split_idx, 0, d_total_sizes};
+
+  // CUB's flat item count stays 64-bit even when the key width is 32-bit.
+  auto const scan_num_items           = num_paths * seg;
+  auto const run_exclusive_sum_by_key = [&](auto const& keys_it) {
+    auto const scan = [](auto&&... args) { return cub::DeviceScan::ExclusiveSumByKey(args...); };
+    run_cub_two_phase(
+      scan, stream, keys_it, lengths_it, scan_out_it, scan_num_items, cuda::std::equal_to<>{});
+  };
+  if (idx32) {
+    run_exclusive_sum_by_key(keys32_it);
+  } else {
+    run_exclusive_sum_by_key(keys64_it);
+  }
+
+  {
+    // Each block owns one path's word slice; total_blocks stays below 2^31 (see the kernel
+    // comment above).
+    auto const num_blocks_per_path =
+      static_cast<int32_t>(cudf::detail::div_rounding_up_safe<int64_t>(rows, validity_block_size));
+    auto const words_per_block = static_cast<int32_t>(
+      cudf::detail::div_rounding_up_safe<int64_t>(words_per_path, num_blocks_per_path));
+    auto const total_blocks = num_paths * num_blocks_per_path;  // bounded, see note above
+    auto const grid =
+      cudf::detail::grid_1d{total_blocks * validity_block_size, validity_block_size};
+    batched_validity_kernel<<<grid.num_blocks, grid.num_threads_per_block, 0, stream.get()>>>(
+      rows,
+      d_pair_ptrs.data(),
+      d_mask_ptrs.data(),
+      static_cast<int32_t>(words_per_path),
+      num_blocks_per_path,
+      words_per_block,
+      d_valid_counts,
+      depth_error);
+    CUDF_CUDA_TRY(cudaGetLastError());
+  }
+
+  // The pinned D2H buffer must outlive the caller's or retry finisher's ordering sync.
+  auto h_packed_readback = cudf::detail::make_pinned_vector_async<std::byte>(
+    static_cast<std::size_t>(readback_bytes), stream);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(h_packed_readback.data(),
+                                d_packed_readback.data(),
+                                readback_bytes,
+                                cudaMemcpyDefault,
+                                stream.get()));
+  return prepared_output_metadata{std::move(offsets_cols),
+                                  std::move(null_masks),
+                                  std::move(d_pair_ptrs),
+                                  std::move(d_mask_ptrs),
+                                  std::move(d_targets32),
+                                  std::move(d_packed_readback),
+                                  std::move(h_packed_readback),
+                                  num_err,
+                                  false,  // the caller sets this after its own error-readback sync
+                                  std::move(h_pair_ptrs),
+                                  std::move(h_mask_ptrs),
+                                  std::move(h_targets32),
+                                  num_paths,
+                                  rows};
+}
+
+/**
+ * Builds columns only after the caller accepts depth/size flags for these paths. Synchronizes
+ * the prepared readback unless already ordered, then rejects totals at the int32 factory
+ * threshold before allocating chars or exposing narrowed offsets. Pairs must keep the same
+ * lengths/order used by preparation, with readable input/scratch bytes through queued gather.
+ * Moves offsets/masks into the results; zero paths returns none, zero rows returns empty strings.
+ */
+std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
+  prepared_output_metadata&& prepared,
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> const&
+    pairs_by_path,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto const num_paths = prepared.num_paths;
+  auto const rows      = prepared.rows;
+  auto& offsets_cols   = prepared.offsets_cols;
+  auto& null_masks     = prepared.null_masks;
+
+  if (num_paths == 0) { return {}; }
+  if (rows == 0) {
+    std::vector<std::unique_ptr<cudf::column>> output;
+    output.reserve(pairs_by_path.size());
+    for (std::size_t i = 0; i < pairs_by_path.size(); ++i) {
+      output.emplace_back(cudf::make_empty_column(cudf::type_id::STRING));
+    }
+    return output;
+  }
+
+  // already_synced skips a second sync on the success path; the retry path syncs here.
+  if (!prepared.already_synced) { stream.sync(); }
+  auto const* h_total_sizes  = prepared.h_total_sizes();
+  auto const* h_valid_counts = prepared.h_valid_counts();
+
+  // Mirror the strings-column factory's int32 overflow threshold before exposing columns; a
+  // large-strings build would need an INT64 offsets branch here as well.
+  auto const threshold = cudf::strings::get_offset64_threshold();
+  for (int64_t p = 0; p < num_paths; ++p) {
+    CUDF_EXPECTS(h_total_sizes[p] < threshold,
+                 "Size of output exceeds the column size limit",
+                 std::overflow_error);
+  }
+
+  std::vector<rmm::device_uvector<char>> chars_buffers;
+  chars_buffers.reserve(pairs_by_path.size());
+  std::vector<gather_entry> h_entries;
+  h_entries.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    chars_buffers.emplace_back(
+      rmm::device_uvector<char>(static_cast<std::size_t>(h_total_sizes[p]), stream, mr));
+    // Skip empty chars buffers in the gather table to avoid zero-byte CUB descriptors.
+    if (h_total_sizes[p] == 0) { continue; }  // skip-emission
+    h_entries.emplace_back(gather_entry{pairs_by_path[p].data(),
+                                        chars_buffers.back().data(),
+                                        offsets_cols[p]->view().data<cudf::size_type>()});
+  }
+  // Pair lengths must sum to the scanned total; the strings-column factory trusts this producer.
+  gather_chars_for_group(h_entries, rows, stream);
+
+  std::vector<std::unique_ptr<cudf::column>> output;
+  output.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    auto const null_count = static_cast<cudf::size_type>(rows - h_valid_counts[p]);
+    output.emplace_back(cudf::make_strings_column(
+      static_cast<cudf::size_type>(rows),
+      std::move(offsets_cols[p]),
+      std::move(chars_buffers[p]).release(),
+      null_count,
+      null_count > 0 ? std::move(null_masks[p])
+                     : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr)));
+  }
+  return output;
+}
+
+/**
+ * Builds a path subset from one prepared metadata owner: subset order p reads owner path
+ * src_indices[p]. Reuses the owner's already-prepared offsets/masks/totals/validity (and its
+ * already_synced ordering) so a caller whose subset was prepared with the full batch — e.g. the
+ * retry's unflagged paths — skips a second prepare pass. Packed-readback entries are read at
+ * mapped owner indices; the owner's layout stays untouched. src_indices must be unique and
+ * within the owner's path range; pairs_by_path holds the subset's spans in subset order.
+ * Moves the mapped offsets/masks into the results.
+ */
+std::vector<std::unique_ptr<cudf::column>> finish_output_columns(
+  prepared_output_metadata&& prepared,
+  std::vector<std::size_t> const& src_indices,
+  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> const&
+    pairs_by_path,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
+{
+  auto const num_paths = static_cast<int64_t>(src_indices.size());
+  CUDF_EXPECTS(static_cast<int64_t>(pairs_by_path.size()) == num_paths,
+               "Subset finish requires one span per mapped path");
+  for (auto const src : src_indices) {
+    CUDF_EXPECTS(src < static_cast<std::size_t>(prepared.num_paths),
+                 "Subset index exceeds the prepared metadata path range");
+  }
+
+  auto const rows = prepared.rows;
+  if (num_paths == 0) { return {}; }
+  if (rows == 0) {
+    std::vector<std::unique_ptr<cudf::column>> output;
+    output.reserve(pairs_by_path.size());
+    for (std::size_t i = 0; i < pairs_by_path.size(); ++i) {
+      output.emplace_back(cudf::make_empty_column(cudf::type_id::STRING));
+    }
+    return output;
+  }
+
+  // Sync only when the caller has not already ordered the packed readback.
+  if (!prepared.already_synced) { stream.sync(); }
+  auto const* h_total_sizes  = prepared.h_total_sizes();
+  auto const* h_valid_counts = prepared.h_valid_counts();
+
+  // Mirror the strings-column factory's int32 overflow threshold before exposing columns; a
+  // large-strings build would need an INT64 offsets branch here as well.
+  auto const threshold = cudf::strings::get_offset64_threshold();
+  for (int64_t p = 0; p < num_paths; ++p) {
+    CUDF_EXPECTS(h_total_sizes[src_indices[p]] < threshold,
+                 "Size of output exceeds the column size limit",
+                 std::overflow_error);
+  }
+
+  std::vector<rmm::device_uvector<char>> chars_buffers;
+  chars_buffers.reserve(pairs_by_path.size());
+  std::vector<gather_entry> h_entries;
+  h_entries.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    auto const src = src_indices[p];
+    chars_buffers.emplace_back(
+      rmm::device_uvector<char>(static_cast<std::size_t>(h_total_sizes[src]), stream, mr));
+    // Skip empty chars buffers in the gather table to avoid zero-byte CUB descriptors.
+    if (h_total_sizes[src] == 0) { continue; }  // skip-emission
+    h_entries.emplace_back(
+      gather_entry{pairs_by_path[p].data(),
+                   chars_buffers.back().data(),
+                   prepared.offsets_cols[src]->view().data<cudf::size_type>()});
+  }
+  // Pair lengths must sum to the scanned total; the strings-column factory trusts this producer.
+  gather_chars_for_group(h_entries, rows, stream);
+
+  std::vector<std::unique_ptr<cudf::column>> output;
+  output.reserve(pairs_by_path.size());
+  for (int64_t p = 0; p < num_paths; ++p) {
+    auto const src        = src_indices[p];
+    auto const null_count = static_cast<cudf::size_type>(rows - h_valid_counts[src]);
+    output.emplace_back(cudf::make_strings_column(
+      static_cast<cudf::size_type>(rows),
+      std::move(prepared.offsets_cols[src]),
+      std::move(chars_buffers[p]).release(),
+      null_count,
+      null_count > 0 ? std::move(prepared.null_masks[src])
+                     : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr)));
+  }
+  return output;
+}
+}  // namespace
+
+namespace {
+
+// One decoded-name trie walk per pure-NAMED group; first duplicate wins, dead paths stay dead.
+// Parse errors null all paths; depth overflow throws only when a path is not already dead.
+
+// Shallow admission: depth <= 2 and a path floor scaled by the input's max row size; the
+// 32-row floor is below. Few-path requests over wide rows lose to the general kernel because
+// the merged walk parses every member (measured 1.1-2.6x slower); wide-many rows keep winning
+// under the bucketed scan. Production hit rate under the plugin's 4 GiB budget: the caller
+// batches paths by scratch size, so a narrow-row batch reaches the 8-path floor only for
+// columns below roughly 512 MiB (4 GiB / 8). The k_merged_max_paths cap keeps admitted
+// groups' records within the 48 KiB shared-memory bound, so the global record fallback
+// (allocated outside memory_budget_bytes) is unreachable via admission and remains only as a
+// defensive fallback in launch_merged_named.
 inline constexpr std::size_t k_merged_max_depth = 2;
-inline constexpr std::size_t k_merged_min_paths = 8;
+inline constexpr std::size_t k_merged_min_paths = 8;  // max row size <= k_narrow_row_bytes
+// Wider rows admit only at path counts that amortize the per-member scan. The byte bounds
+// share max_row_size's int64_t type to keep the comparison sign-clean.
+inline constexpr int64_t k_narrow_row_bytes            = 2'048;  // k_merged_min_paths up to here
+inline constexpr int64_t k_wide_row_bytes              = 4'096;  // k_wide_row_min_paths up to here
+inline constexpr std::size_t k_wide_row_min_paths      = 16;
+inline constexpr std::size_t k_very_wide_row_min_paths = 64;
 // 48 KiB of shared memory holds 4 warps/block x 16 B per record = 768 paths; admission caps a
 // group at this many paths so every admitted group's records stay in shared memory.
 inline constexpr std::size_t k_merged_max_paths = 768;
@@ -1036,8 +1695,8 @@ struct merged_trie_view {
   int32_t const* max_name_len;        // [nodes]; unused when the row is bypassed
 };
 
-// R=1 uses an aligned 8-byte head and a 1-byte kind at offset 8, rounding to a 16-byte stride;
-// R=2 packs all fields in 8 bytes. Both layouts require 8-byte alignment.
+// R=1 stores an aligned 8-byte head plus a 1-byte kind at offset 8; the record rounds to a 16-byte
+// stride. R=2 packs all fields in 8 bytes; both layouts require 8-byte alignment.
 /**
  * One path's selection in one row: [val_begin, val_end) are byte offsets into that input row.
  * begin=-1 is unset; dead marks a failed first occurrence that later duplicates cannot replace.
@@ -1067,8 +1726,7 @@ constexpr int8_t k_merged_kind_dead = 3;
 /**
  * R=2 record: begin occupies bits 0..31, exclusive end bits 32..60, and kind bits 61..63.
  * begin=-1 is unset; kind=dead prevents a failed first occurrence from being resurrected.
- * The launcher admits this layout only when row bytes fit the 29-bit end field; updates use
- * one atomic word.
+ * The launcher admits this layout only when row bytes fit 29 end bits; updates are plain stores.
  */
 struct merged_path_packed {
   uint64_t word;
@@ -1076,7 +1734,7 @@ struct merged_path_packed {
 
 inline constexpr int64_t k_packed_end_max = static_cast<int64_t>((uint64_t{1} << 29) - 1);
 
-// Row barriers bracket initialization/reset; these ordinary stores must not race atomic reads.
+// Row barriers bracket initialization/reset; these ordinary stores must not race record reads.
 __device__ __forceinline__ void merged_rec_init(merged_path_out& r)
 {
   r = merged_path_out{-1, -1, 0};
@@ -1088,7 +1746,7 @@ __device__ __forceinline__ void merged_rec_set(merged_path_out& r,
 {
   // R=1: only row_lane 0 publishes, so plain stores suffice and the post-walk __syncwarp makes
   // both fields visible to the other lanes before materialization.
-  // R=2: the packed record is one 8-byte word, published with atomics for the same reason.
+  // R=2: the packed record is one 8-byte word published with plain stores for the same reason.
   static_assert(offsetof(merged_path_out, val_begin) == 0 &&
                   offsetof(merged_path_out, val_end) == 4 &&
                   offsetof(merged_path_out, val_kind) == 8,
@@ -1151,48 +1809,36 @@ __device__ __forceinline__ void merged_rec_set(merged_path_packed& r,
                                                int32_t end,
                                                int8_t kind)
 {
-  // Only row_lane 0 publishes to each path's distinct packed record; the atomic exchange keeps
-  // the single 8-byte word consistent with the atomic reads of merged_rec_word.
+  // Only row_lane 0 of the record's half-warp publishes, and the sibling half-warp walks a
+  // different row's records, so this thread is the record's sole writer; the post-walk
+  // __syncwarp(row_mask) orders the plain store before the sibling lanes' plain reads.
   uint64_t const image = static_cast<uint64_t>(static_cast<uint32_t>(begin)) |
                          (static_cast<uint64_t>(static_cast<uint32_t>(end)) << 32) |
                          (static_cast<uint64_t>(static_cast<uint8_t>(kind)) << 61);
-  (void)atomicExch(reinterpret_cast<unsigned long long*>(&r.word), image);
+  r.word = image;
 }
-// Read the packed record atomically while other row lanes can publish it.
-__device__ __forceinline__ uint64_t merged_rec_word(merged_path_packed const& r)
-{
-  return cuda::atomic_ref<unsigned long long, cuda::thread_scope_device>(
-           *reinterpret_cast<unsigned long long*>(const_cast<uint64_t*>(&r.word)))
-    .load(cuda::std::memory_order_relaxed);
-}
+// Read the packed record; the record's sole writer precedes these loads, and the walk barrier
+// orders that store first.
+__device__ __forceinline__ uint64_t merged_rec_word(merged_path_packed const& r) { return r.word; }
 __device__ __forceinline__ bool merged_rec_is_set(merged_path_packed const& r)
 {
   return static_cast<int32_t>(static_cast<uint32_t>(merged_rec_word(r))) >= 0;
 }
 __device__ __forceinline__ void merged_rec_mark_dead(merged_path_packed& r)
 {
-  // A dead record must never resurrect, and a set record must never be killed: publish
-  // kind=dead only if the record is still unset, as one atomic 8-byte transition. The CAS
-  // predicate is re-checked on the freshly loaded value every attempt.
-  unsigned long long* const addr = reinterpret_cast<unsigned long long*>(&r.word);
-  // Seed the CAS predicate from an atomic load; row_lane 0 is the only writer.
-  unsigned long long old = merged_rec_word(r);
-  unsigned long long assumed;
-  do {
-    if (static_cast<int32_t>(static_cast<uint32_t>(old)) >= 0) { return; }
-    assumed = old;
-    unsigned long long const dead =
-      (old & ~(7ull << 61)) |
-      (static_cast<uint64_t>(static_cast<uint8_t>(k_merged_kind_dead)) << 61);
-    old = atomicCAS(addr, assumed, dead);
-  } while (old != assumed);
+  // A dead record must never resurrect, and an already-set record must never be killed. The
+  // record has a sole writer (row_lane 0 of its own half-warp), so check-then-store is
+  // race-free: dead-mark and first-set both happen inside this lane's walk.
+  if (static_cast<int32_t>(static_cast<uint32_t>(merged_rec_word(r))) >= 0) { return; }
+  r.word = (merged_rec_word(r) & ~(7ull << 61)) |
+           (static_cast<uint64_t>(static_cast<uint8_t>(k_merged_kind_dead)) << 61);
 }
 __device__ __forceinline__ int8_t merged_rec_kind(merged_path_packed const& r)
 {
   return static_cast<int8_t>((merged_rec_word(r) >> 61) & 7);
 }
-// The packed variant decodes all fields from one atomic 8-byte word; only row_lane 0 publishes,
-// so the atomic load covers the pre-barrier reset/init ordering.
+// The packed variant decodes all fields from one 8-byte word; only the record's sole writer
+// publishes (see merged_rec_set), and the walk barrier covers the pre-barrier reset/init ordering.
 __device__ __forceinline__ merged_rec_view merged_rec_load(merged_path_packed const& r)
 {
   uint64_t const word = merged_rec_word(r);
@@ -1561,6 +2207,8 @@ __launch_bounds__(block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     };
 
     auto const record_subtree = [&](int32_t slot, int32_t begin, int32_t end) {
+      // Non-owner lanes skip the certify scan; their record write would be dropped anyway.
+      if (!records_owner) { return; }
       // A certificate borrows input through gather; false only selects normalized serialization.
       bool const raw = certify_raw_subtree(str.data() + begin, end - begin);
       record_slot(slot, begin, end, raw ? k_merged_kind_subtree_raw : k_merged_kind_subtree);
@@ -2091,6 +2739,7 @@ void launch_merged_named(cudf::column_device_view const& input,
  */
 struct launch_grouped_staging {
   std::optional<cudf::detail::host_vector<std::byte>> h_prewalk_pack;
+  // `cuda::device_buffer` has no default ctor; empty until `launch_grouped` populates it.
   std::optional<cuda::device_buffer<std::byte>> d_prewalk_pack;
   std::vector<std::vector<json_path_processing_data>> group_staging;
   std::vector<merged_group_plan> merged_plans;
@@ -2107,8 +2756,11 @@ struct launch_grouped_staging {
 /**
  * Partitions a batch into one eligible pure-NAMED trie and remaining independent paths.
  * A depth-three-to-five group needs 32 rows and eight deep paths, then absorbs shallow paths;
- * otherwise shallow admission requires 32 rows and eight paths at depth <= 2; shallow and deep
- * admission share the k_merged_max_paths cap and overflow stays general.
+ * otherwise shallow admission requires 32 rows and a path floor scaled by max row size
+ * (8/16/64 by row width) at depth <= 2, met by max(request_shallow_paths, the batch's eligible
+ * count) because the caller's scratch-budget splitter can batch a wide-row request below its
+ * floor; shallow and deep admission share the k_merged_max_paths cap and overflow stays
+ * general.
  * Other shapes, unadmitted groups and last-non-null selection use the general kernel.
  * Host/device paths share batch order; zeroed error storage has path flags plus one depth flag.
  * Reuses caller-owned staging for upload lifetimes: a retry call passes the same object, and
@@ -2124,6 +2776,10 @@ void launch_grouped(
   std::vector<json_path_processing_data> const& h_path_data,
   cudf::device_span<json_path_processing_data> d_path_data,
   int64_t max_row_size,  // Row-size bound for the two-rows-per-warp gate.
+  // Eligible shallow NAMED paths in the caller's full request: the scratch-budget splitter can
+  // place a wide-row request's eligible group across several batches each below the floor, so
+  // the width-scaled floor compares max(this, the batch's count) or every batch denies.
+  std::size_t request_shallow_paths,
   bool use_last_non_null,
   bool is_retry,
   launch_grouped_staging& staging,
@@ -2146,9 +2802,10 @@ void launch_grouped(
   staging.group_staging.clear();
   if (!is_retry) { staging.merged_routed.assign(num_outputs, 0); }
 
-  // Shallow groups admit at 8 paths; depth-3-to-5 paths route to the deep group, which admits
-  // separately below and absorbs shallow paths. Both share the k_merged_max_paths cap (capped
-  // overflow keeps its batch order among the general paths).
+  // Shallow groups admit at the row-width-scaled path floor (8/16/64); depth-3-to-5 paths
+  // route to the deep group, which admits separately below and absorbs shallow paths. Both
+  // share the k_merged_max_paths cap (capped overflow keeps its batch order among the general
+  // paths).
   std::vector<std::size_t> general_indices;
   std::vector<std::size_t> merged_shallow_indices;
   std::vector<std::size_t> merged_deep_indices;
@@ -2255,8 +2912,14 @@ void launch_grouped(
     for (auto idx : merged_shallow_indices) {
       max_inst_count = std::max(max_inst_count, json_paths[idx].size());
     }
+    // Wide rows take more paths to amortize the merged walk's per-member parse. The floor
+    // compares max(request_shallow_paths, the batch's eligible count): wide-row requests split
+    // by the scratch budget must be measured at request granularity or every batch denies.
+    auto const min_paths = max_row_size <= k_narrow_row_bytes ? k_merged_min_paths
+                           : max_row_size <= k_wide_row_bytes ? k_wide_row_min_paths
+                                                              : k_very_wide_row_min_paths;
     if (max_inst_count <= k_merged_max_depth &&
-        merged_shallow_indices.size() >= k_merged_min_paths &&
+        std::max(request_shallow_paths, merged_shallow_indices.size()) >= min_paths &&
         static_cast<std::size_t>(input.size()) >= k_min_rows_per_family) {
       merged_plans.emplace_back(build_merged_named_plan(
         json_paths, merged_shallow_indices, k_merged_max_trie_depth, stream));
@@ -2362,6 +3025,10 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> const&
     json_paths,
   int64_t scratch_size,
+  // Eligible shallow NAMED paths in the caller's full request: the scratch-budget splitter can
+  // place a wide-row request's eligible group across several batches each below the floor, so
+  // the width-scaled floor compares max(this, the batch's count) or every batch denies.
+  std::size_t request_shallow_paths,
   bool use_last_non_null,
   int64_t max_row_size,
   cuda::stream_ref stream,
@@ -2377,13 +3044,32 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   rmm::device_uvector<int8_t> d_error_check(num_outputs + 1, stream);
   auto const d_max_path_depth_exceeded = d_error_check.data() + num_outputs;
 
-  std::vector<rmm::device_uvector<char>> scratch_buffers;
+  // Share string-view metadata while keeping each path's scratch independently allocated.
+  using stringview_pair = cuda::std::pair<char const*, cudf::size_type>;
+  auto const rows       = static_cast<std::size_t>(input.size());
   // `second` = write footprint for OOB rows, else committed result length.
-  std::vector<rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>> out_stringviews;
+  auto out_stringviews =
+    cuda::device_buffer<stringview_pair>(stream, mr, num_outputs * rows, cuda::no_init);
+  std::vector<cuda::device_buffer<char>> scratch_buffers;
+  scratch_buffers.reserve(num_outputs);
   std::vector<json_path_processing_data> h_path_data;
-  scratch_buffers.reserve(json_paths.size());
-  out_stringviews.reserve(json_paths.size());
-  h_path_data.reserve(json_paths.size());
+  h_path_data.reserve(num_outputs);
+
+  auto* const stringviews_base  = out_stringviews.data();
+  auto const stringview_span_of = [&](std::size_t idx) {
+    return cudf::device_span<stringview_pair const>(stringviews_base + idx * rows, rows);
+  };
+  auto const stringview_span_mutable_of = [&](std::size_t idx) {
+    return cudf::device_span<stringview_pair>(stringviews_base + idx * rows, rows);
+  };
+  auto const assemble_stringviews = [&](auto indices, std::size_t count) {
+    std::vector<cudf::device_span<stringview_pair const>> stringviews;
+    stringviews.reserve(count);
+    for (std::size_t idx = 0; idx < count; ++idx) {
+      stringviews.emplace_back(stringview_span_of(indices[idx]));
+    }
+    return stringviews;
+  };
 
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
     auto const& path = json_paths[idx];
@@ -2391,19 +3077,19 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
       CUDF_FAIL("JSON Path has depth exceeds the maximum allowed value.");
     }
 
-    scratch_buffers.emplace_back(rmm::device_uvector<char>(scratch_size, stream));
-    out_stringviews.emplace_back(rmm::device_uvector<cuda::std::pair<char const*, cudf::size_type>>{
-      static_cast<std::size_t>(input.size()), stream});
-
+    scratch_buffers.emplace_back(
+      cuda::device_buffer<char>(stream, mr, scratch_size, cuda::no_init));
     h_path_data.emplace_back(json_path_processing_data{d_json_paths[idx],
                                                        in_offsets,
                                                        base_offset,
-                                                       out_stringviews.back().data(),
+                                                       stringviews_base + idx * rows,
                                                        scratch_buffers.back().data(),
                                                        d_error_check.data() + idx});
   }
   auto d_path_data = cudf::detail::make_device_uvector_async(
     h_path_data, stream, cudf::get_current_device_resource_ref());
+  auto all_stringviews =
+    assemble_stringviews(thrust::make_counting_iterator(std::size_t{0}), num_outputs);
   thrust::uninitialized_fill(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     d_error_check.begin(),
@@ -2418,11 +3104,20 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  h_path_data,
                  d_path_data,
                  max_row_size,
+                 request_shallow_paths,
                  use_last_non_null,
                  /* is_retry */ false,
                  launch_staging,
                  stream);
 
+  // Check errors before consuming prepared totals; one sync orders both readbacks. Below the
+  // gate, error readback and both output sites stay on the strings-column factory path.
+  bool const use_packed_readback = num_outputs >= packed_readback_min_paths;
+  std::optional<prepared_output_metadata> prepared_metadata;
+  if (use_packed_readback) {
+    prepared_metadata = prepare_output_metadata(
+      input, all_stringviews, stream, mr, cudf::device_span<int8_t>{d_error_check});
+  }
   // The route hook reports the first pass's per-path decision (0 general, 1 shallow, 2 deep);
   // `merged_routed_prev` holds it once the retry snapshot is taken inside launch_grouped.
   if (merged_routed_out != nullptr) {
@@ -2431,19 +3126,28 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
     *merged_routed_out = launch_staging.merged_routed_prev;
   }
 
-  auto h_error_check = cudf::detail::make_host_vector(d_error_check, stream);
-  auto has_no_oob    = check_error(h_error_check);
-
-  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>>
-    batch_stringviews;
-  batch_stringviews.reserve(out_stringviews.size());
+  // Both routes order their H2D sources; a small batch reads error markers directly.
+  bool has_no_oob = false;
+  cudf::host_span<int8_t const> error_markers;
+  std::optional<cudf::detail::host_vector<int8_t>> h_error_check;
+  if (use_packed_readback && prepared_metadata->num_err > 0) {
+    stream.sync();  // completes the packed D2H (totals + counts + error markers)
+    prepared_metadata->already_synced = true;
+    error_markers                     = cudf::host_span<int8_t const>{
+      prepared_metadata->h_error_check(), static_cast<std::size_t>(prepared_metadata->num_err)};
+  } else {
+    h_error_check = cudf::detail::make_pinned_vector(d_error_check, stream);
+    error_markers = *h_error_check;
+  }
+  has_no_oob = check_error(error_markers);
 
   // Only unflagged scratch may be gathered; successful string views already carry final validity.
   if (has_no_oob) {
-    for (auto const& out_sview : out_stringviews) {
-      batch_stringviews.emplace_back(out_sview);
+    // The admission gate is identical here AND at the OOB site.
+    if (!use_packed_readback) {
+      return cudf::make_strings_column_batch(all_stringviews, stream, mr);
     }
-    return cudf::make_strings_column_batch(batch_stringviews, stream, mr);
+    return finish_output_columns(std::move(*prepared_metadata), all_stringviews, stream, mr);
   }
   // The retry runs the flagged paths as its own batch: retry-ordered path spans, a retry-order
   // flag vector, and each path's first-pass route as the launch hint. The two evaluators write
@@ -2453,7 +3157,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   std::vector<std::size_t> oob_indices;
   std::vector<std::size_t> no_oob_indices;
   auto const oob_count = static_cast<std::size_t>(
-    std::count_if(h_error_check.begin(), h_error_check.begin() + num_outputs, [](int8_t flag) {
+    std::count_if(error_markers.begin(), error_markers.begin() + num_outputs, [](int8_t flag) {
       return flag != 0;
     }));
 
@@ -2468,9 +3172,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   cuda::device_buffer<int8_t> d_retry_error_check(
     stream, cudf::get_current_device_resource_ref(), oob_count + 1, cuda::no_init);
   for (std::size_t idx = 0; idx < num_outputs; ++idx) {
-    auto& out_sview = out_stringviews[idx];
+    auto const out_sview = stringview_span_of(idx);
 
-    if (h_error_check[idx]) {
+    if (error_markers[idx]) {
       oob_indices.emplace_back(idx);
 
       // Non-OOB rows' discarded writes never exceed their input row size.
@@ -2493,23 +3197,37 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                   cudf::detail::offsetalator_factory::make_input_iterator(
                                     out_offsets_and_sizes.back().first->view()),
                                   0,
-                                  out_sview.data(),
+                                  stringview_span_mutable_of(idx).data(),
                                   out_char_buffers.back().data(),
                                   d_retry_error_check.data() + (oob_indices.size() - 1)});
     } else {
       no_oob_indices.emplace_back(idx);
-      batch_stringviews.emplace_back(out_sview);
     }
   }
 
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
-  auto no_oob_output = cudf::make_strings_column_batch(batch_stringviews, stream, mr);
-  for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
-    auto const out_idx = no_oob_indices[idx];
-    output[out_idx]    = std::move(no_oob_output[idx]);
+  auto no_oob_stringviews = assemble_stringviews(no_oob_indices.begin(), no_oob_indices.size());
+  // Same admission gate as the happy path: a small batch builds retry columns with
+  // make_strings_column_batch, a large one reuses the packed machinery. The packed branch
+  // finishes the unflagged subset from the first-pass metadata (already synced), so the
+  // subset's offsets/masks/readback are not prepared a second time; prepared_metadata stays
+  // alive through the mapped finish and dies at function end.
+  if (!use_packed_readback) {
+    auto no_oob_output = cudf::make_strings_column_batch(no_oob_stringviews, stream, mr);
+    for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
+      output[no_oob_indices[idx]] = std::move(no_oob_output[idx]);
+    }
+  } else {
+    auto no_oob_output = finish_output_columns(
+      std::move(*prepared_metadata), no_oob_indices, no_oob_stringviews, stream, mr);
+    for (std::size_t idx = 0; idx < no_oob_indices.size(); ++idx) {
+      output[no_oob_indices[idx]] = std::move(no_oob_output[idx]);
+    }
   }
 
-  // The first-pass scratch buffers are unreferenced by the retry descriptors.
+  // The flat pair storage in out_stringviews stays alive through the retry: the retry kernel
+  // overwrites the flagged paths' pairs in place, and the rebuild below reads them after the
+  // retry. Clearing here frees only the first-pass per-path scratch buffers.
   scratch_buffers.clear();
 
   // The retry overwrites flagged paths' output pairs; rebuilt columns use those lengths and
@@ -2528,27 +3246,41 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                  h_path_data,
                  d_path_data,
                  max_row_size,
+                 request_shallow_paths,
                  use_last_non_null,
                  /* is_retry */ true,
                  launch_staging,
                  stream);
-  // The retry's flag vector carries its own depth slot, so the same check applies.
-  auto h_retry_error_check = cudf::detail::make_host_vector(d_retry_error_check, stream);
+  // The retry's flag vector carries its own depth slot, so the same check applies; the
+  // readback pins so the host check does not hold the stream between passes.
+  auto h_retry_error_check = cudf::detail::make_pinned_vector(d_retry_error_check, stream);
   has_no_oob               = check_error(h_retry_error_check);
 
   // Identical input and paths must reproduce the measured lengths; still check for overflow.
   CUDF_EXPECTS(has_no_oob, "Unexpected out-of-bound write in get_json_object kernel.");
 
-  // Retry pairs carry committed lengths; scratch offsets only reserve write space.
-  std::vector<cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>> oob_spans;
-  oob_spans.reserve(oob_indices.size());
+  // Rebuild the retried columns from their post-retry pairs while the flat pair storage is
+  // alive; the deallocation below must wait for the last consumer. One batched factory call
+  // syncs all sizes once instead of twice per column.
+  std::vector<std::pair<stringview_pair const*, cudf::size_type>> retry_ranges;
+  retry_ranges.reserve(oob_indices.size());
   for (auto const out_idx : oob_indices) {
-    oob_spans.emplace_back(cudf::device_span<cuda::std::pair<char const*, cudf::size_type> const>{
-      out_stringviews[out_idx].data(), static_cast<std::size_t>(input.size())});
+    auto const out_sview = stringview_span_of(out_idx);
+    // Rebuild from the retry's committed pairs: pre-retry offsets only size the scratch slots,
+    // so adopting them as logical offsets would leak unwritten trailing bytes into rows.
+    retry_ranges.emplace_back(out_sview.data(), static_cast<cudf::size_type>(out_sview.size()));
   }
-  auto oob_output = cudf::make_strings_column_batch(oob_spans, stream, mr);
-  for (std::size_t idx = 0; idx < oob_indices.size(); ++idx) {
-    output[oob_indices[idx]] = std::move(oob_output[idx]);
+  auto retry_output = cudf::strings::detail::make_strings_column_batch(
+    retry_ranges,
+    [&out_stringviews, count = retry_ranges.size()](std::size_t idx) {
+      if (idx + 1 == count) { out_stringviews.destroy(); }
+    },
+    stream,
+    mr);
+  // The rebuilt columns no longer reference the first-pass scratch buffers or the retry-stage
+  // views; the deallocation above is the last consumer boundary.
+  for (std::size_t i = 0; i < oob_indices.size(); ++i) {
+    output[oob_indices[i]] = std::move(retry_output[i]);
   }
   return output;
 }
@@ -2596,6 +3328,18 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   std::vector<std::unique_ptr<cudf::column>> output(num_outputs);
   if (merged_routed_out != nullptr) { merged_routed_out->assign(num_outputs, 0); }
 
+  // Request-level eligible shallow count: a wide-row request's eligible group can split across
+  // several scratch-budget batches each below the width-scaled floor, so the floor must be able
+  // to see the request's full count (max with the batch's own count inside launch_grouped).
+  // The classification mirrors launch_grouped's shallow bucket: pure NAMED, depth <= 2.
+  auto const request_shallow_paths = static_cast<std::size_t>(
+    std::count_if(sorted_indices.begin(), sorted_indices.end(), [&json_paths](std::size_t idx) {
+      auto const& path = json_paths[idx];
+      return path.size() <= 2 && std::all_of(path.begin(), path.end(), [](auto const& step) {
+               return std::get<0>(step) == path_instruction_type::NAMED;
+             });
+    }));
+
   std::vector<cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const>> batch;
   std::vector<std::size_t> output_ids;
   // Per-batch route decisions gathered into the caller's output (batch position = output
@@ -2607,22 +3351,21 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
     std::size_t at = starting_path;
     batch.resize(0);
     output_ids.resize(0);
-    if (parallel_override > 0) {
-      int count = 0;
-      while (at < num_outputs && count < parallel_override) {
-        auto output_location = sorted_indices[at];
-        batch.emplace_back(json_paths[output_location]);
-        output_ids.push_back(output_location);
-        at++;
+    int count   = 0;
+    long budget = 0;
+    // Batches collect paths until the budget would be exceeded: with positive budget, the
+    // loop consumes at least one path per batch, so a request whose scratch size exceeds the
+    // budget runs unsplit (one batch). Splitting only occurs when a request fits the budget
+    // whole but its scratch demand divides it into several batches.
+    while (at < num_outputs &&
+           (parallel_override > 0 ? count < parallel_override : budget < memory_budget_bytes)) {
+      auto output_location = sorted_indices[at];
+      batch.emplace_back(json_paths[output_location]);
+      output_ids.push_back(output_location);
+      at++;
+      if (parallel_override > 0) {
         count++;
-      }
-    } else {
-      long budget = 0;
-      while (at < num_outputs && budget < memory_budget_bytes) {
-        auto output_location = sorted_indices[at];
-        batch.emplace_back(json_paths[output_location]);
-        output_ids.push_back(output_location);
-        at++;
+      } else {
         budget += scratch_size;
       }
     }
@@ -2631,6 +3374,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
                                      base_offset,
                                      batch,
                                      scratch_size,
+                                     request_shallow_paths,
                                      use_last_non_null,
                                      max_row_size,
                                      stream,
