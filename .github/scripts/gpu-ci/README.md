@@ -5,9 +5,10 @@ Blossom. For PRs targeting main or `release/YY.MM`, a maintainer triggers it wit
 `/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
 commands can copy the latest head rather than the supplied SHA.
 
-The suite catalog requires GPU tests for every change except Markdown documentation
-and explicitly listed unrelated workflows. GPU workflows, these helpers, the catalog
-and image recipes remain covered. Excluded-only changes still report the gate;
+The suite catalog selects JNI source, shared build inputs and GPU CI configuration,
+excluding Markdown documentation. `paths` accepts exact filenames or directory
+prefixes ending in `/`; add relevant workflows explicitly. Sonar and unrelated
+workflows do not select GPU tests. Unaffected changes still report the gate;
 a PR-title `[skip ci]` marker also skips GPU work. Keep existing Blossom/Sonar
 checks until their replacement is ready. Release branches need the workflows,
 helpers and toolchain pins backported before their PRs can use GPU CI.
