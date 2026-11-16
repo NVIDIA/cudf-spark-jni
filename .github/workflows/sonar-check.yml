@@ -3,8 +3,6 @@
 
 name: Sonar check
 
-# Reuse GPU CI's copy-pr-bot admission. Each new PR head needs approval before
-# the bot updates pull-request/<number>; opening a PR or pushing to a fork is not a trigger.
 on:
   push:
     branches: ['pull-request/[0-9]+']

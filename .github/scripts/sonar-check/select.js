@@ -65,23 +65,37 @@ function pathMatcher() {
   const extensions = values('extensions');
   const patterns = values('paths');
   const excluded = values('excluded-paths');
+  const excludedNames = values('trigger-excluded-filenames');
+  const excludedDirectories = values('trigger-excluded-directories');
   requireValue(
     catalog && !Array.isArray(catalog) &&
-      [extensions, patterns, excluded].every(values => Array.isArray(values) &&
+      [extensions, patterns, excluded, excludedNames, excludedDirectories].every(values => Array.isArray(values) &&
         new Set(values).size === values.length) &&
       extensions.length + patterns.length > 0 &&
       extensions.every(value => typeof value === 'string' && /^[a-z0-9][a-z0-9+]*$/.test(value)) &&
       patterns.every(validPattern) &&
       excluded.every(value => validPath(value) && value.endsWith('/') &&
-        !/[?*\[\]{}()!\\]/.test(value)),
-    'The approved Sonar path catalog needs unique extensions, * or ** path patterns, and literal excluded directory prefixes.',
+        !/[?*\[\]{}()!\\]/.test(value)) &&
+      excludedNames.every(value => validPattern(value) && !value.includes('/')) &&
+      excludedDirectories.every(value => validPattern(value) && !/[/*]/.test(value)),
+    'The approved Sonar catalog needs unique extensions, paths, directory prefixes, and trigger-only filename or directory exclusions.',
   );
   const included = new Set(extensions.map(extension => `.${extension}`));
-  return filename => typeof filename === 'string' &&
-    !excluded.some(prefix => filename.startsWith(prefix)) && (
+  const skippedDirectories = new Set(excludedDirectories.map(value => value.toLowerCase()));
+  return filename => {
+    if (typeof filename !== 'string') return false;
+    // Trigger-only rules do not reduce the files analyzed in a selected scan.
+    // Match names separately so hidden directories receive the same policy.
+    const parts = filename.toLowerCase().split('/');
+    if (parts.slice(0, -1).some(part => skippedDirectories.has(part)) ||
+        excludedNames.some(pattern => path.posix.matchesGlob(parts.at(-1), pattern.toLowerCase()))) {
+      return false;
+    }
+    return !excluded.some(prefix => filename.startsWith(prefix)) && (
       included.has(path.posix.extname(filename)) ||
       patterns.some(pattern => path.posix.matchesGlob(filename, pattern))
     );
+  };
 }
 
 async function changedFiles(github, request, pr) {

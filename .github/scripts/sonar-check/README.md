@@ -1,28 +1,25 @@
 # Sonar check
 
-Sonar uses GPU CI's existing copy-PR approval flow. A maintainer comments
-`/ok to test <full-head-SHA>`; the bot updates `pull-request/<number>` and that
-push starts both workflows. Automatic copying is disabled. Opening a PR or
-pushing a new commit alone does not start Sonar; each new head needs approval.
-Verify the copied SHA: the bot's trusted-contributor policy may copy the latest
-head rather than the SHA written in the command.
+For a PR targeting `main` or `release/26.12`, a maintainer comments
+`/ok to test <full-head-SHA>`. The bot updates `pull-request/<number>`, whose push
+starts Sonar. Each new head needs approval; verify the copied SHA because the
+bot's trust policy may select the latest head. Title/base edits require rerunning
+the existing approved workflow.
 
 ```mermaid
 flowchart LR
-  A[OK to test approval] --> B[Bot copies PR head]
-  B --> C[GPU CI]
-  B --> D[Hosted Java compile]
-  D --> E[Hosted source and class preflight]
-  E --> F[Internal Sonar analysis]
-  F --> G[Findings and Sonar check gate]
+  A[Approved copied head] --> B[Hosted Java compile + Maven cache]
+  B --> C[Hosted source and class preflight]
+  C --> D[Internal Sonar analysis]
+  D --> E[Hosted findings report + Sonar check gate]
 ```
 
-The workflow verifies that the copied SHA is still the open PR's current head,
-and supports `main` and `release/26.12`. It rechecks the selected head and target
-before scanning and before passing the native **Sonar check gate**. Same-PR scans
-serialize through result collection; newer requests do not abort an active scan.
-Title/base edits alone do not create a copied push. Rerun the existing approved
-workflow to apply them; a new head needs another approval.
+[sonar-paths.json](../../sonar-paths.json) selects the full PR diff, including
+deleted/renamed paths, and controls scanner inclusions. It covers Java/Scala,
+C/C++, scripts, XML/HTML, workflow YAML and enabled Text/secrets formats.
+Documentation-only and Dockerfile-only changes skip Sonar. Vendored/generated
+files, CUDA and generic JSON/YAML are excluded. A `[skip ci]` title or an
+unaffected diff also skips Sonar.
 
 ## Results
 
@@ -34,32 +31,22 @@ workflow to apply them; a new head needs another approval.
 | High/Blocker issues or failed quality gate | Failure | Findings summary |
 | Compilation, infrastructure or reporting error | Failure | None |
 
-[sonar-paths.json](../../sonar-paths.json) drives selection and scanner inclusions.
-Selection checks the full diff, including deleted/renamed paths. Supported files
-include Java/Scala, C/C++ and headers, scripts, XML/HTML, Dockerfiles, workflow YAML
-and enabled Text/secrets formats. Vendored dependencies and generated output are
-excluded. Markdown, plain documentation, CUDA `.cu`/`.cuh`, and generic JSON/YAML
-are outside the current analyzer list. Update the catalog when enabling analyzers.
-
 ## Configuration and trust
 
-- Reuse `SONAR_HOST_URL` and `SONAR_TOKEN`; set `SONAR_PROJECT_KEY` to the existing
-  JNI project. Its quality gate must reject new High and Blocker issues.
-- `SONAR_BUILD_JAVA_VERSION` optionally overrides hosted Java 17. Scanner tooling
-  stays in the existing internal runner image and pool.
-- Hosted compilation shares GPU CI's Maven cache key and archive path. It restores
-  the copied PR's cache first, then the existing main baseline, and saves updates
-  only under that copied PR branch. No Sonar post-merge warmer or schedule is added.
-  Only dependencies are cached; misses use normal downloads. Other Sonar jobs
-  have cache access disabled. Keep the explicit archive path aligned with GPU CI.
-- Approval covers the copied workflow and helper code. Maven runs on a disposable
-  hosted runner with read-only repository access and no Sonar credentials.
-  The fresh hosted preflight rejects source symlinks and unsafe class
-  artifacts before internal analysis. Internal scanning reads source/classes as
-  data and uses approved scanner settings with step-scoped Sonar credentials.
-- This uses the same approval model as GPU CI. Runner labels are not access
-  controls for other workflows; the bot does not make the repository pool
-  exclusive to Sonar. Script preflight is heuristic, not proof of safe code.
-- Backport these files to the release branch; existing auto-merge carries them to
-  main. Validate the approved-copy scan and native gate before making
-  **Sonar check gate** required. Existing merge rules are unchanged.
+- Requires repository secrets `SONAR_HOST_URL` and `SONAR_TOKEN`, plus variable
+  `SONAR_PROJECT_KEY`. The project's quality gate must reject new High/Blocker issues.
+- `SONAR_BUILD_JAVA_VERSION` optionally overrides hosted Java 17; scanner tooling
+  comes from the internal runner image.
+- Compilation restores the copied PR's Maven cache first, then the shared main
+  baseline, and saves only to that PR branch. Misses download dependencies normally;
+  no Sonar warmup or schedule is needed. Other Sonar jobs have cache access disabled.
+
+Approval covers the copied workflow and helpers. Maven runs on a disposable hosted
+runner without Sonar credentials. Fresh hosted preflight rejects source symlinks
+and unsafe class artifacts before internal scanning, which reads source/classes as
+data with step-scoped credentials. Preflight is heuristic; runner labels do not
+restrict access from other workflows.
+
+The workflow rechecks the PR head and target before scanning and passing the gate.
+Same-PR scans serialize through collection without cancelling active scans.
+Validate the workflow before making **Sonar check gate** required.

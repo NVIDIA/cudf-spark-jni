@@ -71,5 +71,22 @@
   "excluded-paths": [
     "thirdparty/",
     "target/"
+  ],
+  "trigger-excluded-filenames": [
+    "readme",
+    "readme.*",
+    "*.md",
+    "*.markdown",
+    "*.rst",
+    "*.txt",
+    "dockerfile",
+    "dockerfile.*",
+    "dockerfile-*",
+    "dockerfile_*",
+    "*.dockerfile"
+  ],
+  "trigger-excluded-directories": [
+    "doc",
+    "docs"
   ]
 }
