@@ -61,6 +61,31 @@ public class RowConversionTest {
   }
 
   @Test
+  void stringDictionaryRowsRoundTrip() {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(5, null, 1, 2, 7, 3);
+         ColumnVector strings = ColumnVector.fromStrings("a", "", null, "bbb", "a", "");
+         ColumnVector dict = strings.dictionaryEncode();
+         Table dictTable = new Table(ints, dict)) {
+      assert dict.getType().equals(DType.DICTIONARY32);
+      ColumnVector[] rowMajorTable = RowConversion.convertToRows(dictTable);
+      try {
+        assert rowMajorTable.length == 1;
+        // The row format carries no dictionary information; read the column back as STRING.
+        try (Table backAgain =
+                 RowConversion.convertFromRows(rowMajorTable[0], DType.INT32, DType.STRING)) {
+          assert backAgain.getColumn(1).getType().equals(DType.STRING);
+          AssertUtils.assertColumnsAreEqual(ints, backAgain.getColumn(0));
+          AssertUtils.assertColumnsAreEqual(strings, backAgain.getColumn(1));
+        }
+      } finally {
+        for (ColumnVector cv : rowMajorTable) {
+          cv.close();
+        }
+      }
+    }
+  }
+
+  @Test
   void fixedWidthRowsRoundTrip() {
     try (Table origTable = new Table.TestBuilder()
         .column(3l, 9l, 4l, 2l, 20l, null)

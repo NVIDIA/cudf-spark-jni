@@ -31,6 +31,12 @@ public class RowConversion {
    * The only thing different between this method and {@link #convertToRowsFixedWidthOptimized()}
    * is that this can handle rougly 250M columns while {@link #convertToRowsFixedWidthOptimized()}
    * can only handle columns less than 100
+   * <p/>
+   * DICTIONARY32 columns with STRING keys are accepted and encoded by value, exactly like the
+   * decoded STRING column. Other dictionary key types are rejected. The row format does not
+   * record dictionary encoding, so {@link #convertFromRows(ColumnView, DType...)} must be given
+   * {@link DType#STRING} for such columns and returns STRING; callers that need a dictionary
+   * can re-encode the result with {@link ColumnView#dictionaryEncode()}.
    */
   public static ColumnVector[] convertToRows(Table table) {
     long[] ptrs = convertToRows(table.getNativeView());
@@ -128,7 +134,9 @@ public class RowConversion {
    * Convert a column of list of bytes that is formatted like the output from `convertToRows`
    * and convert it back to a table.
    *
-   * NOTE: This method doesn't support nested types
+   * NOTE: This method doesn't support nested types or DICTIONARY32 schema entries. Columns that
+   * were DICTIONARY32 when passed to {@link #convertToRows(Table)} must be read back as
+   * {@link DType#STRING}; re-encode with {@link ColumnView#dictionaryEncode()} if needed.
    *
    * @param vec the row data to process.
    * @param schema the types of each column.

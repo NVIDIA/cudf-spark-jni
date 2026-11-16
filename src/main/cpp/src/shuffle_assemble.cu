@@ -1958,6 +1958,14 @@ shuffle_assemble_result shuffle_assemble(shuffle_split_metadata const& metadata,
 {
   SRJ_FUNC_RANGE();
 
+  // DICTIONARY32 has no kudo encoding. The device size functors would silently size it as 0, so
+  // reject it on the host before touching any data.
+  for (auto const& col : metadata.col_info) {
+    CUDF_EXPECTS(col.type != cudf::type_id::DICTIONARY32,
+                 "DICTIONARY32 columns are not supported by shuffle_assemble; decode them to "
+                 "STRING before kudo serialization and assemble with a STRING schema");
+  }
+
   auto temp_mr = cudf::get_current_device_resource_ref();
 
   // trim off trailing empty partitions to handle ambiguities with copying offsets

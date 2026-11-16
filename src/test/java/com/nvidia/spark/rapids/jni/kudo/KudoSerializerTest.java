@@ -41,6 +41,7 @@ import java.util.stream.IntStream;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.junit.jupiter.api.function.Executable;
 
 import static java.lang.Math.toIntExact;
 import static java.util.Arrays.asList;
@@ -1200,6 +1201,109 @@ public class KudoSerializerTest extends CudfTestBase {
     } finally {
       for (ColumnVector cv : allCols) {
         cv.close();
+      }
+    }
+  }
+
+  /**
+   * Asserts that the executable fails with the kudo DICTIONARY32 rejection. The CPU write path
+   * wraps exceptions in a RuntimeException, so the cause chain is searched.
+   */
+  static void assertDictionaryRejected(Executable executable) {
+    Throwable thrown = assertThrows(Throwable.class, executable);
+    Throwable t = thrown;
+    while (t != null && !(t instanceof UnsupportedOperationException)) {
+      t = t.getCause();
+    }
+    assertNotNull(t, () -> "Expected an UnsupportedOperationException, got " + thrown);
+    assertTrue(t.getMessage().contains("DICTIONARY32"), t.getMessage());
+    assertTrue(t.getMessage().contains("dictionaryDecode"), t.getMessage());
+  }
+
+  @Test
+  public void testSerializeDictionaryColumnThrows() {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, 4);
+         ColumnVector strings = ColumnVector.fromStrings("a", null, "b", "a");
+         ColumnVector dict = strings.dictionaryEncode();
+         Table table = new Table(ints, dict)) {
+      // The shuffle schema for a dictionary column is STRING.
+      KudoSerializer serializer = new KudoSerializer(Schema.builder()
+          .column(DType.INT32, "a")
+          .column(DType.STRING, "b")
+          .build());
+      assertDictionaryRejected(() ->
+          serializer.writeToStreamWithMetrics(table, new OpenByteArrayOutputStream(), 0, 4));
+      assertDictionaryRejected(() ->
+          serializer.writeToStreamWithMetrics(table, new OpenByteArrayOutputStream(), 1, 2));
+
+      try (HostColumnVector hostInts = ints.copyToHost();
+           HostColumnVector hostDict = dict.copyToHost()) {
+        HostColumnVector[] columns = new HostColumnVector[]{hostInts, hostDict};
+        assertDictionaryRejected(() ->
+            serializer.writeToStreamWithMetrics(columns, new ByteArrayOutputStream(), 0, 4));
+      }
+    }
+  }
+
+  @Test
+  public void testSerializeStructWithDictionaryChildThrows() {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3);
+         ColumnVector strings = ColumnVector.fromStrings("a", null, "b");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector struct = ColumnVector.makeStruct(ints, dict);
+         Table table = new Table(struct)) {
+      Schema.Builder builder = Schema.builder();
+      builder.addColumn(DType.STRUCT, "s")
+          .column(DType.INT32, "a")
+          .column(DType.STRING, "b");
+      KudoSerializer serializer = new KudoSerializer(builder.build());
+      assertDictionaryRejected(() ->
+          serializer.writeToStreamWithMetrics(table, new OpenByteArrayOutputStream(), 0, 3));
+    }
+  }
+
+  @Test
+  public void testDecodedDictionaryRoundTrip() {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, 4, 5);
+         ColumnVector strings = ColumnVector.fromStrings("a", null, "b", "a", "");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector decoded = dict.dictionaryDecode();
+         Table decodedTable = new Table(ints, decoded);
+         ColumnVector expectedInts = ColumnVector.fromBoxedInts(null, 3, 4, 5);
+         ColumnVector expectedStrings = ColumnVector.fromStrings(null, "b", "a", "");
+         Table expected = new Table(expectedInts, expectedStrings)) {
+      checkMergeTable(expected, asList(
+          new TableSlice(1, 2, decodedTable),
+          new TableSlice(3, 2, decodedTable)));
+    }
+  }
+
+  @Test
+  public void testMergeWithDictionarySchemaThrows() throws Exception {
+    try (ColumnVector strings = ColumnVector.fromStrings("a", null, "b");
+         ColumnVector struct = ColumnVector.makeStruct(strings);
+         Table stringTable = new Table(strings);
+         Table structTable = new Table(struct)) {
+      Schema dictSchema = Schema.builder().column(DType.DICTIONARY32, "a").build();
+      Schema.Builder structBuilder = Schema.builder();
+      structBuilder.addColumn(DType.STRUCT, "s").column(DType.DICTIONARY32, "a");
+      Schema structDictSchema = structBuilder.build();
+
+      for (Table table : new Table[]{stringTable, structTable}) {
+        Schema readSchema = table == stringTable ? dictSchema : structDictSchema;
+        KudoSerializer writer = new KudoSerializer(schemaOf(table));
+        OpenByteArrayOutputStream bout = new OpenByteArrayOutputStream();
+        writer.writeToStreamWithMetrics(table, bout, 0, (int) table.getRowCount());
+        bout.flush();
+        try (KudoTable kudoTable =
+                 KudoTable.from(new ByteArrayInputStream(bout.toByteArray())).get()) {
+          KudoSerializer reader = new KudoSerializer(readSchema);
+          KudoTable[] kudoTables = new KudoTable[]{kudoTable};
+          assertDictionaryRejected(() -> reader.mergeOnHost(kudoTables));
+          assertDictionaryRejected(() -> {
+            try (Table merged = reader.mergeToTable(kudoTables)) {}
+          });
+        }
       }
     }
   }

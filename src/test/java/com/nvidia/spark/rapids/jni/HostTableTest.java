@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
+import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.ColumnVector;
@@ -27,6 +28,8 @@ import ai.rapids.cudf.HostColumnVector.ListType;
 import ai.rapids.cudf.HostColumnVector.StructData;
 import ai.rapids.cudf.HostColumnVector.StructType;
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class HostTableTest {
   @Test
@@ -69,6 +72,46 @@ public class HostTableTest {
         }
       }
     }
+  }
+
+  @Test
+  public void testRoundTripDictionary() {
+    try (ColumnVector strings = buildDictionaryStrings();
+         ColumnVector dict = strings.dictionaryEncode();
+         Table expected = new Table(dict);
+         HostTable ht = HostTable.fromTable(expected);
+         Table actual = ht.toTable()) {
+      AssertUtils.assertTablesAreEqual(expected, actual);
+      assertDictionaryDecodesTo(strings, actual.getColumn(0));
+    }
+  }
+
+  // TODO: Restore once NVIDIA/cudf-spark-jni#5383 lands, along with HostTable support for sliced
+  // DICTIONARY32 columns (indices over the parent's rows, keys whole). Until then a sliced
+  // dictionary is copied with the wrong rows, and `sliceTable` comes from #5383.
+  // @Test
+  // public void testRoundTripSlicedDictionary() {
+  //   try (ColumnVector strings = buildDictionaryStrings();
+  //        ColumnVector dict = strings.dictionaryEncode();
+  //        ColumnVector expectedStrings = strings.subVector(2, 8);
+  //        ColumnVector expectedDict = dict.subVector(2, 8);
+  //        Table sliced = sliceTable(2, 8, dict);
+  //        HostTable ht = HostTable.fromTable(sliced);
+  //        Table actual = ht.toTable()) {
+  //     AssertUtils.assertColumnsAreEqual(expectedDict, actual.getColumn(0));
+  //     assertDictionaryDecodesTo(expectedStrings, actual.getColumn(0));
+  //   }
+  // }
+
+  private static void assertDictionaryDecodesTo(ColumnView expectedStrings, ColumnView actual) {
+    assertEquals(DType.DICTIONARY32, actual.getType());
+    try (ColumnVector decoded = actual.dictionaryDecode()) {
+      AssertUtils.assertColumnsAreEqual(expectedStrings, decoded);
+    }
+  }
+
+  private static ColumnVector buildDictionaryStrings() {
+    return ColumnVector.fromStrings("b", null, "a", "b", "", null, "c", "a", "b", null, "d");
   }
 
   private Table buildEmptyTable() {

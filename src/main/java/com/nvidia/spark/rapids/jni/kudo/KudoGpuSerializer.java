@@ -77,11 +77,22 @@ public class KudoGpuSerializer {
   public static Table assembleFromDeviceRaw(Schema schema,
                                             DeviceMemoryBuffer partitions,
                                             DeviceMemoryBuffer offsets) {
+    int[] flattenedTypeIds = schema.getFlattenedTypeIds();
+    int dictionaryTypeId = DType.DTypeEnum.DICTIONARY32.getNativeId();
+    if (flattenedTypeIds != null) {
+      for (int typeId : flattenedTypeIds) {
+        if (typeId == dictionaryTypeId) {
+          throw new UnsupportedOperationException("DICTIONARY32 columns are not supported by kudo " +
+              "assembly; decode them with ColumnView.dictionaryDecode() before kudo serialization " +
+              "and assemble with a STRING schema");
+        }
+      }
+    }
     AssembleResult result = assembleFromDeviceRawNative(
         partitions.getAddress(), partitions.getLength(),
         offsets.getAddress(), offsets.getLength(),
         schema.getFlattenedNumChildren(),
-        schema.getFlattenedTypeIds(),
+        flattenedTypeIds,
         schema.getFlattenedTypeScales());
 
     DeviceMemoryBuffer singleBuffer = DeviceMemoryBuffer.fromRmm(

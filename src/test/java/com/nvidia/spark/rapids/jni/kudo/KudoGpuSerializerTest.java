@@ -522,4 +522,68 @@ public class KudoGpuSerializerTest {
       }
     }
   }
+
+  @Test
+  public void testSplitDictionaryColumnThrows() {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, 4);
+         ColumnVector strings = ColumnVector.fromStrings("a", null, "b", "a");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector struct = ColumnVector.makeStruct(ints, dict);
+         ColumnVector emptyStrings = ColumnVector.fromStrings();
+         ColumnVector emptyDict = emptyStrings.dictionaryEncode();
+         Table flat = new Table(ints, dict);
+         Table nested = new Table(struct);
+         Table empty = new Table(emptyDict)) {
+      for (Table table : new Table[]{flat, nested, empty}) {
+        for (int[] slices : new int[][]{new int[0], new int[]{2}}) {
+          if (table.getRowCount() == 0 && slices.length > 0) {
+            continue;
+          }
+          CudfException e = assertThrows(CudfException.class,
+              () -> writeGPU(table, slices));
+          assertTrue(e.getMessage().contains("DICTIONARY32"), e.getMessage());
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testDecodedDictionaryGpuRoundTrip() throws Exception {
+    try (ColumnVector ints = ColumnVector.fromBoxedInts(1, null, 3, 4);
+         ColumnVector strings = ColumnVector.fromStrings("a", null, "b", "a");
+         ColumnVector dict = strings.dictionaryEncode();
+         ColumnVector decoded = dict.dictionaryDecode();
+         Table expected = new Table(ints, strings);
+         Table table = new Table(ints, decoded)) {
+      Schema s = KudoSerializerTest.schemaOf(table);
+      byte[] data = writeGPU(table, new int[]{2});
+      try (Table t = readGPU("decoded dictionary", s, data)) {
+        assertTablesAreEqual(expected, t);
+      }
+    }
+  }
+
+  @Test
+  public void testAssembleWithDictionarySchemaThrows() throws Exception {
+    try (ColumnVector strings = ColumnVector.fromStrings("a", null, "b", "a");
+         ColumnVector struct = ColumnVector.makeStruct(strings);
+         Table stringTable = new Table(strings);
+         Table structTable = new Table(struct)) {
+      Schema dictSchema = Schema.builder().column(DType.DICTIONARY32, "a").build();
+      Schema.Builder structBuilder = Schema.builder();
+      structBuilder.addColumn(DType.STRUCT, "s").column(DType.DICTIONARY32, "a");
+      Schema structDictSchema = structBuilder.build();
+
+      for (Table table : new Table[]{stringTable, structTable}) {
+        Schema readSchema = table == stringTable ? dictSchema : structDictSchema;
+        byte[] data = writeGPU(table, new int[]{2});
+        UnsupportedOperationException e = assertThrows(UnsupportedOperationException.class,
+            () -> {
+              try (Table t = readGPU("dictionary schema", readSchema, data)) {}
+            });
+        assertTrue(e.getMessage().contains("DICTIONARY32"), e.getMessage());
+        assertTrue(e.getMessage().contains("dictionaryDecode"), e.getMessage());
+      }
+    }
+  }
 }

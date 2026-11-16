@@ -34,6 +34,12 @@ std::vector<std::unique_ptr<cudf::column>> convert_to_rows_fixed_width_optimized
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
+/**
+ * Convert a table to JCUDF row format. Accepts fixed-width and STRING columns, plus
+ * DICTIONARY32 columns with STRING keys, which are encoded by value exactly like the decoded
+ * STRING column (other dictionary key types are rejected). The row format carries no dictionary
+ * information.
+ */
 std::vector<std::unique_ptr<cudf::column>> convert_to_rows(
   cudf::table_view const& tbl,
   // TODO need something for validity
@@ -46,6 +52,11 @@ std::unique_ptr<cudf::table> convert_from_rows_fixed_width_optimized(
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
+/**
+ * Convert JCUDF rows back to a table. DICTIONARY32 is not a valid schema type: columns that were
+ * dictionaries when passed to convert_to_rows must be read back as STRING and re-encoded by the
+ * caller (e.g. with cudf::dictionary::encode) if a dictionary is needed.
+ */
 std::unique_ptr<cudf::table> convert_from_rows(
   cudf::lists_column_view const& input,
   std::vector<cudf::data_type> const& schema,

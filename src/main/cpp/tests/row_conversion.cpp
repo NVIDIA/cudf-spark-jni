@@ -19,8 +19,11 @@
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/table_utilities.hpp>
 
+#include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/dictionary/dictionary_factories.hpp>
+#include <cudf/dictionary/encode.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/types.hpp>
 
@@ -31,6 +34,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <string>
 
 struct ColumnToRowTests : public cudf::test::BaseFixture {};
 struct RowToColumnTests : public cudf::test::BaseFixture {};
@@ -642,6 +646,106 @@ TEST_F(RowToColumnTests, RejectSlicedRowList)
                cudf::logic_error);
   EXPECT_THROW(spark_rapids_jni::convert_from_rows_fixed_width_optimized(
                  cudf::lists_column_view(sliced), schema),
+               cudf::logic_error);
+}
+
+namespace {
+
+// Asserts that `dict_tbl` (which may contain STRING-keyed DICTIONARY32 columns) produces rows of
+// the same sizes as `decoded_tbl` and that reading those rows back yields `decoded_tbl`. The raw
+// row bytes are not compared: alignment padding inside a row is not initialized.
+void expect_dictionary_rows_match_decoded(cudf::table_view const& dict_tbl,
+                                          cudf::table_view const& decoded_tbl)
+{
+  auto dict_rows    = spark_rapids_jni::convert_to_rows(dict_tbl);
+  auto decoded_rows = spark_rapids_jni::convert_to_rows(decoded_tbl);
+  ASSERT_EQ(dict_rows.size(), decoded_rows.size());
+  std::vector<cudf::data_type> schema;
+  for (auto const& c : decoded_tbl) {
+    schema.push_back(c.type());
+  }
+  for (std::size_t i = 0; i < dict_rows.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(cudf::lists_column_view(*dict_rows[i]).offsets(),
+                                   cudf::lists_column_view(*decoded_rows[i]).offsets());
+  }
+  if (dict_rows.size() == 1) {
+    auto result =
+      spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*dict_rows[0]), schema);
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(decoded_tbl, *result);
+  }
+}
+
+}  // namespace
+
+TEST_F(ColumnToRowTests, StringDictionaryRoundTrip)
+{
+  cudf::test::strings_column_wrapper strings(
+    {"apple", "", "banana", "apple", "", "a much longer string value to widen the row", "banana"},
+    {true, true, false, true, true, true, false});
+  for (auto const index_type : {cudf::type_id::INT8, cudf::type_id::INT32}) {
+    auto dict = cudf::dictionary::encode(strings, cudf::data_type{index_type});
+    EXPECT_EQ(dict->type().id(), cudf::type_id::DICTIONARY32);
+    expect_dictionary_rows_match_decoded(cudf::table_view({dict->view()}),
+                                         cudf::table_view({strings}));
+  }
+}
+
+TEST_F(ColumnToRowTests, SlicedStringDictionary)
+{
+  cudf::test::strings_column_wrapper strings({"x", "", "yy", "zzz", "yy", "x", "", "w"},
+                                             {true, true, false, true, true, true, true, false});
+  auto dict          = cudf::dictionary::encode(strings, cudf::data_type{cudf::type_id::INT8});
+  auto sliced_dict   = cudf::slice(dict->view(), {2, 7})[0];
+  auto sliced_string = cudf::slice(static_cast<cudf::column_view>(strings), {2, 7})[0];
+  // Materialize the decoded slice so the reference table has offset 0.
+  cudf::column decoded_slice(sliced_string);
+  expect_dictionary_rows_match_decoded(cudf::table_view({sliced_dict}),
+                                       cudf::table_view({decoded_slice.view()}));
+}
+
+TEST_F(ColumnToRowTests, MixedTableWithStringDictionary)
+{
+  cudf::test::fixed_width_column_wrapper<int64_t> a({1, 2, 3, 4}, {true, false, true, true});
+  cudf::test::strings_column_wrapper strings({"k1", "", "k2", "k1"}, {true, true, false, true});
+  cudf::test::strings_column_wrapper c({"plain", "string", "", "column"});
+  cudf::test::fixed_width_column_wrapper<int16_t> d({7, 8, 9, 10});
+  auto dict = cudf::dictionary::encode(strings);
+  expect_dictionary_rows_match_decoded(cudf::table_view({a, dict->view(), c, d}),
+                                       cudf::table_view({a, strings, c, d}));
+}
+
+TEST_F(ColumnToRowTests, RejectNonStringKeyedDictionary)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> keys({10, 20, 30});
+  cudf::test::fixed_width_column_wrapper<int32_t> indices({0, 2, 1, 0});
+  auto dict = cudf::make_dictionary_column(keys, indices);
+  cudf::table_view in({dict->view()});
+  try {
+    spark_rapids_jni::convert_to_rows(in);
+    FAIL() << "expected cudf::logic_error";
+  } catch (cudf::logic_error const& e) {
+    EXPECT_NE(std::string(e.what()).find(
+                "Row conversion only supports DICTIONARY32 columns with STRING keys"),
+              std::string::npos);
+  }
+}
+
+TEST_F(ColumnToRowTests, RejectStringDictionaryInFixedWidthOptimized)
+{
+  cudf::test::strings_column_wrapper strings({"a", "bb", "a"});
+  auto dict = cudf::dictionary::encode(strings);
+  cudf::table_view in({dict->view()});
+  EXPECT_THROW(spark_rapids_jni::convert_to_rows_fixed_width_optimized(in), cudf::logic_error);
+}
+
+TEST_F(RowToColumnTests, RejectDictionarySchema)
+{
+  cudf::test::strings_column_wrapper strings({"a", "bb", "a"});
+  cudf::table_view in({strings});
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_EQ(rows.size(), 1u);
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::DICTIONARY32}};
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), schema),
                cudf::logic_error);
 }
 

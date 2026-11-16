@@ -1011,3 +1011,63 @@ TEST_F(ShuffleSplitTests, MixedValidity)
     run_mixed_null_split(num_rows, splits, has_nulls);
   }
 }
+
+TEST_F(ShuffleSplitTests, DictionaryRejected)
+{
+  auto split = [](cudf::table_view const& tbl, std::vector<cudf::size_type> const& splits) {
+    return spark_rapids_jni::shuffle_split(
+      tbl, splits, cudf::get_default_stream(), rmm::mr::get_current_device_resource_ref());
+  };
+
+  cudf::test::fixed_width_column_wrapper<int> ints{{1, 2, 3, 4}, {1, 0, 1, 1}};
+  cudf::test::dictionary_column_wrapper<std::string> dict{{"a", "", "b", "a"}, {1, 0, 1, 1}};
+
+  // top level
+  {
+    cudf::table_view tbl{
+      {static_cast<cudf::column_view>(ints), static_cast<cudf::column_view>(dict)}};
+    EXPECT_THROW(split(tbl, std::vector<cudf::size_type>{2}), cudf::logic_error);
+    EXPECT_THROW(split(tbl, std::vector<cudf::size_type>{}), cudf::logic_error);
+  }
+
+  // nested in a struct
+  {
+    cudf::test::fixed_width_column_wrapper<int> child_ints{1, 2, 3, 4};
+    cudf::test::dictionary_column_wrapper<std::string> child_dict{"a", "c", "b", "a"};
+    std::vector<std::unique_ptr<cudf::column>> struct_children;
+    struct_children.push_back(child_ints.release());
+    struct_children.push_back(child_dict.release());
+    cudf::test::structs_column_wrapper structs(std::move(struct_children));
+    cudf::table_view tbl{{static_cast<cudf::column_view>(structs)}};
+    EXPECT_THROW(split(tbl, std::vector<cudf::size_type>{2}), cudf::logic_error);
+  }
+
+  // empty input takes an early return path; it must still be rejected
+  {
+    cudf::test::dictionary_column_wrapper<std::string> empty_dict{};
+    cudf::table_view tbl{{static_cast<cudf::column_view>(empty_dict)}};
+    EXPECT_THROW(split(tbl, std::vector<cudf::size_type>{}), cudf::logic_error);
+  }
+}
+
+TEST_F(ShuffleSplitTests, AssembleDictionaryRejected)
+{
+  cudf::test::strings_column_wrapper strings{{"a", "", "b", "a"}, {1, 0, 1, 1}};
+  cudf::table_view tbl{{static_cast<cudf::column_view>(strings)}};
+  auto [split_data, split_metadata] = spark_rapids_jni::shuffle_split(
+    tbl, {2}, cudf::get_default_stream(), rmm::mr::get_current_device_resource_ref());
+
+  // Same data, but the schema names the STRING column as DICTIONARY32.
+  spark_rapids_jni::shuffle_split_metadata dict_metadata;
+  dict_metadata.col_info.emplace_back(cudf::type_id::DICTIONARY32, 0);
+
+  cudf::device_span<uint8_t const> partitions{static_cast<uint8_t*>(split_data.partitions->data()),
+                                              split_data.partitions->size()};
+  cudf::device_span<size_t const> offsets{split_data.offsets};
+  EXPECT_THROW(spark_rapids_jni::shuffle_assemble(dict_metadata,
+                                                  partitions,
+                                                  offsets,
+                                                  cudf::get_default_stream(),
+                                                  rmm::mr::get_current_device_resource_ref()),
+               cudf::logic_error);
+}

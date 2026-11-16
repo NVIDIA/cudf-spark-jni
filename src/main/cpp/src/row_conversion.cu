@@ -23,6 +23,8 @@
 #include <cudf/detail/offsets_iterator_factory.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/dictionary/dictionary_column_view.hpp>
+#include <cudf/dictionary/encode.hpp>
 #include <cudf/filling.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
@@ -2104,6 +2106,40 @@ inline void check_supported_schema(std::vector<data_type> const& schema, bool fi
   }
 }
 
+// Row conversion encodes STRING-keyed DICTIONARY32 columns by value: each dictionary column is
+// decoded to STRING so the row layout is identical to the decoded column's. Decoded columns are
+// kept alive in `owned`. Returns `tbl` itself when it contains no dictionary column.
+table_view decode_string_dictionaries(table_view const& tbl,
+                                      std::vector<std::unique_ptr<column>>& owned,
+                                      cuda::stream_ref stream)
+{
+  bool const has_dictionary = std::any_of(
+    tbl.begin(), tbl.end(), [](auto const& c) { return c.type().id() == type_id::DICTIONARY32; });
+  if (!has_dictionary) { return tbl; }
+
+  std::vector<column_view> cols;
+  cols.reserve(tbl.num_columns());
+  for (auto const& c : tbl) {
+    if (c.type().id() != type_id::DICTIONARY32) {
+      cols.push_back(c);
+      continue;
+    }
+    if (c.num_children() == 2) {
+      CUDF_EXPECTS(c.child(cudf::dictionary_column_view::keys_column_index).type().id() ==
+                     type_id::STRING,
+                   "Row conversion only supports DICTIONARY32 columns with STRING keys");
+    }
+    if (c.size() > 0) {
+      owned.push_back(cudf::dictionary::decode(
+        cudf::dictionary_column_view{c}, stream, cudf::get_current_device_resource_ref()));
+    } else {
+      owned.push_back(cudf::make_empty_column(type_id::STRING));
+    }
+    cols.push_back(owned.back()->view());
+  }
+  return table_view{cols};
+}
+
 }  // namespace
 
 /**
@@ -2114,11 +2150,13 @@ inline void check_supported_schema(std::vector<data_type> const& schema, bool fi
  * @param mr memory resource used for returned data
  * @return vector of list columns containing byte columns of the JCUDF row data
  */
-std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& tbl,
+std::vector<std::unique_ptr<column>> convert_to_rows(table_view const& input,
                                                      cuda::stream_ref stream,
                                                      rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
+  std::vector<std::unique_ptr<column>> decoded_dictionaries;
+  auto const tbl = decode_string_dictionaries(input, decoded_dictionaries, stream);
   auto const fixed_width_only = check_supported_columns(tbl, /*fixed_width_only=*/false);
 
   auto const num_columns = tbl.num_columns();

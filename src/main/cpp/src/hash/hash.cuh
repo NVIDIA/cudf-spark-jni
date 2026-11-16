@@ -16,8 +16,15 @@
 
 #pragma once
 
+#include <cudf/column/column_device_view.cuh>
+#include <cudf/column/column_view.hpp>
+#include <cudf/detail/row_operator/hashing.cuh>
+#include <cudf/dictionary/dictionary_column_view.hpp>
+#include <cudf/strings/string_view.cuh>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/error.hpp>
+#include <cudf/utilities/traits.hpp>
 
 #include <cuda/std/algorithm>
 #include <cuda/std/array>
@@ -34,6 +41,89 @@ namespace spark_rapids_jni {
 struct java_big_decimal_bytes {
   cuda::std::array<cuda::std::byte, sizeof(__int128_t)> bytes;
   cudf::size_type length;
+};
+
+/**
+ * @brief Checks that a column, and every column nested in it, is hashable as a dictionary.
+ *
+ * A DICTIONARY32 column is hashed as its decoded key string, so only STRING keys are supported.
+ * A childless (empty) dictionary has no keys and is accepted.
+ *
+ * @param col The column to check
+ * @throw cudf::logic_error if a DICTIONARY32 column has non-STRING keys
+ */
+inline void check_dictionary_keys(cudf::column_view const& col)
+{
+  if (col.type().id() == cudf::type_id::DICTIONARY32) {
+    CUDF_EXPECTS(col.num_children() == 0 ||
+                   col.child(cudf::dictionary_column_view::keys_column_index).type().id() ==
+                     cudf::type_id::STRING,
+                 "Hashing only supports DICTIONARY32 columns with STRING keys");
+    return;
+  }
+  for (auto child = col.child_begin(); child != col.child_end(); ++child) {
+    check_dictionary_keys(*child);
+  }
+}
+
+/**
+ * @brief Checks every column of a table with `check_dictionary_keys`.
+ *
+ * @param input The table to check
+ * @throw cudf::logic_error if a DICTIONARY32 column has non-STRING keys
+ */
+inline void check_dictionary_keys(cudf::table_view const& input)
+{
+  for (cudf::column_view const& col : input) {
+    check_dictionary_keys(col);
+  }
+}
+
+/**
+ * @brief Element hasher that hashes a DICTIONARY32 element as its STRING key.
+ *
+ * Non-dictionary elements are forwarded to `cudf::detail::row::hash::element_hasher`. For a
+ * dictionary element, a null row returns `null_hash` like any other null element; otherwise the
+ * key string the row's index refers to is hashed with `hash_function<cudf::string_view>`, so a
+ * dictionary hashes exactly like its decoded STRING column. Keys must be STRING; callers check
+ * this on the host with `check_dictionary_keys`.
+ *
+ * @tparam hash_function Hash functor to use for hashing elements
+ * @tparam Nullate A cudf::nullate type describing whether to check for nulls
+ */
+template <template <typename> class hash_function, typename Nullate>
+class dictionary_aware_element_hasher {
+ public:
+  using element_hasher_t = cudf::detail::row::hash::element_hasher<hash_function, Nullate>;
+  using result_type      = typename element_hasher_t::result_type;
+
+  __device__ dictionary_aware_element_hasher(Nullate check_nulls,
+                                             result_type seed,
+                                             result_type null_hash) noexcept
+    : _hasher{check_nulls, seed, null_hash}
+  {
+  }
+
+  template <typename T, CUDF_ENABLE_IF(not cudf::is_dictionary<T>())>
+  __device__ result_type operator()(cudf::column_device_view const& col,
+                                    cudf::size_type row_index) const noexcept
+  {
+    return _hasher.template operator()<T>(col, row_index);
+  }
+
+  template <typename T, CUDF_ENABLE_IF(cudf::is_dictionary<T>())>
+  __device__ result_type operator()(cudf::column_device_view const& col,
+                                    cudf::size_type row_index) const noexcept
+  {
+    if (_hasher._check_nulls && col.is_null(row_index)) { return _hasher._null_hash; }
+    auto const keys      = col.child(cudf::dictionary_column_view::keys_column_index);
+    auto const key_index = col.element<cudf::dictionary32>(row_index).value();
+    return hash_function<cudf::string_view>(_hasher._seed)(
+      keys.element<cudf::string_view>(key_index));
+  }
+
+ private:
+  element_hasher_t const _hasher;
 };
 
 /**

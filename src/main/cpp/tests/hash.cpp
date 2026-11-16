@@ -20,7 +20,10 @@
 #include <cudf_test/iterator_utilities.hpp>
 #include <cudf_test/type_lists.hpp>
 
+#include <cudf/column/column.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/detail/iterator.cuh>
+#include <cudf/dictionary/dictionary_factories.hpp>
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/hashing.hpp>
 
@@ -1015,4 +1018,72 @@ TEST_F(SparkXXHash64Test, Strings)
   auto const hash_strings = spark_rapids_jni::xxhash64(cudf::table_view({strings_col}));
 
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*hash_strings, hash_strings_expected, verbosity);
+}
+
+class SparkHashDictionaryTest : public cudf::test::BaseFixture {};
+
+namespace {
+
+// Every Spark hasher must hash `input` exactly like `expected`.
+void expect_same_hashes(cudf::table_view const& input, cudf::table_view const& expected)
+{
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*spark_rapids_jni::murmur_hash3_32(input, 42),
+                                 *spark_rapids_jni::murmur_hash3_32(expected, 42),
+                                 verbosity);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    *spark_rapids_jni::xxhash64(input), *spark_rapids_jni::xxhash64(expected), verbosity);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    *spark_rapids_jni::hive_hash(input), *spark_rapids_jni::hive_hash(expected), verbosity);
+}
+
+}  // namespace
+
+TEST_F(SparkHashDictionaryTest, StringKeysHashLikeDecodedStrings)
+{
+  cudf::test::strings_column_wrapper const keys({"", "abc", "The quick brown fox"});
+  cudf::test::fixed_width_column_wrapper<int8_t> const indices({1, 0, 2, 1, 0, 2},
+                                                               {1, 1, 0, 1, 1, 1});
+  auto const dict = cudf::make_dictionary_column(keys, indices);
+  cudf::test::strings_column_wrapper const strings(
+    {"abc", "", "", "abc", "", "The quick brown fox"}, {1, 1, 0, 1, 1, 1});
+
+  expect_same_hashes(cudf::table_view({*dict}), cudf::table_view({strings}));
+
+  // Sliced
+  auto const sliced_dict    = cudf::slice(*dict, {1, 5})[0];
+  auto const sliced_strings = cudf::slice(strings, {1, 5})[0];
+  expect_same_hashes(cudf::table_view({sliced_dict}), cudf::table_view({sliced_strings}));
+
+  // Nested in a struct, alongside another column
+  std::vector<std::unique_ptr<cudf::column>> dict_children;
+  dict_children.push_back(std::make_unique<cudf::column>(*dict));
+  dict_children.push_back(
+    cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3, 4, 5, 6}).release());
+  cudf::test::structs_column_wrapper const dict_struct(std::move(dict_children),
+                                                       {1, 1, 1, 0, 1, 1});
+  std::vector<std::unique_ptr<cudf::column>> strings_children;
+  strings_children.push_back(std::make_unique<cudf::column>(cudf::column_view{strings}));
+  strings_children.push_back(
+    cudf::test::fixed_width_column_wrapper<int32_t>({1, 2, 3, 4, 5, 6}).release());
+  cudf::test::structs_column_wrapper const strings_struct(std::move(strings_children),
+                                                          {1, 1, 1, 0, 1, 1});
+
+  expect_same_hashes(cudf::table_view({dict_struct}), cudf::table_view({strings_struct}));
+}
+
+TEST_F(SparkHashDictionaryTest, NonStringKeysThrow)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> const keys({5, 10});
+  cudf::test::fixed_width_column_wrapper<int32_t> const indices({0, 1, 0});
+  auto const dict = cudf::make_dictionary_column(keys, indices);
+
+  std::vector<std::unique_ptr<cudf::column>> children;
+  children.push_back(std::make_unique<cudf::column>(*dict));
+  cudf::test::structs_column_wrapper const dict_struct(std::move(children));
+
+  for (auto const& input : {cudf::table_view({*dict}), cudf::table_view({dict_struct})}) {
+    EXPECT_THROW(spark_rapids_jni::murmur_hash3_32(input, 42), cudf::logic_error);
+    EXPECT_THROW(spark_rapids_jni::xxhash64(input), cudf::logic_error);
+    EXPECT_THROW(spark_rapids_jni::hive_hash(input), cudf::logic_error);
+  }
 }
