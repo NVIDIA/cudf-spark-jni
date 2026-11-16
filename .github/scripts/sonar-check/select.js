@@ -4,7 +4,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const resolveSource = require('./source');
 
 const repository = 'NVIDIA/cudf-spark-jni';
 const supportedBases = new Set(['main', 'release/26.12']);
@@ -12,7 +11,7 @@ const shaPattern = /^[0-9a-fA-F]{40}$/;
 const fileStatuses = new Set([
   'added', 'removed', 'modified', 'renamed', 'copied', 'changed', 'unchanged',
 ]);
-const trustedRoot = path.resolve(__dirname, '../../..');
+const approvedRoot = path.resolve(__dirname, '../../..');
 
 function requireValue(condition, message) {
   if (!condition) {
@@ -48,7 +47,10 @@ function validatePR(pr, expected) {
       typeof pr.head.repo?.full_name === 'string' &&
       pr.head.repo.full_name === expected.head.repo?.full_name &&
       typeof pr.title === 'string',
-    'The PR head or target changed, or the PR is closed; use the workflow for the current PR revision.',
+    `PR #${expected.number} is closed, changed, or has invalid metadata: ` +
+      `expected head=${expected.head.sha}, target=${expected.base.ref}; ` +
+      `observed state=${pr?.state}, head=${pr?.head?.sha}, target=${pr?.base?.ref}. ` +
+      'Approve and run the current PR revision.',
   );
   requireValue(
     !pr.head.ref.includes('${'),
@@ -57,7 +59,7 @@ function validatePR(pr, expected) {
 }
 
 function pathMatcher() {
-  const filename = path.join(trustedRoot, '.github/sonar-paths.json');
+  const filename = path.join(approvedRoot, '.github/sonar-paths.json');
   const catalog = JSON.parse(fs.readFileSync(filename, 'utf8'));
   const values = name => Object.hasOwn(catalog ?? {}, name) ? catalog[name] : [];
   const extensions = values('extensions');
@@ -72,7 +74,7 @@ function pathMatcher() {
       patterns.every(validPattern) &&
       excluded.every(value => validPath(value) && value.endsWith('/') &&
         !/[?*\[\]{}()!\\]/.test(value)),
-    'The trusted Sonar path catalog needs unique extensions, * or ** path patterns, and literal excluded directory prefixes.',
+    'The approved Sonar path catalog needs unique extensions, * or ** path patterns, and literal excluded directory prefixes.',
   );
   const included = new Set(extensions.map(extension => `.${extension}`));
   return filename => typeof filename === 'string' &&
@@ -125,58 +127,48 @@ async function changedFiles(github, request, pr) {
 }
 
 module.exports = async function select({ github, context, core, initial = false, env = process.env }) {
+  // The copied-branch approval covers the whole revision, including its workflow
+  // and helpers. These checks validate freshness; they do not grant approval.
+  const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref || '');
+  const number = match ? Number(match[1]) : NaN;
+  requireValue(
+    context.eventName === 'push' && context.payload.deleted === false &&
+      `${context.repo.owner}/${context.repo.repo}` === repository &&
+      context.payload.repository?.full_name === repository && env.GITHUB_REPOSITORY === repository &&
+      Number.isSafeInteger(number) && number > 0 &&
+      typeof context.sha === 'string' && shaPattern.test(context.sha) &&
+      typeof context.payload.after === 'string' &&
+      context.payload.after.toLowerCase() === context.sha.toLowerCase(),
+    'Sonar requires a non-deleted push of an exact commit to NVIDIA/cudf-spark-jni pull-request/<number>.',
+  );
   const deadline = Date.now() + 120000;
   const request = () => {
     const remaining = deadline - Date.now();
     requireValue(remaining > 0, 'PR selection exceeded its 120-second API observation budget.');
     return { timeout: Math.min(10000, remaining) };
   };
-  let expected;
-  let producer;
-  if (context.eventName === 'workflow_run') {
-    const source = await resolveSource({ github, context, env, request });
-    producer = source.run;
-    if (source.stale) {
-      requireValue(initial, 'The preparation run or its PR is stale; the queued scan will not run.');
-      core.setOutput('run-scan', 'false');
-      core.setOutput('reason', 'stale-source');
-      core.setOutput('complete', 'false');
-      core.notice('The preparation run no longer represents a current PR revision.');
-      return;
-    }
-    expected = source.pr;
-  } else {
-    expected = context.payload.pull_request;
-    requireValue(context.eventName === 'pull_request', 'Sonar preparation requires a pull_request event.');
-  }
-  const baseRef = expected?.base?.ref;
-  requireValue(
-    `${context.repo.owner}/${context.repo.repo}` === repository &&
-      context.payload.repository?.full_name === repository && env.GITHUB_REPOSITORY === repository &&
-      Number.isSafeInteger(expected?.number) && expected.number > 0 &&
-      expected.base?.repo?.full_name === repository && supportedBases.has(baseRef) &&
-      typeof expected.head?.sha === 'string' && shaPattern.test(expected.head.sha),
-    'Sonar requires an exact current PR head targeting main or release/26.12.',
-  );
   const getPR = async () => {
     const { data } = await github.rest.pulls.get({
-      ...context.repo, pull_number: expected.number, request: request(),
+      ...context.repo, pull_number: number, request: request(),
     });
-    validatePR(data, expected);
     return data;
   };
   const pr = await getPR();
+  const baseRef = initial ? pr?.base?.ref : env.APPROVED_BASE_REF;
+  requireValue(
+    supportedBases.has(baseRef),
+    `Sonar only supports main or release/26.12; observed target ${JSON.stringify(baseRef)}.`,
+  );
+  const expected = {
+    number, base: { ref: baseRef },
+    head: { sha: context.sha, ref: pr?.head?.ref, repo: { full_name: pr?.head?.repo?.full_name } },
+  };
+  validatePR(pr, expected);
   const titleSkip = /\[skip ci\]/.test(pr.title);
   if (!initial) {
     requireValue(
-      producer?.status === 'completed' && producer.conclusion === 'success',
-      'The queued scan requires a completed, successful Sonar preparation run.',
-    );
-    requireValue(
       typeof env.APPROVED_SHA === 'string' &&
-        env.APPROVED_SHA.toLowerCase() === expected.head.sha.toLowerCase() &&
-        env.APPROVED_BASE_REF === baseRef &&
-        env.PR_NUMBER === String(expected.number),
+        env.APPROVED_SHA.toLowerCase() === context.sha.toLowerCase() && env.PR_NUMBER === String(number),
       'The queued scan does not match the selected PR revision and target.',
     );
     requireValue(!titleSkip, 'The PR now requests CI to be skipped; the queued scan will not run.');
@@ -188,6 +180,7 @@ module.exports = async function select({ github, context, core, initial = false,
     const matches = pathMatcher();
     const files = await changedFiles(github, request, pr);
     const current = await getPR();
+    validatePR(current, expected);
     requireValue(
       current.base.sha === pr.base.sha &&
         current.changed_files === pr.changed_files &&
@@ -197,19 +190,17 @@ module.exports = async function select({ github, context, core, initial = false,
     runScan = files.some(file => matches(file.filename) || matches(file.previous_filename));
     reason = runScan ? 'code-changes' : 'no-code-changes';
   }
-  const trustedSha = execFileSync('git', ['-C', trustedRoot, 'rev-parse', '--verify', 'HEAD^{commit}'], {
+  const approvedSha = execFileSync('git', ['-C', approvedRoot, 'rev-parse', '--verify', 'HEAD^{commit}'], {
     encoding: 'utf8', timeout: 10000, maxBuffer: 1024,
   }).trim();
-  requireValue(shaPattern.test(trustedSha), 'The trusted workflow checkout has no valid commit SHA.');
+  requireValue(
+    shaPattern.test(approvedSha) && approvedSha.toLowerCase() === context.sha.toLowerCase(),
+    `The workflow helper checkout must match approved commit ${context.sha}; observed ${approvedSha}.`,
+  );
   for (const [name, value] of Object.entries({
     'pr-number': String(pr.number), sha: pr.head.sha.toLowerCase(), branch: pr.head.ref,
     'base-ref': baseRef, 'run-scan': String(runScan), reason,
-    'title-skip': String(titleSkip), 'trusted-sha': trustedSha.toLowerCase(),
-    'source-run-id': producer ? String(producer.id) : '',
-    'source-run-number': producer ? String(producer.run_number) : '',
-    'source-attempt': producer ? String(producer.run_attempt) : '',
-    'source-result': producer?.conclusion || '',
-    complete: String(Boolean(producer && producer.status === 'completed' && producer.conclusion !== null)),
+    'title-skip': String(titleSkip), 'trusted-sha': approvedSha.toLowerCase(),
   })) {
     core.setOutput(name, value);
   }

@@ -4,6 +4,7 @@
 const jobNames = {
   select: 'PR source selection',
   security: 'script security preflight',
+  compile: 'Java compilation',
   scan: 'analysis and collection',
 };
 const results = new Set(['success', 'failure', 'cancelled', 'skipped']);

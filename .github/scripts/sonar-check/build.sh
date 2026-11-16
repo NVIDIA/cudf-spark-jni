@@ -9,11 +9,13 @@ cd "$GITHUB_WORKSPACE/source"
 test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
 test -z "${SONAR_TOKEN:-}"
 test -z "${GITHUB_RUNNER_ADMIN_TOKEN:-}"
+: "${MAVEN_REPOSITORY:?Set the shared Maven cache directory}"
 
 # Reuse JNI's public Maven routing. Skip the native build and GPU tests, as in
 # the existing Sonar job; build-helper still compiles the pinned cuDF Java sources.
 mvn --batch-mode --no-transfer-progress \
   --settings "$GITHUB_WORKSPACE/workflow/.github/scripts/gpu-ci/settings.xml" \
+  -Dmaven.repo.local="$MAVEN_REPOSITORY" \
   -DskipTests=true -Dmaven.antrun.skip=true test-compile
 
 if ! find target/classes -type f -name '*.class' -print -quit | grep -q .; then
