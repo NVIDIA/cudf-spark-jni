@@ -1,6 +1,8 @@
 // Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+const resolveSource = require('./source.js');
+
 const checkName = 'Sonar check gate';
 
 function result(jobs) {
@@ -13,7 +15,7 @@ function result(jobs) {
     if (!['title-skip', 'no-code-changes'].includes(reason)) {
       throw new Error('Sonar selection omitted its skip reason.');
     }
-    if (['security', 'compile', 'scan', 'report'].some(id =>
+    if (['security', 'scan', 'report'].some(id =>
       !['success', 'skipped'].includes(jobs[id]?.result))) {
       return { conclusion: 'failure', message: 'An unselected Sonar job failed or has no valid result.' };
     }
@@ -27,7 +29,6 @@ function result(jobs) {
   if (selected !== 'true') throw new Error('Sonar selection did not return a valid decision.');
   const names = {
     security: 'script preflight',
-    compile: 'Java compilation',
     scan: 'internal analysis',
     report: 'result reporting',
   };
@@ -40,50 +41,37 @@ function result(jobs) {
     : { conclusion: 'success', message: 'Sonar analysis and result publication passed.' };
 }
 
-async function gate({ github, context, core, initial = false, env = process.env }) {
-  const pr = context.payload.pull_request;
-  const repository = `${context.repo.owner}/${context.repo.repo}`;
-  const sha = pr?.head?.sha;
-  const attempt = Number(env.GITHUB_RUN_ATTEMPT);
-  const runNumber = Number(env.GITHUB_RUN_NUMBER);
-  if (
-    repository !== 'NVIDIA/cudf-spark-jni' ||
-    context.eventName !== 'pull_request_target' ||
-    pr?.base?.repo?.full_name !== repository || !['main', 'release/26.12'].includes(pr.base.ref) ||
-    !Number.isSafeInteger(pr.number) || pr.number <= 0 || !/^[0-9a-f]{40}$/.test(sha || '') ||
-    !Number.isSafeInteger(context.runId) || context.runId <= 0 ||
-    !Number.isSafeInteger(attempt) || attempt <= 0 ||
-    !Number.isSafeInteger(runNumber) || runNumber <= 0 ||
-    env.GITHUB_WORKFLOW_REF !== `${repository}/.github/workflows/sonar-check.yml@refs/heads/main`
-  ) {
-    throw new Error('Sonar gate requires the trusted trigger and an exact main or release/26.12 PR head.');
-  }
-  let jobs;
-  let resultError;
-  if (!initial) {
-    try {
-      jobs = JSON.parse(env.JOB_RESULTS);
-    } catch (error) {
-      resultError = error;
-    }
-  }
-  // A failed-job rerun retains outputs from the successful selection job. Its
-  // gate belongs to the producing attempt, not necessarily this final job's.
-  const gateAttempt = Number(jobs?.select?.outputs?.['gate-attempt'] || attempt);
-  if (!Number.isSafeInteger(gateAttempt) || gateAttempt <= 0 || gateAttempt > attempt) {
-    throw new Error('Sonar gate has an invalid producing attempt.');
-  }
-  const prefix = `sonar:${repository}:${pr.number}:`;
-  const externalId = `${prefix}${runNumber}:${context.runId}:${gateAttempt}`;
-  const detailsUrl = `https://github.com/${repository}/actions/runs/${context.runId}/attempts/${attempt}`;
+async function gate({ github, context, core, phase = 'finish', env = process.env }) {
+  if (!['start', 'finish'].includes(phase)) throw new Error('Unknown Sonar gate phase.');
   const deadline = Date.now() + 120000;
+  const request = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('Sonar gate exceeded its 120-second API budget.');
+    return { timeout: Math.min(10000, remaining) };
+  };
+  const source = await resolveSource({ github, context, env, request });
+  if (source.stale) {
+    core.setOutput('active', 'false');
+    core.notice('The producing PR run is stale; leaving the current Sonar gate untouched.');
+    return;
+  }
+  const pr = source.pr;
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  const sha = pr.head.sha;
+  const attempt = source.run.run_attempt;
+  const runNumber = source.run.run_number;
+  const runId = source.run.id;
+  const initial = phase === 'start';
+  const prefix = `sonar:${repository}:${pr.number}:`;
+  const externalId = `${prefix}${runNumber}:${runId}:${attempt}`;
+  const detailsUrl = `https://github.com/${repository}/actions/runs/${context.runId}/attempts/${env.GITHUB_RUN_ATTEMPT}`;
   const common = (limit = deadline) => {
     const remaining = Math.min(deadline, limit) - Date.now();
     if (remaining <= 0) throw new Error('Sonar gate exceeded its API deadline before the next request.');
     return { ...context.repo, request: { timeout: Math.min(10000, remaining) } };
   };
-  // The select and final gate jobs share a short, FIFO concurrency group. Do not
-  // serialize the scan itself here, or a title edit could not reset the gate.
+  // Initialization and final mutations share a FIFO group. They are jobs in
+  // one completed-event consumer, so there is no cross-event creation race.
   const visibilityDeadline = Math.min(deadline, Date.now() + 60000);
   let matches;
   let owned;
@@ -115,7 +103,7 @@ async function gate({ github, context, core, initial = false, env = process.env 
         throw new Error('Cannot verify Sonar gate ownership: malformed check identity.');
       }
       newer ||= BigInt(identity[1]) > BigInt(runNumber) ||
-        (BigInt(identity[1]) === BigInt(runNumber) && BigInt(identity[3]) > BigInt(gateAttempt));
+        (BigInt(identity[1]) === BigInt(runNumber) && BigInt(identity[3]) > BigInt(attempt));
     }
     if (newer) {
       core.setOutput('active', 'false');
@@ -145,7 +133,16 @@ async function gate({ github, context, core, initial = false, env = process.env 
       core.notice('The PR revision or target changed; its current event owns the Sonar gate.');
       return;
     }
-    if (matches.length) throw new Error('This Sonar run already initialized its gate; refusing a duplicate write.');
+    if (matches.length) {
+      const check = matches[0];
+      core.setOutput('check-id', String(check.id));
+      core.setOutput('active', String(check.conclusion !== 'cancelled'));
+      core.notice('Reusing the existing producer attempt gate without repeating its creation.');
+      return;
+    }
+    if (Number(env.GITHUB_RUN_ATTEMPT) !== 1) {
+      throw new Error('Cannot verify the original gate creation; rerun Sonar preparation instead of replaying this create.');
+    }
     // Retire only superseded check records, not their workflows or scans. Do
     // this before creating the replacement so a late completion cannot become
     // the newest required result or leave an obsolete pending gate behind.
@@ -167,7 +164,6 @@ async function gate({ github, context, core, initial = false, env = process.env 
       throw new Error('GitHub did not return the initialized Sonar gate ID.');
     }
     core.setOutput('check-id', String(check.id));
-    core.setOutput('gate-attempt', String(attempt));
     core.setOutput('active', 'true');
     return;
   }
@@ -182,18 +178,26 @@ async function gate({ github, context, core, initial = false, env = process.env 
   }
   let outcome;
   try {
-    if (resultError) throw resultError;
+    const jobs = JSON.parse(env.JOB_RESULTS);
     const selectedId = jobs.select?.outputs?.['gate-id'];
     if (selectedId && selectedId !== String(check.id)) {
-      throw new Error('The selected gate ID differs from this run-owned check.');
+      throw new Error('The selected gate ID differs from this producer-owned check.');
     }
     outcome = result(jobs);
-    if (!sameRevision) {
-      outcome = { conclusion: 'cancelled', message: 'The PR revision or target changed before completion.' };
+    const selected = jobs.select?.outputs || {};
+    const selectedRevisionMatches = jobs.select?.result !== 'success' || (
+      selected.sha === sha && selected['pr-number'] === String(pr.number) &&
+      selected['base-ref'] === current.base.ref
+    );
+    if (!sameRevision || !selectedRevisionMatches) {
+      outcome = { conclusion: 'cancelled', message: 'The PR revision or target differs from the selected analysis; rerun Sonar preparation.' };
     } else if (/\[skip ci\]/.test(current.title)) {
       outcome = { conclusion: 'skipped', message: 'The current PR title requests CI to be skipped.' };
     } else if (jobs.select?.outputs?.reason === 'title-skip') {
-      outcome = { conclusion: 'failure', message: 'The CI-skip title marker was removed; the newer workflow must run Sonar.' };
+      outcome = { conclusion: 'failure', message: 'The CI-skip title marker was removed; rerun Sonar preparation.' };
+    } else if (jobs.select?.outputs?.['run-scan'] === 'true' && source.run.conclusion !== 'success') {
+      const producerUrl = `https://github.com/${repository}/actions/runs/${runId}/attempts/${attempt}`;
+      outcome = { conclusion: 'failure', message: `Hosted Sonar preparation ${source.run.conclusion || source.run.status}. [Preparation logs](${producerUrl})` };
     }
   } catch (error) {
     core.error(`Cannot evaluate Sonar job results: ${error.message}`);

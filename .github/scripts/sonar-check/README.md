@@ -1,53 +1,66 @@
 # Sonar check
 
-PRs targeting `main` or `release/26.12` run automatically on new commits. Title
-and target changes refresh selection; body-only edits do not restart scans. The release
-change reaches `main` through the existing auto-merge workflow, which activates
-GitHub's trusted `pull_request_target` entry point.
+PRs targeting `main` or `release/26.12` start **Sonar preparation** on opening,
+reopening and new commits, like CPU CI. Title and target edits take effect on the
+next such event. A title CI-skip marker or an unaffected diff skips analysis.
 
 ```mermaid
 flowchart LR
-  A[Select affected files] --> B[Hosted script preflight]
-  B --> C[Hosted Java compile]
-  C --> D[Internal scan and exact result collection]
-  D --> E[Hosted reporting and Sonar check gate]
+  A[PR commit] --> B[Hosted Java compile]
+  B --> C[Trusted workflow_run consumer]
+  C --> D[Hosted script and class-file checks]
+  D --> E[Restricted internal Sonar runner]
+  E --> F[Exact-head gate and findings]
 ```
 
-The stable **Sonar check gate** starts pending on the exact PR head. Short gate
-updates serialize separately from scans, so a title edit resets the gate without
-interrupting an active analysis. Older runs cannot replace a newer gate. A title
-CI-skip marker or an unaffected diff produces `skipped`, which does not block a required
-check. Selected scans must finish successfully; missing evidence fails. Clean
-passes create no PR comment. Advisory findings receive a summary; High/Blocker or
-quality-gate failures receive a failing result and findings summary. Infrastructure
-failures do not create comments.
+The PR workflow has read-only access and no Sonar credentials. The consumer runs
+from `main`, independently verifies the producing run and current PR, and accepts
+only bounded class-file artifacts from that run. It never executes PR build
+scripts internally. Trusted helpers provide scanner settings and fresh scratch
+space; the shared Common actions collect and report the exact analysis.
+
+## Results
+
+**Sonar check gate** is a custom check on the PR head, separate from the native
+`workflow_run` jobs. A new commit waits for the required gate while preparation
+runs. The trusted consumer creates it on completion, then reports the scan
+outcome. A same-commit rerun retains the previous gate until preparation completes.
+Same-commit gate updates serialize; superseded runs cannot overwrite the newer gate. Rerun
+**Sonar preparation** to retry the whole path. An executing scan is not cancelled
+by newer work; same-PR scans serialize through result collection.
+
+| Result | Gate | PR comment |
+| --- | --- | --- |
+| Title skip or unaffected diff | Skipped | None |
+| Clean analysis | Success | None |
+| Non-blocking findings | Success | Findings summary |
+| High/Blocker issues or failed quality gate | Failure | Findings summary |
+| Preparation, infrastructure or reporting error | Failure | None |
 
 ## Affected files
 
-[sonar-paths.json](../../sonar-paths.json) is shared by selection and scanner
-inclusions. Selection checks the complete PR diff, including old/new rename paths
-and deletions. It includes Java/Scala, C/C++ and headers, supported script languages,
-XML/HTML, Dockerfiles, GitHub Actions workflows and configuration formats covered
-by the server's Text/secrets analyzer (including properties, PEM/key files and
-`.env`). The scanner also analyzes Java tests and excludes vendored dependencies and generated build output.
+[sonar-paths.json](../../sonar-paths.json) drives both selection and scanner
+inclusions. Selection checks the complete diff, including deleted and renamed
+paths. It includes Java/Scala, C/C++ and headers, supported script languages,
+XML/HTML, Dockerfiles, workflow YAML and formats supported by the enabled
+Text/secrets analyzer. Vendored dependencies and generated output are excluded.
 
-The current server has no Markdown analyzer. Plain documentation, CUDA `.cu`/`.cuh`,
-and generic JSON/YAML are outside this code-analysis list; workflow YAML has its
-own enabled analyzer. Update the catalog when enabling another analyzer. Script
-preflight is a separate heuristic check, not proof that source is safe to execute.
+The current server does not analyze Markdown, plain documentation, CUDA
+`.cu`/`.cuh`, or generic JSON/YAML. Update the catalog when enabling another
+analyzer. The separate script preflight is heuristic, not proof of safe code.
 
-## Operation
+## Configuration
 
-- Helpers come from the trusted workflow revision. PR Maven code runs only on a
-  disposable hosted runner with read-only permissions and Actions cache access
-  disabled. Internal runners receive source/classes as data and use trusted scanner settings and fresh scratch space.
-- Same-PR scans serialize through server processing and result collection. New
-  requests do not abort an executing scan; GitHub may replace older pending work.
 - Reuse `SONAR_HOST_URL` and `SONAR_TOKEN`; set `SONAR_PROJECT_KEY` to the existing
-  JNI project. The token needs Execute Analysis and the collector's read access.
-  The gate must include new High and Blocker counts, both `GT 0`.
+  JNI project. Its quality gate must reject new High and Blocker issues.
 - `SONAR_BUILD_JAVA_VERSION` optionally overrides the hosted Java 17 default.
-  Scanner tooling remains in the reviewed internal runner image.
-- Keep the internal pool for trusted scans, never PR builds. Its existing two-slot
-  rotation and recovery stay unchanged. Existing merge rules stay unchanged until
-  **Sonar check gate** is explicitly made required after rollout validation.
+  Scanner tooling comes from the internal runner image.
+- Set `SONAR_RUNNER_GROUP` to `org/<name>` only after that organization group is
+  restricted to JNI and
+  `NVIDIA/cudf-spark-jni/.github/workflows/sonar-scan.yml@refs/heads/main`.
+  Missing configuration fails before requesting an internal runner. Labels alone
+  are not an access boundary.
+- The existing release-to-main auto-merge activates the trusted consumer. Validate
+  fork execution and exact-head required-check enforcement before making
+  **Sonar check gate** required. Native `workflow_run` job checks are unsuitable
+  for that required check. Existing merge rules are unchanged by these files.

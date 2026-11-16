@@ -1,0 +1,334 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Sonar check
+
+# Only this default-branch workflow may access the restricted internal group.
+on:
+  workflow_run:
+    workflows: [Sonar preparation]
+    types: [completed]
+
+permissions: {}
+cache-mode: none
+
+env:
+  SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+
+jobs:
+  select:
+    name: Verify Sonar preparation
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      github.event.action == 'completed' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: sonar-gate-${{ github.event.workflow_run.head_sha }}
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+      statuses: write
+    outputs:
+      gate-id: ${{ steps.gate.outputs.check-id }}
+      active: ${{ steps.gate.outputs.active }}
+      sha: ${{ steps.select.outputs.sha }}
+      pr-number: ${{ steps.select.outputs.pr-number }}
+      branch: ${{ steps.select.outputs.branch }}
+      base-ref: ${{ steps.select.outputs.base-ref }}
+      run-scan: ${{ steps.select.outputs.run-scan }}
+      reason: ${{ steps.select.outputs.reason }}
+      trusted-sha: ${{ steps.select.outputs.trusted-sha }}
+      source-run-id: ${{ steps.select.outputs.source-run-id }}
+      artifact-id: ${{ steps.prepare.outputs.artifact-id }}
+    steps:
+      - name: Checkout trusted workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Initialize or resume the producer attempt's required gate
+        id: gate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 0
+          script: |
+            const gate = require('./trusted/.github/scripts/sonar-check/gate.js');
+            await gate({github, context, core, phase: 'start'});
+      - name: Independently verify the current PR diff
+        id: select
+        if: steps.gate.outputs.active == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 0
+          script: |
+            const select = require('./trusted/.github/scripts/sonar-check/select.js');
+            await select({github, context, core, initial: true});
+      - name: Verify the class artifact and restricted runner configuration
+        id: prepare
+        if: steps.gate.outputs.active == 'true' && steps.select.outputs.run-scan == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          APPROVED_SHA: ${{ steps.select.outputs.sha }}
+          PR_NUMBER: ${{ steps.select.outputs.pr-number }}
+          SOURCE_RUN_ID: ${{ steps.select.outputs.source-run-id }}
+          SOURCE_ATTEMPT: ${{ steps.select.outputs.source-attempt }}
+          SONAR_RUNNER_GROUP: ${{ vars.SONAR_RUNNER_GROUP }}
+        with:
+          retries: 0
+          script: |
+            const prepare = require('./trusted/.github/scripts/sonar-check/prepare.js');
+            await prepare({github, context, core});
+      - name: Mark the selected analysis pending
+        if: steps.gate.outputs.active == 'true' && steps.select.outputs.run-scan == 'true'
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          phase: pending
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ steps.select.outputs.pr-number }}
+          sha: ${{ steps.select.outputs.sha }}
+          base-ref: ${{ steps.select.outputs.base-ref }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+
+  security:
+    name: Script security preflight
+    needs: select
+    if: needs.select.outputs.run-scan == 'true' && needs.select.outputs.active == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha: ${{ steps.security.outputs.sha }}
+    steps:
+      - name: Checkout trusted artifact validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.trusted-sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Checkout selected source as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          path: source
+          # Only source/data checkouts opt in; helper code stays trusted.
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
+      - name: Inspect source with the published scanner image
+        id: security
+        uses: NVIDIA/spark-rapids-common/sonar-check/scan-scripts@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          source-directory: source
+          expected-sha: ${{ needs.select.outputs.sha }}
+
+      - name: Download only the verified preparation artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.select.outputs.artifact-id }}
+          run-id: ${{ needs.select.outputs.source-run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/sonar-classes
+          digest-mismatch: error
+      - name: Check class-only contents and size on the hosted runner
+        env:
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes
+        run: python3 -I trusted/.github/scripts/sonar-check/scan.py --check-classes
+      - name: Transfer the inspected classes within this trusted run
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: inspected-classes-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sonar-classes/classes/**/*.class
+            ${{ runner.temp }}/sonar-classes/test-classes/**/*.class
+          if-no-files-found: error
+          retention-days: 3
+
+  scan:
+    name: Internal Sonar analysis
+    needs: [select, security]
+    runs-on:
+      group: ${{ vars.SONAR_RUNNER_GROUP || 'sonar-runner-group-not-configured' }}
+      labels: [self-hosted, Linux, X64, spark-sonar-internal]
+    timeout-minutes: 35
+    # Hold this lock through server processing and collection. Different PRs may
+    # scan concurrently; a new request never aborts an executing analysis.
+    concurrency:
+      group: sonar-analysis-${{ needs.select.outputs.pr-number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      attempt: ${{ steps.collect.outputs.source-attempt }}
+    steps:
+      - name: Checkout trusted scan helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.trusted-sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Recheck the selected PR after runner allocation
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+          APPROVED_BASE_REF: ${{ needs.select.outputs.base-ref }}
+          PR_NUMBER: ${{ needs.select.outputs.pr-number }}
+        with:
+          retries: 0
+          script: |
+            const select = require('./trusted/.github/scripts/sonar-check/select.js');
+            await select({github, context, core});
+      - name: Checkout selected source for analysis only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.security.outputs.sha }}
+          path: source
+          # Only source/data checkouts opt in; helper code stays trusted.
+          allow-unsafe-pr-checkout: true
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the hosted-inspected class artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.security.outputs.artifact-id }}
+          path: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+          digest-mismatch: error
+      - name: Submit the selected analysis
+        id: analyze
+        continue-on-error: true
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+          PR_NUMBER: ${{ needs.select.outputs.pr-number }}
+          PR_BRANCH: ${{ needs.select.outputs.branch }}
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+          PR_BASE_REF: ${{ needs.select.outputs.base-ref }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: python3 -I trusted/.github/scripts/sonar-check/scan.py
+      - name: Collect the exact analysis and quality gate
+        id: collect
+        if: always() && steps.analyze.outputs.task-file != ''
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          task-file: ${{ steps.analyze.outputs.task-file }}
+          result-path: ${{ steps.analyze.outputs.result-path }}
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ needs.select.outputs.pr-number }}
+          sha: ${{ needs.select.outputs.sha }}
+          base-ref: ${{ needs.select.outputs.base-ref }}
+          scanner-outcome: ${{ steps.analyze.outcome }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+      - name: Transfer the analysis result, including a failed gate
+        id: upload
+        if: always() && steps.collect.outputs.result-path != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-result-${{ github.run_attempt }}
+          path: ${{ steps.collect.outputs.result-path }}
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Remove this scan's temporary files
+        if: always()
+        env:
+          SONAR_WORK_DIRECTORY: ${{ steps.analyze.outputs.work-directory }}
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 -I trusted/.github/scripts/sonar-check/scan.py --cleanup
+
+  report:
+    name: Report Sonar findings
+    needs: [select, security, scan]
+    if: >-
+      always() && needs.select.outputs.sha != '' &&
+      needs.select.outputs.run-scan == 'true' && needs.select.outputs.active == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Checkout trusted diagnostics
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.trusted-sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Identify failed prerequisites
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const diagnose = require('./trusted/.github/scripts/sonar-check/diagnostics.js');
+            await diagnose({github, context, core});
+      - name: Download the exact scan result
+        id: download
+        if: always() && needs.scan.outputs.artifact-id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.scan.outputs.artifact-id }}
+          path: ${{ runner.temp }}/sonar-report
+          digest-mismatch: error
+      - name: Publish findings and the scoped Sonar status
+        if: always()
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          # Never consume a partial download after a digest/transfer failure.
+          result-path: ${{ runner.temp }}/${{ steps.download.outcome == 'success' && 'sonar-report/result.json' || 'sonar-report-unavailable.json' }}
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ needs.select.outputs.pr-number }}
+          sha: ${{ needs.select.outputs.sha }}
+          base-ref: ${{ needs.select.outputs.base-ref }}
+          source-attempt: ${{ needs.scan.outputs.attempt || github.run_attempt }}
+          scan-result: ${{ steps.download.outcome == 'failure' && 'failure' || needs.scan.result }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+
+  gate:
+    name: Finalize Sonar check gate
+    if: >-
+      always() && github.repository == 'NVIDIA/cudf-spark-jni' &&
+      github.event.action == 'completed' && github.event.workflow_run.event == 'pull_request'
+    needs: [select, security, scan, report]
+    concurrency:
+      group: sonar-gate-${{ github.event.workflow_run.head_sha }}
+      queue: max
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Checkout trusted gate helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.trusted-sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Complete the check on the exact PR head
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        with:
+          retries: 0
+          script: |
+            const gate = require('./trusted/.github/scripts/sonar-check/gate.js');
+            await gate({github, context, core});

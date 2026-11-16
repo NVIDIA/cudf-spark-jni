@@ -33,10 +33,34 @@ def cleanup():
             shutil.rmtree(path)
 
 
+def validate_classes(classes):
+    """Bound untrusted artifact contents before transferring them internally."""
+    if classes.is_symlink() or not classes.is_dir():
+        raise ValueError("The compile artifact is not a regular class directory")
+    count = total = main_classes = 0
+    for path in classes.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("The compile artifact must not contain symlinks")
+        relative = path.relative_to(classes)
+        if relative.parts[0] not in ("classes", "test-classes"):
+            raise ValueError("The compile artifact contains an unexpected directory")
+        if path.is_dir():
+            continue
+        if not path.is_file() or path.suffix != ".class":
+            raise ValueError("The compile artifact must contain only class files")
+        count += 1
+        total += path.stat().st_size
+        main_classes += relative.parts[0] == "classes"
+        if count > 50000 or total > 512 * 1024 * 1024:
+            raise ValueError("Class artifact exceeds 50000 files or 512 MiB")
+    if not main_classes:
+        raise ValueError("The producing compile job supplied no Java class files")
+
+
 def main():
     workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
     source = workspace / "source"
-    classes = Path(os.environ["CLASSES_DIRECTORY"]).resolve()
+    classes = Path(os.environ["CLASSES_DIRECTORY"])
     work = Path(tempfile.mkdtemp(prefix="sonar-", dir=os.environ["RUNNER_TEMP"]))
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"task-file={work / 'report-task.txt'}\n")
@@ -53,11 +77,8 @@ def main():
         raise ValueError("Runner administration credentials must not enter the scan")
     if not os.environ.get("SONAR_TOKEN") or not os.environ.get("SONAR_HOST_URL"):
         raise ValueError("Configure the existing SONAR_TOKEN and SONAR_HOST_URL secrets")
-    if not any((classes / "classes").rglob("*.class")):
-        raise ValueError("The producing compile job supplied no Java class files")
-    for path in classes.rglob("*"):
-        if path.is_symlink() or (path.is_file() and path.suffix != ".class"):
-            raise ValueError("The compile artifact must contain only class files")
+    validate_classes(classes)
+    classes = classes.resolve()
 
     # Read version metadata without invoking Maven or any code from the PR.
     pom = ET.parse(source / "pom.xml")
@@ -115,6 +136,8 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["--cleanup"]:
             cleanup()
+        elif sys.argv[1:] == ["--check-classes"]:
+            validate_classes(Path(os.environ["CLASSES_DIRECTORY"]))
         elif sys.argv[1:]:
             raise ValueError("Unsupported Sonar scan arguments")
         else:
