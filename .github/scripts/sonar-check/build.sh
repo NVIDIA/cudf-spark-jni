@@ -6,9 +6,9 @@
 set -euo pipefail
 
 cd "$GITHUB_WORKSPACE/source"
-test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
-test -z "${SONAR_TOKEN:-}"
-test -z "${GITHUB_RUNNER_ADMIN_TOKEN:-}"
+[[ "$(git rev-parse HEAD)" = "$APPROVED_SHA" ]]
+[[ -z "${SONAR_TOKEN:-}" ]]
+[[ -z "${GITHUB_RUNNER_ADMIN_TOKEN:-}" ]]
 : "${MAVEN_REPOSITORY:?Set the shared Maven cache directory}"
 
 # Reuse JNI's public Maven routing. Skip the native build and GPU tests, as in
