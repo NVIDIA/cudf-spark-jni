@@ -1,10 +1,7 @@
 # Sonar check
 
-For a PR targeting `main` or `release/26.12`, a maintainer comments
-`/ok to test <full-head-SHA>`. The bot updates `pull-request/<number>`, whose push
-starts Sonar. Each new head needs approval; verify the copied SHA because the
-bot's trust policy may select the latest head. Title/base edits require rerunning
-the existing approved workflow.
+Sonar runs for approved PR commits. Each new commit needs approval; title or
+target-branch changes require rerunning the approved workflow.
 
 ```mermaid
 flowchart LR
