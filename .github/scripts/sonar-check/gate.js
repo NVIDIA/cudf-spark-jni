@@ -201,9 +201,12 @@ async function gate({ github, context, core, initial = false, env = process.env 
   }
   await github.rest.checks.update({
     ...common(), check_run_id: check.id, status: 'completed', conclusion: outcome.conclusion,
-    ...(outcome.conclusion === 'success' ? {} : {
-      output: { title: checkName, summary: `${outcome.message}\n\n[Workflow logs](${detailsUrl})` },
-    }),
+    details_url: detailsUrl,
+    // A successful partial rerun must clear the previous failure text.
+    output: {
+      title: checkName,
+      summary: outcome.conclusion === 'success' ? '' : `${outcome.message}\n\n[Workflow logs](${detailsUrl})`,
+    },
   });
   if (outcome.conclusion === 'failure') core.setFailed(outcome.message);
 }
