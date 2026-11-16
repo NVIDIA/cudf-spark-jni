@@ -297,20 +297,11 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
-      - name: Checkout approved diagnostics
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check Sonar prerequisites
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@7c549a3539db93ce43fd4c3e44becd119ebb3092
         with:
-          ref: ${{ github.sha }}
-          path: workflow
-          persist-credentials: false
-      - name: Identify failed prerequisites
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          JOB_RESULTS: ${{ toJSON(needs) }}
-        with:
-          script: |
-            const diagnose = require('./workflow/.github/scripts/sonar-check/diagnostics.js');
-            await diagnose({github, context, core});
+          needs: ${{ toJSON(needs) }}
+          required-jobs: '["select", "compile", "security", "scan"]'
       - name: Download the exact scan result
         id: download
         if: always() && needs.scan.outputs.artifact-id != ''
