@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ *  Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
+import ai.rapids.cudf.ColumnView;
 import ai.rapids.cudf.Cuda;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.DeviceMemoryBuffer;
 import ai.rapids.cudf.Table;
 import ai.rapids.cudf.HostColumnVector.BasicType;
 import ai.rapids.cudf.HostColumnVector.DataType;
@@ -67,6 +69,144 @@ public class HostTableTest {
         try (Table actual = ht.toTableAsync(Cuda.DEFAULT_STREAM)) {
           AssertUtils.assertTablesAreEqual(expected, actual);
         }
+      }
+    }
+  }
+
+  @Test
+  public void testRoundTripSliced() {
+    // Covers sliced fixed-width, STRING, LIST, map and STRUCT columns, with nulls.
+    try (Table full = buildTable();
+         Table sliced = sliceTable(3, 17, columnsOf(full));
+         Table expected = subTable(full, 3, 17);
+         HostTable ht = HostTable.fromTable(sliced);
+         Table actual = ht.toTable()) {
+      AssertUtils.assertTablesAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  public void testRoundTripSlicedAsync() {
+    try (Table full = buildTable();
+         Table sliced = sliceTable(5, 21, columnsOf(full));
+         Table expected = subTable(full, 5, 21);
+         HostTable ht = HostTable.fromTableAsync(sliced, Cuda.DEFAULT_STREAM);
+         Table actual = ht.toTableAsync(Cuda.DEFAULT_STREAM)) {
+      AssertUtils.assertTablesAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  public void testRoundTripSlicedBoundaries() {
+    // A prefix (offset 0 but fewer rows than its buffers and children hold), an empty slice, and
+    // the last row.
+    int[][] ranges = {{0, 9}, {7, 7}, {20, 21}};
+    try (Table full = buildTable()) {
+      for (int[] range : ranges) {
+        try (Table sliced = sliceTable(range[0], range[1], columnsOf(full));
+             Table expected = subTable(full, range[0], range[1]);
+             HostTable ht = HostTable.fromTable(sliced);
+             Table actual = ht.toTable()) {
+          AssertUtils.assertTablesAreEqual(expected, actual);
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testRoundTripSlicedChildren() {
+    // A STRUCT with offset 0 whose children are slices, so every offset is below the top level.
+    // The children are sliced fixed-width, STRING, LIST, map and STRUCT columns, with nulls.
+    try (Table full = buildTable();
+         Table slicedChildren = sliceTable(3, 17, columnsOf(full));
+         Table expectedChildren = subTable(full, 3, 17);
+         ColumnVector expectedStruct = ColumnVector.makeStruct(columnsOf(expectedChildren));
+         Table expected = new Table(expectedStruct);
+         Table input = structTable(columnsOf(slicedChildren));
+         HostTable ht = HostTable.fromTable(input);
+         Table actual = ht.toTable()) {
+      AssertUtils.assertTablesAreEqual(expected, actual);
+    }
+  }
+
+  private static ColumnVector[] columnsOf(Table table) {
+    ColumnVector[] columns = new ColumnVector[table.getNumberOfColumns()];
+    for (int i = 0; i < columns.length; i++) {
+      columns[i] = table.getColumn(i);
+    }
+    return columns;
+  }
+
+  /** Returns a table of copies of rows [start, end) of the given table. */
+  private static Table subTable(Table table, int start, int end) {
+    ColumnVector[] columns = new ColumnVector[table.getNumberOfColumns()];
+    try {
+      for (int i = 0; i < columns.length; i++) {
+        columns[i] = table.getColumn(i).subVector(start, end);
+      }
+      return new Table(columns);
+    } finally {
+      for (ColumnVector c : columns) {
+        if (c != null) {
+          c.close();
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns a table of zero-copy slices [start, end) of the given columns, so the native column
+   * views have a non-zero offset and, for compound types, unsliced children. The table does not
+   * own the data: the given columns must outlive it.
+   */
+  private static Table sliceTable(int start, int end, ColumnVector... columns) {
+    ColumnVector[] slices = new ColumnVector[columns.length];
+    // Table only takes ColumnVectors, so each slice's view handle is handed to a ColumnVector.
+    // The placeholder only satisfies the buffer argument; the given columns own the memory.
+    try (DeviceMemoryBuffer placeholder = DeviceMemoryBuffer.allocate(1)) {
+      for (int i = 0; i < columns.length; i++) {
+        ColumnView[] views = columns[i].splitAsViews(start, end);
+        views[0].close();
+        views[2].close();
+        try {
+          slices[i] = ColumnVector.fromViewWithContiguousAllocation(views[1].getNativeView(),
+              placeholder);
+        } catch (Throwable t) {
+          views[1].close();
+          throw t;
+        }
+        // slices[i] now owns the view handle, so views[1] must not be closed.
+      }
+      return new Table(slices);
+    } finally {
+      for (ColumnVector c : slices) {
+        if (c != null) {
+          c.close();
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns a single-column table holding a zero-copy STRUCT view of the given columns. The
+   * STRUCT itself has offset 0. The table does not own the data: the given columns must outlive
+   * it.
+   */
+  private static Table structTable(ColumnVector... children) {
+    // As in sliceTable, the view handle is handed to a ColumnVector so it can go in a Table.
+    try (DeviceMemoryBuffer placeholder = DeviceMemoryBuffer.allocate(1)) {
+      ColumnView struct = ColumnView.makeStructView(children);
+      ColumnVector structVector;
+      try {
+        structVector = ColumnVector.fromViewWithContiguousAllocation(struct.getNativeView(),
+            placeholder);
+      } catch (Throwable t) {
+        struct.close();
+        throw t;
+      }
+      // structVector now owns the view handle, so struct must not be closed.
+      try (ColumnVector v = structVector) {
+        return new Table(v);
       }
     }
   }
