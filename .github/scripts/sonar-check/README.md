@@ -47,3 +47,12 @@ restrict access from other workflows.
 The workflow rechecks the PR head and target before scanning and passing the gate.
 Same-PR scans serialize through collection without cancelling active scans.
 Validate the workflow before making **Sonar check gate** required.
+
+## Selector tests
+
+CPU CI runs the selector regression tests when its helpers, catalog or workflow
+change. Run them locally with Node.js 24 or newer:
+
+```sh
+node --test .github/scripts/sonar-check/test/*.test.js
+```

@@ -16,7 +16,7 @@ name: CPU CI
 
 # PRs run on hosted runners with read-only permissions; no bot approval is needed.
 # Always report the gate; the suite catalog selects which CPU jobs must run.
-# Currently only toolchain images are covered; JNI GPU tests remain in Jenkins.
+# Covers toolchain images and Sonar selector tests; GPU tests run separately.
 # PR title/description edits do not restart these checks.
 on:
   pull_request:
@@ -206,10 +206,30 @@ jobs:
         with:
           config: ${{ toJSON(matrix.image) }}
 
+  sonar-check:
+    name: Sonar selector tests
+    needs: select
+    if: contains(fromJSON(needs.select.outputs.suites), 'sonar-check')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout PR merge commit
+        uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test Sonar selection with mocked GitHub responses
+        run: node --test .github/scripts/sonar-check/test/*.test.js
+
   gate:
     name: CPU CI gate
     if: always() && github.repository == 'NVIDIA/cudf-spark-jni'
-    needs: [select, jni-images]
+    needs: [select, jni-images, sonar-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
