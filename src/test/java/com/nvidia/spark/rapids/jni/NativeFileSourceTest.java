@@ -233,7 +233,7 @@ public class NativeFileSourceTest {
     Path file = writeFile(100);
     NativeFileSource source = NativeFileSource.open(file.toString());
     source.close();
-    source.close();
     assertThrows(IllegalStateException.class, source::size);
+    assertThrows(IllegalStateException.class, source::close);
   }
 }

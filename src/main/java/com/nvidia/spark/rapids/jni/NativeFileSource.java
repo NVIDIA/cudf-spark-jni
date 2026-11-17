@@ -48,9 +48,9 @@ public final class NativeFileSource implements AutoCloseable {
   }
 
   private final long handle;
-  // A close while calls are using the handle frees it only once the last of them finishes.
-  private boolean closed = false;
-  private int activeCalls = 0;
+  // The owner's reference, released by close, plus one per call using the handle. The last
+  // release frees the handle.
+  private int refCount = 1;
 
   private NativeFileSource(long handle) {
     this.handle = handle;
@@ -166,25 +166,23 @@ public final class NativeFileSource implements AutoCloseable {
 
   @Override
   public synchronized void close() {
-    if (!closed) {
-      closed = true;
-      if (activeCalls == 0) {
-        close(handle);
-      }
-    }
+    releaseHandle();
   }
 
   private synchronized NativeFileSourceHandle acquireHandle() {
-    if (closed) {
+    if (refCount == 0) {
       throw new IllegalStateException("file source is closed");
     }
-    activeCalls++;
+    refCount++;
     return new NativeFileSourceHandle();
   }
 
   private synchronized void releaseHandle() {
-    activeCalls--;
-    if (activeCalls == 0 && closed) {
+    if (refCount == 0) {
+      throw new IllegalStateException("Close called too many times");
+    }
+    refCount--;
+    if (refCount == 0) {
       close(handle);
     }
   }
