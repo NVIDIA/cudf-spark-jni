@@ -12,7 +12,7 @@
 # the License.
 # =============================================================================
 
-cmake_minimum_required(VERSION 4.0 FATAL_ERROR)
+cmake_minimum_required(VERSION 4.3 FATAL_ERROR)
 
 # CUDF_DIR is set from the environment variable, allowing to specify
 # a custom cudf repository other than `thirdparty/cudf`.
