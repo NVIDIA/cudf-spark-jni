@@ -28,7 +28,6 @@
 #include <cstdint>
 #include <exception>
 #include <future>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>

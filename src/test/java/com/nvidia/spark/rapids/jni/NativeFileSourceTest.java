@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -31,6 +32,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Tests reads with KvikIO in libcudf's default mode, ON, where every read goes through POSIX and
+ * device reads are staged in host memory. NativeFileSourceGdsTest covers AUTO mode.
+ */
 public class NativeFileSourceTest {
 
   @TempDir
@@ -109,6 +114,68 @@ public class NativeFileSourceTest {
       for (int i = 0; i < 60; i++) {
         assertEquals((byte) -1, dst.getByte(i), "byte " + i);
       }
+    }
+  }
+
+  /**
+   * Open the file, then shrink it. The source keeps the size it read first, so a range past the
+   * new end passes validation and then fails in the read itself.
+   */
+  private static NativeFileSource openThenTruncate(Path file, long newLength) throws IOException {
+    NativeFileSource source = NativeFileSource.open(file.toString());
+    try {
+      long size = source.size();
+      try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "rw")) {
+        raf.setLength(newLength);
+      }
+      assertEquals(size, source.size());
+      return source;
+    } catch (Throwable t) {
+      source.close();
+      throw t;
+    }
+  }
+
+  private static void assertBytesRead(HostMemoryBuffer dst, long dstOffset, int fileOffset,
+      int length) {
+    for (int i = 0; i < length; i++) {
+      assertEquals((byte) (fileOffset + i), dst.getByte(dstOffset + i), "byte " + i);
+    }
+  }
+
+  // Range 0 is inside the truncated file and range 1 is past its end.
+  private static final long[] TRUNCATED_FILE_OFFSETS = {0, 60};
+  private static final long[] TRUNCATED_LENGTHS = {10, 40};
+  private static final long[] TRUNCATED_DST_OFFSETS = {0, 10};
+
+  @Test
+  void failedHostReadThrows() throws IOException {
+    Path file = writeFile(100);
+    try (NativeFileSource source = openThenTruncate(file, 50);
+         HostMemoryBuffer dst = HostMemoryBuffer.allocate(50)) {
+      assertThrows(CudfException.class, () -> source.readToHost(
+          TRUNCATED_FILE_OFFSETS, TRUNCATED_LENGTHS, dst, TRUNCATED_DST_OFFSETS));
+      assertBytesRead(dst, 0, 0, 10);
+      source.readToHost(new long[] {20}, new long[] {10}, dst, new long[] {0});
+      assertBytesRead(dst, 0, 20, 10);
+    }
+  }
+
+  @Test
+  void failedDeviceReadThrows() throws IOException {
+    Path file = writeFile(100);
+    try (NativeFileSource source = openThenTruncate(file, 50);
+         DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(50);
+         HostMemoryBuffer host = HostMemoryBuffer.allocate(50)) {
+      assertThrows(CudfException.class, () -> source.readToDevice(
+          TRUNCATED_FILE_OFFSETS, TRUNCATED_LENGTHS, dst, TRUNCATED_DST_OFFSETS,
+          Cuda.DEFAULT_STREAM));
+      host.copyFromDeviceBuffer(dst);
+      assertBytesRead(host, 0, 0, 10);
+      source.readToDevice(new long[] {20}, new long[] {10}, dst, new long[] {0},
+          Cuda.DEFAULT_STREAM);
+      host.copyFromDeviceBuffer(dst);
+      assertBytesRead(host, 0, 20, 10);
     }
   }
 

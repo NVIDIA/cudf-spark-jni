@@ -47,10 +47,23 @@ public final class NativeFileSource implements AutoCloseable {
     AUTO
   }
 
-  private long handle;
+  private final long handle;
+  // A close while calls are using the handle frees it only once the last of them finishes.
+  private boolean closed = false;
+  private int activeCalls = 0;
 
   private NativeFileSource(long handle) {
     this.handle = handle;
+  }
+
+  /** One call's use of the handle, which keeps it open until the use is closed. */
+  private final class NativeFileSourceHandle implements AutoCloseable {
+    final long handle = NativeFileSource.this.handle;
+
+    @Override
+    public void close() {
+      releaseHandle();
+    }
   }
 
   /**
@@ -80,7 +93,9 @@ public final class NativeFileSource implements AutoCloseable {
 
   /** @return the file's size in bytes */
   public long size() {
-    return size(getHandle());
+    try (NativeFileSourceHandle h = acquireHandle()) {
+      return size(h.handle);
+    }
   }
 
   /**
@@ -90,7 +105,9 @@ public final class NativeFileSource implements AutoCloseable {
    *         compatibility mode.
    */
   public boolean isDeviceReadDirect(long size) {
-    return isDeviceReadDirect(getHandle(), size);
+    try (NativeFileSourceHandle h = acquireHandle()) {
+      return isDeviceReadDirect(h.handle, size);
+    }
   }
 
   /**
@@ -106,7 +123,9 @@ public final class NativeFileSource implements AutoCloseable {
   public void readToHost(long[] fileOffsets, long[] lengths, HostMemoryBuffer dst,
       long[] dstOffsets) {
     long[] dstAddresses = dstAddresses(fileOffsets, lengths, dst, dstOffsets);
-    readToHost(getHandle(), fileOffsets, lengths, dstAddresses);
+    try (NativeFileSourceHandle h = acquireHandle()) {
+      readToHost(h.handle, fileOffsets, lengths, dstAddresses);
+    }
   }
 
   /**
@@ -123,7 +142,9 @@ public final class NativeFileSource implements AutoCloseable {
   public void readToDevice(long[] fileOffsets, long[] lengths, DeviceMemoryBuffer dst,
       long[] dstOffsets, Cuda.Stream stream) {
     long[] dstAddresses = dstAddresses(fileOffsets, lengths, dst, dstOffsets);
-    readToDevice(getHandle(), fileOffsets, lengths, dstAddresses, stream.getStream());
+    try (NativeFileSourceHandle h = acquireHandle()) {
+      readToDevice(h.handle, fileOffsets, lengths, dstAddresses, stream.getStream());
+    }
   }
 
   private static long[] dstAddresses(long[] fileOffsets, long[] lengths, MemoryBuffer dst,
@@ -145,17 +166,27 @@ public final class NativeFileSource implements AutoCloseable {
 
   @Override
   public synchronized void close() {
-    if (handle != 0) {
-      close(handle);
-      handle = 0;
+    if (!closed) {
+      closed = true;
+      if (activeCalls == 0) {
+        close(handle);
+      }
     }
   }
 
-  private synchronized long getHandle() {
-    if (handle == 0) {
+  private synchronized NativeFileSourceHandle acquireHandle() {
+    if (closed) {
       throw new IllegalStateException("file source is closed");
     }
-    return handle;
+    activeCalls++;
+    return new NativeFileSourceHandle();
+  }
+
+  private synchronized void releaseHandle() {
+    activeCalls--;
+    if (activeCalls == 0 && closed) {
+      close(handle);
+    }
   }
 
   private static native void setUpKvikioNative(int mode, int numThreads);

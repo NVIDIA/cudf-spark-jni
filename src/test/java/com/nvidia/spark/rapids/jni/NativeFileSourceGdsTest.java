@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.Cuda;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DeviceMemoryBuffer;
 import ai.rapids.cudf.HostMemoryBuffer;
 import org.junit.jupiter.api.BeforeAll;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -35,16 +37,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Tests reads with KvikIO in AUTO mode, where it reads through cuFile if it can and through POSIX
- * if not.
+ * if not. NativeFileSourceTest covers the default mode, ON.
  * <ul>
  *   <li>The data checks pass either way.</li>
- *   <li>readsThroughCuFile is skipped when cuFile is not used. Set -Dgds.required=true to make it
- *       fail instead, on machines that should have GDS.</li>
+ *   <li>The cuFile tests are skipped when cuFile is not used. Set -Dgds.required=true to make
+ *       them fail instead, on machines that should have GDS.</li>
  *   <li>This class runs in its own JVM, because the first cuDF IO in a process fixes KvikIO's
  *       mode.</li>
  * </ul>
@@ -116,22 +120,54 @@ public class NativeFileSourceGdsTest {
     readToDeviceAndCheck();
   }
 
-  // Does not detect cuFile falling back to its own compatibility mode; see gds_stats for that.
-  @Test
-  void readsThroughCuFile() {
-    boolean direct;
-    try (NativeFileSource source = NativeFileSource.open(file.toString())) {
-      // 1 GiB, well above KvikIO's GDS threshold, so this asks only whether cuFile reads the file.
-      direct = source.isDeviceReadDirect(1L << 30);
-    }
-    System.out.println("KvikIO reads " + file + (direct ? " through cuFile" : " through POSIX"));
-    String message = "KvikIO is not reading " + file + " through cuFile";
+  /** Check the source reads through cuFile; if not, skip the test, or fail if gds.required. */
+  private static void assumeCuFile(NativeFileSource source, Path path) {
+    // 1 GiB, well above KvikIO's GDS threshold, so this asks only whether cuFile reads the file.
+    boolean direct = source.isDeviceReadDirect(1L << 30);
+    String message = "KvikIO is not reading " + path + " through cuFile";
     if (GDS_REQUIRED) {
       assertTrue(direct, message);
     } else {
       assumeTrue(direct, message);
     }
+  }
+
+  // Does not detect cuFile falling back to its own compatibility mode; see gds_stats for that.
+  @Test
+  void readsThroughCuFile() {
+    try (NativeFileSource source = NativeFileSource.open(file.toString())) {
+      assumeCuFile(source, file);
+    }
     readToDeviceAndCheck();
+  }
+
+  // The source keeps the size it read before the file is shrunk, so the range past the new end
+  // passes validation and then fails in the cuFile read itself.
+  @Test
+  void failedCuFileReadThrows() throws IOException {
+    Path truncated = Files.write(tempDir.resolve("truncated.bin"), data);
+    // Ranges above KvikIO's default 1 MiB GDS threshold, so both go to cuFile.
+    int length = 2 << 20;
+    long[] fileOffsets = {0, FILE_SIZE - length};
+    long[] lengths = {length, length};
+    long[] dstOffsets = {0, length};
+    try (NativeFileSource source = NativeFileSource.open(truncated.toString());
+         DeviceMemoryBuffer dst = DeviceMemoryBuffer.allocate(2L * length);
+         HostMemoryBuffer host = HostMemoryBuffer.allocate(2L * length)) {
+      assumeCuFile(source, truncated);
+      assertEquals(FILE_SIZE, source.size());
+      // Shrink the file so cuFile reads past the end.
+      try (RandomAccessFile raf = new RandomAccessFile(truncated.toFile(), "rw")) {
+        raf.setLength(FILE_SIZE / 2);
+      }
+      // cuFile may return a short read or an error past the end; both fail the call.
+      assertThrows(CudfException.class, () -> source.readToDevice(
+          fileOffsets, lengths, dst, dstOffsets, Cuda.DEFAULT_STREAM));
+      host.copyFromDeviceBuffer(dst);
+      byte[] actual = new byte[length];
+      host.getBytes(actual, 0, 0, actual.length);
+      assertArrayEquals(Arrays.copyOfRange(data, 0, actual.length), actual);
+    }
   }
 
   @Test
