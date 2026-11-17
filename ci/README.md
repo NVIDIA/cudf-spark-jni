@@ -159,7 +159,7 @@ Unrelated changes skip the image jobs, not the gate.
 These hosted PR jobs have read-only permissions and never publish images. They use
 `ubuntu-latest` for amd64 and `ubuntu-26.04-arm` for arm64, both native 4-CPU runners;
 GitHub currently has no `ubuntu-latest-arm` label. Publication uses the same native
-runner labels. Existing Jenkins product-test coverage is unchanged.
+runner labels. [GPU CI](../.github/scripts/gpu-ci/README.md) provides PR product-test coverage.
 
 Builds export separate layer-cache scopes for each full CUDA version and
 architecture. The existing amd64 PR builds can also import earlier major-series

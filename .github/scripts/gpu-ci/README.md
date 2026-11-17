@@ -1,17 +1,17 @@
 # GPU CI
 
-`GPU CI` runs the existing CUDA 12/13 amd64 native/Java tests and fuzzing alongside
-Blossom. For PRs targeting main or `release/YY.MM`, a maintainer triggers it with
-`/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
+`GPU CI` runs the CUDA 12/13 amd64 native/Java tests and fuzzing, replacing the
+legacy Blossom PR workflow. For PRs targeting main or `release/YY.MM`, a maintainer
+triggers it with `/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
 commands can copy the latest head rather than the supplied SHA.
 
 The suite catalog selects JNI source, shared build inputs and GPU CI configuration,
 excluding Markdown documentation. `paths` accepts exact filenames or directory
 prefixes ending in `/`; add relevant workflows explicitly. Sonar and unrelated
 workflows do not select GPU tests. Unaffected changes still report the gate;
-a PR-title `[skip ci]` marker also skips GPU work. Keep existing Blossom/Sonar
-checks until their replacement is ready. Release branches need the workflows,
-helpers and toolchain pins backported before their PRs can use GPU CI.
+a PR-title `[skip ci]` marker also skips GPU work. [Sonar checks](../sonar-check/README.md)
+run separately. Release branches need the workflows, helpers and toolchain pins
+backported before their PRs can use GPU CI.
 
 Workers reuse a verified, branch-compatible GHCR image or build a missing recipe
 locally without publishing it. Registry failures remain errors. Runner fallback
