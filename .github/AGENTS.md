@@ -4,8 +4,9 @@ Keep GHA-only helpers and settings under `.github/scripts/`; `ci/` is for shared
 local, GHA and Blossom scripts. Read [GPU CI](scripts/gpu-ci/README.md) for this
 workflow's expected behavior and `ci/README.md` for shared image contracts.
 
-Keep suite catalogs, job IDs and result gates aligned. GPU CI is all-except-listed:
-exclude documentation and unrelated workflow files, not whole `.github` folders.
+Keep suite catalogs, job IDs and result gates aligned. GPU CI explicitly includes
+source/build inputs and relevant workflow files; exclude only documentation.
+Keep the catalog, image recipes and GPU helpers covered when adding build inputs.
 Preserve bot approval, copied-head/target checks and existing Blossom/Sonar coverage.
 Do not retry registry or workload failures, or weaken release image pinning.
 

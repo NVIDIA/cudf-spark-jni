@@ -1,0 +1,364 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Sonar check
+
+on:
+  push:
+    branches: ['pull-request/[0-9]+']
+
+permissions:
+  contents: read
+  pull-requests: read
+cache-mode: none
+
+env:
+  SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+
+jobs:
+  select:
+    name: Select Sonar checks
+    if: >-
+      github.repository == 'NVIDIA/cudf-spark-jni' &&
+      github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      sha: ${{ steps.select.outputs.sha }}
+      pr-number: ${{ steps.select.outputs.pr-number }}
+      branch: ${{ steps.select.outputs.branch }}
+      base-ref: ${{ steps.select.outputs.base-ref }}
+      run-scan: ${{ steps.select.outputs.run-scan }}
+      reason: ${{ steps.select.outputs.reason }}
+    steps:
+      - name: Checkout approved workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workflow
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Verify the copied head and select from the complete PR diff
+        id: select
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 0
+          script: |
+            const select = require('./workflow/.github/scripts/sonar-check/select.js');
+            await select({github, context, core, initial: true});
+      - name: Mark the selected analysis pending
+        if: steps.select.outputs.run-scan == 'true'
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          phase: pending
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ steps.select.outputs.pr-number }}
+          sha: ${{ steps.select.outputs.sha }}
+          base-ref: ${{ steps.select.outputs.base-ref }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+
+  compile:
+    name: Compile Java for Sonar
+    needs: select
+    if: needs.select.outputs.run-scan == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only approved hosted compilation may restore/save dependency caches.
+    cache-mode: write
+    env:
+      # Match GPU CI's existing cache archive path as well as its key. Changing
+      # this to the hosted runner.temp path would change the hidden cache version.
+      MAVEN_REPOSITORY: /home/runner/_work/_temp/jni-home/.m2/repository
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Checkout approved workflow helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workflow
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Checkout selected Java and pinned cuDF sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          path: source
+          submodules: true
+          persist-credentials: false
+      - name: Set up Java for compilation
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ vars.SONAR_BUILD_JAVA_VERSION || '17' }}
+          overwrite-settings: false
+      - name: Restore shared Maven dependencies
+        id: maven-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: ${{ env.MAVEN_REPOSITORY }}
+          # Same format as GPU CI: prefer this copied PR, then the main baseline.
+          key: jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/pom.xml') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/pom.xml') }}-
+            jni-maven-${{ runner.os }}-${{ runner.arch }}-
+      - name: Compile without Sonar credentials
+        id: compile
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+        run: bash workflow/.github/scripts/sonar-check/build.sh
+      - name: Transfer only this run's Java classes
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-classes-${{ github.run_attempt }}
+          path: |
+            source/target/classes/**/*.class
+            source/target/test-classes/**/*.class
+          if-no-files-found: error
+          retention-days: 3
+      - name: Save Maven dependencies for this copied PR
+        if: >-
+          !cancelled() && steps.compile.outcome == 'success' &&
+          steps.maven-cache.outputs.cache-primary-key != '' && steps.maven-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        continue-on-error: true
+        timeout-minutes: 5
+        with:
+          path: ${{ env.MAVEN_REPOSITORY }}
+          key: ${{ steps.maven-cache.outputs.cache-primary-key }}
+
+  security:
+    name: Script security preflight
+    needs: [select, compile]
+    if: needs.select.outputs.run-scan == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha: ${{ steps.security.outputs.sha }}
+    steps:
+      - name: Checkout approved artifact validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workflow
+          persist-credentials: false
+      - name: Checkout selected source as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - name: Inspect source with the published scanner image
+        id: security
+        uses: NVIDIA/spark-rapids-common/sonar-check/scan-scripts@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          source-directory: source
+          expected-sha: ${{ needs.select.outputs.sha }}
+
+      - name: Download only the verified preparation artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile.outputs.artifact-id }}
+          path: ${{ runner.temp }}/sonar-classes
+          digest-mismatch: error
+      - name: Check class-only contents and size on the hosted runner
+        env:
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes
+        run: python3 -I workflow/.github/scripts/sonar-check/scan.py --check-classes
+      - name: Transfer the inspected classes within this run
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: inspected-classes-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sonar-classes/classes/**/*.class
+            ${{ runner.temp }}/sonar-classes/test-classes/**/*.class
+          if-no-files-found: error
+          retention-days: 3
+
+  scan:
+    name: Internal Sonar analysis
+    needs: [select, security]
+    runs-on: [self-hosted, Linux, X64, spark-sonar-internal]
+    timeout-minutes: 35
+    # Hold this lock through server processing and collection. Different PRs may
+    # scan concurrently; a new request never aborts an executing analysis.
+    concurrency:
+      group: sonar-analysis-${{ needs.select.outputs.pr-number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      attempt: ${{ steps.collect.outputs.source-attempt }}
+    steps:
+      - name: Checkout approved scan helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workflow
+          persist-credentials: false
+      - name: Recheck the selected PR after runner allocation
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+          APPROVED_BASE_REF: ${{ needs.select.outputs.base-ref }}
+          PR_NUMBER: ${{ needs.select.outputs.pr-number }}
+        with:
+          retries: 0
+          script: |
+            const select = require('./workflow/.github/scripts/sonar-check/select.js');
+            await select({github, context, core});
+      - name: Checkout selected source for analysis only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.security.outputs.sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the hosted-inspected class artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.security.outputs.artifact-id }}
+          path: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+          digest-mismatch: error
+      - name: Submit the selected analysis
+        id: analyze
+        continue-on-error: true
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+          PR_NUMBER: ${{ needs.select.outputs.pr-number }}
+          PR_BRANCH: ${{ needs.select.outputs.branch }}
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+          PR_BASE_REF: ${{ needs.select.outputs.base-ref }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: python3 -I workflow/.github/scripts/sonar-check/scan.py
+      - name: Collect the exact analysis and quality gate
+        id: collect
+        if: always() && steps.analyze.outputs.task-file != ''
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: NVIDIA/spark-rapids-common/sonar-check/collect@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          task-file: ${{ steps.analyze.outputs.task-file }}
+          result-path: ${{ steps.analyze.outputs.result-path }}
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ needs.select.outputs.pr-number }}
+          sha: ${{ needs.select.outputs.sha }}
+          base-ref: ${{ needs.select.outputs.base-ref }}
+          scanner-outcome: ${{ steps.analyze.outcome }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+      - name: Transfer the analysis result, including a failed gate
+        id: upload
+        if: always() && steps.collect.outputs.result-path != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sonar-result-${{ github.run_attempt }}
+          path: ${{ steps.collect.outputs.result-path }}
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Remove this scan's temporary files
+        if: always()
+        env:
+          SONAR_WORK_DIRECTORY: ${{ steps.analyze.outputs.work-directory }}
+          CLASSES_DIRECTORY: ${{ runner.temp }}/sonar-classes-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 -I workflow/.github/scripts/sonar-check/scan.py --cleanup
+
+  report:
+    name: Report Sonar findings
+    needs: [select, compile, security, scan]
+    if: >-
+      always() && needs.select.outputs.sha != '' &&
+      needs.select.outputs.run-scan == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check Sonar prerequisites
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: '["select", "compile", "security", "scan"]'
+      - name: Download the exact scan result
+        id: download
+        if: always() && needs.scan.outputs.artifact-id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.scan.outputs.artifact-id }}
+          path: ${{ runner.temp }}/sonar-report
+          digest-mismatch: error
+      - name: Publish findings and the scoped Sonar status
+        if: always()
+        uses: NVIDIA/spark-rapids-common/sonar-check/report@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          # Never consume a partial download after a digest/transfer failure.
+          result-path: ${{ runner.temp }}/${{ steps.download.outcome == 'success' && 'sonar-report/result.json' || 'sonar-report-unavailable.json' }}
+          project: ${{ vars.SONAR_PROJECT_KEY }}
+          pr-number: ${{ needs.select.outputs.pr-number }}
+          sha: ${{ needs.select.outputs.sha }}
+          base-ref: ${{ needs.select.outputs.base-ref }}
+          source-attempt: ${{ needs.scan.outputs.attempt || github.run_attempt }}
+          scan-result: ${{ steps.download.outcome == 'failure' && 'failure' || needs.scan.result }}
+          sonar-url: ${{ secrets.SONAR_HOST_URL }}
+
+  gate:
+    name: Sonar check gate
+    needs: [select, compile, security, scan, report]
+    # A successful skip decision skips this native check, which is nonblocking.
+    # Failed selection or missing outputs must still evaluate the required jobs.
+    if: >-
+      always() && github.repository == 'NVIDIA/cudf-spark-jni' &&
+      (needs.select.result != 'success' || needs.select.outputs.run-scan != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout approved gate helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: workflow
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Recheck the analyzed PR revision and target
+        if: needs.select.result == 'success' && needs.select.outputs.run-scan == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          APPROVED_SHA: ${{ needs.select.outputs.sha }}
+          APPROVED_BASE_REF: ${{ needs.select.outputs.base-ref }}
+          PR_NUMBER: ${{ needs.select.outputs.pr-number }}
+        with:
+          retries: 0
+          script: |
+            const select = require('./workflow/.github/scripts/sonar-check/select.js');
+            await select({github, context, core});
+      - name: Require every selected Sonar job to pass
+        uses: NVIDIA/spark-rapids-common/workflow-result-gate@7c549a3539db93ce43fd4c3e44becd119ebb3092
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: '["select", "compile", "security", "scan", "report"]'
