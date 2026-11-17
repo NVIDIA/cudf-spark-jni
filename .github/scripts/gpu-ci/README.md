@@ -1,9 +1,9 @@
 # GPU CI
 
-`GPU CI` runs the CUDA 12/13 amd64 native/Java tests and fuzzing, replacing the
-legacy Blossom PR workflow. For PRs targeting main or `release/YY.MM`, a maintainer
-triggers it with `/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
-commands can copy the latest head rather than the supplied SHA.
+`GPU CI` runs the CUDA 12/13 amd64 native/Java tests and fuzzing. For PRs targeting
+main or `release/YY.MM`, a maintainer triggers it with `/ok to test <full-head-SHA>`.
+Check the copied revision: trusted contributors' commands can copy the latest head
+rather than the supplied SHA.
 
 The suite catalog selects JNI source, shared build inputs and GPU CI configuration,
 excluding Markdown documentation. `paths` accepts exact filenames or directory
