@@ -26,7 +26,8 @@ M2DIR=${M2DIR:-"$HOME/.m2"}
 
 MVN_SETTINGS=${MVN_SETTINGS:-"$WORKSPACE/ci/settings.xml"}
 SLF4J_VER=$(mvn -s "$MVN_SETTINGS" help:evaluate -Dexpression=slf4j.version -q -DforceStdout)
-CLASSPATH=${CLASSPATH:-"$WORKSPACE/target/*:$M2DIR/repository/org/slf4j/slf4j-api/$SLF4J_VER/slf4j-api-$SLF4J_VER.jar"}
+ZSTD_JNI_VER=$(mvn -s "$MVN_SETTINGS" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
+CLASSPATH=${CLASSPATH:-"$WORKSPACE/target/*:$M2DIR/repository/org/slf4j/slf4j-api/$SLF4J_VER/slf4j-api-$SLF4J_VER.jar:$M2DIR/repository/com/github/luben/zstd-jni/$ZSTD_JNI_VER/zstd-jni-$ZSTD_JNI_VER.jar"}
 
 java -cp "$CLASSPATH" \
   com.nvidia.spark.rapids.jni.RmmSparkMonteCarlo \
