@@ -20,8 +20,25 @@
 set -exo pipefail
 
 jar_path=$1
-tmp_path=/tmp/"jni-$(date "+%Y%m%d%H%M%S")"
+tmp_path=$(mktemp -d /tmp/jni-XXXXXXXX)
 unzip -j "${jar_path}" "*64/Linux/*.so" -d "${tmp_path}"
+
+if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.properties$' >/dev/null; then
+    m2_dir=${M2DIR:-"$HOME/.m2"}
+    mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
+    zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
+    zstd_jni_jar="$m2_dir/repository/com/github/luben/zstd-jni/$zstd_jni_ver/zstd-jni-$zstd_jni_ver.jar"
+    if [[ ! -f "$zstd_jni_jar" ]]; then
+        echo "zstd-jni $zstd_jni_ver jar not found at $zstd_jni_jar; set M2DIR to the local Maven repository"
+        exit 1
+    fi
+    java -cp "$jar_path:$zstd_jni_jar" ai.rapids.cudf.NativeDepUtil extract cudf "$tmp_path/libcudf.so"
+fi
+
+if [[ ! -f "$tmp_path/libcudf.so" ]]; then
+    echo "libcudf.so is missing from $jar_path"
+    exit 1
+fi
 
 find "$tmp_path" -type f -name "*.so" | while read -r so_file; do
     # Check if *.so file has a dynamic link to CUDA Runtime
@@ -33,3 +50,4 @@ find "$tmp_path" -type f -name "*.so" | while read -r so_file; do
         echo "No dynamic link to CUDA Runtime found in $so_file"
     fi
 done
+rm -rf "$tmp_path"
