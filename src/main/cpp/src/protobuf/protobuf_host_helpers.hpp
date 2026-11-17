@@ -566,7 +566,7 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
 
 // Assemble a STRUCT from `children`, which follow `child_indices`. Hidden children were only
 // validated and become all-null columns, so the struct's nulls go only into the visible ones.
-std::unique_ptr<cudf::column> make_struct_column(
+std::unique_ptr<cudf::column> make_struct_column_with_schema(
   protobuf_schema const& schema,
   std::vector<int> const& child_indices,
   cudf::size_type num_rows,

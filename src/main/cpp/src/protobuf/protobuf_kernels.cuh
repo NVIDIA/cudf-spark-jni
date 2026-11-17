@@ -27,6 +27,7 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -747,8 +748,8 @@ inline std::unique_ptr<cudf::column> extract_typed_column(protobuf_field_decode_
       return extract_and_build_scalar_field_column<double>(
         field, message_data, loc_provider, num_items, decode_ctx, stream, mr);
     default:
-      CUDF_FAIL("Protobuf decode internal error: unsupported scalar type id=" +
-                std::to_string(static_cast<int>(dt.id())));
+      CUDF_FAIL("Protobuf decode internal error: unsupported scalar type " +
+                cudf::type_to_name(dt));
   }
 }
 

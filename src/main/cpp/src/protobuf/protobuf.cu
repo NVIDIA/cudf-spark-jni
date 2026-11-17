@@ -113,9 +113,9 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
                                                            cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr)
 {
-  auto const& field = schema[schema_idx];
-  auto const dtype  = cudf::data_type{field.output_type};
-  auto null_mask    = [&] {
+  auto const& field  = schema[schema_idx];
+  auto const dtype   = cudf::data_type{field.output_type};
+  auto all_null_mask = [&] {
     return cudf::create_null_mask(num_rows, cudf::mask_state::ALL_NULL, stream, mr);
   };
   auto null_list = [&](std::unique_ptr<cudf::column> element) {
@@ -123,7 +123,7 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
                                    make_zero_offsets_column(num_rows, stream, mr),
                                    std::move(element),
                                    num_rows,
-                                   null_mask());
+                                   all_null_mask());
   };
 
   if (field.is_repeated) {
@@ -140,31 +140,32 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
     case cudf::type_id::UINT64:
     case cudf::type_id::FLOAT32:
     case cudf::type_id::FLOAT64:
-      return cudf::make_fixed_width_column(dtype, num_rows, cudf::mask_state::ALL_NULL, stream, mr);
+      return cudf::make_fixed_width_column(dtype, num_rows, all_null_mask(), num_rows, stream, mr);
     case cudf::type_id::STRING:
       return cudf::make_strings_column(num_rows,
                                        make_zero_offsets_column(num_rows, stream, mr),
                                        rmm::device_buffer{},
                                        num_rows,
-                                       null_mask());
+                                       all_null_mask());
     case cudf::type_id::LIST:  // bytes
-      return null_list(cudf::make_empty_column(cudf::data_type{cudf::type_id::UINT8}));
+      return null_list(cudf::make_empty_column(cudf::type_id::UINT8));
     case cudf::type_id::STRUCT: {
       std::vector<std::unique_ptr<cudf::column>> children;
       for (auto const child_idx : schema.children(schema_idx)) {
         children.push_back(make_null_column_with_schema(schema, child_idx, num_rows, stream, mr));
       }
-      // The children are all null already; make_structs_column would push the nulls down again.
+      // The children are all null already, so skip the superimpose_and_sanitize_nulls() pass that
+      // make_structs_column would run on each of them.
       return cudf::create_structs_hierarchy(
-        num_rows, std::move(children), num_rows, null_mask(), stream, mr);
+        num_rows, std::move(children), num_rows, all_null_mask(), stream, mr);
     }
     default:
-      CUDF_FAIL("Protobuf decode internal error: unsupported output type id=" +
-                std::to_string(static_cast<int>(dtype.id())));
+      CUDF_FAIL("Protobuf decode internal error: unsupported output type " +
+                cudf::type_to_name(dtype));
   }
 }
 
-std::unique_ptr<cudf::column> make_struct_column(
+std::unique_ptr<cudf::column> make_struct_column_with_schema(
   protobuf_schema const& schema,
   std::vector<int> const& child_indices,
   cudf::size_type num_rows,
@@ -180,6 +181,9 @@ std::unique_ptr<cudf::column> make_struct_column(
     auto const schema_idx = child_indices[i];
     auto& child           = children[i];
     if (!schema.is_output(schema_idx)) {
+      CUDF_EXPECTS(child == nullptr,
+                   "Protobuf decode internal error: hidden field " + std::to_string(schema_idx) +
+                     " was decoded");
       child = make_null_column_with_schema(schema, schema_idx, num_rows, stream, mr);
       continue;
     }
@@ -289,8 +293,8 @@ void validate_decode_context(protobuf_decode_context const& context)
                    "protobuf decode context: parent must be STRUCT at field " + std::to_string(i),
                    std::invalid_argument);
       // A hidden STRUCT is returned as all nulls, so it cannot have visible descendants.
-      CUDF_EXPECTS(context.output_fields.empty() || context.output_fields[field.parent_idx] ||
-                     !context.output_fields[i],
+      CUDF_EXPECTS(context.output_fields.empty() || !context.output_fields[i] ||
+                     context.output_fields[field.parent_idx],
                    "protobuf decode context: visible field under a hidden parent at field " +
                      std::to_string(i),
                    std::invalid_argument);
@@ -851,8 +855,8 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         }
         default:
           // Schema validation rejects unsupported output types before dispatch.
-          CUDF_FAIL("Protobuf decode internal error: unsupported repeated element type id=" +
-                    std::to_string(static_cast<int>(element_type)));
+          CUDF_FAIL("Protobuf decode internal error: unsupported repeated element type " +
+                    cudf::type_to_name(cudf::data_type{element_type}));
       }
     }  // for (ri)
   }
@@ -940,14 +944,14 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
     if (null_count > 0) { struct_mask = std::move(mask); }
   }
 
-  return make_struct_column(schema_context,
-                            top_level_indices,
-                            num_rows,
-                            std::move(top_level_children),
-                            struct_null_count,
-                            std::move(struct_mask),
-                            stream,
-                            mr);
+  return make_struct_column_with_schema(schema_context,
+                                        top_level_indices,
+                                        num_rows,
+                                        std::move(top_level_children),
+                                        struct_null_count,
+                                        std::move(struct_mask),
+                                        stream,
+                                        mr);
 }
 
 }  // namespace detail

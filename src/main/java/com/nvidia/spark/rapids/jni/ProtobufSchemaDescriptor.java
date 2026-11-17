@@ -98,8 +98,7 @@ public final class ProtobufSchemaDescriptor implements java.io.Serializable {
   /**
    * @param isOutput per-field flag; if {@code false}, the field is still validated like any
    *        other field but is returned as an all-null column, so the result keeps the full
-   *        schema. Children of a hidden STRUCT must be hidden too; a visible STRUCT may hide
-   *        individual children.
+   *        schema. A hidden STRUCT can't have visible children.
    * @throws IllegalArgumentException if any array is null, arrays have mismatched lengths,
    *         field numbers are out of range, or encoding values are invalid.
    */

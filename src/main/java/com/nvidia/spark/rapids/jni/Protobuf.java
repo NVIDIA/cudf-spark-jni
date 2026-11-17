@@ -72,7 +72,8 @@ public class Protobuf {
    * @param schema descriptor containing flattened schema arrays (field numbers, types, defaults, etc.)
    * @param failOnErrors if true, throw an exception on malformed protobuf messages. If false,
    *                     malformed top-level messages produce null STRUCT rows.
-   * @return a cudf STRUCT column with nested structure.
+   * @return a cudf STRUCT column with nested structure. Fields that the schema marks hidden
+   *         ({@code isOutput == false}) are validated but returned as all-null columns.
    */
   public static ColumnVector decodeToStruct(ColumnView binaryInput,
                                             ProtobufSchemaDescriptor schema,
