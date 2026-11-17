@@ -20,7 +20,7 @@
 set -exo pipefail
 
 jar_path=$1
-tmp_path=/tmp/"jni-$(date "+%Y%m%d%H%M%S")"
+tmp_path=$(mktemp -d /tmp/jni-XXXXXXXX)
 unzip -j "${jar_path}" "*64/Linux/*.so" -d "${tmp_path}"
 
 if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.properties$' >/dev/null; then
@@ -28,6 +28,10 @@ if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.proper
     mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
     zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
     zstd_jni_jar="$m2_dir/repository/com/github/luben/zstd-jni/$zstd_jni_ver/zstd-jni-$zstd_jni_ver.jar"
+    if [[ ! -f "$zstd_jni_jar" ]]; then
+        echo "zstd-jni $zstd_jni_ver jar not found at $zstd_jni_jar; set M2DIR to the local Maven repository"
+        exit 1
+    fi
     java -cp "$jar_path:$zstd_jni_jar" ai.rapids.cudf.NativeDepUtil extract cudf "$tmp_path/libcudf.so"
 fi
 

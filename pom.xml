@@ -384,6 +384,42 @@
         <BUILD_PROFILER>OFF</BUILD_PROFILER>
       </properties>
     </profile>
+    <profile>
+      <!-- native_chunks.py only chunks libraries of at least 256 MiB, so single-arch,
+           debug and other small builds legitimately have no chunks. CI builds that
+           publish JARs (RAPIDS archs) pass -Dnative.chunks.require=true so a JAR
+           without chunks fails the build. -->
+      <id>require-native-chunks</id>
+      <activation>
+        <property>
+          <name>native.chunks.require</name>
+          <value>true</value>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>require-zstd-native-chunks</id>
+                <phase>package</phase>
+                <goals><goal>java</goal></goals>
+                <configuration>
+                  <arguments>
+                    <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
+                    <argument>verify</argument>
+                    <argument>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</argument>
+                    <argument>--require-chunks</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 
   <build>
@@ -786,7 +822,6 @@
                 <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
                 <argument>verify</argument>
                 <argument>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</argument>
-                <argument>--require-chunks</argument>
               </arguments>
             </configuration>
           </execution>
