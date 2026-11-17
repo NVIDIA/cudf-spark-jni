@@ -23,7 +23,7 @@ jar_path=$1
 tmp_path=/tmp/"jni-$(date "+%Y%m%d%H%M%S")"
 unzip -j "${jar_path}" "*64/Linux/*.so" -d "${tmp_path}"
 
-if unzip -Z -1 "${jar_path}" | grep -Eq '^[^/]+/Linux/libcudf\.so\.chunks\.properties$'; then
+if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.properties$' >/dev/null; then
     m2_dir=${M2DIR:-"$HOME/.m2"}
     mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
     zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
