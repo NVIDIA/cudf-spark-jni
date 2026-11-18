@@ -84,7 +84,14 @@ test('uses the actual catalog for source, documentation, Dockerfile and vendor p
     ['src/Example.java', true], ['src/Example.scala', true],
     ['src/native.c', true], ['src/native.cpp', true], ['src/native.hpp', true],
     ['ci/build.py', true], ['ci/build.sh', true], ['ci/build.js', true],
-    ['pom.xml', true], ['.github/workflows/build.yml', true], ['.env', true],
+    ['pom.xml', true], ['.env', true],
+    ['.github/workflows/build.yml', false], ['.github/workflows/gpu-ci.yml', false],
+    ['.github/workflows/nested/build.yaml', false], ['.github/workflows/sonar-check.yml', true],
+    ['.github/scripts/sonar-check/select.js', true], ['.github/scripts/sonar-check/build.sh', true],
+    ['.github/scripts/sonar-check/scan.py', true], ['.github/scripts/sonar-check/README.md', false],
+    ['.github/scripts/gpu-ci/run.sh', true], ['.github/scripts/gpu-ci/image.py', true],
+    ['.github/scripts/gpu-ci/cache.js', true],
+    ['.github/workflows/action-helper/entrypoint.sh', true], ['.github/workflows/action-helper/python/utils.py', true],
     ['README.md', false], ['guide.rst', false], ['notes.txt', false],
     ['docs/example.java', false], ['.github/workflows/docs/example.yaml', false],
     ['.github/workflows/README.yml', false], ['module/ReadMe.html', false],
@@ -111,10 +118,17 @@ test('handles both rename paths, deletions, empty diffs and mixed changes', asyn
     ['Dockerfile rename', [{ filename: '.devcontainer/Dockerfile.sh', previous_filename: 'Dockerfile', status: 'renamed' }], false],
     ['deleted source', [{ filename: 'src/Example.java', status: 'removed' }], true],
     ['deleted Dockerfile', [{ filename: 'Dockerfile', status: 'removed' }], false],
+    ['archived unrelated workflow', [{ filename: '.github/workflows/blossom-ci.yml.deprecated', previous_filename: '.github/workflows/blossom-ci.yml', status: 'renamed' }], false],
+    ['deleted unrelated workflow', [{ filename: '.github/workflows/gpu-ci.yml', status: 'removed' }], false],
+    ['deleted Sonar workflow', [{ filename: '.github/workflows/sonar-check.yml', status: 'removed' }], true],
+    ['renamed Sonar workflow', [{ filename: '.github/workflows/sonar-check.yml.deprecated', previous_filename: '.github/workflows/sonar-check.yml', status: 'renamed' }], true],
+    ['renamed into Sonar workflow', [{ filename: '.github/workflows/sonar-check.yml', previous_filename: '.github/workflows/build.yml', status: 'renamed' }], true],
     ['empty diff', [], false],
     ['docs and Dockerfile', [modified('README.md'), modified('Dockerfile')], false],
     ['mixed source and docs', [modified('README.md'), modified('src/Example.java')], true],
     ['mixed source and vendor', [modified('thirdparty/A.java'), modified('src/native.h')], true],
+    ['mixed source and unrelated workflow', [modified('.github/workflows/gpu-ci.yml'), modified('src/Example.java')], true],
+    ['workflow and its script', [modified('.github/workflows/gpu-ci.yml'), modified('.github/scripts/gpu-ci/run.sh')], true],
   ];
   for (const [name, files, expected] of cases) {
     await t.test(name, async () => {
@@ -123,6 +137,25 @@ test('handles both rename paths, deletions, empty diffs and mixed changes', asyn
       assert.equal(f.outputs['run-scan'], String(expected));
     });
   }
+});
+
+test('skips the Blossom retirement diff with documentation and unrelated CI changes', async () => {
+  const f = fixture([
+    modified('.github/AGENTS.md'),
+    modified('.github/cpu-ci-suites.json'),
+    modified('.github/scripts/gpu-ci/README.md'),
+    {
+      filename: '.github/workflows/blossom-ci.yml.deprecated',
+      previous_filename: '.github/workflows/blossom-ci.yml',
+      status: 'renamed',
+    },
+    modified('.github/workflows/gpu-ci.yml'),
+    modified('CONTRIBUTING.md'),
+    modified('ci/README.md'),
+  ]);
+  await select(f.args);
+  assert.equal(f.outputs['run-scan'], 'false');
+  assert.equal(f.outputs.reason, 'no-code-changes');
 });
 
 test('honors the title skip before reading even an oversized diff', async () => {
