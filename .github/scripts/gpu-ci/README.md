@@ -1,9 +1,15 @@
 # GPU CI
 
 `GPU CI` runs the CUDA 12/13 amd64 native/Java tests and fuzzing. For PRs targeting
-main or `release/YY.MM`, a maintainer triggers it with `/ok to test <full-head-SHA>`.
+main or `release/YY.MM`, an authorized NVIDIA user triggers it with
+`/ok to test <full-head-SHA>`.
 Check the copied revision: trusted contributors' commands can copy the latest head
 rather than the supplied SHA.
+
+If a run fails for a non-code reason and the PR commit is unchanged, someone with
+repository write access can open the parent `GPU CI` run in GitHub Actions and
+select **Re-run failed jobs**. A new commit needs another `/ok to test` command
+with its new full head SHA.
 
 The suite catalog selects JNI source, shared build inputs and GPU CI configuration,
 excluding Markdown documentation. `paths` accepts exact filenames or directory
