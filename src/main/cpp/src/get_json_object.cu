@@ -998,12 +998,12 @@ inline constexpr std::size_t k_merged_min_fanout_den = 20;  // distinct paths mu
 // over 16 roots) pays the merged walk's per-root overhead without amortizing it, and measured
 // 1.5-2.5x slower than the general route. 33 paths over 3 roots (11/root) and the nested
 // family's shallow group (120 paths over 38 roots, 3.16/root) admit; the 16-path flat-mixed
-// shape (1/root) and flat-wide groups of 124 paths over 40 roots (3.1/root, measured 3.13x
-// slower merged) deny and fall to the general route. Pure depth-1 groups cannot admit: the
+// shape (1/root) and flat-wide groups of 124 paths over 40 roots (3.1/root) deny and fall to
+// the general route. Pure depth-1 groups cannot admit: the
 // first-segment name of a 1-tuple path is the path itself, so distinct paths equals distinct
 // roots (ratio 1) and the fan-out comparison reads P*20 >= P*63, false for every nonempty
 // group. The 63/20 threshold is calibrated between the two measured endpoints 3.10 (124/40,
-// merged slower) and 3.158 (120/38, merged faster) — not a break-even; admission near it
+// denied) and 3.158 (120/38, admitted) — not a break-even; admission near it
 // holds by thin integer margins (120/38 admits by 6 of 2400), so one added root flips those
 // shapes. Deny-side failure is safe.
 // 48 KiB of shared memory holds 4 warps/block x 16 B per record = 768 paths; admission caps a
