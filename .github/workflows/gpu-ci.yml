@@ -3,15 +3,14 @@
 
 name: GPU CI
 
-# Additive validation for main/release PRs; Blossom and Sonar remain enabled.
+# PR build/test validation for main/release PRs.
 # Use /ok to test <full-head-SHA>; copy-pr-bot copies the current head under its
 # trust policy. Auto-sync stays disabled; each new head needs another command.
-# Selection uses the full PR diff. Documentation and explicitly listed unrelated
-# workflow files skip GPU jobs, not the gate; every other change selects the suite.
-# A PR-title [skip ci] marker also skips GPU work, matching Jenkins premerge.
-# The current suite omits paths to cover all files except exclude_paths.
+# Selection uses the full PR diff and the catalog's explicit source/build/GPU-CI
+# paths, excluding Markdown documentation. Unaffected PRs skip GPU jobs, not the gate.
+# A PR-title [skip ci] marker also skips GPU work.
 # Add future suites to the catalog, jobs and gate's needs together.
-# Keep the existing required checks until this additional gate is validated.
+# Sonar validation runs separately in sonar-check.yml.
 # gpu-cache.yml warms shared dependencies after merge, independently of this gate.
 on:
   push:
@@ -82,7 +81,7 @@ jobs:
         classifier: [cuda12, cuda13]
     runs-on: ubuntu-latest
     # Six fifteen-minute queues + up to four hours on the allocated worker,
-    # with headroom for dispatch/cleanup. Jenkins keeps its existing six-hour limit.
+    # with headroom for dispatch/cleanup.
     timeout-minutes: 360
     permissions:
       contents: read

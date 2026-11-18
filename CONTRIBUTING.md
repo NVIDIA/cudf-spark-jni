@@ -335,7 +335,12 @@ script can be run without any arguments to get into an interactive shell inside 
 4. Code! Make sure to add or update unit tests if needed!
 5. When done, [create your pull request](https://github.com/NVIDIA/cudf-spark-jni/compare).
 6. Verify that CI passes all [status checks](https://help.github.com/articles/about-status-checks/).
-    Fix if needed.
+    CPU CI starts automatically. An authorized NVIDIA user starts [GPU CI](.github/scripts/gpu-ci/README.md)
+    and [Sonar checks](.github/scripts/sonar-check/README.md) with
+    `/ok to test <full-head-SHA>` for each new revision. Fix any failures before merging.
+    If a run fails for a non-code reason and the commit is unchanged, someone with
+    repository write access can open the workflow run in GitHub Actions and select
+    **Re-run failed jobs**.
 7. Wait for other developers to review your code and update code as needed.
 8. Once reviewed and approved, a project committer will merge your pull request.
 

@@ -6,7 +6,7 @@
   "suites": {
     "jni-images": {
       "enabled": true,
-      "comment": "Validate JNI toolchain recipes and consumer inputs, not publisher/cleanup-only changes; product tests stay in Jenkins.",
+      "comment": "Validate JNI toolchain recipes and consumer inputs, not publisher/cleanup-only changes; product tests run in GPU CI.",
       "paths": [
         "pom.xml",
         "ci/Dockerfile",
@@ -19,6 +19,17 @@
       "jobs": [
         "jni-images"
       ]
+    },
+    "sonar-check": {
+      "enabled": true,
+      "comment": "Validate Sonar selection with mocked GitHub responses; no scan or internal runner is needed.",
+      "paths": [
+        ".github/scripts/sonar-check/",
+        ".github/sonar-paths.json",
+        ".github/workflows/sonar-check.yml"
+      ],
+      "exclude_paths": [".github/**/*.md"],
+      "jobs": ["sonar-check"]
     }
   }
 }
