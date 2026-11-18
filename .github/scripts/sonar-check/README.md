@@ -11,12 +11,16 @@ flowchart LR
   D --> E[Hosted findings report + Sonar check gate]
 ```
 
-[sonar-paths.json](../../sonar-paths.json) selects the full PR diff, including
-deleted/renamed paths, and controls scanner inclusions. It covers Java/Scala,
-C/C++, scripts, XML/HTML, workflow YAML and enabled Text/secrets formats.
-Documentation-only and Dockerfile-only changes skip Sonar. Vendored/generated
-files, CUDA and generic JSON/YAML are excluded. A `[skip ci]` title or an
-unaffected diff also skips Sonar.
+Selection checks the full PR diff, including deleted/renamed paths. Supported
+source and script changes trigger a scan, including GPU CI and other workflow
+helpers. Among workflow YAML files, only `.github/workflows/sonar-check.yml` triggers Sonar.
+Other workflow YAML, documentation and Dockerfile changes alone skip Sonar.
+
+[sonar-paths.json](../../sonar-paths.json) controls supported source formats and
+scanner inclusions: Java/Scala, C/C++, scripts, XML/HTML, workflow YAML and enabled
+Text/secrets formats. Workflow YAML remains part of a selected scan.
+Vendored/generated files, CUDA and generic JSON/YAML are excluded. A `[skip ci]`
+title or an unaffected diff also skips Sonar.
 
 ## Results
 

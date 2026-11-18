@@ -91,6 +91,12 @@ function pathMatcher() {
         excludedNames.some(pattern => path.posix.matchesGlob(parts.at(-1), pattern.toLowerCase()))) {
       return false;
     }
+    // Only Sonar's own workflow triggers a scan. Other workflow YAML remains
+    // in scanner coverage when supported source or script changes select a scan.
+    if (filename.startsWith('.github/workflows/') && /\.ya?ml$/.test(filename) &&
+        filename !== '.github/workflows/sonar-check.yml') {
+      return false;
+    }
     return !excluded.some(prefix => filename.startsWith(prefix)) && (
       included.has(path.posix.extname(filename)) ||
       patterns.some(pattern => path.posix.matchesGlob(filename, pattern))
