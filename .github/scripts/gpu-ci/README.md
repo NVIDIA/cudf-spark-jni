@@ -1,16 +1,23 @@
 # GPU CI
 
-`GPU CI` runs the existing CUDA 12/13 amd64 native/Java tests and fuzzing alongside
-Blossom. For PRs targeting main or `release/YY.MM`, a maintainer triggers it with
-`/ok to test <full-head-SHA>`. Check the copied revision: trusted contributors'
-commands can copy the latest head rather than the supplied SHA.
+`GPU CI` runs the CUDA 12/13 amd64 native/Java tests and fuzzing. For PRs targeting
+main or `release/YY.MM`, an authorized NVIDIA user triggers it with
+`/ok to test <full-head-SHA>`.
+Check the copied revision: trusted contributors' commands can copy the latest head
+rather than the supplied SHA.
 
-The suite catalog requires GPU tests for every change except Markdown documentation
-and explicitly listed unrelated workflows. GPU workflows, these helpers, the catalog
-and image recipes remain covered. Excluded-only changes still report the gate;
-a PR-title `[skip ci]` marker also skips GPU work. Keep existing Blossom/Sonar
-checks until their replacement is ready. Release branches need the workflows,
-helpers and toolchain pins backported before their PRs can use GPU CI.
+If a run fails for a non-code reason and the PR commit is unchanged, someone with
+repository write access can open the parent `GPU CI` run in GitHub Actions and
+select **Re-run failed jobs**. A new commit needs another `/ok to test` command
+with its new full head SHA.
+
+The suite catalog selects JNI source, shared build inputs and GPU CI configuration,
+excluding Markdown documentation. `paths` accepts exact filenames or directory
+prefixes ending in `/`; add relevant workflows explicitly. Sonar and unrelated
+workflows do not select GPU tests. Unaffected changes still report the gate;
+a PR-title `[skip ci]` marker also skips GPU work. [Sonar checks](../sonar-check/README.md)
+run separately. Release branches need the workflows, helpers and toolchain pins
+backported before their PRs can use GPU CI.
 
 Workers reuse a verified, branch-compatible GHCR image or build a missing recipe
 locally without publishing it. Registry failures remain errors. Runner fallback

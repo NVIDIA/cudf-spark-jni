@@ -152,7 +152,7 @@ jobs:
           config: ${{ steps.image.outputs.config }}
       - name: Pin workload image
         id: toolchain
-        timeout-minutes: 15
+        timeout-minutes: 60
         env:
           REFERENCE: ${{ steps.image.outputs.reference }}
           CONFIG: ${{ steps.image.outputs.config }}
