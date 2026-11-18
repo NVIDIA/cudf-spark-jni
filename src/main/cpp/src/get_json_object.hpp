@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,7 @@ enum class named_field_match_policy : int32_t { LAST_NON_NULL = 1 };
  *
  * If the input JSON string is invalid, or it does not contain the object at the given path, a null
  * will be returned.
+ * A null input row produces null regardless of retained string bytes.
  */
 std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
@@ -64,6 +65,7 @@ std::unique_ptr<cudf::column> get_json_object(
  * This function processes all the JSON paths in parallel, which may be faster than calling
  * to `get_json_object` on the individual JSON paths. However, it may consume much more GPU
  * memory, proportional to the number of JSON paths.
+ * A null input row produces null for every path regardless of retained string bytes.
  * @param input the input string column to parse JSON from
  * @param json_paths the path operations to read extract
  * @param memory_budget_bytes a memory budget for temporary memory usage if > 0
@@ -86,6 +88,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
  * `LAST_NON_NULL` selects the last non-null occurrence of each top-level named field, as required
  * by Spark json_tuple. Every path must contain exactly one `NAMED` instruction. Use the overload
  * without `match_policy` for ordinary get_json_object path evaluation.
+ * A null input row produces null for every path regardless of retained string bytes.
  *
  * @throw cudf::logic_error If `match_policy` is invalid or a path shape is unsupported by it
  * @param[in] input The input string column to parse JSON from

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,30 @@ namespace spark_rapids_jni {
 
 constexpr int64_t DEFAULT_XXHASH64_SEED = 42;
 constexpr int MAX_STACK_DEPTH           = 8;
+
+/**
+ * @brief Compute signed Spark Murmur3 hashes and positive modulo in one row
+ * kernel.
+ *
+ * No intermediate hash column is allocated; only the non-nullable INT32 partition map
+ * and hash-preprocessing temporaries are allocated. Null and
+ * nested-value hashing follows murmur_hash3_32. The caller must normalize
+ * floating-point inputs as usual.
+ *
+ * @param input Table of partition keys
+ * @param num_partitions Positive divisor
+ * @param seed Initial hash seed
+ * @param stream CUDA stream for the operation
+ * @param mr Resource for the result column
+ * @return Partition IDs in [0, num_partitions)
+ * @throws cudf::logic_error If num_partitions is not positive or input has no columns
+ */
+std::unique_ptr<cudf::column> murmur_hash3_32_pmod(
+  cudf::table_view const& input,
+  cudf::size_type num_partitions,
+  uint32_t seed                     = 0,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
  * @brief Computes the murmur32 hash value of each row in the input set of columns.

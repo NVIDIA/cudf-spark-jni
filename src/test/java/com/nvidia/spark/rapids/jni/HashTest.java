@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,6 +50,60 @@ public class HashTest {
   static final double POSITIVE_DOUBLE_NAN_UPPER_RANGE = Double.longBitsToDouble(0x7fffffffffffffffL);
   static final double NEGATIVE_DOUBLE_NAN_LOWER_RANGE = Double.longBitsToDouble(0xfff0000000000001L);
   static final double NEGATIVE_DOUBLE_NAN_UPPER_RANGE = Double.longBitsToDouble(0xffffffffffffffffL);
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 100, 200, Integer.MAX_VALUE})
+  void testMurmurHash32Pmod(int numPartitions) {
+    int[] sparkHashes = {59727262, 751823303, -1080202046, 42, 723455942, 133916647};
+    int[] expectedIds = Arrays.stream(sparkHashes)
+        .map(hash -> Math.floorMod(hash, numPartitions)).toArray();
+    try (ColumnVector first = ColumnVector.fromBoxedInts(
+             0, 100, null, null, Integer.MIN_VALUE, null);
+         ColumnVector second = ColumnVector.fromBoxedInts(
+             0, null, -100, null, null, Integer.MAX_VALUE);
+         ColumnVector result = Hash.murmurHash32Pmod(
+             42, numPartitions, new ColumnView[]{first, second});
+         ColumnVector expected = ColumnVector.fromInts(expectedIds)) {
+      assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testMurmurHash32PmodSignedBoundaries() {
+    try (ColumnVector nullRow = ColumnVector.fromBoxedInts((Integer) null)) {
+      for (int seed : new int[]{Integer.MIN_VALUE, -201, -200, -1, 0, 1, Integer.MAX_VALUE}) {
+        for (int numPartitions : new int[]{1, 2, 100, 200, Integer.MAX_VALUE}) {
+          try (ColumnVector result = Hash.murmurHash32Pmod(
+                   seed, numPartitions, new ColumnView[]{nullRow});
+               ColumnVector expected = ColumnVector.fromInts(Math.floorMod(seed, numPartitions))) {
+            assertColumnsAreEqual(expected, result);
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  void testMurmurHash32PmodEmptyInput() {
+    try (ColumnVector empty = ColumnVector.fromInts();
+         ColumnVector result = Hash.murmurHash32Pmod(42, 100, new ColumnView[]{empty})) {
+      assertColumnsAreEqual(empty, result);
+    }
+    assertThrows(IllegalArgumentException.class,
+        () -> Hash.murmurHash32Pmod(42, 100, new ColumnView[]{}));
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1, Integer.MIN_VALUE})
+  void testMurmurHash32PmodInvalidPartitionCount(int numPartitions) {
+    try (ColumnVector values = ColumnVector.fromInts(1, 2, 3);
+         ColumnVector empty = ColumnVector.fromInts()) {
+      for (ColumnVector column : new ColumnVector[]{values, empty}) {
+        assertThrows(IllegalArgumentException.class,
+            () -> Hash.murmurHash32Pmod(42, numPartitions, new ColumnView[]{column}));
+      }
+    }
+  }
 
   @Test
   void testSpark32BitMurmur3HashStrings() {

@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A workflow to trigger ci on hybrid infra (github + self hosted runner)
+# Deprecated: GPU CI (gpu-ci.yml) provides PR build/test validation.
+# The legacy Black Duck gate fails on expected transitive-dependency findings.
+# Dependency scanning continues through internal NSPECT, separately from GPU CI and Sonar.
+# The .deprecated extension disables workflow discovery on this branch.
+# Comment-triggered runs stop once this rename reaches the default branch.
 name: Blossom-CI
 on:
   issue_comment:

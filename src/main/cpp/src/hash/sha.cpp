@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,10 +26,7 @@
 #include <hash/hash.hpp>
 
 namespace {
-using HashFunction = std::unique_ptr<cudf::column> (*)(cudf::table_view const&,
-                                                       cuda::stream_ref,
-                                                       rmm::device_async_resource_ref);
-
+template <typename HashFunction>
 std::unique_ptr<cudf::column> sha_impl(HashFunction hash_function,
                                        cudf::column_view const& input,
                                        cuda::stream_ref stream,

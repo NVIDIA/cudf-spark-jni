@@ -1,4 +1,4 @@
-# Copyright (c) 2025-2026, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,6 +60,75 @@ jobs:
           expect_redaction 'a[b]' 'a[b]c#d' 'username=a[b] password=a[b]c#d' 'username=**** password=****'
           encoded=$(printf '%s:%s' abc YWJj | base64 -w 0)
           expect_redaction abc YWJj "Authorization: Basic $encoded" 'Authorization: Basic ****'
+
+          # Exercise the GHA filter with synthetic credentials only. Full reports
+          # and summaries must consume the same sanitized evidence as the console.
+          python3 - <<'PY'
+          import base64
+          import importlib.util
+          import io
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import xml.etree.ElementTree as ET
+
+          helper = Path(".github/scripts/gpu-ci/download-auth.py").resolve()
+          spec = importlib.util.spec_from_file_location("download_auth", helper)
+          auth = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(auth)
+          token = "synthetic[a]#token"
+          encoded = base64.b64encode(f"x-access-token:{token}".encode())
+          sample = (f"password={token}\n".encode() + b"encoded=" + encoded +
+                    b"\nAuthorization: Basic " + encoded +
+                    b"\nauthorization: Basic\n  " + encoded + b"\nuseful error\n")
+          with tempfile.TemporaryDirectory() as directory:
+              root = Path(directory)
+              netrc = root / "netrc"
+              netrc.write_text(f'machine github.com login x-access-token password {token}\n')
+              netrc.chmod(0o600)
+              secrets = auth.credentials(netrc)
+              result = subprocess.run(["python3", str(helper), str(netrc)],
+                                      input=sample, capture_output=True, check=True)
+              assert token.encode() not in result.stdout and encoded not in result.stdout
+              assert b"useful error" in result.stdout
+              # Encoded values are replaced first, even when they contain the raw token.
+              output = io.BytesIO()
+              auth.redact(io.BytesIO(b"YWJj:YWJjYWJj\n"), output, (b"YWJjYWJj", b"YWJj"))
+              assert output.getvalue() == b"****:****\n"
+              workspace = root / "workspace"
+              report = workspace / "target/surefire-reports/TEST-example.xml"
+              report.parent.mkdir(parents=True)
+              xml = (b'<testsuite><testcase name="download"><failure message="Authorization: Basic ' +
+                     encoded + b'">' + token.encode() + b'</failure></testcase></testsuite>')
+              report.write_bytes(xml)
+              evidence = root / "evidence"
+              auth.stage(workspace, evidence, secrets)
+              filtered = (evidence / report.relative_to(workspace)).read_bytes()
+              assert token.encode() not in filtered and encoded not in filtered
+              case = ET.fromstring(filtered).find("testcase")
+              assert case.get("name") == "download" and case.find("failure").text == "****"
+              # Raw files are left intact; only staged, filtered copies are uploaded.
+              assert report.read_bytes() == xml
+              report.unlink()
+              report.symlink_to(netrc)
+              try:
+                  auth.stage(workspace, root / "unsafe", secrets)
+              except ValueError:
+                  assert not (root / "unsafe").exists()
+              else:
+                  raise AssertionError("Symlink diagnostic was accepted")
+              # Malformed credentials must suppress output, not echo parser details.
+              netrc.write_text(f"unexpected-{token}")
+              result = subprocess.run(["python3", str(helper), str(netrc)],
+                                      input=sample, capture_output=True)
+              assert result.returncode != 0 and not result.stdout
+              assert token.encode() not in result.stderr
+              netrc.write_text("")
+              result = subprocess.run(["python3", str(helper), str(netrc)],
+                                      input=b"anonymous build\n", capture_output=True, check=True)
+              assert result.stdout == b"anonymous build\n"
+          print("GHA credential stream and evidence checks passed")
+          PY
 
       - name: Run Git network retry regression tests
         run: ci/test-retry-git-network.sh

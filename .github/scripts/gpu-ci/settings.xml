@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+
+  GHA reuses premerge-build.sh and fuzz-test.sh through MVN_SETTINGS.
+  Keep public routing here, not in the shared POM or internal settings.
+  Mirror Central explicitly because transitive dependency/plugin POMs may add it.
+  The separate fallback ID remains usable when Google cannot serve an artifact.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>google-maven-central</id>
+      <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+  <profiles>
+    <profile>
+      <id>public-repositories</id>
+      <repositories>
+        <repository>
+          <id>google-maven-central</id>
+          <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>maven-central-fallback</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>google-maven-central</id>
+          <url>https://maven-central.storage-download.googleapis.com/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>maven-central-fallback</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>public-repositories</activeProfile>
+  </activeProfiles>
+</settings>

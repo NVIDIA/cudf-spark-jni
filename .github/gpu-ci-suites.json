@@ -1,0 +1,30 @@
+{
+  "suites": {
+    "jni": {
+      "enabled": true,
+      "comment": "Run CUDA 12/13 native/Java tests and fuzzing for JNI source, build inputs and GPU CI configuration. To pause, set enabled to false and record the reason here.",
+      "paths": [
+        "src/",
+        "thirdparty/",
+        "patches/",
+        "build/",
+        "ci/",
+        ".mvn/",
+        "pom.xml",
+        "LICENSE",
+        ".gitmodules",
+        ".github/image-builds.json",
+        ".github/gpu-ci-suites.json",
+        ".github/scripts/gpu-ci/",
+        ".github/workflows/gpu-ci.yml",
+        ".github/workflows/gpu-ci-worker.yml"
+      ],
+      "exclude_paths": [
+        "**/*.md",
+        ".github/**/*.md",
+        ".mvn/**/*.md"
+      ],
+      "jobs": ["gpu-test"]
+    }
+  }
+}

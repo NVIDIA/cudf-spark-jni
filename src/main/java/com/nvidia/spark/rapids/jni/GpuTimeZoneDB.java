@@ -424,7 +424,9 @@ public class GpuTimeZoneDB {
     }
   }
 
-  private static Table getTimezoneInfo(int tzIndex) {
+  /** Returns one timezone row, addressed as row zero by native consumers. */
+  static synchronized Table getTimezoneInfo(int tzIndex) {
+    verifyDatabaseCached();
     try (HostColumnVector.ColumnBuilder fixedRow =
             new HostColumnVector.ColumnBuilder(getFixedTransitionDataType(), 1);
         HostColumnVector.ColumnBuilder dstRow =
