@@ -6,7 +6,7 @@
   "suites": {
     "jni-images": {
       "enabled": true,
-      "comment": "Validate JNI toolchain recipes and consumer inputs, not publisher/cleanup-only changes; product tests stay in Jenkins.",
+      "comment": "Validate JNI toolchain recipes and consumer inputs, not publisher/cleanup-only changes; product tests run in GPU CI.",
       "paths": [
         "pom.xml",
         "ci/Dockerfile",
