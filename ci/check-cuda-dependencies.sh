@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,8 +25,14 @@ unzip -j "${jar_path}" "*64/Linux/*.so" -d "${tmp_path}"
 
 if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.properties$' >/dev/null; then
     m2_dir=${M2DIR:-"$HOME/.m2"}
-    mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
-    zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
+    version_file="$(dirname -- "$jar_path")/ci/zstd-jni.version"
+    if [[ -s "$version_file" ]]; then
+        zstd_jni_ver=$(<"$version_file")
+    else
+        # Standalone checks can receive a JAR built before CI metadata was added.
+        mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
+        zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
+    fi
     zstd_jni_jar="$m2_dir/repository/com/github/luben/zstd-jni/$zstd_jni_ver/zstd-jni-$zstd_jni_ver.jar"
     if [[ ! -f "$zstd_jni_jar" ]]; then
         echo "zstd-jni $zstd_jni_ver jar not found at $zstd_jni_jar; set M2DIR to the local Maven repository"

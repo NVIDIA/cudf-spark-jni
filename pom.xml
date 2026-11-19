@@ -546,6 +546,11 @@
             <phase>generate-resources</phase>
             <configuration>
               <target>
+                <mkdir dir="${project.build.directory}/ci"/>
+                <echo file="${project.build.directory}/ci/jni-jar.name"
+                      message="${project.build.finalName}-${jni.classifier}.jar"/>
+                <echo file="${project.build.directory}/ci/zstd-jni.version" message="${zstd-jni.version}"/>
+                <echo file="${project.build.directory}/ci/slf4j.version" message="${slf4j.version}"/>
                 <mkdir dir="${project.build.directory}/extra-resources"/>
                 <exec executable="bash"
                       output="${project.build.directory}/extra-resources/cudf-java-version-info.properties"

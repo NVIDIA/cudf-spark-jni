@@ -63,6 +63,14 @@ if [[ -n "${GITHUB_DOWNLOAD_TOKEN:-}" ]]; then
 fi
 unset GITHUB_DOWNLOAD_TOKEN
 
+# The Docker daemon can have a different group database from the runner.
+runner_gid=$(id -g)
+awk -F: -v gid="$runner_gid" '
+  { print }
+  $3 == gid { found = 1 }
+  END { if (!found) print "jni-runner-" gid ":x:" gid ":" }
+' /etc/group > "$auth_dir/group"
+
 printf 'starting container\n' > target/gha-phase.txt || :
 [[ "${JNI_WORKLOAD_DEADLINE:?Worker deadline required}" =~ ^[0-9]+$ ]]
 remaining=$((JNI_WORKLOAD_DEADLINE - $(date +%s)))
@@ -78,8 +86,9 @@ set +e
 # Variables in the command below are expanded inside the workload container.
 # shellcheck disable=SC2016
 timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
-  --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$(id -g)" \
+  --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$runner_gid" \
   -v "$PWD:/workspace" -v "$home_dir:/home/ci" -v /etc/passwd:/etc/passwd:ro \
+  -v "$auth_dir/group:/etc/group:ro" \
   -v "$auth_dir/netrc:/run/secrets/github.netrc:ro" \
   -w /workspace -e HOME=/home/ci -e WORKSPACE=/workspace \
   -e "CMAKE_NETRC=${CMAKE_NETRC:-OPTIONAL}" -e CMAKE_NETRC_FILE=/run/secrets/github.netrc \
@@ -136,7 +145,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     echo "Build resources: requested=${PARALLEL_LEVEL:-auto} cpus=$cpu_limit available_memory_kib=$memory_kb parallel_level=$parallel_level"
     export PARALLEL_LEVEL=$parallel_level
 
-    # Maven user properties must reach verify and every help:evaluate invocation.
+    # Pass the selected CUDA classifier to Maven as a user property.
     # MAVEN_OPTS system properties do not consistently override POM interpolation.
     mkdir -p .mvn
     printf "\n-Dcuda.version=%s\n" "$CUDA_VER" >> .mvn/maven.config
