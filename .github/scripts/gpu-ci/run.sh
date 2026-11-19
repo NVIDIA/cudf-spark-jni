@@ -63,6 +63,14 @@ if [[ -n "${GITHUB_DOWNLOAD_TOKEN:-}" ]]; then
 fi
 unset GITHUB_DOWNLOAD_TOKEN
 
+# The Docker daemon can have a different group database from the runner.
+runner_gid=$(id -g)
+awk -F: -v gid="$runner_gid" '
+  { print }
+  $3 == gid { found = 1 }
+  END { if (!found) print "jni-runner-" gid ":x:" gid ":" }
+' /etc/group > "$auth_dir/group"
+
 printf 'starting container\n' > target/gha-phase.txt || :
 [[ "${JNI_WORKLOAD_DEADLINE:?Worker deadline required}" =~ ^[0-9]+$ ]]
 remaining=$((JNI_WORKLOAD_DEADLINE - $(date +%s)))
@@ -78,15 +86,16 @@ set +e
 # Variables in the command below are expanded inside the workload container.
 # shellcheck disable=SC2016
 timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
-  --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$(id -g)" \
+  --cidfile "$PWD/target/gha-container.cid" --user "$(id -u):$runner_gid" \
   -v "$PWD:/workspace" -v "$home_dir:/home/ci" -v /etc/passwd:/etc/passwd:ro \
+  -v "$auth_dir/group:/etc/group:ro" \
   -v "$auth_dir/netrc:/run/secrets/github.netrc:ro" \
   -w /workspace -e HOME=/home/ci -e WORKSPACE=/workspace \
   -e "CMAKE_NETRC=${CMAKE_NETRC:-OPTIONAL}" -e CMAKE_NETRC_FILE=/run/secrets/github.netrc \
   -e "CUDA_VER=$CLASSIFIER" \
   -e "JNI_MODE=$mode" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
-  -e MVN_SETTINGS=/workspace/.github/scripts/gpu-ci/settings.xml \
+  -e "MVN_SETTINGS=/workspace/.github/scripts/gpu-ci/${MVN_SETTINGS_FILE:-settings.xml}" \
   -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
   -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=3G \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
@@ -159,6 +168,17 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     fi
     timeout -k 5s 10s nvcc --version || :
     timeout -k 5s 10s java -version || :
+
+    printf "Maven plugin warm-up\n" > target/gha-phase.txt || :
+    echo "=== Warm Maven plugins ==="
+    timeout -k 10s 5m ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
+      help:evaluate -Dexpression=project.build.finalName surefire:help jar:help" || {
+      status=$?
+      if [[ "$JNI_MODE" == cache ]]; then
+        exit "$status"
+      fi
+      echo "::warning::Maven plugin warm-up failed (exit $status). The PR build will resolve missing dependencies."
+    }
 
     if [[ "$JNI_MODE" == cache ]]; then
       printf "build-only cache preparation\n" > target/gha-phase.txt || :
