@@ -171,7 +171,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
 
     printf "Maven plugin warm-up\n" > target/gha-phase.txt || :
     echo "=== Warm Maven plugins ==="
-    ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
+    timeout -k 10s 5m ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
       help:evaluate -Dexpression=project.build.finalName surefire:help jar:help" || {
       status=$?
       if [[ "$JNI_MODE" == cache ]]; then
