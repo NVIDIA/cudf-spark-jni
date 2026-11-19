@@ -5533,7 +5533,7 @@ public class ProtobufTest {
         .addField(6, DType.STRUCT).repeated().isOutput(false).down()
             .addField(1, DType.STRING).isOutput(false)
         .up()
-        .addField(7, DType.INT32).defaultValue(5L).isOutput(false)
+        .addField(7, DType.INT32).defaultValue(5).isOutput(false)
         .addField(8, DType.STRING).repeated().isOutput(false)
         .addField(9, DType.LIST).repeated().isOutput(false)
         .build();

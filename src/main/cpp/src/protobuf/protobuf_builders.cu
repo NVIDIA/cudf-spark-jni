@@ -757,8 +757,7 @@ std::unique_ptr<cudf::column> build_nested_struct_column(
         input, parent, fields, decode_ctx.error->data(), depth + 1, stream);
     });
 
-  // Hidden children stay empty here; make_struct_column_with_schema returns them as all-null
-  // columns.
+  // Hidden children stay empty; make_struct_column_with_schema returns them as all-null columns.
   std::vector<std::unique_ptr<cudf::column>> struct_children(num_child_fields);
   for (int ci = 0; ci < num_child_fields; ci++) {
     int child_schema_idx = child_field_indices[ci];
