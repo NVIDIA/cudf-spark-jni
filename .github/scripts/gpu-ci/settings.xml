@@ -3,7 +3,7 @@
   Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
   SPDX-License-Identifier: Apache-2.0
 
-  GPU CI builds use these settings through MVN_SETTINGS.
+  GHA reuses premerge-build.sh and fuzz-test.sh through MVN_SETTINGS.
   Keep public routing here, not in the shared POM or internal settings.
   Mirror Central explicitly because transitive dependency/plugin POMs may add it.
   The separate fallback ID remains usable when Google cannot serve an artifact.

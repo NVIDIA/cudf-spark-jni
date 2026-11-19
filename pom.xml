@@ -546,12 +546,6 @@
             <phase>generate-resources</phase>
             <configuration>
               <target>
-                <sequential xmlns:if="ant:if" if:set="jni.ci.metadata.dir">
-                  <echo file="${jni.ci.metadata.dir}/jni-jar.path"
-                        message="${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar"/>
-                  <echo file="${jni.ci.metadata.dir}/zstd-jni.version" message="${zstd-jni.version}"/>
-                  <echo file="${jni.ci.metadata.dir}/slf4j.version" message="${slf4j.version}"/>
-                </sequential>
                 <mkdir dir="${project.build.directory}/extra-resources"/>
                 <exec executable="bash"
                       output="${project.build.directory}/extra-resources/cudf-java-version-info.properties"

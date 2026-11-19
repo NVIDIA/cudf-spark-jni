@@ -145,7 +145,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     echo "Build resources: requested=${PARALLEL_LEVEL:-auto} cpus=$cpu_limit available_memory_kib=$memory_kb parallel_level=$parallel_level"
     export PARALLEL_LEVEL=$parallel_level
 
-    # Pass the selected CUDA classifier to Maven as a user property.
+    # Maven user properties must reach verify and every help:evaluate invocation.
     # MAVEN_OPTS system properties do not consistently override POM interpolation.
     mkdir -p .mvn
     printf "\n-Dcuda.version=%s\n" "$CUDA_VER" >> .mvn/maven.config
@@ -179,17 +179,15 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
         BUILD_FAULTINJ=OFF
         BUILD_PROFILER=OFF
       fi
-      # Match premerge native/Java targets, but stop before process-test-classes
-      # and test: those phases execute code that requires a GPU.
-      ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 test-compile \
+      # Warm the plugins used after compilation. Stop at test-compile because
+      # process-test-classes already runs tests that require a GPU.
+      ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
+        help:evaluate -Dexpression=project.build.finalName surefire:help jar:help test-compile \
         -DCPP_PARALLEL_LEVEL=$PARALLEL_LEVEL -Dlibcudf.build.configure=true \
         -DUSE_GDS=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
         -DBUILD_FAULTINJ=$BUILD_FAULTINJ -DBUILD_PROFILER=$BUILD_PROFILER"
       printf "build_only_seconds=%s\n" "$SECONDS" > target/gha-timing.txt || :
     else
-      # Both steps share this private directory for the lifetime of the container.
-      JNI_CI_METADATA_DIR=$(mktemp -d /tmp/jni-premerge.XXXXXXXX)
-      export JNI_CI_METADATA_DIR
       printf "build and Java/native tests\n" > target/gha-phase.txt || :
       echo "=== JNI build and tests ==="
       ${sclCMD} "ci/premerge-build.sh"
