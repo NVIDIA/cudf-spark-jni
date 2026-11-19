@@ -169,6 +169,17 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
     timeout -k 5s 10s nvcc --version || :
     timeout -k 5s 10s java -version || :
 
+    printf "Maven plugin warm-up\n" > target/gha-phase.txt || :
+    echo "=== Warm Maven plugins ==="
+    ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
+      help:evaluate -Dexpression=project.build.finalName surefire:help jar:help" || {
+      status=$?
+      if [[ "$JNI_MODE" == cache ]]; then
+        exit "$status"
+      fi
+      echo "::warning::Maven plugin warm-up failed (exit $status). The PR build will resolve missing dependencies."
+    }
+
     if [[ "$JNI_MODE" == cache ]]; then
       printf "build-only cache preparation\n" > target/gha-phase.txt || :
       echo "=== JNI cache preparation (no tests) ==="
@@ -179,10 +190,9 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
         BUILD_FAULTINJ=OFF
         BUILD_PROFILER=OFF
       fi
-      # Warm the plugins used after compilation. Stop at test-compile because
-      # process-test-classes already runs tests that require a GPU.
-      ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 \
-        help:evaluate -Dexpression=project.build.finalName surefire:help jar:help test-compile \
+      # Match premerge native/Java targets, but stop before process-test-classes
+      # and test: those phases execute code that requires a GPU.
+      ${sclCMD} "mvn -B -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3 test-compile \
         -DCPP_PARALLEL_LEVEL=$PARALLEL_LEVEL -Dlibcudf.build.configure=true \
         -DUSE_GDS=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON \
         -DBUILD_FAULTINJ=$BUILD_FAULTINJ -DBUILD_PROFILER=$BUILD_PROFILER"
