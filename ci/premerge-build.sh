@@ -35,7 +35,14 @@ fi
 MVN_SETTINGS=${MVN_SETTINGS:-"ci/settings.xml"}
 MVN="mvn -Dmaven.wagon.http.retryHandler.count=3 -B -s $MVN_SETTINGS"
 PARALLEL_LEVEL=${PARALLEL_LEVEL:-4}
-${MVN} verify ${MVN_MIRROR} \
+
+metadata_dir=${JNI_CI_METADATA_DIR:-}
+if [[ -z "$metadata_dir" ]]; then
+  metadata_dir=$(mktemp -d /tmp/jni-premerge.XXXXXXXX)
+  trap 'rm -rf -- "$metadata_dir"' EXIT
+fi
+
+${MVN} verify ${MVN_MIRROR} "-Djni.ci.metadata.dir=$metadata_dir" \
   -DCPP_PARALLEL_LEVEL=${PARALLEL_LEVEL} \
   -Dlibcudf.build.configure=true \
   -DUSE_GDS=ON \
@@ -45,5 +52,6 @@ ${MVN} verify ${MVN_MIRROR} \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
   -DBUILD_PROFILER=${BUILD_PROFILER}
 
-jar_name=$(<target/ci/jni-jar.name)
-. ci/check-cuda-dependencies.sh "target/$jar_name"
+jar_path=$(<"$metadata_dir/jni-jar.path")
+zstd_version=$(<"$metadata_dir/zstd-jni.version")
+bash ci/check-cuda-dependencies.sh "$jar_path" "$zstd_version"

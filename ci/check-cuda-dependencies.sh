@@ -25,11 +25,9 @@ unzip -j "${jar_path}" "*64/Linux/*.so" -d "${tmp_path}"
 
 if unzip -Z -1 "${jar_path}" | grep -E '^[^/]+/Linux/libcudf\.so\.chunks\.properties$' >/dev/null; then
     m2_dir=${M2DIR:-"$HOME/.m2"}
-    version_file="$(dirname -- "$jar_path")/ci/zstd-jni.version"
-    if [[ -s "$version_file" ]]; then
-        zstd_jni_ver=$(<"$version_file")
-    else
-        # Standalone checks can receive a JAR built before CI metadata was added.
+    zstd_jni_ver=${2:-}
+    if [[ -z "$zstd_jni_ver" ]]; then
+        # Standalone callers can supply only the packaged JAR.
         mvn_settings=${MVN_SETTINGS:-"${WORKSPACE:-$PWD}/ci/settings.xml"}
         zstd_jni_ver=$(mvn -s "$mvn_settings" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
     fi

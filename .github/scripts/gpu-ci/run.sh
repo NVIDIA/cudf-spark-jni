@@ -187,6 +187,9 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
         -DBUILD_FAULTINJ=$BUILD_FAULTINJ -DBUILD_PROFILER=$BUILD_PROFILER"
       printf "build_only_seconds=%s\n" "$SECONDS" > target/gha-timing.txt || :
     else
+      # Both steps share this private directory for the lifetime of the container.
+      JNI_CI_METADATA_DIR=$(mktemp -d /tmp/jni-premerge.XXXXXXXX)
+      export JNI_CI_METADATA_DIR
       printf "build and Java/native tests\n" > target/gha-phase.txt || :
       echo "=== JNI build and tests ==="
       ${sclCMD} "ci/premerge-build.sh"

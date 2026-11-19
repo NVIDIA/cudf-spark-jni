@@ -25,12 +25,12 @@ WORKSPACE=${WORKSPACE:-$PWD}
 M2DIR=${M2DIR:-"$HOME/.m2"}
 
 if [[ -z "${CLASSPATH:-}" ]]; then
-  metadata_dir="$WORKSPACE/target/ci"
-  if [[ -s "$metadata_dir/slf4j.version" && -s "$metadata_dir/zstd-jni.version" ]]; then
+  metadata_dir=${JNI_CI_METADATA_DIR:-}
+  if [[ -n "$metadata_dir" && -s "$metadata_dir/slf4j.version" && -s "$metadata_dir/zstd-jni.version" ]]; then
     SLF4J_VER=$(<"$metadata_dir/slf4j.version")
     ZSTD_JNI_VER=$(<"$metadata_dir/zstd-jni.version")
   else
-    # Standalone fuzzing can use artifacts from an older build.
+    # Standalone fuzzing can run in a separate shell after the build.
     MVN_SETTINGS=${MVN_SETTINGS:-"$WORKSPACE/ci/settings.xml"}
     SLF4J_VER=$(mvn -s "$MVN_SETTINGS" help:evaluate -Dexpression=slf4j.version -q -DforceStdout)
     ZSTD_JNI_VER=$(mvn -s "$MVN_SETTINGS" help:evaluate -Dexpression=zstd-jni.version -q -DforceStdout)
