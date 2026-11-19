@@ -200,7 +200,6 @@ jobs:
       - name: Run JNI workload
         id: tests
         env:
-          MVN_SETTINGS_FILE: ${{ vars.JNI_MAVEN_CENTRAL_FALLBACK == 'true' && 'settings-central-fallback.xml' || 'settings.xml' }}
           JNI_IMAGE: ${{ steps.toolchain.outputs.image }}
           # Read-only job token, scoped to this guarded worker step, never a PAT.
           GITHUB_DOWNLOAD_TOKEN: ${{ github.token }}

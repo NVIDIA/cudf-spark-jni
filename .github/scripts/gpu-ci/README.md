@@ -49,10 +49,8 @@ that baseline. Backport the workflow and helpers to enable release warmups.
 ## Downloads And Diagnostics
 
 GPU tests, post-merge cache preparation, and the hosted Sonar compile use Google's
-Maven Central mirror by default. To allow direct Apache Maven Central as a fallback,
-set the GitHub Actions repository variable `JNI_MAVEN_CENTRAL_FALLBACK` to `true`.
-Set it to `false` or delete it to restore the default. When enabled, Maven can
-query both repositories for plugin metadata.
+Maven Central mirror by default. To enable direct Central for a script invocation,
+set `MVN_SETTINGS_FILE=settings-central-fallback.xml` in its environment.
 
 GHA uses a temporary, read-only GitHub credential for dependency downloads;
 credentials are excluded from caches and filtered from published diagnostics.
