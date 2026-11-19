@@ -115,6 +115,7 @@ jobs:
       - name: Compile without Sonar credentials
         id: compile
         env:
+          MVN_SETTINGS_FILE: ${{ vars.JNI_MAVEN_CENTRAL_FALLBACK == 'true' && 'settings-central-fallback.xml' || 'settings.xml' }}
           APPROVED_SHA: ${{ needs.select.outputs.sha }}
         run: bash workflow/.github/scripts/sonar-check/build.sh
       - name: Transfer only this run's Java classes

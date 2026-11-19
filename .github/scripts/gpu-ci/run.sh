@@ -95,7 +95,7 @@ timeout -k 30s "${remaining}s" docker run --rm --init "${gpu_args[@]}" \
   -e "CUDA_VER=$CLASSIFIER" \
   -e "JNI_MODE=$mode" \
   -e MAVEN_OPTS='-Duser.home=/home/ci -Dmaven.repo.local=/home/ci/.m2/repository' \
-  -e MVN_SETTINGS=/workspace/.github/scripts/gpu-ci/settings.xml \
+  -e "MVN_SETTINGS=/workspace/.github/scripts/gpu-ci/${MVN_SETTINGS_FILE:-settings.xml}" \
   -e "PARALLEL_LEVEL=${PARALLEL_LEVEL:-}" \
   -e CCACHE_DIR=/home/ci/.ccache -e CCACHE_BASEDIR=/workspace -e CCACHE_MAXSIZE=3G \
   -e CPM_SOURCE_CACHE=/home/ci/.cache/cpm \
