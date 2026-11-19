@@ -48,9 +48,9 @@ that baseline. Backport the workflow and helpers to enable release warmups.
 
 ## Downloads And Diagnostics
 
-GHA passes this folder's `settings.xml` to Maven: Google first, Central fallback,
-including transitive dependency and plugin repositories. The shared POM, internal
-settings and local Maven defaults are unchanged.
+GPU tests, post-merge cache preparation, and the hosted Sonar compile use this
+folder's `settings.xml` to resolve Maven dependencies and plugins through Google's
+Maven Central mirror.
 
 GHA uses a temporary, read-only GitHub credential for dependency downloads;
 credentials are excluded from caches and filtered from published diagnostics.
