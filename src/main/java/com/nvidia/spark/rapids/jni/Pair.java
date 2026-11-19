@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ public class Pair<K, V> {
         return right;
     }
 
-    public static <K, V> Pair<K, V> of(K left, V right) {
-        return new Pair<>(left, right);
+    public static <K, V> Pair<K, V> of(K leftValue, V rightValue) {
+        return new Pair<>(leftValue, rightValue);
     }
 }
