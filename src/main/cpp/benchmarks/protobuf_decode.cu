@@ -1001,7 +1001,7 @@ struct ManyRepeatedFieldsCase {
 //   message Inner { num_fields fields (cycling through int32, int64, string) }
 // The first hidden_percent of the fields at each level are hidden. Absent `inner` messages and
 // null input rows give both structs nulls to push into their children.
-struct hidden_field_case {
+struct hidden_fields_case {
   using enum cudf::type_id;
   static constexpr auto FIELD_TYPES = get_types({INT32, INT64, STRING});
 
@@ -1556,7 +1556,7 @@ NVBENCH_BENCH(BM_protobuf_many_repeated)
 // ===========================================================================
 static void BM_protobuf_hidden_fields(nvbench::state& state)
 {
-  auto data = prepare_decode_benchmark<HiddenFieldsCase>(
+  auto data = prepare_decode_benchmark<hidden_fields_case>(
     state, int_axis_argument{"num_fields"}, int_axis_argument{"hidden_percent"});
 
   cuda::stream_ref stream = cudf::get_default_stream();
