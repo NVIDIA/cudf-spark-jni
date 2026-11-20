@@ -235,6 +235,7 @@
                     <exclude>**/CudaFatalTest.java</exclude>
                     <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/NativeFileSourceGdsTest.java</exclude>
                     <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
@@ -267,6 +268,7 @@
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
                   <excludes>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/NativeFileSourceGdsTest.java</exclude>
                     <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
@@ -283,6 +285,15 @@
               </execution>
               <execution>
                 <id>non-empty-null-test</id>
+                <goals>
+                  <goal>test</goal>
+                </goals>
+                <configuration>
+                  <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                </configuration>
+              </execution>
+              <execution>
+                <id>native-file-source-gds-test</id>
                 <goals>
                   <goal>test</goal>
                 </goals>
@@ -693,6 +704,7 @@
                 <exclude>**/CudaFatalTest.java</exclude>
                 <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                 <exclude>**/NativeDepsLoaderTest.java</exclude>
+                <exclude>**/NativeFileSourceGdsTest.java</exclude>
                 <exclude>**/PackagedJarOriginCheck.java</exclude>
               </excludes>
             </configuration>
@@ -715,6 +727,17 @@
             <configuration>
               <reuseForks>false</reuseForks>
               <test>CudaFatalTest</test>
+            </configuration>
+          </execution>
+          <!-- NativeFileSourceGdsTest sets KvikIO's mode before any other cuDF IO. -->
+          <execution>
+            <id>native-file-source-gds-test</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <reuseForks>false</reuseForks>
+              <test>NativeFileSourceGdsTest</test>
             </configuration>
           </execution>
         </executions>
