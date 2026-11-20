@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.Table;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 
 import static ai.rapids.cudf.AssertUtils.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class DecimalUtilsTest {
   ColumnVector makeDec128Column(String ... values) {
@@ -703,6 +705,117 @@ public class DecimalUtilsTest {
         output3.result.close();
         output4.result.close();
         output5.result.close();
+      }
+    }
+  }
+
+  private void assertFloatingConversion(boolean floatInput, DType target, int precision,
+      Double[] values, BigInteger[] coefficients, boolean hasFailure) {
+    Float[] floats = new Float[values.length];
+    for (int i = 0; i < values.length; i++) {
+      floats[i] = values[i] == null ? null : values[i].floatValue();
+    }
+    try (ColumnVector input = floatInput ? ColumnVector.fromBoxedFloats(floats) :
+             ColumnVector.fromBoxedDoubles(values);
+         ColumnVector wideExpected = ColumnVector.decimalFromBigInt(target.getScale(), coefficients);
+         ColumnVector expected = wideExpected.castTo(target)) {
+      DecimalUtils.CastFloatToDecimalResult converted =
+          DecimalUtils.floatingPointToDecimal(input, target, precision);
+      try (ColumnVector result = converted.result) {
+        assertColumnsAreEqual(expected, result);
+        if (hasFailure) {
+          assertTrue(converted.failureRowId >= 0 && converted.failureRowId < values.length);
+          int failed = (int) converted.failureRowId;
+          assertNull(coefficients[failed]);
+          assertNotNull(values[failed]);
+          assertTrue(Double.isFinite(values[failed]));
+        } else {
+          assertTrue(converted.failureRowId < 0);
+        }
+      }
+    }
+  }
+
+  @Test
+  void floatingPointStorageOverflow() {
+    DType[] targets = {
+        DType.create(DType.DTypeEnum.DECIMAL32, -2),
+        DType.create(DType.DTypeEnum.DECIMAL32, -9),
+        DType.create(DType.DTypeEnum.DECIMAL64, -18),
+        DType.create(DType.DTypeEnum.DECIMAL128, -36)};
+    int[] precisions = {9, 9, 18, 38};
+    double[] overflowing = {43000000.0, 4.35, 18.5, 340.2823669209385};
+    for (boolean floatInput : new boolean[]{false, true}) {
+      for (int i = 0; i < targets.length; i++) {
+        assertFloatingConversion(floatInput, targets[i], precisions[i],
+            new Double[]{0.0, -0.0, overflowing[i], -overflowing[i],
+                floatInput ? (double) Float.MAX_VALUE : Double.MAX_VALUE, null,
+                Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, Double.MIN_VALUE},
+            new BigInteger[]{BigInteger.ZERO, BigInteger.ZERO, null, null, null,
+                null, null, null, null, BigInteger.ZERO}, true);
+      }
+    }
+  }
+
+  @Test
+  void floatingPointNegativeScaleAndRoundingCarry() {
+    for (boolean floatInput : new boolean[]{false, true}) {
+      // 2^39 is exactly representable in either input type. Its extra rounding digit
+      // does not fit DECIMAL32 even though the final rounded coefficient does.
+      assertFloatingConversion(floatInput, DType.create(DType.DTypeEnum.DECIMAL32, 3), 9,
+          new Double[]{549755813888.0, -549755813888.0, 0.0},
+          new BigInteger[]{BigInteger.valueOf(549755814), BigInteger.valueOf(-549755814),
+              BigInteger.ZERO}, false);
+      assertFloatingConversion(floatInput, DType.create(DType.DTypeEnum.DECIMAL32, -2), 3,
+          new Double[]{9.99, -9.99, 9.999, -9.999},
+          new BigInteger[]{BigInteger.valueOf(999), BigInteger.valueOf(-999), null, null}, true);
+    }
+    BigInteger coefficient = new BigInteger("50000000000000000000000000000000000000");
+    assertFloatingConversion(false, DType.create(DType.DTypeEnum.DECIMAL128, 2), 38,
+        new Double[]{5e39, -5e39},
+        new BigInteger[]{coefficient, coefficient.negate()}, false);
+    assertFloatingConversion(false, DType.create(DType.DTypeEnum.DECIMAL32, 3), 9,
+        new Double[]{9e11, -9e11},
+        new BigInteger[]{BigInteger.valueOf(900000000), BigInteger.valueOf(-900000000)}, false);
+  }
+
+  @Test
+  void floatingPointSpecialValuesDoNotReportOverflow() {
+    for (boolean floatInput : new boolean[]{false, true}) {
+      for (int scale : new int[]{-38, 0, 38}) {
+        assertFloatingConversion(floatInput, DType.create(DType.DTypeEnum.DECIMAL128, scale), 38,
+            new Double[]{null, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                0.0, -0.0},
+            new BigInteger[]{null, null, null, null, BigInteger.ZERO, BigInteger.ZERO}, false);
+      }
+    }
+  }
+
+  @Test
+  void floatingPointRejectsUnsupportedScaleAndPrecision() {
+    try (ColumnVector input = ColumnVector.fromDoubles(0.0)) {
+      // Construct the type first so the assertion exercises native validation, rather than
+      // DType's separate restriction on negative scales.
+      for (int scale : new int[]{39, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
+        DType target = DType.create(DType.DTypeEnum.DECIMAL128, scale);
+        CudfException error = assertThrows(CudfException.class, () -> {
+          DecimalUtils.CastFloatToDecimalResult converted = DecimalUtils.floatingPointToDecimal(
+              input, target, 38);
+          try (ColumnVector ignored = converted.result) {
+            // Close an unexpected result if the native precondition is not enforced.
+          }
+        });
+        assertTrue(error.getMessage().contains("supports scales from -38 to 38"));
+      }
+      for (int precision : new int[]{0, 10}) {
+        CudfException error = assertThrows(CudfException.class, () -> {
+          DecimalUtils.CastFloatToDecimalResult converted = DecimalUtils.floatingPointToDecimal(
+              input, DType.create(DType.DTypeEnum.DECIMAL32, 0), precision);
+          try (ColumnVector ignored = converted.result) {
+            // Close an unexpected result if the native precondition is not enforced.
+          }
+        });
+        assertTrue(error.getMessage().contains("Precision must be between 1"));
       }
     }
   }
