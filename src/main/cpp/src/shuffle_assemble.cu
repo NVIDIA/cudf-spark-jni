@@ -527,7 +527,8 @@ __host__ __device__ constexpr size_t bitmask_allocation_size_bytes(size_type num
 struct assemble_src_buffer_size_functor {
   int const src_row_index;
 
-  template <typename T, typename OutputIter, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>
+  template <typename T, typename OutputIter>
+    requires(cudf::is_fixed_width<T>())
   __device__ void operator()(assemble_column_info const& col,
                              OutputIter validity_out,
                              OutputIter offsets_out,
@@ -543,9 +544,8 @@ struct assemble_src_buffer_size_functor {
     *data_out = cudf::type_dispatcher(data_type{col.type}, size_of_helper{}) * col.num_rows;
   }
 
-  template <typename T,
-            typename OutputIter,
-            CUDF_ENABLE_IF(cuda::std::is_same_v<T, cudf::list_view>)>
+  template <typename T, typename OutputIter>
+    requires(cuda::std::is_same_v<T, cudf::list_view>)
   __device__ void operator()(assemble_column_info const& col,
                              OutputIter validity_out,
                              OutputIter offsets_out,
@@ -561,9 +561,8 @@ struct assemble_src_buffer_size_functor {
     *data_out = 0;
   }
 
-  template <typename T,
-            typename OutputIter,
-            CUDF_ENABLE_IF(cuda::std::is_same_v<T, cudf::struct_view>)>
+  template <typename T, typename OutputIter>
+    requires(cuda::std::is_same_v<T, cudf::struct_view>)
   __device__ void operator()(assemble_column_info const& col,
                              OutputIter validity_out,
                              OutputIter offsets_out,
@@ -577,9 +576,8 @@ struct assemble_src_buffer_size_functor {
     *data_out    = 0;
   }
 
-  template <typename T,
-            typename OutputIter,
-            CUDF_ENABLE_IF(cuda::std::is_same_v<T, cudf::string_view>)>
+  template <typename T, typename OutputIter>
+    requires(cuda::std::is_same_v<T, cudf::string_view>)
   __device__ void operator()(assemble_column_info const& col,
                              OutputIter validity_out,
                              OutputIter offsets_out,
@@ -595,12 +593,10 @@ struct assemble_src_buffer_size_functor {
     *offsets_out = offsets_size(col);
   }
 
-  template <typename T,
-            typename OutputIter,
-            CUDF_ENABLE_IF(!cuda::std::is_same_v<T, cudf::struct_view> &&
-                           !cuda::std::is_same_v<T, cudf::list_view> &&
-                           !cuda::std::is_same_v<T, cudf::string_view> &&
-                           !cudf::is_fixed_width<T>())>
+  template <typename T, typename OutputIter>
+    requires(!cuda::std::is_same_v<T, cudf::struct_view> &&
+             !cuda::std::is_same_v<T, cudf::list_view> &&
+             !cuda::std::is_same_v<T, cudf::string_view> && !cudf::is_fixed_width<T>())
   __device__ void operator()(assemble_column_info const& col,
                              OutputIter validity_out,
                              OutputIter offsets_out,
@@ -696,7 +692,8 @@ rmm::device_uvector<std::invoke_result_t<GroupFunction>> transform_expand(
  * @brief Functor to calculate buffer sizes for the shared buffer approach.
  */
 struct shared_buffer_size_functor {
-  template <typename T, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>
+  template <typename T>
+    requires(cudf::is_fixed_width<T>())
   void operator()(assemble_column_info const& col,
                   size_t& validity_size,
                   size_t& offsets_size,
@@ -713,7 +710,8 @@ struct shared_buffer_size_functor {
       cudf::type_dispatcher(data_type{col.type}, size_of_helper{}) * col.num_rows, split_align);
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::list_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::list_view>)
   void operator()(assemble_column_info const& col,
                   size_t& validity_size,
                   size_t& offsets_size,
@@ -729,7 +727,8 @@ struct shared_buffer_size_functor {
     data_size = 0;
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::struct_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::struct_view>)
   void operator()(assemble_column_info const& col,
                   size_t& validity_size,
                   size_t& offsets_size,
@@ -743,7 +742,8 @@ struct shared_buffer_size_functor {
     data_size    = 0;
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::string_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::string_view>)
   void operator()(assemble_column_info const& col,
                   size_t& validity_size,
                   size_t& offsets_size,
@@ -760,10 +760,9 @@ struct shared_buffer_size_functor {
     offsets_size = get_output_offsets_size(col);
   }
 
-  template <typename T,
-            CUDF_ENABLE_IF(!std::is_same_v<T, cudf::struct_view> &&
-                           !std::is_same_v<T, cudf::list_view> &&
-                           !std::is_same_v<T, cudf::string_view> && !cudf::is_fixed_width<T>())>
+  template <typename T>
+    requires(!std::is_same_v<T, cudf::struct_view> && !std::is_same_v<T, cudf::list_view> &&
+             !std::is_same_v<T, cudf::string_view> && !cudf::is_fixed_width<T>())
   void operator()(assemble_column_info const& col,
                   size_t& validity_size,
                   size_t& offsets_size,
@@ -1761,7 +1760,8 @@ struct assemble_column_view_functor {
   cuda::stream_ref stream;
   rmm::device_async_resource_ref mr;
 
-  template <typename T, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>
+  template <typename T>
+    requires(cudf::is_fixed_width<T>())
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
   {
     auto const& col      = assemble_data[col_index];
@@ -1793,7 +1793,8 @@ struct assemble_column_view_functor {
     return {col_index + 1, std::move(column_view)};
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::struct_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::struct_view>)
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
   {
     auto const& col = assemble_data[col_index];
@@ -1830,7 +1831,8 @@ struct assemble_column_view_functor {
     return {next, std::move(column_view)};
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::string_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::string_view>)
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
   {
     auto const& col = assemble_data[col_index];
@@ -1868,7 +1870,8 @@ struct assemble_column_view_functor {
     return {col_index + 1, std::move(column_view)};
   }
 
-  template <typename T, CUDF_ENABLE_IF(std::is_same_v<T, cudf::list_view>)>
+  template <typename T>
+    requires(std::is_same_v<T, cudf::list_view>)
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
   {
     auto const& col = assemble_data[col_index];
@@ -1910,10 +1913,9 @@ struct assemble_column_view_functor {
     return {next_idx, std::move(column_view)};
   }
 
-  template <typename T,
-            CUDF_ENABLE_IF(!cudf::is_fixed_width<T>() and !std::is_same_v<T, cudf::struct_view> and
-                           !std::is_same_v<T, cudf::string_view> and
-                           !std::is_same_v<T, cudf::list_view>)>
+  template <typename T>
+    requires(!cudf::is_fixed_width<T>() and !std::is_same_v<T, cudf::struct_view> and
+             !std::is_same_v<T, cudf::string_view> and !std::is_same_v<T, cudf::list_view>)
   std::pair<size_t, std::unique_ptr<cudf::column_view>> operator()(size_t col_index) const
   {
     CUDF_FAIL("Unsupported type in assemble_column_view_functor");
