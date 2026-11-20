@@ -36,7 +36,7 @@ __device__ inline uint32_t rotate_bits_left(uint32_t x, uint32_t r)
 }
 
 template <typename Key>
-  requires(not cudf::is_nested<Key>())
+  requires(not cudf::concepts::nested<Key>)
 struct MurmurHash3_32 {
   using result_type = murmur_hash_value_type;
 

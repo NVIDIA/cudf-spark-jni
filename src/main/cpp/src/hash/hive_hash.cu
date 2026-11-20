@@ -204,7 +204,7 @@ class hive_device_row_hasher {
     }
 
     template <typename T>
-      requires(not cudf::is_nested<T>())
+      requires(not cudf::concepts::nested<T>)
     __device__ hive_hash_value_t operator()(cudf::column_device_view const& col,
                                             cudf::size_type row_index) const noexcept
     {
@@ -361,8 +361,7 @@ class hive_device_row_hasher {
      *
      * @note This function is only enabled for nested column types.
      */
-    template <typename T>
-      requires(cudf::is_nested<T>())
+    template <cudf::concepts::nested T>
     __device__ hive_hash_value_t operator()(cudf::column_device_view const& col,
                                             cudf::size_type row_index) const noexcept
     {

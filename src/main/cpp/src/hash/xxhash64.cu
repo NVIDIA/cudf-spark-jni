@@ -367,7 +367,7 @@ class device_row_hasher {
     };
 
     template <typename T>
-      requires(not cudf::is_nested<T>())
+      requires(not cudf::concepts::nested<T>)
     __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                           cudf::size_type row_index,
                                           Nullate const _check_nulls,
@@ -449,8 +449,7 @@ class device_row_hasher {
      *
      * @note This function is only enabled for nested columns.
      */
-    template <typename T>
-      requires(cudf::is_nested<T>())
+    template <cudf::concepts::nested T>
     __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                           cudf::size_type row_index,
                                           Nullate const _check_nulls,

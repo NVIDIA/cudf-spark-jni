@@ -155,15 +155,14 @@ int num_direct_parents(int num_lvls, int num_leaf_columns)
 double avg_element_size(data_profile const& profile, cudf::data_type dtype);
 
 // Utilities to determine the mean size of an element, given the data profile
-template <typename T>
-  requires(cudf::is_fixed_width<T>())
+template <cudf::concepts::fixed_width T>
 double non_fixed_width_size(data_profile const& profile)
 {
   CUDF_FAIL("Should not be called, use `size_of` for this type instead");
 }
 
 template <typename T>
-  requires(!cudf::is_fixed_width<T>())
+  requires(not cudf::concepts::fixed_width<T>)
 double non_fixed_width_size(data_profile const& profile)
 {
   CUDF_FAIL("not implemented!");

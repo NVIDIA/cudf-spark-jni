@@ -27,6 +27,7 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/std/concepts>
 #include <cuda/std/limits>
 #include <cuda/std/type_traits>
 #include <cuda/stream>
@@ -56,7 +57,7 @@ void check_multiply_inputs(cudf::data_type left_type,
  * Set `valid` to false if overflow occurs.
  */
 template <typename T>
-  requires(cuda::std::is_same_v<T, int8_t> || cuda::std::is_same_v<T, int16_t>)
+  requires(cuda::std::same_as<T, int8_t> || cuda::std::same_as<T, int16_t>)
 __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
 {
   // when int8_t * int8_t or int16_t * int16_t, the result is promoted to int type.
@@ -74,8 +75,7 @@ __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
  * @brief Multiply two int32_t values with overflow check.
  * Set `valid` to false if overflow occurs.
  */
-template <typename T>
-  requires(cuda::std::is_same_v<T, int32_t>)
+template <cuda::std::same_as<int32_t> T>
 __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
 {
   if (check_overflow) {
@@ -109,8 +109,7 @@ __device__ bool is_multiply_overflow(int64_t a, int64_t b)
  * @brief Multiply two int64_t values with overflow check.
  * Set `valid` to false if overflow occurs.
  */
-template <typename T>
-  requires(cuda::std::is_same_v<T, int64_t>)
+template <cuda::std::same_as<int64_t> T>
 __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
 {
   if (check_overflow && is_multiply_overflow(x, y)) {
@@ -127,7 +126,7 @@ __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
  * `check_overflow` is ignored for float multiplication.
  */
 template <typename T>
-  requires(cuda::std::is_same_v<T, float> || cuda::std::is_same_v<T, double>)
+  requires(cuda::std::same_as<T, float> || cuda::std::same_as<T, double>)
 __device__ void multiply(T x, T y, bool check_overflow, bool* valid, T* result)
 {
   *valid  = true;

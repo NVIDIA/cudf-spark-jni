@@ -32,6 +32,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/cmath>
+#include <cuda/std/concepts>
 #include <cuda/std/functional>
 #include <cuda/stream>
 #include <thrust/tabulate.h>
@@ -1201,8 +1202,7 @@ using namespace numeric::detail;
  * @param pow10 The power of 10 to scale the floating-point value by
  * @return Integer representation of the floating-point value, rounding after scaled
  */
-template <typename FloatType, typename IntType>
-  requires(cuda::std::is_floating_point_v<FloatType>)
+template <cuda::std::floating_point FloatType, typename IntType>
 __device__ inline IntType scaled_round(FloatType input, int32_t pow10)
 {
   // Extract components of the (double-ized) floating point number
