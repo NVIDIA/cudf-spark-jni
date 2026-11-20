@@ -292,6 +292,15 @@
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
                 </configuration>
               </execution>
+              <execution>
+                <id>native-file-source-gds-test</id>
+                <goals>
+                  <goal>test</goal>
+                </goals>
+                <configuration>
+                  <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                </configuration>
+              </execution>
             </executions>
           </plugin>
         </plugins>
