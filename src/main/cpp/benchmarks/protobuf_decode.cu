@@ -1001,7 +1001,7 @@ struct ManyRepeatedFieldsCase {
 //   message Inner { num_fields fields (cycling through int32, int64, string) }
 // The first hidden_percent of the fields at each level are hidden. Absent `inner` messages and
 // null input rows give both structs nulls to push into their children.
-struct HiddenFieldsCase {
+struct hidden_field_case {
   using enum cudf::type_id;
   static constexpr auto FIELD_TYPES = get_types({INT32, INT64, STRING});
 
