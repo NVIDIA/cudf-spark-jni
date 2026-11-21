@@ -113,7 +113,8 @@ class murmur_device_row_hasher {
     {
     }
 
-    template <typename T, CUDF_ENABLE_IF(not cudf::is_nested<T>())>
+    template <typename T>
+      requires(not cudf::concepts::nested<T>)
     __device__ murmur_hash_value_type operator()(cudf::column_device_view const& col,
                                                  cudf::size_type row_index) const noexcept
     {
@@ -121,7 +122,7 @@ class murmur_device_row_hasher {
       return hasher.template operator()<T>(col, row_index);
     }
 
-    template <typename T, CUDF_ENABLE_IF(cudf::is_nested<T>())>
+    template <cudf::concepts::nested T>
     __device__ murmur_hash_value_type operator()(cudf::column_device_view const& col,
                                                  cudf::size_type row_index) const noexcept
     {

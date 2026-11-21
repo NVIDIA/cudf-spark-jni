@@ -170,7 +170,8 @@ struct percentile_dispatcher {
     CUDF_FAIL("Unsupported type in histogram-to-percentile evaluation.");
   }
 
-  template <typename T, CUDF_ENABLE_IF(is_supported<T>())>
+  template <typename T>
+    requires(is_supported<T>())
   output_type operator()(cudf::size_type const* const offsets,
                          cudf::size_type const* const ordered_indices,
                          cudf::column_device_view const& data,

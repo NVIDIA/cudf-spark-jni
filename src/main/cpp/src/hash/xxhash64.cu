@@ -348,7 +348,8 @@ class device_row_hasher {
       {
       }
 
-      template <typename T, CUDF_ENABLE_IF(cudf::column_device_view::has_element_accessor<T>())>
+      template <typename T>
+        requires(cudf::column_device_view::has_element_accessor<T>())
       __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                             cudf::size_type row_index) const noexcept
       {
@@ -356,7 +357,8 @@ class device_row_hasher {
         return XXHash_64<T>{_seed}(col.element<T>(row_index));
       }
 
-      template <typename T, CUDF_ENABLE_IF(not cudf::column_device_view::has_element_accessor<T>())>
+      template <typename T>
+        requires(not cudf::column_device_view::has_element_accessor<T>())
       __device__ hash_value_type operator()(cudf::column_device_view const&,
                                             cudf::size_type) const noexcept
       {
@@ -364,7 +366,8 @@ class device_row_hasher {
       }
     };
 
-    template <typename T, CUDF_ENABLE_IF(not cudf::is_nested<T>())>
+    template <typename T>
+      requires(not cudf::concepts::nested<T>)
     __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                           cudf::size_type row_index,
                                           Nullate const _check_nulls,
@@ -446,7 +449,7 @@ class device_row_hasher {
      *
      * @note This function is only enabled for nested columns.
      */
-    template <typename T, CUDF_ENABLE_IF(cudf::is_nested<T>())>
+    template <cudf::concepts::nested T>
     __device__ hash_value_type operator()(cudf::column_device_view const& col,
                                           cudf::size_type row_index,
                                           Nullate const _check_nulls,

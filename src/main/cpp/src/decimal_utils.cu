@@ -32,6 +32,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/cmath>
+#include <cuda/std/concepts>
 #include <cuda/std/functional>
 #include <cuda/stream>
 #include <thrust/tabulate.h>
@@ -1201,9 +1202,7 @@ using namespace numeric::detail;
  * @param pow10 The power of 10 to scale the floating-point value by
  * @return Integer representation of the floating-point value, rounding after scaled
  */
-template <typename FloatType,
-          typename IntType,
-          CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
+template <cuda::std::floating_point FloatType, typename IntType>
 __device__ inline IntType scaled_round(FloatType input, int32_t pow10)
 {
   // Extract components of the (double-ized) floating point number
@@ -1360,18 +1359,15 @@ struct floating_point_to_decimal_dispatcher {
             std::is_same_v<DecimalType, numeric::decimal128>);
   }
 
-  template <typename FloatType,
-            typename DecimalType,
-            typename... Args,
-            CUDF_ENABLE_IF(not supported_types<FloatType, DecimalType>())>
+  template <typename FloatType, typename DecimalType, typename... Args>
+    requires(not supported_types<FloatType, DecimalType>())
   void operator()(Args...) const
   {
     CUDF_FAIL("Unsupported types for floating_point_to_decimal_fn", cudf::data_type_error);
   }
 
-  template <typename FloatType,
-            typename DecimalType,
-            CUDF_ENABLE_IF(supported_types<FloatType, DecimalType>())>
+  template <typename FloatType, typename DecimalType>
+    requires(supported_types<FloatType, DecimalType>())
   void operator()(cudf::column_view const& input,
                   cudf::mutable_column_view const& output,
                   bool* validity,
