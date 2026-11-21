@@ -53,7 +53,6 @@ public final class PageableMemoryPool implements AutoCloseable {
   private static ExecutorService stagedCopyExecutor = null;
   private static boolean stagedH2DEnabled = false;
   private static boolean stagedD2HEnabled = false;
-  private static boolean stagedCopyHandlerRegistered = false;
   // A copy owns its CUDA event and staging buffers until all worker futures complete.
   // Fairness prevents new callers from overtaking shutdown once it is waiting.
   private static final ReentrantReadWriteLock stagedCopyLifecycleLock =
@@ -204,12 +203,10 @@ public final class PageableMemoryPool implements AutoCloseable {
   private static final class PageableHostBufferCleaner extends MemoryBuffer.MemoryBufferCleaner {
     private long address;
     private final long origLength;
-    private final boolean stageDeviceToHost;
 
-    PageableHostBufferCleaner(long address, long length, boolean stageDeviceToHost) {
+    PageableHostBufferCleaner(long address, long length) {
       this.address = address;
       this.origLength = length;
-      this.stageDeviceToHost = stageDeviceToHost;
     }
 
     @Override
@@ -240,48 +237,6 @@ public final class PageableMemoryPool implements AutoCloseable {
     @Override
     public boolean isClean() {
       return address == -1;
-    }
-  }
-
-  /** Owns a raw allocation while marking it for the same D2H staging path as pool buffers. */
-  private static final class RawStagedHostBufferCleaner extends MemoryBuffer.MemoryBufferCleaner {
-    private HostMemoryBuffer raw;
-
-    RawStagedHostBufferCleaner(HostMemoryBuffer raw) {
-      this.raw = raw;
-    }
-
-    @Override
-    protected synchronized boolean cleanImpl(boolean logErrorIfNotClean) {
-      if (raw == null) {
-        return false;
-      }
-      try {
-        if (logErrorIfNotClean) {
-          log.error("A RAW STAGED HOST BUFFER WAS LEAKED (ID: " + id + ")");
-          logRefCountDebug("Leaked raw staged host buffer");
-        }
-        raw.close();
-      } finally {
-        raw = null;
-      }
-      return true;
-    }
-
-    @Override
-    public boolean isClean() {
-      return raw == null;
-    }
-  }
-
-  /** Allocate outside the pool, retaining explicit D2H staging for allocator-based callers. */
-  public static HostMemoryBuffer allocateRawForDeviceToHost(long bytes) {
-    HostMemoryBuffer raw = HostMemoryBuffer.allocateRaw(bytes);
-    try {
-      return new HostMemoryBuffer(raw.getAddress(), bytes, new RawStagedHostBufferCleaner(raw));
-    } catch (Throwable t) {
-      raw.close();
-      throw t;
     }
   }
 
@@ -427,10 +382,7 @@ public final class PageableMemoryPool implements AutoCloseable {
     initThread.setDaemon(true);
     initThread.start();
     initFuture = task;
-    if (stagedD2HEnabled && stagedCopyExecutor != null) {
-      HostMemoryBuffer.setDeviceToHostCopyHandler(PageableMemoryPool::copyFromDeviceBuffer);
-      stagedCopyHandlerRegistered = true;
-    }
+
   }
 
   /**
@@ -479,10 +431,6 @@ public final class PageableMemoryPool implements AutoCloseable {
       stagedH2DEnabled = false;
       stagedD2HEnabled = false;
     } finally {
-      if (stagedCopyHandlerRegistered) {
-        HostMemoryBuffer.setDeviceToHostCopyHandler(null);
-        stagedCopyHandlerRegistered = false;
-      }
       stagedCopyLifecycleLock.writeLock().unlock();
     }
   }
@@ -728,15 +676,6 @@ public final class PageableMemoryPool implements AutoCloseable {
    *         (caller should fall back to a regular malloc'd buffer)
    */
   public static HostMemoryBuffer tryAllocate(long bytes) {
-    return tryAllocate(bytes, false);
-  }
-
-  /** Allocate a pageable destination whose device-to-host copies use staging when enabled. */
-  public static HostMemoryBuffer tryAllocateForDeviceToHost(long bytes) {
-    return tryAllocate(bytes, true);
-  }
-
-  private static HostMemoryBuffer tryAllocate(long bytes, boolean stageDeviceToHost) {
     if (bytes <= 0) {
       throw new IllegalArgumentException("bytes must be positive");
     }
@@ -746,7 +685,7 @@ public final class PageableMemoryPool implements AutoCloseable {
     HostMemoryBuffer result = null;
     PageableMemoryPool pool = getSingleton();
     if (pool != null) {
-      result = pool.tryAllocateInternal(bytes, stageDeviceToHost);
+      result = pool.tryAllocateInternal(bytes);
     }
     if (result == null) {
       poolAllocMiss.incrementAndGet();
@@ -773,12 +712,6 @@ public final class PageableMemoryPool implements AutoCloseable {
 
   public static boolean isPageablePoolBuffer(HostMemoryBuffer buffer) {
     return buffer.cleaner instanceof PageableHostBufferCleaner;
-  }
-
-  private static boolean isStagedDeviceToHostBuffer(HostMemoryBuffer buffer) {
-    return buffer.cleaner instanceof RawStagedHostBufferCleaner ||
-        (buffer.cleaner instanceof PageableHostBufferCleaner &&
-        ((PageableHostBufferCleaner) buffer.cleaner).stageDeviceToHost);
   }
 
   /** Copy device data into a pageable host destination through pinned staging buffers. */
@@ -823,12 +756,6 @@ public final class PageableMemoryPool implements AutoCloseable {
         }
       }
     }
-  }
-
-  static boolean copyFromDeviceBuffer(HostMemoryBuffer dst, long dstOffset,
-      BaseDeviceMemoryBuffer src, long srcOffset, long length, Cuda.Stream stream) {
-    return copyFromDeviceBuffer(dst, dstOffset, src, srcOffset, length, stream,
-        isStagedDeviceToHostBuffer(dst));
   }
 
   private static boolean copyFromDeviceBuffer(HostMemoryBuffer dst, long dstOffset,
@@ -918,7 +845,7 @@ public final class PageableMemoryPool implements AutoCloseable {
       long copyOffset = 0;
       long submitStart = STAGED_COPY_STATS_ENABLED ? System.nanoTime() : 0;
       final String destinationSource = dst.cleaner instanceof PageableHostBufferCleaner ?
-          "pool" : dst.cleaner instanceof RawStagedHostBufferCleaner ? "raw" : "other";
+          "pool" : "raw";
       try {
         while (remaining > 0) {
           int chunkIndex = futures.size();
@@ -1268,8 +1195,7 @@ public final class PageableMemoryPool implements AutoCloseable {
    * Attempts to allocate from the pageable pool. Returns null rather than throwing if
    * the pool is exhausted, so callers can fall back gracefully.
    */
-  private synchronized HostMemoryBuffer tryAllocateInternal(long bytes,
-      boolean stageDeviceToHost) {
+  private synchronized HostMemoryBuffer tryAllocateInternal(long bytes) {
     if (this.poolHandle == -1) {
       throw new IllegalStateException("Pageable memory pool has been closed");
     }
@@ -1278,7 +1204,7 @@ public final class PageableMemoryPool implements AutoCloseable {
       return null;
     }
     return new HostMemoryBuffer(allocated, bytes,
-            new PageableHostBufferCleaner(allocated, bytes, stageDeviceToHost));
+            new PageableHostBufferCleaner(allocated, bytes));
   }
 
   private synchronized void free(long address, long size) {

@@ -18,14 +18,12 @@ package ai.rapids.cudf;
 import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -58,7 +56,6 @@ public class PageableStagingDisabledTest {
     try {
       PageableMemoryPool.shutdown();
     } finally {
-      HostMemoryBuffer.setDeviceToHostCopyHandler(null);
       try {
         PinnedMemoryPool.shutdown();
         Rmm.shutdown();
@@ -135,11 +132,6 @@ public class PageableStagingDisabledTest {
 
   private void checkPoolOnly(boolean registered) throws Exception {
     System.setProperty(PREFIX + "registered.buffers", Boolean.toString(registered));
-    AtomicInteger fallbackCalls = new AtomicInteger();
-    HostMemoryBuffer.setDeviceToHostCopyHandler((dst, dstOffset, src, srcOffset, length, stream) -> {
-      fallbackCalls.incrementAndGet();
-      return false;
-    });
     PageableMemoryPool.initialize(8192, 1);
     assertTrue(PageableMemoryPool.isInitialized());
     assertFalse(PageableMemoryPool.isDeviceToHostStagingEnabled());
@@ -155,7 +147,7 @@ public class PageableStagingDisabledTest {
     }
     byte[] expected = {1, 2, 3, 4};
     try (HostMemoryBuffer input = HostMemoryBuffer.allocateRaw(4);
-         HostMemoryBuffer output = PageableMemoryPool.tryAllocateForDeviceToHost(4);
+         HostMemoryBuffer output = PageableMemoryPool.tryAllocate(4);
          DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4);
          Cuda.Stream stream = new Cuda.Stream(true)) {
       assertNotNull(output);
@@ -166,21 +158,13 @@ public class PageableStagingDisabledTest {
       byte[] actual = new byte[4];
       output.getBytes(actual, 0, 0, 4);
       assertArrayEquals(expected, actual);
-      assertEquals(1, fallbackCalls.get(), "disabled initialization replaced the handler");
-      assertFalse(PageableMemoryPool.copyFromDeviceBuffer(output, 0, device, 0, 4, stream));
       assertThrows(IllegalStateException.class, () ->
           PageableMemoryPool.copyDeviceToPageableHost(output, 0, device, 0, 4, stream));
       assertThrows(IllegalStateException.class, () ->
           PageableMemoryPool.copyPageableHostToDevice(device, 0, output, 0, 4, stream));
     }
     PageableMemoryPool.shutdown();
-    // Disabled teardown must not unregister a handler it did not install.
-    try (HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4);
-         DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4)) {
-      device.copyFromHostBuffer(host);
-      host.copyFromDeviceBuffer(device);
-      assertEquals(2, fallbackCalls.get());
-    }
+
   }
 
   private static Object resource(String name) throws Exception {

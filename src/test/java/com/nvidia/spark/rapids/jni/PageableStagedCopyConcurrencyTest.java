@@ -121,7 +121,7 @@ public class PageableStagedCopyConcurrencyTest {
           try (Cuda.Stream callerStream = new Cuda.Stream(true);
                DeviceMemoryBuffer source = DeviceMemoryBuffer.allocate(seedBytes.length);
                HostMemoryBuffer destination =
-                   PageableMemoryPool.allocateRawForDeviceToHost(expectedD2H.length)) {
+                   HostMemoryBuffer.allocateRaw(expectedD2H.length)) {
             destination.setBytes(0, initialD2H, 0, initialD2H.length);
             // Producer work is queued on this caller's stream before the staged copy.
             source.copyFromDeviceBufferAsync(0, seed, 0, seedBytes.length, callerStream);

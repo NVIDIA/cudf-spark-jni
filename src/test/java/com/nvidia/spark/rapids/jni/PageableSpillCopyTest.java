@@ -89,7 +89,7 @@ public class PageableSpillCopyTest {
       field.set(null, rejecting);
       AtomicReference<Throwable> failure = new AtomicReference<>();
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(8192);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(8192)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(8192)) {
         copier = new Thread(() -> {
           try {
             PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 8192,
@@ -159,7 +159,7 @@ public class PageableSpillCopyTest {
       });
       assertTrue(workerBlocked.await(5, TimeUnit.SECONDS));
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         copier = new Thread(() -> {
           try {
             PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 4096,
@@ -260,24 +260,26 @@ public class PageableSpillCopyTest {
         input.setBytes(0, expected, 0, length);
         device.copyFromHostBuffer(input);
         try (HostMemoryBuffer staged =
-                 PageableMemoryPool.tryAllocateForDeviceToHost(length)) {
+                 PageableMemoryPool.tryAllocate(length)) {
           assertNotNull(staged);
-          staged.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM);
-          byte[] automatic = new byte[length];
-          staged.getBytes(automatic, 0, 0, length);
-          assertArrayEquals(expected, automatic);
+          PageableMemoryPool.copyDeviceToPageableHost(staged, 0, device, 0, length,
+              Cuda.DEFAULT_STREAM);
+          byte[] pooledExplicit = new byte[length];
+          staged.getBytes(pooledExplicit, 0, 0, length);
+          assertArrayEquals(expected, pooledExplicit);
         }
         PageableMemoryPool.copyDeviceToPageableHost(output, 0, device, 0, length,
             Cuda.DEFAULT_STREAM);
         byte[] rawExplicit = new byte[length];
         output.getBytes(rawExplicit, 0, 0, length);
         assertArrayEquals(expected, rawExplicit);
-        try (HostMemoryBuffer raw = PageableMemoryPool.allocateRawForDeviceToHost(length)) {
+        try (HostMemoryBuffer raw = HostMemoryBuffer.allocateRaw(length)) {
           assertFalse(PageableMemoryPool.isPageablePoolBuffer(raw));
-          raw.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM);
-          byte[] rawAutomatic = new byte[length];
-          raw.getBytes(rawAutomatic, 0, 0, length);
-          assertArrayEquals(expected, rawAutomatic);
+          PageableMemoryPool.copyDeviceToPageableHost(raw, 0, device, 0, length,
+              Cuda.DEFAULT_STREAM);
+          byte[] rawStaged = new byte[length];
+          raw.getBytes(rawStaged, 0, 0, length);
+          assertArrayEquals(expected, rawStaged);
         }
         try (HostMemoryBuffer spill = PageableMemoryPool.tryAllocate(length + 32)) {
           assertNotNull(spill);

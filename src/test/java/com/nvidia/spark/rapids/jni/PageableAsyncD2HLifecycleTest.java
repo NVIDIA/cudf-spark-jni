@@ -66,7 +66,7 @@ public class PageableAsyncD2HLifecycleTest {
       List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
       CountDownLatch started = new CountDownLatch(1);
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         caller = new Thread(() -> {
           started.countDown();
           try {
@@ -130,7 +130,7 @@ public class PageableAsyncD2HLifecycleTest {
       });
       ArrayBlockingQueue<?> free = (ArrayBlockingQueue<?>) field("freeAsyncD2HSlots").get(null);
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         RuntimeException failure = assertThrows(RuntimeException.class,
             () -> PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 4096,
                 Cuda.DEFAULT_STREAM));
@@ -174,7 +174,7 @@ public class PageableAsyncD2HLifecycleTest {
       });
       List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         caller = new Thread(() -> {
           try {
             PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 4096,
@@ -232,7 +232,7 @@ public class PageableAsyncD2HLifecycleTest {
       });
       ArrayBlockingQueue<?> free = (ArrayBlockingQueue<?>) field("freeAsyncD2HSlots").get(null);
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         RuntimeException failure = assertThrows(RuntimeException.class,
             () -> PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 4096,
                 Cuda.DEFAULT_STREAM));
@@ -360,7 +360,7 @@ public class PageableAsyncD2HLifecycleTest {
         for (int i = 0; i < 4; i++) {
           Thread caller = new Thread(() -> {
             try (HostMemoryBuffer destination =
-                     PageableMemoryPool.allocateRawForDeviceToHost(pattern.length)) {
+                     HostMemoryBuffer.allocateRaw(pattern.length)) {
               ready.countDown();
               start.await();
               PageableMemoryPool.copyDeviceToPageableHost(destination, 0, device, 0,
@@ -417,7 +417,7 @@ public class PageableAsyncD2HLifecycleTest {
         assertTrue(failures.isEmpty(), () -> "copy failures: " + failures);
         assertEquals(1, free.size(), "async bounce capacity was not recovered");
         try (HostMemoryBuffer recovery =
-                 PageableMemoryPool.allocateRawForDeviceToHost(pattern.length)) {
+                 HostMemoryBuffer.allocateRaw(pattern.length)) {
           PageableMemoryPool.copyDeviceToPageableHost(recovery, 0, device, 0,
               pattern.length, Cuda.DEFAULT_STREAM);
           byte[] actual = new byte[pattern.length];
@@ -485,7 +485,7 @@ public class PageableAsyncD2HLifecycleTest {
       freeField.setAccessible(true);
       ArrayBlockingQueue<?> free = (ArrayBlockingQueue<?>) freeField.get(null);
       try (DeviceMemoryBuffer device = DeviceMemoryBuffer.allocate(4096);
-           HostMemoryBuffer host = PageableMemoryPool.allocateRawForDeviceToHost(4096)) {
+           HostMemoryBuffer host = HostMemoryBuffer.allocateRaw(4096)) {
         RuntimeException failure = assertThrows(RuntimeException.class,
             () -> PageableMemoryPool.copyDeviceToPageableHost(host, 0, device, 0, 4096,
                 Cuda.DEFAULT_STREAM));
