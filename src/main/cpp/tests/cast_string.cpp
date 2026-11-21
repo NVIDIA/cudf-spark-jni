@@ -1727,6 +1727,37 @@ TEST_F(StringToDecimalTests, ExponentalNotation)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
 }
 
+TEST_F(StringToDecimalTests, ExponentWithTrailingWhitespace)
+{
+  auto const stream  = cudf::get_default_stream();
+  auto const strings = test::strings_column_wrapper({"5e2 ",
+                                                     "17284E3\t",
+                                                     " 1.5e1 ",
+                                                     "250e-1\n",
+                                                     "-828438e+0\x1f",
+                                                     "0e3 ",
+                                                     "5e2 1",
+                                                     "5e 2",
+                                                     "5e+ "});
+  strings_column_view scv{strings};
+
+  {
+    // Spark trims the string before parsing it, so whitespace after the exponent is ignored.
+    auto const result = spark_rapids_jni::string_to_decimal(10, 0, scv, false, true, stream);
+    test::fixed_point_column_wrapper<int64_t> expected({500, 17284000, 15, 25, -828438, 0, 0, 0, 0},
+                                                       {1, 1, 1, 1, 1, 1, 0, 0, 0},
+                                                       numeric::scale_type{0});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+  {
+    // Without stripping, any whitespace makes the row invalid.
+    auto const result = spark_rapids_jni::string_to_decimal(10, 0, scv, false, false, stream);
+    test::fixed_point_column_wrapper<int64_t> expected(
+      {0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0}, numeric::scale_type{0});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result->view(), expected);
+  }
+}
+
 TEST_F(StringToDecimalTests, Overflow)
 {
   auto const strings =

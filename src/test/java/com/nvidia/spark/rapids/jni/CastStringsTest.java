@@ -524,6 +524,19 @@ public class CastStringsTest {
   }
 
   @Test
+  void castToDecimalExponentWithTrailingWhitespace() {
+    // Spark trims the string before parsing it, so whitespace after the exponent is ignored.
+    try (ColumnVector input = ColumnVector.fromStrings(
+             "5e2 ", "17284E3\t", " 1.5e1 ", "250e-1\n", "-828438e+0\u001f", "0e3 ",
+             "5e2 1", "5e 2", "5e+ ");
+         ColumnVector actual = CastStrings.toDecimal(input, false, 10, 0);
+         ColumnVector expected = ColumnVector.decimalFromBoxedLongs(0,
+             500L, 17284000L, 15L, 25L, -828438L, 0L, null, null, null)) {
+      AssertUtils.assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void castToDecimalNoStripTest() {
     Table.TestBuilder tb = new Table.TestBuilder();
     tb.decimal32Column(0, null, 9, 4, 2, 21, null, null);
