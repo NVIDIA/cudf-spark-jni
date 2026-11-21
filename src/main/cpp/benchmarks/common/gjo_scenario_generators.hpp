@@ -429,5 +429,157 @@ inline std::vector<nested_prefix_entry> const& nested_table_33()
   return table;
 }
 
+/**
+ * @brief The mixed flat+nested shape: 15 top-level fields with distinct
+ * short names plus one depth-two path `$.zz_nested.x`. The rows carry
+ * `member_count` top-level members (filler string members absorb the row
+ * budget), so the same 16 paths run over both the 50- and the 150-member
+ * layouts selected on the caller's `num_paths` axis.
+ */
+inline multi_paths flat_mixed_build_paths()
+{
+  multi_paths paths;
+  paths.reserve(16);
+  for (int i = 0; i < 15; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
+  }
+  paths.push_back(path_list{path_tuple{instruction_t::NAMED, "zz_nested", -1},
+                            path_tuple{instruction_t::NAMED, "x", -1}});
+  return paths;
+}
+
+/**
+ * @brief Rows for the flat-mixed shape: `member_count` top-level members,
+ * with the 15 queried fields first and the nested object last. A trailing
+ * `fill` member absorbs the remaining `row_bytes` budget via `pad_row_to`,
+ * matching the other scenarios' row sizing.
+ */
+inline std::vector<std::string> flat_mixed_build_rows(std::mt19937_64& rng,
+                                                      std::size_t num_rows,
+                                                      std::size_t member_count,
+                                                      std::size_t row_bytes,
+                                                      std::uint64_t seed)
+{
+  std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < std::min<std::size_t>(member_count, 15)) {
+        row += "\"f" + std::to_string(m) + "\":\"v" + std::to_string((r + salt) % 1000) + "\"";
+      } else if (m == member_count - 1) {
+        row += "\"zz_nested\":{\"x\":\"n" + std::to_string((r + salt) % 1000) + "\"}";
+      } else {
+        row += "\"fill_m" + std::to_string(m) + "\":\"" + random_string(rng, 12) + "\"";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
+/**
+ * @brief Paths for the wide flat+nested shape: 64 distinct depth-two paths
+ * `f{i}.c{i}` (64 roots, one queried child path per root), measured over
+ * 150-member rows.
+ */
+inline multi_paths flat_mixed_64_build_paths()
+{
+  multi_paths paths;
+  paths.reserve(64);
+  for (int i = 0; i < 64; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1},
+                              path_tuple{instruction_t::NAMED, "c" + std::to_string(i), -1}});
+  }
+  return paths;
+}
+
+/**
+ * @brief Rows for the wide flat+nested shape: `member_count` top-level
+ * members whose first 64 carry one queried child each (`f{m}` holding
+ * `c{m}`), one trailing `zz_nested` object, and filler members absorbing
+ * the row budget like `flat_mixed_build_rows` does.
+ */
+inline std::vector<std::string> flat_mixed_64_build_rows(std::mt19937_64& rng,
+                                                         std::size_t num_rows,
+                                                         std::size_t member_count,
+                                                         std::size_t row_bytes,
+                                                         std::uint64_t seed)
+{
+  std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < 64) {
+        // Root f<m> holds exactly the queried child c<m>, so every path hits.
+        row += "\"f" + std::to_string(m) + "\":{\"c" + std::to_string(m) + "\":\"v" +
+               std::to_string((r + salt) % 1000) + "\"}";
+      } else if (m == member_count - 1) {
+        row += "\"zz_nested\":{\"x\":\"n" + std::to_string((r + salt) % 1000) + "\"}";
+      } else {
+        row += "\"fill_m" + std::to_string(m) + "\":\"" + random_string(rng, 12) + "\"";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
+/**
+ * @brief Paths for the wide flat shape: 15 top-level field paths (no nested
+ * path), measured over rows of 600 top-level members (filler members absorb
+ * the row budget).
+ */
+inline multi_paths flat_600_build_paths()
+{
+  multi_paths paths;
+  paths.reserve(15);
+  for (int i = 0; i < 15; ++i) {
+    paths.push_back(path_list{path_tuple{instruction_t::NAMED, "f" + std::to_string(i), -1}});
+  }
+  return paths;
+}
+
+/**
+ * @brief Rows for the wide flat shape: rows of `member_count` top-level
+ * members, the first 15 carrying the queried `f{i}` fields and the rest
+ * filler, with a trailing `fill` member absorbing the remaining `row_bytes`
+ * budget via `pad_row_to` like the other flat scenarios.
+ */
+inline std::vector<std::string> flat_600_build_rows(std::mt19937_64& rng,
+                                                    std::size_t num_rows,
+                                                    std::size_t member_count,
+                                                    std::size_t row_bytes,
+                                                    std::uint64_t seed)
+{
+  std::uint64_t const salt = seed * 0x9E3779B97F4A7C15ULL;
+  std::vector<std::string> rows;
+  rows.reserve(num_rows);
+  for (std::size_t r = 0; r < num_rows; ++r) {
+    std::string row = "{";
+    for (std::size_t m = 0; m < member_count; ++m) {
+      if (m > 0) { row += ','; }
+      if (m < 15) {
+        row += "\"f" + std::to_string(m) + "\":\"v" + std::to_string((r + salt) % 1000) + "\"";
+      } else {
+        // 600 members leave only ~17 B each at the ~10 KiB row budget, so filler values stay
+        // 1 char: the natural row must stay under `row_bytes` for `pad_row_to` to absorb the
+        // remainder exactly like the other flat scenarios.
+        row += "\"fill_m" + std::to_string(m) + "\":\"x\"";
+      }
+    }
+    row += '}';
+    rows.push_back(pad_row_to(rng, std::move(row), row_bytes));
+  }
+  return rows;
+}
+
 }  // namespace gjo_scenarios
 }  // namespace spark_rapids_jni
