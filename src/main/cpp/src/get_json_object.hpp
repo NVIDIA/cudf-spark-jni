@@ -110,4 +110,21 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
+namespace detail {
+
+// The optional test observer records first-pass routes in request order: 0 general, 1 shallow;
+// higher codes are reserved for deeper families. It does not change admission.
+std::vector<std::unique_ptr<cudf::column>> get_json_object(
+  cudf::strings_column_view const& input,
+  std::vector<std::vector<std::tuple<path_instruction_type, std::string, int32_t>>> const&
+    json_paths,
+  int64_t memory_budget_bytes,
+  int32_t parallel_override,
+  bool use_last_non_null,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr,
+  std::vector<char>* merged_routed_out = nullptr);
+
+}  // namespace detail
+
 }  // namespace spark_rapids_jni
