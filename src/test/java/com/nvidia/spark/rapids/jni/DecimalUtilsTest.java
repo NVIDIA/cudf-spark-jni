@@ -758,6 +758,33 @@ public class DecimalUtilsTest {
   }
 
   @Test
+  void floatingPointRoundedMagnitudeOverflow() {
+    DType[] targets = {
+        DType.create(DType.DTypeEnum.DECIMAL32, -2),
+        DType.create(DType.DTypeEnum.DECIMAL64, -2),
+        DType.create(DType.DTypeEnum.DECIMAL128, -2),
+        DType.create(DType.DTypeEnum.DECIMAL128, -2),
+        DType.create(DType.DTypeEnum.DECIMAL128, 0)};
+    int[] precisions = {9, 18, 38, 38, 38};
+    // The last two coefficients also exceed 2^127, so they must be checked unsigned.
+    double[] overflowing = {1.5e7, 1.5e16, 1.5e36, 1.8e36, 1.99e38};
+    for (boolean floatInput : new boolean[]{false, true}) {
+      for (int i = 0; i < targets.length; i++) {
+        double actualInput = floatInput ? (double) (float) overflowing[i] : overflowing[i];
+        double scaledMagnitude = actualInput * Math.pow(10.0, -targets[i].getScale());
+        double precisionBound = Math.pow(10.0, precisions[i]);
+        // Qualify the actual source value: it must pass the loose envelope and reach the
+        // exact magnitude check, including after rounding the input to float precision.
+        assertTrue(scaledMagnitude > precisionBound && scaledMagnitude < 2 * precisionBound);
+        BigInteger unit = BigInteger.TEN.pow(-targets[i].getScale());
+        assertFloatingConversion(floatInput, targets[i], precisions[i],
+            new Double[]{overflowing[i], -overflowing[i], 1.0, -1.0, 0.0, null},
+            new BigInteger[]{null, null, unit, unit.negate(), BigInteger.ZERO, null}, true);
+      }
+    }
+  }
+
+  @Test
   void floatingPointNegativeScaleAndRoundingCarry() {
     for (boolean floatInput : new boolean[]{false, true}) {
       // 2^39 is exactly representable in either input type. Its extra rounding digit
@@ -796,7 +823,7 @@ public class DecimalUtilsTest {
     try (ColumnVector input = ColumnVector.fromDoubles(0.0)) {
       // Construct the type first so the assertion exercises native validation, rather than
       // DType's separate restriction on negative scales.
-      for (int scale : new int[]{39, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
+      for (int scale : new int[]{39, 50, 60, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
         DType target = DType.create(DType.DTypeEnum.DECIMAL128, scale);
         CudfException error = assertThrows(CudfException.class, () -> {
           DecimalUtils.CastFloatToDecimalResult converted = DecimalUtils.floatingPointToDecimal(

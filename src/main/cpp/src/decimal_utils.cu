@@ -1341,9 +1341,8 @@ struct floating_point_to_decimal_fn {
     }
 
     auto const input_abs = cuda::std::abs(static_cast<double>(x));
-    // Leave rounding-boundary decisions to the exact integer check below. This loose
-    // envelope in input units prevents the conversion itself from overflowing, including
-    // DECIMAL128, without requiring a scaled floating-point multiplication for DECIMAL64.
+    // This loose envelope in input units prevents the conversion itself from overflowing,
+    // including DECIMAL128. Leave rounding-boundary decisions to the exact integer check below.
     // 2 * 10^38 fits UINT128, and the extra-digit path has its own tighter safety check.
     if (input_abs >= coarse_input_bound) {
       *failure_row_id = idx;
