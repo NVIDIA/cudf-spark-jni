@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Copyright (c) 2022-2026, NVIDIA CORPORATION.
+  Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -120,10 +120,16 @@
     at your own risk. -->
     <submodule.patch.skip>false</submodule.patch.skip>
     <antrun.version>3.0.0</antrun.version>
+    <zstd-jni.version>1.5.6-6</zstd-jni.version>
     <hilbert.version>0.2.2</hilbert.version>
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>com.github.luben</groupId>
+      <artifactId>zstd-jni</artifactId>
+      <version>${zstd-jni.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client-api</artifactId>
@@ -182,6 +188,7 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
       <version>${slf4j.version}</version>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
@@ -228,6 +235,7 @@
                     <exclude>**/CudaFatalTest.java</exclude>
                     <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/NativeFileSourceGdsTest.java</exclude>
                     <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
@@ -260,6 +268,7 @@
                   <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
                   <excludes>
                     <exclude>**/NativeDepsLoaderTest.java</exclude>
+                    <exclude>**/NativeFileSourceGdsTest.java</exclude>
                     <exclude>**/PackagedJarOriginCheck.java</exclude>
                   </excludes>
                 </configuration>
@@ -276,6 +285,15 @@
               </execution>
               <execution>
                 <id>non-empty-null-test</id>
+                <goals>
+                  <goal>test</goal>
+                </goals>
+                <configuration>
+                  <jvm>${project.basedir}/build/sanitizer-java/bin/java</jvm>
+                </configuration>
+              </execution>
+              <execution>
+                <id>native-file-source-gds-test</id>
                 <goals>
                   <goal>test</goal>
                 </goals>
@@ -377,6 +395,42 @@
         <BUILD_PROFILER>OFF</BUILD_PROFILER>
       </properties>
     </profile>
+    <profile>
+      <!-- native_chunks.py only chunks libraries of at least 256 MiB, so single-arch,
+           debug and other small builds legitimately have no chunks. CI builds that
+           publish JARs (RAPIDS archs) pass -Dnative.chunks.require=true so a JAR
+           without chunks fails the build. -->
+      <id>require-native-chunks</id>
+      <activation>
+        <property>
+          <name>native.chunks.require</name>
+          <value>true</value>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>require-zstd-native-chunks</id>
+                <phase>package</phase>
+                <goals><goal>java</goal></goals>
+                <configuration>
+                  <arguments>
+                    <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
+                    <argument>verify</argument>
+                    <argument>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</argument>
+                    <argument>--require-chunks</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 
   <build>
@@ -393,9 +447,19 @@
               <skip>${submodule.check.skip}</skip>
               <target>
                 <exec dir="${project.basedir}"
-                      failonerror="true"
+                      failonerror="false"
+                      resultproperty="submodule.check.exit.code"
+                      outputproperty="submodule.check.output"
+                      errorproperty="submodule.check.error"
                       executable="${project.basedir}/build/submodule-check">
                 </exec>
+                <fail message="Submodule check failed with exit code ${submodule.check.exit.code}: ${submodule.check.error}${line.separator}${submodule.check.output}">
+                  <condition>
+                    <not>
+                      <equals arg1="${submodule.check.exit.code}" arg2="0"/>
+                    </not>
+                  </condition>
+                </fail>
               </target>
             </configuration>
             <goals>
@@ -529,6 +593,9 @@
         <version>3.0.2</version>
         <configuration>
           <classifier>${jni.classifier}</classifier>
+          <excludes>
+            <exclude>**/*.chunks/**</exclude>
+          </excludes>
         </configuration>
         <executions>
           <execution>
@@ -637,6 +704,7 @@
                 <exclude>**/CudaFatalTest.java</exclude>
                 <exclude>**/ColumnViewNonEmptyNullsTest.java</exclude>
                 <exclude>**/NativeDepsLoaderTest.java</exclude>
+                <exclude>**/NativeFileSourceGdsTest.java</exclude>
                 <exclude>**/PackagedJarOriginCheck.java</exclude>
               </excludes>
             </configuration>
@@ -659,6 +727,17 @@
             <configuration>
               <reuseForks>false</reuseForks>
               <test>CudaFatalTest</test>
+            </configuration>
+          </execution>
+          <!-- NativeFileSourceGdsTest sets KvikIO's mode before any other cuDF IO. -->
+          <execution>
+            <id>native-file-source-gds-test</id>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <reuseForks>false</reuseForks>
+              <test>NativeFileSourceGdsTest</test>
             </configuration>
           </execution>
         </executions>
@@ -704,6 +783,69 @@
                   <directory>${cudf.path}/java/src/test/resources</directory>
                 </resource>
               </resources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.0.0</version>
+        <configuration>
+          <includePluginDependencies>true</includePluginDependencies>
+          <includeProjectDependencies>false</includeProjectDependencies>
+          <mainClass>org.python.util.jython</mainClass>
+        </configuration>
+        <dependencies>
+          <dependency>
+            <groupId>org.python</groupId>
+            <artifactId>jython-standalone</artifactId>
+            <version>2.7.3</version>
+          </dependency>
+          <dependency>
+            <groupId>com.github.luben</groupId>
+            <artifactId>zstd-jni</artifactId>
+            <version>${zstd-jni.version}</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>chunk-native-library</id>
+            <phase>process-resources</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <arguments>
+                <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
+                <argument>produce</argument>
+                <argument>${project.build.outputDirectory}/${os.arch}/${os.name}/libcudf.so</argument>
+                <argument>--require-loader</argument>
+                <argument>${cudf.path}/java/src/main/java/ai/rapids/cudf/NativeDepsLoader.java</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>store-native-chunks</id>
+            <phase>package</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <arguments>
+                <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
+                <argument>store</argument>
+                <argument>${project.build.outputDirectory}</argument>
+                <argument>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>verify-zstd-native-chunks</id>
+            <phase>package</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <arguments>
+                <argument>${cudf.path}/java/buildscripts/native_chunks.py</argument>
+                <argument>verify</argument>
+                <argument>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</argument>
+              </arguments>
             </configuration>
           </execution>
         </executions>

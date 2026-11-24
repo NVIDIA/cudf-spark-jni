@@ -21,7 +21,6 @@
 #include <cudf/ast/detail/expression_parser.hpp>
 #include <cudf/ast/expressions.hpp>
 #include <cudf/column/column_factories.hpp>
-#include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/join/hash_join.hpp>
 #include <cudf/join/sort_merge_join.hpp>
 #include <cudf/table/table.hpp>
@@ -34,6 +33,7 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/hierarchy>
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
 #include <thrust/copy.h>
@@ -74,8 +74,8 @@ __global__ void filter_join_indices_kernel(
   auto evaluator = cudf::ast::detail::expression_evaluator<has_nulls>(
     left_table, right_table, device_expression_data);
 
-  auto const idx    = cudf::detail::grid_1d::global_thread_id();
-  auto const stride = cudf::detail::grid_1d::grid_stride();
+  auto const idx    = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
+  auto const stride = cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x;
 
   for (cudf::thread_index_type i = idx; i < num_pairs; i += stride) {
     auto output_dest                = cudf::ast::detail::value_expression_result<bool, has_nulls>();

@@ -280,9 +280,9 @@ TEST_F(ShuffleSplitTests, Lists)
   {
     using lcw = cudf::test::lists_column_wrapper<uint64_t>;
     lcw col0{{{9, 8}, {7, 6, 5}},
-             {lcw{}, {4}},
+             {{}, {4}},
              {{3, 2, 1, 0}, {20, 21, 22, 23, 24}},
-             {lcw{}, {66, 666}},
+             {{}, {66, 666}},
              {{123, 7}, {100, 101}},
              {{1, 2, 4}, {8, 6, 5}}};
 
@@ -676,9 +676,9 @@ TEST_F(ShuffleSplitTests, Reshaping)
   {
     using lcw = cudf::test::lists_column_wrapper<uint64_t>;
     lcw col0{{{9, 8}, {7, 6, 5}},
-             {lcw{}, {4}},
+             {{}, {4}},
              {{3, 2, 1, 0}, {20, 21, 22, 23, 24}},
-             {lcw{}, {66, 666}},
+             {{}, {66, 666}},
              {{123, 7}, {100, 101}},
              {{1, 2, 4}, {8, 6, 5}}};
 

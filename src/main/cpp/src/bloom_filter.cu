@@ -22,7 +22,6 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/null_mask.hpp>
@@ -35,6 +34,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/std/utility>
 #include <cuda/stream>
@@ -339,6 +339,8 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
                       cuda::stream_ref stream)
 {
   SRJ_FUNC_RANGE();
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::INT64,
+               "Bloom filter put requires an INT64 input column");
   auto [header, buffer, bloom_filter_bits, seed] = unpack_bloom_filter(bloom_filter.view(), stream);
   auto const hdr_size = bloom_filter_header_size_for_version(header.version);
   CUDF_EXPECTS(static_cast<size_t>(bloom_filter.view().size()) == (buffer.size() * 4) + hdr_size,
@@ -349,12 +351,14 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
   auto* mutable_buffer = const_cast<cudf::bitmask_type*>(buffer.data());
 
   constexpr int block_size = 256;
-  auto grid                = cudf::detail::grid_1d{input.size(), block_size, 1};
-  auto d_input             = cudf::column_device_view::create(input);
+  auto const num_blocks =
+    cuda::ceil_div(static_cast<cudf::thread_index_type>(input.size()), block_size);
+  CUDF_EXPECTS(num_blocks > 0, "num_blocks must be > 0");
+  auto d_input = cudf::column_device_view::create(input);
 
   auto launch = [&](auto version_tag, auto nullable_tag) {
     gpu_bloom_filter_put<decltype(version_tag)::value, decltype(nullable_tag)::value>
-      <<<grid.num_blocks, block_size, 0, stream.get()>>>(
+      <<<num_blocks, block_size, 0, stream.get()>>>(
         mutable_buffer, bloom_filter_bits, *d_input, header.num_hashes, seed);
   };
 
@@ -460,6 +464,8 @@ std::unique_ptr<cudf::column> bloom_filter_probe(cudf::column_view const& input,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::INT64,
+               "Bloom filter probe requires an INT64 input column");
   auto [header, buffer, bloom_filter_bits, seed] = unpack_bloom_filter(bloom_filter, stream);
   auto const hdr_size = bloom_filter_header_size_for_version(header.version);
   CUDF_EXPECTS(bloom_filter.size() == static_cast<size_t>((buffer.size() * 4) + hdr_size),

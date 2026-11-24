@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
+#include <cuda/hierarchy>
 #include <cuda/stream>
 
 namespace spark_rapids_jni {
@@ -35,7 +37,7 @@ namespace {
 CUDF_KERNEL void compute_output_size_kernel(cudf::column_device_view d_longs,
                                             cudf::size_type* d_sizes)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   if (tid >= d_longs.size()) { return; }
   if (d_longs.is_null(tid)) {
     d_sizes[tid] = 0;
@@ -73,7 +75,7 @@ CUDF_KERNEL void long_to_binary_string_kernel(cudf::column_device_view d_longs,
                                               char* d_chars,
                                               cudf::detail::input_offsetalator d_offsets)
 {
-  auto const tid     = cudf::detail::grid_1d::global_thread_id();
+  auto const tid     = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   auto const row_idx = tid / num_threads_per_row;
   if (row_idx >= d_longs.size()) { return; }
 
@@ -113,8 +115,9 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
   auto output_sizes         = rmm::device_uvector<cudf::size_type>(strings_count, stream);
   cudf::size_type* d_sizes  = output_sizes.data();
   auto constexpr block_size = 256;
-  auto grid                 = cudf::detail::grid_1d{strings_count, block_size};
-  compute_output_size_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(*d_column, d_sizes);
+  auto const num_blocks =
+    cuda::ceil_div(static_cast<cudf::thread_index_type>(strings_count), block_size);
+  compute_output_size_kernel<<<num_blocks, block_size, 0, stream.get()>>>(*d_column, d_sizes);
 
   // Convert the sizes to offsets
   auto [offsets, bytes] = cudf::strings::detail::make_offsets_child_column(
@@ -128,10 +131,11 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
 
   // Fill in the chars data
   constexpr int num_threads_per_row = 32;
-  auto new_grid = cudf::detail::grid_1d{strings_count * num_threads_per_row, block_size};
+  auto const num_char_blocks        = cuda::ceil_div(
+    static_cast<cudf::thread_index_type>(strings_count) * num_threads_per_row, block_size);
   if (bytes > 0) {
     long_to_binary_string_kernel<num_threads_per_row>
-      <<<new_grid.num_blocks, block_size, 0, stream.get()>>>(*d_column, d_chars, d_offsets);
+      <<<num_char_blocks, block_size, 0, stream.get()>>>(*d_column, d_chars, d_offsets);
   }
 
   return cudf::make_strings_column(input.size(),

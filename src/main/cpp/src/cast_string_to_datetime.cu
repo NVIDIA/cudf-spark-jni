@@ -16,13 +16,13 @@
 
 #include "cast_string.hpp"
 #include "cast_string_to_timestamp_common.hpp"
+#include "date_parse.cuh"
 #include "datetime_utils.cuh"
 #include "version.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/strings/string_view.hpp>
-#include <cudf/transform.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
@@ -116,45 +116,7 @@ __device__ bool is_whitespace(unsigned char const c)
 
 __device__ bool is_valid_tz(time_zone const& tz) { return tz.type != TZ_TYPE::INVALID_TZ; }
 
-/**
- * Parse a string to an integer.
- * @param ptr The input string
- * @param[out] pos the pointer to the string when parsing
- * @param end_pos the end pointer of the string
- * @param[out] v the parsed value
- * @param min_digits the minimum digits to parse, if not enough, return false
- * @param max_digits the maximum digits to parse, if exceeds, return false
- * @return true if the input string is valid, false otherwise
- */
-__device__ bool parse_int(unsigned char const* const ptr,
-                          int& pos,
-                          int const end_pos,
-                          int& v,
-                          int min_digits,
-                          int max_digits)
-{
-  v          = 0;
-  int digits = 0;
-  while (pos < end_pos) {
-    int const parsed_value = static_cast<int32_t>(ptr[pos]) - '0';
-    if (parsed_value >= 0 && parsed_value <= 9) {
-      if (++digits > max_digits) { return false; }
-      v = v * 10 + parsed_value;
-    } else {
-      break;
-    }
-    pos++;
-  }
-
-  return digits >= min_digits;
-}
-
 __device__ bool eof(int pos, int end_pos) { return end_pos - pos <= 0; }
-
-__device__ bool parse_char(unsigned char const* const ptr, int& pos, unsigned char const c)
-{
-  return ptr[pos++] == c;
-}
 
 __device__ bool try_parse_char(unsigned char const* const ptr, int& pos, unsigned char const c)
 {
@@ -446,22 +408,6 @@ __device__ time_zone parse_from_tz(unsigned char const* const ptr,
     ++pos;
   }
   return parse_tz(ptr, pos, pos_end, is_spark_320);
-}
-
-/**
- * Parse separator between date and time: 'T' or ' '
- * e.g.:
- * 2020-01-01T12:00:00
- * 2020-01-01 12:00:00
- */
-__device__ bool parse_date_time_separator(unsigned char const* const ptr, int& pos)
-{
-  unsigned char const c = ptr[pos];
-  if (c == ' ' || c == 'T') {
-    ++pos;
-    return true;
-  }
-  return false;
 }
 
 /**
@@ -952,166 +898,6 @@ std::unique_ptr<cudf::column> parse_ts_strings(cudf::strings_column_view const& 
                              mr);
 }
 
-/**
- * Parse date string to year, month, day.
- * Note: Spark date supports max 7 digits year, Spark timestamp supports max 6
- * digits year.
- */
-__device__ bool parse_date(unsigned char const* const ptr,
-                           unsigned char const* const ptr_end,
-                           spark_rapids_jni::date_segments& d)
-{
-  int pos     = 0;
-  int end_pos = ptr_end - ptr;
-
-  // trim left
-  while (pos < end_pos && is_whitespace(ptr[pos])) {
-    ++pos;
-  }
-
-  // trim right
-  while (pos < end_pos && is_whitespace(ptr[end_pos - 1])) {
-    --end_pos;
-  }
-
-  if (eof(pos, end_pos)) { return false; }
-
-  // parse sign
-  bool negative_year_sign = false;
-  char const sign_c       = ptr[pos];
-  if ('-' == sign_c || '+' == sign_c) {
-    ++pos;
-    if ('-' == sign_c) { negative_year_sign = true; }
-  }
-
-  // parse year: yyyy[y][y][y]
-  if (!parse_int(ptr,
-                 pos,
-                 end_pos,
-                 d.year,
-                 /*min_digits*/ 4,
-                 /*max_digits*/ 7)) {
-    return false;
-  }
-  if (negative_year_sign) { d.year = -d.year; }
-
-  if (eof(pos, end_pos)) {
-    // only has: yyyy[y][y][y], return early
-    return true;
-  }
-
-  // parse month: -[m]m
-  if (!parse_char(ptr, pos, '-') || !parse_int(ptr,
-                                               pos,
-                                               end_pos,
-                                               d.month,
-                                               /*min_digits*/ 1,
-                                               /*max_digits*/ 2)) {
-    return false;
-  }
-
-  if (eof(pos, end_pos)) {
-    // only has: yyyy[y][y]-[m]m, return early
-    return true;
-  }
-
-  // parse day: -[d]d
-  if (!parse_char(ptr, pos, '-') || !parse_int(ptr,
-                                               pos,
-                                               end_pos,
-                                               d.day,
-                                               /*min_digits*/ 1,
-                                               /*max_digits*/ 2)) {
-    return false;
-  }
-
-  if (eof(pos, end_pos)) {
-    // no tailing characters, e.g.: "2025-01-01"
-    return true;
-  }
-
-  // parse date time separator
-  // ignore the tailing chars after ' ' or 'T', e.g.: the following are valid:
-  // "2025-01-01T", "2025-01-01Txxxx", and "2025-01-01 xxx"
-  return parse_date_time_separator(ptr, pos);
-}
-
-struct parse_string_to_date_fn {
-  // input strings
-  cudf::column_device_view d_strings;
-
-  // output columns
-  bool* validity;
-  cudf::timestamp_D* output;
-
-  __device__ void operator()(cudf::size_type const idx) const
-  {
-    // check null
-    if (d_strings.is_null(idx)) {
-      validity[idx] = false;
-      return;
-    }
-
-    auto const str                   = d_strings.element<cudf::string_view>(idx);
-    unsigned char const* str_ptr     = reinterpret_cast<unsigned char const*>(str.data());
-    unsigned char const* str_end_ptr = str_ptr + str.size_bytes();
-
-    // parse the date string to segments
-    spark_rapids_jni::date_segments date_segments;
-    auto result_success = parse_date(str_ptr, str_end_ptr, date_segments);
-
-    // check parsed result
-    if (!result_success || !date_segments.is_valid_date()) {
-      validity[idx] = false;
-      return;
-    }
-
-    // calculate the epoch day and check 'days' fits in int32_t
-    int64_t days  = date_segments.to_epoch_day();
-    output[idx]   = cudf::timestamp_D{cudf::duration_D{static_cast<int32_t>(days)}};
-    validity[idx] = days >= cuda::std::numeric_limits<int32_t>::min() &&
-                    days <= cuda::std::numeric_limits<int32_t>::max();
-  }
-};
-
-/**
- * Parse strings to dates.
- */
-std::unique_ptr<cudf::column> parse_to_date(cudf::strings_column_view const& input,
-                                            cuda::stream_ref stream,
-                                            rmm::device_async_resource_ref mr)
-{
-  auto const num_rows = input.size();
-  if (num_rows == 0) {
-    return cudf::make_empty_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()});
-  }
-
-  auto const d_input = cudf::column_device_view::create(
-    input.parent(), stream, cudf::get_current_device_resource_ref());
-  auto result =
-    cudf::make_timestamp_column(cudf::data_type{cudf::type_to_id<cudf::timestamp_D>()},
-                                input.size(),
-                                cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                0,
-                                stream,
-                                mr);
-  auto validity =
-    rmm::device_uvector<bool>(num_rows, stream, cudf::get_current_device_resource_ref());
-
-  thrust::for_each_n(
-    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-    thrust::make_counting_iterator(0),
-    num_rows,
-    parse_string_to_date_fn{
-      *d_input, validity.begin(), result->mutable_view().begin<cudf::timestamp_D>()});
-
-  auto [output_bitmask, null_count] =
-    cudf::bools_to_mask(cudf::device_span<bool const>(validity), stream, mr);
-  if (null_count) { result->set_null_mask(std::move(*output_bitmask.release()), null_count); }
-
-  return result;
-}
-
 }  // anonymous namespace
 
 std::unique_ptr<cudf::column> parse_timestamp_strings(
@@ -1143,7 +929,7 @@ std::unique_ptr<cudf::column> parse_strings_to_date(cudf::strings_column_view co
                                                     cuda::stream_ref stream,
                                                     rmm::device_async_resource_ref mr)
 {
-  return parse_to_date(input, stream, mr);
+  return date_parse::parse_dates(input, date_parse::cast_parser{}, stream, mr);
 }
 
 }  // namespace spark_rapids_jni

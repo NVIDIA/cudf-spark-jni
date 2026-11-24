@@ -18,16 +18,18 @@
 #include "uuid.hpp"
 
 #include <cudf/column/column_factories.hpp>
-#include <cudf/detail/utilities/cuda.hpp>
-#include <cudf/detail/utilities/grid_1d.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
+#include <cuda/devices>
+#include <cuda/hierarchy>
 #include <cuda/stream>
+#include <cuda_runtime_api.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/sequence.h>
 
@@ -94,8 +96,8 @@ template <int block_size>
 __launch_bounds__(block_size) CUDF_KERNEL void generate_uuids_kernel(
   cudf::size_type const row_count, char* uuid_chars, curandState* state, int const num_states)
 {
-  auto const start_idx = cudf::detail::grid_1d::global_thread_id();
-  auto const stride    = cudf::detail::grid_1d::grid_stride();
+  auto const start_idx = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
+  auto const stride    = cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x;
 
   if (start_idx >= num_states) { return; }
 
@@ -138,8 +140,11 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
                std::overflow_error);
 
   constexpr int block_size = 128;
-  auto const num_sms       = cudf::detail::num_multiprocessors();
-  int num_blocks_per_sm    = -1;
+  int current_device       = 0;
+  CUDF_CUDA_TRY(cudaGetDevice(&current_device));
+  auto const num_sms =
+    cuda::device_attributes::multiprocessor_count(cuda::device_ref{current_device});
+  int num_blocks_per_sm = -1;
 
   // Calculate the maximum number of blocks per multiprocessor
   CUDF_CUDA_TRY(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -169,10 +174,11 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
   // generate chars for the UUIDs
   auto const num_chars = row_count * CHAR_COUNT_PER_UUID;
   rmm::device_uvector<char> chars(num_chars, stream, mr);
-  auto grid = cudf::detail::grid_1d(num_states, block_size);
-  generate_uuids_kernel<block_size>
-    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.get()>>>(
-      row_count, chars.data(), states.data(), num_states);
+  auto const num_blocks =
+    cuda::ceil_div(static_cast<cudf::thread_index_type>(num_states), block_size);
+  CUDF_EXPECTS(num_blocks > 0, "num_blocks must be > 0");
+  generate_uuids_kernel<block_size><<<num_blocks, block_size, 0, stream.get()>>>(
+    row_count, chars.data(), states.data(), num_states);
 
   return cudf::make_strings_column(
     row_count,

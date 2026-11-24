@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/convert/convert_floats.hpp>
 #include <cudf/strings/detail/convert/string_to_float.cuh>
@@ -28,6 +27,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/warp/warp_reduce.cuh>
+#include <cuda/cmath>
 #include <cuda/std/bit>
 #include <cuda/std/cassert>
 #include <cuda/std/cmath>
@@ -233,13 +233,20 @@ __device__ __inline__ double correctly_rounded_uint64_times_pow10(uint64_t digit
  *        responsible for the `_warp_lane == 0` guard around the call site.
  */
 template <typename T>
-__device__ __inline__ T default_double_path(uint64_t digits, int exp_ten, int sign)
+__device__ __inline__ T default_double_path(uint64_t digits, int64_t exp_ten, int sign)
 {
   double digitsf = sign >= 0 ? static_cast<double>(digits) : -static_cast<double>(digits);
 
   if (exp_ten > cuda::std::numeric_limits<double>::max_exponent10) {
     return sign >= 0 ? cuda::std::numeric_limits<T>::infinity()
                      : -cuda::std::numeric_limits<T>::infinity();
+  }
+
+  // Performance shortcut: UINT64_MAX * 1e-343 is about 1.84e-324, below half of double's
+  // denorm_min (about 2.47e-324), so round-to-nearest produces signed zero.
+  constexpr int minimum_nonzero_exponent = -343;
+  if (exp_ten <= minimum_nonzero_exponent) {
+    return sign >= 0 ? static_cast<T>(0) : -static_cast<T>(0);
   }
 
   // make sure we don't produce a subnormal number.
@@ -389,7 +396,7 @@ class string_to_float {
 
     // construct the final float value
     if (_warp_lane == 0) {
-      int const exp_ten = exp_base + manual_exp;
+      int64_t const exp_ten = static_cast<int64_t>(exp_base) + manual_exp;
 
       // Two output paths:
       //  - High-precision helper for the `digits > 2^53 AND |q| <= 19` window
@@ -398,9 +405,10 @@ class string_to_float {
       //  - Default path for everything else: float outputs, or doubles outside
       //    the helper window (small digits or large |q|).
       bool const helper_eligible = cuda::std::is_same_v<T, double> && (digits > (1ULL << 53)) &&
-                                   (cuda::std::abs(exp_ten) <= 19);
+                                   (exp_ten >= -19 && exp_ten <= 19);
       if (helper_eligible) {
-        _out[_row] = static_cast<T>(correctly_rounded_uint64_times_pow10(digits, exp_ten, sign));
+        _out[_row] = static_cast<T>(
+          correctly_rounded_uint64_times_pow10(digits, static_cast<int>(exp_ten), sign));
       } else {
         _out[_row] = default_double_path<T>(digits, exp_ten, sign);
       }
@@ -411,6 +419,16 @@ class string_to_float {
   static constexpr int max_safe_digits = 19;
 
  private:
+  __device__ __forceinline__ uint64_t
+  reduce_digits(char c, int num_digits, cub::WarpReduce<uint64_t>::TempStorage& temp_storage)
+  {
+    uint64_t const digit = _warp_lane < num_digits
+                             ? static_cast<uint64_t>(c - '0') * _ipow[(num_digits - _warp_lane) - 1]
+                             : 0;
+    return __shfl_sync(
+      0xffffffff, cub::WarpReduce<uint64_t>(temp_storage).Sum(digit, num_digits), 0);
+  }
+
   // shuffle down to remove whitespace
   __device__ void remove_leading_whitespace()
   {
@@ -641,15 +659,9 @@ class string_to_float {
         // add as many digits to the running sum as we can.
         int const safe_count = min(max_safe_digits - real_digits, num_chars);
 
-        // our local digit
-        uint64_t const digit = _warp_lane < safe_count ? static_cast<uint64_t>(_c - '0') *
-                                                           _ipow[(safe_count - _warp_lane) - 1]
-                                                       : 0;
-
         if (safe_count > 0) {
           // only lane 0 will have the real value so we need to shfl it to the rest of the threads.
-          digits = (digits * _ipow[safe_count]) +
-                   __shfl_sync(0xffffffff, WarpReduce(temp_storage).Sum(digit, safe_count), 0);
+          digits = (digits * _ipow[safe_count]) + reduce_digits(_c, safe_count, temp_storage);
           real_digits += safe_count;
         }
 
@@ -710,7 +722,7 @@ class string_to_float {
 
   // parse manually specified exponent.
   // potentially changes: valid
-  __device__ int parse_manual_exp()
+  __device__ int64_t parse_manual_exp()
   {
     typedef cub::WarpReduce<uint64_t> WarpReduce;
     __shared__ typename WarpReduce::TempStorage temp_storage;
@@ -718,47 +730,117 @@ class string_to_float {
     // if we still have chars left, the only thing legal now is a manual exponent.
     // eg:  E-10
     //
-    int manual_exp = 0;
+    uint64_t manual_exp = 0;
     if (_bpos < _blen) {
       // read some trailing chars.
 
       auto const exp_mask =
         __ballot_sync(0xffffffff, (_warp_lane == 0 && (_c == 'E' || _c == 'e')));
       if (!exp_mask) { return 0; }
-      auto const exp_sign_mask =
-        __ballot_sync(0xffffffff, (_warp_lane == 1 && (_c == '-' || _c == '+')));
-      auto const exp_sign =
-        exp_sign_mask ? __ballot_sync(0xffffffff, _warp_lane == 1 && _c == '-') ? -1 : 1 : 1;
-      auto const chars_to_skip = exp_sign_mask ? 2 : 1;
-      _c                       = __shfl_down_sync(0xffffffff, _c, chars_to_skip);
-      _bpos += chars_to_skip;
 
-      // the largest valid exponent for a double is 4 digits (3 for floats).
-      int const num_chars = min(4, _blen - _bpos);
+      // Keep the original single-pass path for the common case and extend it to the largest
+      // decimal width that is guaranteed to fit in int64_t. Confirm the exponent ends in this
+      // batch before taking this path; longer or split exponents use the arbitrary-length path.
+      constexpr int max_digits_per_step = 18;
+      int const chars_left              = _blen - _bpos;
+      // Broadcast the character after E once so every lane can derive both sign properties
+      // without separate warp ballots for "has sign" and "is negative".
+      char const fast_sign_char =
+        chars_left > 1 ? __shfl_sync(0xffffffff, _c, 1) : static_cast<char>(0);
+      bool const fast_has_sign = fast_sign_char == '-' || fast_sign_char == '+';
+      int const fast_exp_sign  = fast_sign_char == '-' ? -1 : 1;
+      int const chars_to_skip  = fast_has_sign ? 2 : 1;
+      int const num_chars      = chars_left - chars_to_skip;
+      if (num_chars > 0) {
+        auto const exponent_c = __shfl_down_sync(0xffffffff, _c, chars_to_skip);
+        auto const non_digit_mask =
+          __ballot_sync(0xffffffff, _warp_lane < num_chars && !is_digit(exponent_c));
+        auto const first_non_digit = __ffs(non_digit_mask);
+        int const num_digits       = first_non_digit > 0 ? first_non_digit - 1 : num_chars;
+        // With no terminator in this window, another window may contain more exponent digits.
+        bool const exponent_ends_in_batch = first_non_digit > 0 || _bstart + _blen == _len;
 
-      // handle any chars that are not actually digits
-      //
-      auto const non_digit_mask =
-        __ballot_sync(0xffffffff, _warp_lane < num_chars && !is_digit(_c));
-      auto const first_non_digit = __ffs(non_digit_mask);
+        if (num_digits > 0 && num_digits <= max_digits_per_step && exponent_ends_in_batch) {
+          uint64_t const fast_exp = reduce_digits(exponent_c, num_digits, temp_storage);
+          _c                      = __shfl_down_sync(0xffffffff, exponent_c, num_digits);
+          _bpos += chars_to_skip + num_digits;
+          return fast_exp_sign < 0 ? -static_cast<int64_t>(fast_exp)
+                                   : static_cast<int64_t>(fast_exp);
+        }
+      }
 
-      int const num_digits = first_non_digit > 0 ? first_non_digit - 1 : num_chars;
+      // Slow path: consume the exponent across as many 32-character warp windows as needed.
+      consume_chars(1);
 
-      if (num_digits == 0) {
+      int exp_sign = 1;
+      if (_bpos < _blen) {
+        auto const negative_mask = __ballot_sync(0xffffffff, _warp_lane == 0 && _c == '-');
+        auto const sign_mask =
+          __ballot_sync(0xffffffff, _warp_lane == 0 && (_c == '-' || _c == '+'));
+        if (sign_mask) {
+          exp_sign = negative_mask ? -1 : 1;
+          consume_chars(1);
+        }
+      }
+
+      bool seen_digit = false;
+      // Saturate while leaving enough headroom to add exp_base without overflowing int64_t.
+      constexpr uint64_t max_manual_exp =
+        static_cast<uint64_t>(cuda::std::numeric_limits<int64_t>::max()) -
+        static_cast<uint64_t>(cuda::std::numeric_limits<size_type>::max());
+
+      while (_bpos < _blen) {
+        int const num_chars = _blen - _bpos;
+        auto const non_digit_mask =
+          __ballot_sync(0xffffffff, _warp_lane < num_chars && !is_digit(_c));
+        auto const first_non_digit = __ffs(non_digit_mask);
+        int const num_digits       = first_non_digit > 0 ? first_non_digit - 1 : num_chars;
+        if (num_digits == 0) { break; }
+
+        int const step_size       = min(max_digits_per_step, num_digits);
+        uint64_t const step_value = reduce_digits(_c, step_size, temp_storage);
+        if (!seen_digit) {
+          // Any 18-digit value fits below max_manual_exp, so the first step cannot overflow.
+          manual_exp = step_value;
+          seen_digit = true;
+        } else {
+          uint64_t const scale = _ipow[step_size];
+          manual_exp           = manual_exp > (max_manual_exp - step_value) / scale
+                                   ? max_manual_exp
+                                   : manual_exp * scale + step_value;
+        }
+        consume_chars(step_size);
+
+        if (step_size == num_digits && first_non_digit > 0) { break; }
+      }
+
+      if (!seen_digit) {
         _valid  = false;
         _except = true;
         return 0;
       }
 
-      uint64_t const digit = _warp_lane < num_digits ? static_cast<uint64_t>(_c - '0') *
-                                                         _ipow[(num_digits - _warp_lane) - 1]
-                                                     : 0;
-      manual_exp           = WarpReduce(temp_storage).Sum(digit, num_digits) * exp_sign;
-      _c                   = __shfl_down_sync(0xffffffff, _c, num_digits);
-      _bpos += num_digits;
+      return exp_sign < 0 ? -static_cast<int64_t>(manual_exp) : static_cast<int64_t>(manual_exp);
     }
 
-    return manual_exp;
+    return 0;
+  }
+
+  // Advance within a row's 32-character warp window, loading the next window at its boundary.
+  __device__ void consume_chars(int count)
+  {
+    _bpos += count;
+    if (_bpos == _blen) {
+      auto const next_batch_start = _bstart + _blen;
+      if (next_batch_start < _len) {
+        _bstart = next_batch_start;
+        _bpos   = 0;
+        _blen   = min(32, _len - _bstart);
+        _c      = _warp_lane < _blen ? _chars[_row_start + _bstart + _warp_lane] : 0;
+      }
+    } else {
+      _c = __shfl_down_sync(0xffffffff, _c, count);
+    }
   }
 
   __device__ void check_trailing_bytes()
@@ -768,10 +850,7 @@ class string_to_float {
       // f is a valid character at the end of a float string
       auto const f_mask = __ballot_sync(
         0xffffffff, (_warp_lane == 0 && (_c == 'F' || _c == 'f' || _c == 'd' || _c == 'D')));
-      if (f_mask > 0) {
-        _c = __shfl_down_sync(0xffffffff, _c, 1);
-        _bpos++;
-      }
+      if (f_mask > 0) { consume_chars(1); }
     }
 
     // nothing trailing
@@ -894,6 +973,12 @@ std::unique_ptr<column> string_to_float(data_type dtype,
                "invalid float data type");
   if (string_col.size() == 0) { return cudf::make_empty_column(dtype); }
 
+  if (string_col.offset() != 0) {
+    auto const normalized = std::make_unique<cudf::column>(
+      string_col.parent(), stream, cudf::get_current_device_resource_ref());
+    return string_to_float(dtype, strings_column_view{normalized->view()}, ansi_mode, stream, mr);
+  }
+
   auto out = cudf::make_numeric_column(dtype, string_col.size(), mask_state::ALL_NULL, stream, mr);
 
   using ScalarType = cudf::scalar_type_t<size_type>;
@@ -904,8 +989,8 @@ std::unique_ptr<column> string_to_float(data_type dtype,
 
   constexpr auto warps_per_block = 8;
   constexpr auto rows_per_block  = warps_per_block;
-  auto const num_blocks = cudf::util::div_rounding_up_safe(string_col.size(), rows_per_block);
-  auto const num_rows   = string_col.size();
+  auto const num_blocks          = cuda::ceil_div(string_col.size(), rows_per_block);
+  auto const num_rows            = string_col.size();
 
   if (dtype == data_type{type_id::FLOAT32}) {
     detail::string_to_float_kernel<float, warps_per_block * 32>

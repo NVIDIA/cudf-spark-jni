@@ -21,8 +21,6 @@
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/grid_1d.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/scalar/scalar.hpp>
@@ -37,6 +35,8 @@
 
 #include <cuco/detail/hyperloglog/finalizer.cuh>
 #include <cuda/atomic>
+#include <cuda/cmath>
+#include <cuda/hierarchy>
 #include <cuda/std/__algorithm/min.h>  // TODO #include <cuda/std/algorithm> once available
 #include <cuda/std/bit>
 #include <cuda/stream>
@@ -182,7 +182,7 @@ __launch_bounds__(block_size) CUDF_KERNEL void partial_group_sketches_from_hashs
   cudf::size_type* const group_labels_thread_cache  // save the group labels for each thread
 )
 {
-  auto const tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const tid          = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   int64_t const num_hashs = hashs.size();
   if (tid * num_hashs_per_thread >= hashs.size()) { return; }
 
@@ -303,7 +303,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
                                  cudf::size_type const* const group_labels_thread_cache)
 {
   __shared__ int8_t shared_data[block_size];
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   if (tid >= num_registers_per_sketch) { return; }
   int shared_idx = tid % block_size;
 
@@ -371,7 +371,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
                       // num_groups * num_registers_per_sketch integers
                       cudf::device_span<int> registers_output_cache)
 {
-  int64_t const tid           = cudf::detail::grid_1d::global_thread_id();
+  int64_t const tid           = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   int64_t const num_long_cols = num_registers_per_sketch / REGISTERS_PER_LONG + 1;
   if (tid >= num_groups * num_long_cols) { return; }
 
@@ -403,8 +403,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
   int64_t num_registers_per_sketch   = 1 << precision;
   constexpr int64_t block_size       = 256;
   constexpr int num_hashs_per_thread = 256;  // handles 256 items per thread
-  int64_t num_threads_partial_kernel =
-    cudf::util::div_rounding_up_safe(input.size(), num_hashs_per_thread);
+  int64_t num_threads_partial_kernel = cuda::ceil_div(input.size(), num_hashs_per_thread);
 
   auto const default_mr = cudf::get_current_device_resource_ref();
   auto sketches_output =
@@ -425,8 +424,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
       auto d_hashs = cudf::column_device_view::create(hash_col->view(), stream, default_mr);
 
       // 2. execute partial group by
-      int64_t num_blocks_p1 =
-        cudf::util::div_rounding_up_safe(num_threads_partial_kernel, block_size);
+      int64_t num_blocks_p1 = cuda::ceil_div(num_threads_partial_kernel, block_size);
       partial_group_sketches_from_hashs_kernel<block_size, num_hashs_per_thread>
         <<<num_blocks_p1, block_size, 0, stream.get()>>>(*d_hashs,
                                                          group_labels,
@@ -437,7 +435,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
     }
     // 3. merge the intermidate result
     auto num_merge_threads = num_registers_per_sketch;
-    auto num_merge_blocks  = cudf::util::div_rounding_up_safe(num_merge_threads, block_size);
+    auto num_merge_blocks  = cuda::ceil_div(num_merge_threads, block_size);
     merge_sketches_vertically<block_size>
       <<<num_merge_blocks, block_size, block_size, stream.get()>>>(
         num_threads_partial_kernel,  // num_sketches
@@ -473,7 +471,7 @@ std::unique_ptr<cudf::column> group_hllpp(cudf::column_view const& input,
 
   // 5. compact sketches
   auto num_phase3_threads = num_groups * num_long_cols;
-  auto num_phase3_blocks  = cudf::util::div_rounding_up_safe(num_phase3_threads, block_size);
+  auto num_phase3_blocks  = cuda::ceil_div(num_phase3_threads, block_size);
   compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.get()>>>(
     num_groups, num_registers_per_sketch, d_results, sketches_output);
 
@@ -518,7 +516,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
                                           // num_threads integers
                                           cudf::size_type* const group_labels_thread_cache)
 {
-  auto const tid           = cudf::detail::grid_1d::global_thread_id();
+  auto const tid           = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   auto const num_long_cols = sketches_input.size();
   if (tid >= num_threads_per_col * num_long_cols) { return; }
 
@@ -600,11 +598,10 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
   constexpr int64_t num_longs_per_threads = 256;
   constexpr int64_t block_size            = 256;
 
-  int64_t num_threads_per_col_phase1 =
-    cudf::util::div_rounding_up_safe(num_sketches, num_longs_per_threads);
-  int64_t num_threads_phase1 = num_threads_per_col_phase1 * num_long_cols;
-  int64_t num_blocks         = cudf::util::div_rounding_up_safe(num_threads_phase1, block_size);
-  auto const default_mr      = cudf::get_current_device_resource_ref();
+  int64_t num_threads_per_col_phase1 = cuda::ceil_div(num_sketches, num_longs_per_threads);
+  int64_t num_threads_phase1         = num_threads_per_col_phase1 * num_long_cols;
+  int64_t num_blocks                 = cuda::ceil_div(num_threads_phase1, block_size);
+  auto const default_mr              = cudf::get_current_device_resource_ref();
   auto registers_output_cache =
     rmm::device_uvector<int32_t>(num_registers_per_sketch * num_groups, stream, default_mr);
   {
@@ -630,7 +627,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
                                                     registers_thread_cache.begin(),
                                                     group_labels_thread_cache.begin());
     auto const num_phase2_threads = num_registers_per_sketch;
-    auto const num_phase2_blocks = cudf::util::div_rounding_up_safe(num_phase2_threads, block_size);
+    auto const num_phase2_blocks  = cuda::ceil_div(num_phase2_threads, block_size);
     // 2nd kernel: vertical merge
     merge_sketches_vertically<block_size>
       <<<num_phase2_blocks, block_size, block_size, stream.get()>>>(
@@ -660,7 +657,7 @@ std::unique_ptr<cudf::column> group_merge_hllpp(
 
   // 3rd kernel: compact
   auto num_phase3_threads = num_groups * num_long_cols;
-  auto num_phase3_blocks  = cudf::util::div_rounding_up_safe(num_phase3_threads, block_size);
+  auto num_phase3_blocks  = cuda::ceil_div(num_phase3_threads, block_size);
   compact_kernel<block_size><<<num_phase3_blocks, block_size, 0, stream.get()>>>(
     num_groups, num_registers_per_sketch, d_sketches_output, registers_output_cache);
 
@@ -683,8 +680,8 @@ __launch_bounds__(block_size) CUDF_KERNEL
   extern __shared__ int32_t shared_mem_cache[];
   int32_t* cache = mem_cache != nullptr ? mem_cache : shared_mem_cache;
 
-  auto const tid                          = cudf::detail::grid_1d::global_thread_id();
-  auto const num_hashs                    = hashs.size();
+  auto const tid       = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
+  auto const num_hashs = hashs.size();
   uint64_t const num_registers_per_sketch = 1L << precision;
   int const idx_shift                     = 64 - precision;
   uint64_t const w_padding                = 1ULL << (precision - 1);
@@ -789,7 +786,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
                                           int num_registers_per_sketch,
                                           int* const output)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
   if (tid >= num_registers_per_sketch) { return; }
   auto long_idx        = tid / REGISTERS_PER_LONG;
   auto reg_idx_in_long = tid % REGISTERS_PER_LONG;
@@ -838,14 +835,14 @@ std::unique_ptr<cudf::scalar> reduce_merge_hllpp(cudf::column_view const& input,
   // execute merge kernel
   auto num_threads             = num_registers_per_sketch;
   constexpr int64_t block_size = 256;
-  auto num_blocks              = cudf::util::div_rounding_up_safe(num_threads, block_size);
+  auto num_blocks              = cuda::ceil_div(num_threads, block_size);
   auto output_cache = rmm::device_uvector<int32_t>(num_registers_per_sketch, stream, default_mr);
   reduce_merge_hll_kernel_vertically<block_size><<<num_blocks, block_size, 0, stream.get()>>>(
     d_inputs, input.size(), num_registers_per_sketch, output_cache.begin());
 
   // compact to longs
   auto const num_compact_threads = num_long_cols;
-  auto const num_compact_blocks = cudf::util::div_rounding_up_safe(num_compact_threads, block_size);
+  auto const num_compact_blocks  = cuda::ceil_div(num_compact_threads, block_size);
   compact_kernel<block_size><<<num_compact_blocks, block_size, 0, stream.get()>>>(
     1 /** num_groups **/, num_registers_per_sketch, d_results, output_cache);
 

@@ -21,7 +21,6 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/valid_if.cuh>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/null_mask.hpp>
@@ -39,6 +38,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/device/device_reduce.cuh>
+#include <cuda/cmath>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/scan.h>
@@ -188,7 +188,7 @@ phase1_state_summary run_phase1_state(cudf::column_view const& input,
   // ── Phase 1: per-row state collection ──────────────────────────────────────
   {
     constexpr int block_size = 256;
-    auto const grid_size     = cudf::util::div_rounding_up_safe(num_rows, block_size);
+    auto const grid_size     = cuda::ceil_div(num_rows, block_size);
     compute_row_state_kernel<<<grid_size, block_size, 0, stream.get()>>>(input.null_mask(),
                                                                          lists_cv.offsets_begin(),
                                                                          structs.null_mask(),
@@ -316,7 +316,7 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   rmm::device_uvector<cudf::size_type> gather_map(total_entries, stream, temp_mr);
   {
     constexpr int block_size = 256;
-    auto const grid_size     = cudf::util::div_rounding_up_safe(num_rows, block_size);
+    auto const grid_size     = cuda::ceil_div(num_rows, block_size);
     build_gather_map_kernel<<<grid_size, block_size, 0, stream.get()>>>(p1.row_state.data(),
                                                                         lists_cv.offsets_begin(),
                                                                         out_offsets.data(),

@@ -57,8 +57,12 @@ std::unique_ptr<column> generate_labels(
   auto labels = make_numeric_column(
     data_type(type_to_id<size_type>()), n_elements, cudf::mask_state::UNALLOCATED, stream, mr);
   auto const labels_begin = labels->mutable_view().template begin<size_type>();
-  cudf::detail::label_segments(
-    input.offsets_begin(), input.offsets_end(), labels_begin, labels_begin + n_elements, stream);
+  cudf::detail::label_segments(input.offsets_begin(),
+                               input.offsets_end(),
+                               labels_begin,
+                               labels_begin + n_elements,
+                               stream,
+                               cudf::get_current_device_resource_ref());
   return labels;
 }
 
@@ -238,7 +242,8 @@ std::unique_ptr<column> indices_of(
                                values_sizes_offsets->view().end<size_type>(),
                                d_key_index,
                                d_key_index + total_compares,
-                               stream);
+                               stream,
+                               cudf::get_current_device_resource_ref());
 
   // Create an array that maps each comparison to its corresponding value list
   // This tells us which value list we're comparing against
@@ -249,7 +254,8 @@ std::unique_ptr<column> indices_of(
                                d_total_compares_offsets + num_lists + 1,
                                d_val_offsets,
                                d_val_offsets + total_compares,
-                               stream);
+                               stream,
+                               cudf::get_current_device_resource_ref());
 
   // Calculate the index of the value within its list for each comparison
   // This gives us the specific value position we're comparing against

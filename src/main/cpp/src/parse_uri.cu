@@ -20,7 +20,6 @@
 
 #include <cudf/copying.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
 #include <cudf/null_mask.hpp>
@@ -34,7 +33,9 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/cmath>
 #include <cuda/functional>
+#include <cuda/hierarchy>
 #include <cuda/std/optional>
 #include <cuda/std/utility>
 #include <cuda/stream>
@@ -790,10 +791,10 @@ CUDF_KERNEL void parse_uri_char_counter(column_device_view const in_strings,
                                         cuda::std::optional<column_device_view const> query_match)
 {
   // thread per row
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
 
   for (thread_index_type tidx = tid; tidx < in_strings.size();
-       tidx += cudf::detail::grid_1d::grid_stride()) {
+       tidx += cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x) {
     auto const row_idx = static_cast<size_type>(tidx);
     if (in_strings.is_null(row_idx)) {
       out_lengths[row_idx] = 0;
@@ -867,10 +868,10 @@ CUDF_KERNEL void parse_uri(column_device_view const in_strings,
                            size_type const* const offsets,
                            char* const out_chars)
 {
-  auto const tid = cudf::detail::grid_1d::global_thread_id();
+  auto const tid = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
 
   for (thread_index_type tidx = tid; tidx < in_strings.size();
-       tidx += cudf::detail::grid_1d::grid_stride()) {
+       tidx += cuda::gpu_thread.dims_as<cudf::thread_index_type>(cuda::grid).x) {
     auto const row_idx = static_cast<size_type>(tidx);
     auto const len     = offsets[row_idx + 1] - offsets[row_idx];
 
@@ -896,7 +897,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   constexpr size_type num_warps_per_threadblock = 4;
   constexpr size_type threadblock_size = num_warps_per_threadblock * cudf::detail::warp_size;
   auto const num_threadblocks =
-    std::min(65536, cudf::util::div_rounding_up_unsafe(strings_count, num_warps_per_threadblock));
+    std::min(65536, cuda::ceil_div(strings_count, num_warps_per_threadblock));
 
   auto offset_count    = strings_count + 1;
   auto const d_strings = column_device_view::create(input.parent(), stream);
@@ -912,7 +913,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
   auto src_offsets = rmm::device_uvector<size_type>(strings_count, stream);
 
   // copy null mask
-  cuda::device_buffer<std::byte> null_mask =
+  cuda::device_buffer<cudf::bitmask_type> null_mask =
     input.parent().nullable()
       ? cudf::copy_bitmask(input.parent(), stream, mr)
       : cudf::create_null_mask(input.size(), mask_state::ALL_VALID, stream, mr);

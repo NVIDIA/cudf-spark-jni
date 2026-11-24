@@ -50,7 +50,7 @@ def main():
             sha = exist[0].get('head').get('sha')
         else:
             params = {
-                'title': f"[submodule-sync] {pr.head} to {pr.base} [skip ci] [bot]",
+                'title': f"[submodule-sync] {pr.head} to {pr.base} [bot]",
                 'head': f"{pr.head_owner}:{pr.head}",
                 'base': pr.base,
                 'body': "submodule-sync to create a PR keeping thirdparty/cudf up-to-date.\n"

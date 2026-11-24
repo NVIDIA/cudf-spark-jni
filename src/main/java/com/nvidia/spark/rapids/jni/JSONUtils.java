@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,39 @@ public class JSONUtils {
 
   public static final int MAX_PATH_DEPTH = getMaxJSONPathDepth();
 
+  // BigDecimal parses UTF-16 code units using the active JVM's digit table. Unicode versions
+  // differ across Java releases, so the native decimal conversion must use this same table.
+  private static final byte[] DECIMAL_DIGIT_VALUES = createDecimalDigitValues();
+
+  private static byte[] createDecimalDigitValues() {
+    byte[] values = new byte[Character.MAX_VALUE + 1];
+    for (int codeUnit = Character.MIN_VALUE; codeUnit <= Character.MAX_VALUE; ++codeUnit) {
+      char character = (char) codeUnit;
+      values[codeUnit] = (byte) (Character.isDigit(character)
+          ? Character.digit(character, 10) : -1);
+    }
+    return values;
+  }
+
   public enum PathInstructionType {
     WILDCARD,
     INDEX,
     NAMED
+  }
+
+  /**
+   * Additional named-field selection policy for Spark json_tuple.
+   * {@link #LAST_NON_NULL} selects the last non-null occurrence of a top-level field and
+   * requires paths containing exactly one {@code NAMED} instruction.
+   */
+  public enum NamedFieldMatchPolicy {
+    LAST_NON_NULL(1);
+
+    private final int nativeId;
+
+    NamedFieldMatchPolicy(int nativeId) {
+      this.nativeId = nativeId;
+    }
   }
 
   public static class PathInstructionJni {
@@ -90,6 +119,24 @@ public class JSONUtils {
   }
 
   /**
+   * Extract multiple JSON paths from a JSON column using the requested named-field match policy.
+   * {@link NamedFieldMatchPolicy#LAST_NON_NULL} supports paths containing exactly one
+   * {@code NAMED} instruction and implements Spark json_tuple field selection.
+   *
+   * @param input the string column containing JSON
+   * @param paths the instructions for multiple paths
+   * @param matchPolicy the policy for selecting duplicate named fields
+   * @return the result of processing each path in the order that they were passed in
+   * @throws IllegalArgumentException if {@code matchPolicy} is null or does not support a path
+   */
+  public static ColumnVector[] getJsonObjectMultiplePaths(
+      ColumnVector input,
+      List<List<PathInstructionJni>> paths,
+      NamedFieldMatchPolicy matchPolicy) {
+    return getJsonObjectMultiplePaths(input, paths, -1, -1, matchPolicy);
+  }
+
+  /**
    * Extract multiple JSON paths from a JSON column. The paths are processed in a Spark
    * compatible way.
    * @param input the string column containing JSON
@@ -107,6 +154,55 @@ public class JSONUtils {
                                                           List<List<PathInstructionJni>> paths,
                                                           long memoryBudgetBytes,
                                                           int parallelOverride) {
+    return getJsonObjectMultiplePathsInternal(
+        input, paths, memoryBudgetBytes, parallelOverride, null);
+  }
+
+  /**
+   * Extract multiple JSON paths from a JSON column using the requested named-field match policy.
+   * {@link NamedFieldMatchPolicy#LAST_NON_NULL} supports paths containing exactly one
+   * {@code NAMED} instruction and implements Spark json_tuple field selection.
+   *
+   * @param input the string column containing JSON
+   * @param paths the instructions for multiple paths
+   * @param memoryBudgetBytes a soft limit on temporary memory use, or a value {@code <= 0} to
+   *                          process all paths in parallel
+   * @param parallelOverride maximum paths to process in parallel, or a value {@code <= 0} to
+   *                         disable the override
+   * @param matchPolicy the policy for selecting duplicate named fields
+   * @return the result of processing each path in the order that they were passed in
+   * @throws IllegalArgumentException if {@code matchPolicy} is null or does not support a path
+   */
+  public static ColumnVector[] getJsonObjectMultiplePaths(
+      ColumnVector input,
+      List<List<PathInstructionJni>> paths,
+      long memoryBudgetBytes,
+      int parallelOverride,
+      NamedFieldMatchPolicy matchPolicy) {
+    if (matchPolicy == null) {
+      throw new IllegalArgumentException("matchPolicy must not be null");
+    }
+    validateLastNonNullPaths(paths);
+    return getJsonObjectMultiplePathsInternal(
+        input, paths, memoryBudgetBytes, parallelOverride, matchPolicy);
+  }
+
+  private static void validateLastNonNullPaths(List<List<PathInstructionJni>> paths) {
+    for (List<PathInstructionJni> path : paths) {
+      if (path.size() != 1 ||
+          path.get(0).type != (byte) PathInstructionType.NAMED.ordinal()) {
+        throw new IllegalArgumentException(
+            "LAST_NON_NULL requires paths containing exactly one named instruction");
+      }
+    }
+  }
+
+  private static ColumnVector[] getJsonObjectMultiplePathsInternal(
+      ColumnVector input,
+      List<List<PathInstructionJni>> paths,
+      long memoryBudgetBytes,
+      int parallelOverride,
+      NamedFieldMatchPolicy matchPolicy) {
     assert (input.getType().equals(DType.STRING)) : "Input must be of STRING type";
     int[] pathOffsets = new int[paths.size() + 1];
     int offset = 0;
@@ -128,8 +224,14 @@ public class JSONUtils {
         indexes[pathOffsets[i] + j] = current.index;
       }
     }
-    long[] ptrs = getJsonObjectMultiplePaths(input.getNativeView(), typeNums,
-        names, indexes, pathOffsets, memoryBudgetBytes, parallelOverride);
+    long[] ptrs;
+    if (matchPolicy != null) {
+      ptrs = getJsonObjectMultiplePathsWithMatchPolicy(input.getNativeView(), typeNums,
+          names, indexes, pathOffsets, memoryBudgetBytes, parallelOverride, matchPolicy.nativeId);
+    } else {
+      ptrs = getJsonObjectMultiplePaths(input.getNativeView(), typeNums,
+          names, indexes, pathOffsets, memoryBudgetBytes, parallelOverride);
+    }
     ColumnVector[] ret = new ColumnVector[ptrs.length];
     for (int i = 0; i < ptrs.length; i++) {
       ret[i] = new ColumnVector(ptrs[i]);
@@ -271,7 +373,8 @@ public class JSONUtils {
         opts.leadingZerosAllowed(),
         opts.nonNumericNumbersAllowed(),
         opts.unquotedControlChars(),
-        isUSLocale));
+        isUSLocale,
+        DECIMAL_DIGIT_VALUES));
   }
 
   /**
@@ -295,7 +398,8 @@ public class JSONUtils {
         schema.getFlattenedTypeScales(),
         schema.getFlattenedDecimalPrecisions(),
         allowedNonNumericNumbers,
-        isUSLocale));
+        isUSLocale,
+        DECIMAL_DIGIT_VALUES));
   }
 
   /**
@@ -328,6 +432,16 @@ public class JSONUtils {
                                                           long memoryBudgetBytes,
                                                           int parallelOverride);
 
+  private static native long[] getJsonObjectMultiplePathsWithMatchPolicy(
+      long input,
+      byte[] typeNums,
+      String[] names,
+      int[] indexes,
+      int[] pathOffsets,
+      long memoryBudgetBytes,
+      int parallelOverride,
+      int matchPolicy);
+
   private static native long extractRawMapFromJsonString(long input,
                                                          boolean normalizeSingleQuotes,
                                                          boolean leadingZerosAllowed,
@@ -350,7 +464,8 @@ public class JSONUtils {
                                                boolean leadingZerosAllowed,
                                                boolean nonNumericNumbersAllowed,
                                                boolean unquotedControlChars,
-                                               boolean isUSLocale);
+                                               boolean isUSLocale,
+                                               byte[] decimalDigitValues);
 
   private static native long convertFromStrings(long input,
                                                 int[] numChildren,
@@ -358,7 +473,8 @@ public class JSONUtils {
                                                 int[] typeScales,
                                                 int[] typePrecision,
                                                 boolean nonNumericNumbersAllowed,
-                                                boolean isUSLocale);
+                                                boolean isUSLocale,
+                                                byte[] decimalDigitValues);
 
   private static native long removeQuotes(long input, boolean nullifyIfNotQuoted);
 }

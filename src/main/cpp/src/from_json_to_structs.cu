@@ -18,6 +18,7 @@
 #include "json_utils.hpp"
 #include "nvtx_ranges.hpp"
 #include "utilities/iterator.cuh"
+#include "utilities/utf8.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
@@ -33,6 +34,7 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/memory_resource.hpp>
+#include <cudf/utilities/span.hpp>
 #include <cudf/utilities/traits.hpp>
 
 #include <rmm/device_buffer.hpp>
@@ -46,6 +48,7 @@
 #include <cuda/std/tuple>
 #include <cuda/std/utility>
 #include <cuda/stream>
+#include <cuda_runtime.h>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/zip_iterator.h>
@@ -54,16 +57,64 @@
 #include <thrust/uninitialized_fill.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace spark_rapids_jni {
 
 namespace detail {
 
 namespace {
+
+constexpr std::size_t decimal_digit_value_count       = 1ULL << 16;
+constexpr std::size_t packed_decimal_digit_table_size = decimal_digit_value_count / 2;
+constexpr uint8_t decimal_digit_value_mask            = 0x0F;
+constexpr uint8_t invalid_decimal_digit               = 0x0F;
+
+// cuDF for Apache Spark uses one CUDA context. Initialize the active JVM's digit table once in
+// constant memory, without creating a persistent RMM allocation that could outlive RMM teardown.
+__constant__ uint8_t packed_decimal_digit_values_device[packed_decimal_digit_table_size];
+
+std::once_flag decimal_digit_table_init_flag;
+
+void initialize_decimal_digit_table(std::vector<int> const& types,
+                                    std::span<int8_t const> decimal_digit_values,
+                                    cuda::stream_ref stream)
+{
+  auto const has_decimal = std::any_of(types.begin(), types.end(), [](auto const type) {
+    return cudf::is_fixed_point(cudf::data_type{static_cast<cudf::type_id>(type)});
+  });
+  if (!has_decimal) { return; }
+
+  CUDF_EXPECTS(decimal_digit_values.size() == decimal_digit_value_count,
+               "Expected one decimal digit value for each UTF-16 code unit.");
+
+  std::call_once(decimal_digit_table_init_flag, [decimal_digit_values, stream] {
+    std::vector<uint8_t> packed_values(packed_decimal_digit_table_size);
+    for (std::size_t index = 0; index < decimal_digit_value_count; index += 2) {
+      auto const encode = [](int8_t value) {
+        return value >= 0 && value <= 9 ? static_cast<uint8_t>(value) : invalid_decimal_digit;
+      };
+      packed_values[index / 2] =
+        encode(decimal_digit_values[index]) | (encode(decimal_digit_values[index + 1]) << 4);
+    }
+    CUDF_CUDA_TRY(cudaMemcpyToSymbolAsync(packed_decimal_digit_values_device,
+                                          packed_values.data(),
+                                          packed_values.size(),
+                                          0,
+                                          cudaMemcpyDefault,
+                                          stream.get()));
+    // Finish the one-time upload before a conversion on another stream can use the table.
+    CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+  });
+}
 
 /**
  * @brief The struct similar to `cudf::io::schema_element` with adding decimal precision and
@@ -270,7 +321,7 @@ void nullify_rows(cudf::column& input,
   std::unique_ptr<cudf::column> offsets_column,
   std::unique_ptr<cudf::column> child_column,
   cudf::size_type null_count,
-  cuda::device_buffer<std::byte>&& null_mask,
+  cuda::device_buffer<cudf::bitmask_type>&& null_mask,
   bool did_nullify_schema_mismatch_rows,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -296,7 +347,7 @@ void nullify_rows(cudf::column& input,
   cudf::size_type num_rows,
   std::vector<std::unique_ptr<cudf::column>>&& children,
   cudf::size_type null_count,
-  cuda::device_buffer<std::byte>&& null_mask,
+  cuda::device_buffer<cudf::bitmask_type>&& null_mask,
   bool did_nullify_schema_mismatch_rows,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
@@ -317,6 +368,24 @@ void nullify_rows(cudf::column& input,
 
 using string_index_pair = cuda::std::pair<char const*, cudf::size_type>;
 
+/**
+ * @brief Convert a BMP Unicode decimal digit to its ASCII equivalent.
+ *
+ * Use the digit values computed by the active JVM, since Character's Unicode version varies
+ * between Java releases. Supplementary code points are excluded by the UTF-16 char contract.
+ *
+ * @return The ASCII digit, or `\0` if `character` is not a supported decimal digit.
+ */
+__device__ char unicode_decimal_digit_to_ascii(cudf::char_utf8 character)
+{
+  auto const code_point = spark_rapids_jni::util::utf8_to_codepoint(character);
+  if (code_point > 0x00'FFFF) { return '\0'; }
+  auto const packed_values = packed_decimal_digit_values_device[code_point / 2];
+  auto const digit =
+    code_point % 2 == 0 ? packed_values & decimal_digit_value_mask : packed_values >> 4;
+  return digit >= 0 && digit <= 9 ? static_cast<char>('0' + digit) : '\0';
+}
+
 std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& input,
                                                        cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref mr)
@@ -332,7 +401,7 @@ std::unique_ptr<cudf::column> cast_strings_to_booleans(cudf::column_view const& 
 
   auto const input_sv = cudf::strings_column_view{input};
   auto const offsets_it =
-    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets()) + input_sv.offset();
   auto const d_input_ptr =
     cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
@@ -385,7 +454,7 @@ std::unique_ptr<cudf::column> cast_strings_to_integers(cudf::column_view const& 
 
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
-    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets()) + input_sv.offset();
   auto const d_input_ptr =
     cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const valid_input_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
@@ -452,7 +521,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
 
   auto const input_sv = cudf::strings_column_view{input};
   auto const input_offsets_it =
-    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets()) + input_sv.offset();
   auto const d_input_ptr =
     cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
@@ -551,7 +620,6 @@ std::unique_ptr<cudf::column> cast_strings_to_floats(cudf::column_view const& in
     output_type, cudf::strings_column_view{input}, /*ansi_mode*/ false, stream, mr);
 }
 
-// TODO there is a bug here around 0 https://github.com/NVIDIA/cudf-spark/issues/10898
 std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& input,
                                                        cudf::data_type output_type,
                                                        int precision,
@@ -568,32 +636,44 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 
   auto const input_sv = cudf::strings_column_view{input};
   auto const in_offsets =
-    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input_sv.offsets()) + input_sv.offset();
 
   // Count the number of characters `"`.
   rmm::device_uvector<int8_t> quote_counts(string_count, stream);
   // Count the number of characters `"` and `,` in each string.
   rmm::device_uvector<int8_t> remove_counts(string_count, stream);
+  // Count the bytes removed when replacing multi-byte Unicode decimal digits with ASCII digits.
+  rmm::device_uvector<cudf::size_type> digit_byte_reductions(string_count, stream);
 
   {
-    using count_type    = cuda::std::tuple<int8_t, int8_t>;
+    using count_type    = cuda::std::tuple<int8_t, int8_t, cudf::size_type>;
     auto const check_it = spark_rapids_jni::util::make_counting_transform_iterator(
       0,
-      cuda::proclaim_return_type<count_type>(
-        [chars = input_sv.chars_begin(stream)] __device__(auto idx) {
-          auto const c             = chars[idx];
-          auto const is_quote      = c == '"';
-          auto const should_remove = is_quote || c == ',';
-          return count_type{static_cast<int8_t>(is_quote), static_cast<int8_t>(should_remove)};
-        }));
+      cuda::proclaim_return_type<count_type>([chars =
+                                                input_sv.chars_begin(stream)] __device__(auto idx) {
+        auto const byte                      = chars[idx];
+        auto const is_quote                  = byte == '"';
+        auto const should_remove             = is_quote || byte == ',';
+        cudf::size_type digit_byte_reduction = 0;
+        if (!spark_rapids_jni::util::is_utf8_continuation_char(static_cast<unsigned char>(byte))) {
+          cudf::char_utf8 character;
+          auto const character_width = spark_rapids_jni::util::to_char_utf8(chars + idx, character);
+          if (character_width > 1 && unicode_decimal_digit_to_ascii(character) != '\0') {
+            digit_byte_reduction = character_width - 1;
+          }
+        }
+        return count_type{
+          static_cast<int8_t>(is_quote), static_cast<int8_t>(should_remove), digit_byte_reduction};
+      }));
     auto const plus_op =
       cuda::proclaim_return_type<count_type>([] __device__(count_type lhs, count_type rhs) {
         return count_type{cuda::std::get<0>(lhs) + cuda::std::get<0>(rhs),
-                          cuda::std::get<1>(lhs) + cuda::std::get<1>(rhs)};
+                          cuda::std::get<1>(lhs) + cuda::std::get<1>(rhs),
+                          cuda::std::get<2>(lhs) + cuda::std::get<2>(rhs)};
       });
 
-    auto const out_count_it =
-      thrust::make_zip_iterator(quote_counts.begin(), remove_counts.begin());
+    auto const out_count_it = thrust::make_zip_iterator(
+      quote_counts.begin(), remove_counts.begin(), digit_byte_reductions.begin());
 
     std::size_t temp_storage_bytes = 0;
     cub::DeviceSegmentedReduce::Reduce(nullptr,
@@ -604,7 +684,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                        in_offsets,
                                        in_offsets + 1,
                                        plus_op,
-                                       count_type{0, 0},
+                                       count_type{0, 0, 0},
                                        stream.get());
     auto d_temp_storage = rmm::device_buffer{temp_storage_bytes, stream};
     cub::DeviceSegmentedReduce::Reduce(d_temp_storage.data(),
@@ -615,34 +695,40 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                                        in_offsets,
                                        in_offsets + 1,
                                        plus_op,
-                                       count_type{0, 0},
+                                       count_type{0, 0, 0},
                                        stream.get());
   }
 
   auto const out_size_it = spark_rapids_jni::util::make_counting_transform_iterator(
     0,
     cuda::proclaim_return_type<cudf::size_type>(
-      [offsets       = in_offsets,
-       quote_counts  = quote_counts.begin(),
-       remove_counts = remove_counts.begin()] __device__(auto idx) {
+      [offsets               = in_offsets,
+       quote_counts          = quote_counts.begin(),
+       remove_counts         = remove_counts.begin(),
+       digit_byte_reductions = digit_byte_reductions.begin()] __device__(auto idx) {
         auto const input_size = offsets[idx + 1] - offsets[idx];
-        // If the current row is non-quoted, just return the original string.
-        // As such, non-quoted string containing `,` character will not be preprocessed.
-        if (quote_counts[idx] == 0) { return static_cast<cudf::size_type>(input_size); }
+        // For non-quoted strings, only normalize Unicode decimal digits. In particular, preserve
+        // any `,` character so the conversion function can reject it as before.
+        if (quote_counts[idx] == 0) {
+          return static_cast<cudf::size_type>(input_size - digit_byte_reductions[idx]);
+        }
 
-        // For quoted strings, we will modify them, removing characters '"' and ','.
-        return static_cast<cudf::size_type>(input_size - remove_counts[idx]);
+        // For quoted strings, also remove characters '"' and ','.
+        return static_cast<cudf::size_type>(input_size - remove_counts[idx] -
+                                            digit_byte_reductions[idx]);
       }));
   auto [offsets_column, bytes] = cudf::strings::detail::make_offsets_child_column(
     out_size_it, out_size_it + string_count, stream, mr);
 
-  // If the output strings column does not change in its total bytes, we can use the input directly.
-  if (bytes == input_sv.chars_size(stream)) {
+  // Direct conversion requires a zero-offset view; sliced inputs are copied below even if their
+  // total byte count is unchanged.
+  if (input_sv.offset() == 0 && bytes == input_sv.chars_size(stream)) {
     return spark_rapids_jni::string_to_decimal(precision,
                                                output_type.scale(),
                                                input_sv,
                                                /*ansi_mode*/ false,
                                                /*strip*/ false,
+                                               cudf::device_span<int8_t const>{quote_counts},
                                                stream,
                                                mr);
   }
@@ -658,8 +744,9 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                    thrust::make_counting_iterator(string_count),
                    [in_offsets,
                     out_offsets,
-                    input  = input_sv.chars_begin(stream),
-                    output = chars_data.begin()] __device__(auto idx) {
+                    quote_counts = quote_counts.begin(),
+                    input        = input_sv.chars_begin(stream),
+                    output       = chars_data.begin()] __device__(auto idx) {
                      auto const in_size  = in_offsets[idx + 1] - in_offsets[idx];
                      auto const out_size = out_offsets[idx + 1] - out_offsets[idx];
                      if (in_size == 0) { return; }
@@ -669,33 +756,41 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                      // should be handled in the conversion function later on.
                      if (in_size == out_size) {
                        memcpy(output + out_offsets[idx], input + in_offsets[idx], in_size);
-                     } else {  // copy byte by byte, ignoring '"' and ',' characters.
-                       auto in_ptr  = input + in_offsets[idx];
-                       auto in_end  = input + in_offsets[idx + 1];
-                       auto out_ptr = output + out_offsets[idx];
+                     } else {
+                       auto const is_quoted = quote_counts[idx] != 0;
+                       auto in_ptr          = input + in_offsets[idx];
+                       auto in_end          = input + in_offsets[idx + 1];
+                       auto out_ptr         = output + out_offsets[idx];
                        while (in_ptr != in_end) {
-                         if (*in_ptr != '"' && *in_ptr != ',') {
-                           *out_ptr = *in_ptr;
+                         cudf::char_utf8 character;
+                         auto const character_width =
+                           spark_rapids_jni::util::to_char_utf8(in_ptr, character);
+                         auto const ascii_digit =
+                           character_width > 1 ? unicode_decimal_digit_to_ascii(character) : '\0';
+                         if (ascii_digit != '\0') {
+                           *out_ptr = ascii_digit;
                            ++out_ptr;
+                         } else if (!is_quoted || (*in_ptr != '"' && *in_ptr != ',')) {
+                           memcpy(out_ptr, in_ptr, character_width);
+                           out_ptr += character_width;
                          }
-                         ++in_ptr;
+                         in_ptr += character_width;
                        }
                      }
                    });
 
-  // Don't care about the null mask, as nulls imply empty strings, which will also result in nulls.
-  auto const unquoted_strings =
-    cudf::make_strings_column(string_count,
-                              std::move(offsets_column),
-                              chars_data.release(),
-                              0,
-                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
+  auto const unquoted_strings = cudf::make_strings_column(string_count,
+                                                          std::move(offsets_column),
+                                                          chars_data.release(),
+                                                          input.null_count(),
+                                                          cudf::copy_bitmask(input, stream, mr));
 
   return spark_rapids_jni::string_to_decimal(precision,
                                              output_type.scale(),
                                              cudf::strings_column_view{unquoted_strings->view()},
                                              /*ansi_mode*/ false,
                                              /*strip*/ false,
+                                             cudf::device_span<int8_t const>{quote_counts},
                                              stream,
                                              mr);
 }
@@ -712,7 +807,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
   if (string_count == 0) { return {nullptr, false}; }
 
   auto const input_offsets_it =
-    cudf::detail::offsetalator_factory::make_input_iterator(input.offsets());
+    cudf::detail::offsetalator_factory::make_input_iterator(input.offsets()) + input.offset();
   auto const d_input_ptr = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
   auto const is_valid_it = cudf::detail::make_validity_iterator<true>(*d_input_ptr);
@@ -1006,6 +1101,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                                    bool allow_nonnumeric_numbers,
                                                    bool allow_unquoted_control,
                                                    bool is_us_locale,
+                                                   std::span<int8_t const> decimal_digit_values,
                                                    cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
@@ -1015,6 +1111,8 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
     generate_struct_schema(col_names, num_children, types, scales, precisions);
 
   if (input.is_empty()) { return make_empty_column_from_schema(schema_with_precision, stream, mr); }
+
+  initialize_decimal_digit_table(types, decimal_digit_values, stream);
 
   auto opts_builder =
     cudf::io::json_reader_options::builder(
@@ -1107,6 +1205,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                                    bool allow_nonnumeric_numbers,
                                                    bool allow_unquoted_control,
                                                    bool is_us_locale,
+                                                   std::span<int8_t const> decimal_digit_values,
                                                    cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
@@ -1123,6 +1222,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                       allow_nonnumeric_numbers,
                                       allow_unquoted_control,
                                       is_us_locale,
+                                      decimal_digit_values,
                                       stream,
                                       mr);
 }
@@ -1134,6 +1234,7 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
                                                    std::vector<int> const& precisions,
                                                    bool allow_nonnumeric_numbers,
                                                    bool is_us_locale,
+                                                   std::span<int8_t const> decimal_digit_values,
                                                    cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
@@ -1147,10 +1248,26 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
     precisions);
   CUDF_EXPECTS(schema_with_precision.child_types.size() == 1,
                "The input schema to convert must have exactly one column.");
+  auto const& output_schema = schema_with_precision.child_types.front().second;
 
-  auto const input_cv = input.parent();
-  return detail::convert_data_type(input_cv,
-                                   schema_with_precision.child_types.front().second,
+  detail::initialize_decimal_digit_table(types, decimal_digit_values, stream);
+  if (input.offset() != 0) {
+    // convert_data_type does not uniformly support slices: integer conversion can attach a
+    // zero-offset replacement validity mask to the input view. Normalize before that step so
+    // the strings and mask use the same row indices. Offset propagation is tracked in #5303.
+    auto normalized = std::make_unique<cudf::column>(
+      input.parent(), stream, cudf::get_current_device_resource_ref());
+    return detail::convert_data_type(normalized->view(),
+                                     output_schema,
+                                     allow_nonnumeric_numbers,
+                                     is_us_locale,
+                                     /*did_nullify_schema_mismatch_rows=*/false,
+                                     stream,
+                                     mr);
+  }
+
+  return detail::convert_data_type(input.parent(),
+                                   output_schema,
                                    allow_nonnumeric_numbers,
                                    is_us_locale,
                                    /*did_nullify_schema_mismatch_rows=*/false,

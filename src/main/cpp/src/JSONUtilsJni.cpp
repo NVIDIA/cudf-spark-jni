@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,115 @@
 #include "json_utils.hpp"
 
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/types.hpp>
+#include <cudf/utilities/traits.hpp>
 
+#include <algorithm>
 #include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
-using path_instruction_type = spark_rapids_jni::path_instruction_type;
+using path_instruction_type    = spark_rapids_jni::path_instruction_type;
+using named_field_match_policy = spark_rapids_jni::named_field_match_policy;
+
+namespace {
+
+jlongArray get_json_object_multiple_paths(JNIEnv* env,
+                                          jlong j_input,
+                                          jbyteArray j_type_nums,
+                                          jobjectArray j_names,
+                                          jintArray j_indexes,
+                                          jintArray j_path_offsets,
+                                          jlong memory_budget_bytes,
+                                          jint parallel_override,
+                                          std::optional<named_field_match_policy> match_policy)
+{
+  using path_type = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
+
+  std::vector<path_type> paths;
+  {
+    auto const path_offsets = cudf::jni::native_jintArray(env, j_path_offsets).to_vector();
+    CUDF_EXPECTS(path_offsets.size() > 1, "Invalid path offsets.");
+    auto const type_nums  = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
+    auto const name_array = cudf::jni::native_jstringArray(env, j_names);
+    for (int i = 0; i < name_array.size(); ++i) {
+      if (name_array.get(i).is_null()) {
+        auto const message = "Field name at index " + std::to_string(i) + " is null";
+        JNI_THROW_NEW(env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, message.c_str(), nullptr);
+      }
+    }
+    auto const names     = name_array.as_cpp_vector();
+    auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
+    auto const num_paths = path_offsets.size() - 1;
+    paths.resize(num_paths);
+    auto const num_entries = path_offsets[num_paths];
+
+    if (num_entries < 0 ||
+        static_cast<std::size_t>(names.size()) != static_cast<std::size_t>(num_entries) ||
+        indexes.size() != static_cast<std::size_t>(num_entries) ||
+        type_nums.size() != static_cast<std::size_t>(num_entries)) {
+      JNI_THROW_NEW(
+        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", nullptr);
+    }
+
+    for (std::size_t i = 0; i < num_paths; ++i) {
+      auto const path_size = path_offsets[i + 1] - path_offsets[i];
+      auto path            = path_type{};
+      path.reserve(path_size);
+      for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
+        auto const instruction_type = static_cast<path_instruction_type>(type_nums[j]);
+        auto const index            = indexes[j];
+        path.emplace_back(instruction_type, names[j], index);
+      }
+
+      paths[i] = std::move(path);
+    }
+  }
+
+  auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
+  auto output =
+    match_policy.has_value()
+      ? spark_rapids_jni::get_json_object_multiple_paths(cudf::strings_column_view{*input_cv},
+                                                         paths,
+                                                         memory_budget_bytes,
+                                                         parallel_override,
+                                                         *match_policy)
+      : spark_rapids_jni::get_json_object_multiple_paths(
+          cudf::strings_column_view{*input_cv}, paths, memory_budget_bytes, parallel_override);
+
+  auto out_handles = cudf::jni::native_jlongArray(env, output.size());
+  std::transform(output.begin(), output.end(), out_handles.begin(), [](auto& col) {
+    return cudf::jni::release_as_jlong(col);
+  });
+  return out_handles.get_jArray();
+}
+
+bool is_valid_match_policy(jint match_policy)
+{
+  return match_policy == static_cast<jint>(named_field_match_policy::LAST_NON_NULL);
+}
+
+}  // namespace
+
+namespace {
+
+std::vector<jbyte> decimal_digit_values_for_schema(JNIEnv* env,
+                                                   jbyteArray j_decimal_digit_values,
+                                                   std::vector<int> const& types)
+{
+  auto const has_decimal = std::any_of(types.begin(), types.end(), [](auto const type) {
+    return cudf::is_fixed_point(cudf::data_type{static_cast<cudf::type_id>(type)});
+  });
+  return has_decimal ? cudf::jni::native_jbyteArray(env, j_decimal_digit_values).to_vector()
+                     : std::vector<jbyte>{};
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -58,19 +162,25 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
 
     std::vector<std::tuple<path_instruction_type, std::string, int32_t>> instructions;
 
-    auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
-    auto const names     = cudf::jni::native_jstringArray(env, j_names);
-    auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
-    int size             = type_nums.size();
-    if (names.size() != size || indexes.size() != static_cast<std::size_t>(size) ||
-        type_nums.size() != static_cast<std::size_t>(size)) {
+    auto const type_nums  = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
+    auto const name_array = cudf::jni::native_jstringArray(env, j_names);
+    for (int i = 0; i < name_array.size(); ++i) {
+      if (name_array.get(i).is_null()) {
+        auto const message = "Field name at index " + std::to_string(i) + " is null";
+        JNI_THROW_NEW(env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, message.c_str(), 0);
+      }
+    }
+    auto const names   = name_array.as_cpp_vector();
+    auto const indexes = cudf::jni::native_jintArray(env, j_indexes).to_vector();
+    auto const size    = type_nums.size();
+    if (names.size() != size || indexes.size() != size) {
       JNI_THROW_NEW(
         env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", 0);
     }
 
-    for (int i = 0; i < size; i++) {
+    for (std::size_t i = 0; i < size; i++) {
       path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[i]);
-      char const* name_str                   = names[i].get();
+      auto const& name_str                   = names[i];
       jlong index                            = indexes[i];
       instructions.emplace_back(instruction_type, name_str, index);
     }
@@ -98,51 +208,57 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
   JNI_NULL_CHECK(env, j_indexes, "j_indexes is null", 0);
   JNI_NULL_CHECK(env, j_path_offsets, "j_path_offsets is null", 0);
 
-  using path_type = std::vector<std::tuple<path_instruction_type, std::string, int32_t>>;
+  JNI_TRY
+  {
+    cudf::jni::auto_set_device(env);
+    return get_json_object_multiple_paths(env,
+                                          j_input,
+                                          j_type_nums,
+                                          j_names,
+                                          j_indexes,
+                                          j_path_offsets,
+                                          memory_budget_bytes,
+                                          parallel_override,
+                                          std::nullopt);
+  }
+  JNI_CATCH(env, 0);
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePathsWithMatchPolicy(
+  JNIEnv* env,
+  jclass,
+  jlong j_input,
+  jbyteArray j_type_nums,
+  jobjectArray j_names,
+  jintArray j_indexes,
+  jintArray j_path_offsets,
+  jlong memory_budget_bytes,
+  jint parallel_override,
+  jint j_match_policy)
+{
+  JNI_NULL_CHECK(env, j_input, "j_input column is null", 0);
+  JNI_NULL_CHECK(env, j_type_nums, "j_type_nums is null", 0);
+  JNI_NULL_CHECK(env, j_names, "j_names is null", 0);
+  JNI_NULL_CHECK(env, j_indexes, "j_indexes is null", 0);
+  JNI_NULL_CHECK(env, j_path_offsets, "j_path_offsets is null", 0);
+  if (!is_valid_match_policy(j_match_policy)) {
+    JNI_THROW_NEW(
+      env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "Invalid named-field match policy.", 0);
+  }
 
   JNI_TRY
   {
     cudf::jni::auto_set_device(env);
-
-    auto const path_offsets = cudf::jni::native_jintArray(env, j_path_offsets).to_vector();
-    CUDF_EXPECTS(path_offsets.size() > 1, "Invalid path offsets.");
-    auto const type_nums = cudf::jni::native_jbyteArray(env, j_type_nums).to_vector();
-    auto const names     = cudf::jni::native_jstringArray(env, j_names);
-    auto const indexes   = cudf::jni::native_jintArray(env, j_indexes).to_vector();
-    auto const num_paths = path_offsets.size() - 1;
-    std::vector<path_type> paths(num_paths);
-    auto const num_entries = path_offsets[num_paths];
-
-    if (num_entries < 0 || names.size() != num_entries ||
-        indexes.size() != static_cast<std::size_t>(num_entries) ||
-        type_nums.size() != static_cast<std::size_t>(num_entries)) {
-      JNI_THROW_NEW(
-        env, cudf::jni::ILLEGAL_ARG_EXCEPTION_CLASS, "wrong number of entries passed in", 0);
-    }
-
-    for (std::size_t i = 0; i < num_paths; ++i) {
-      auto const path_size = path_offsets[i + 1] - path_offsets[i];
-      auto path            = path_type{};
-      path.reserve(path_size);
-      for (int j = path_offsets[i]; j < path_offsets[i + 1]; ++j) {
-        path_instruction_type instruction_type = static_cast<path_instruction_type>(type_nums[j]);
-        char const* name_str                   = names[j].get();
-        jlong index                            = indexes[j];
-        path.emplace_back(instruction_type, name_str, index);
-      }
-
-      paths[i] = std::move(path);
-    }
-
-    auto const input_cv = std::bit_cast<cudf::column_view const*>(j_input);
-    auto output         = spark_rapids_jni::get_json_object_multiple_paths(
-      cudf::strings_column_view{*input_cv}, paths, memory_budget_bytes, parallel_override);
-
-    auto out_handles = cudf::jni::native_jlongArray(env, output.size());
-    std::transform(output.begin(), output.end(), out_handles.begin(), [](auto& col) {
-      return cudf::jni::release_as_jlong(col);
-    });
-    return out_handles.get_jArray();
+    return get_json_object_multiple_paths(env,
+                                          j_input,
+                                          j_type_nums,
+                                          j_names,
+                                          j_indexes,
+                                          j_path_offsets,
+                                          memory_budget_bytes,
+                                          parallel_override,
+                                          static_cast<named_field_match_policy>(j_match_policy));
   }
   JNI_CATCH(env, 0);
 }
@@ -216,7 +332,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
                                                              jboolean allow_leading_zeros,
                                                              jboolean allow_nonnumeric_numbers,
                                                              jboolean allow_unquoted_control,
-                                                             jboolean is_us_locale)
+                                                             jboolean is_us_locale,
+                                                             jbyteArray j_decimal_digit_values)
 {
   JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
   JNI_NULL_CHECK(env, j_col_names, "j_col_names is null", 0);
@@ -224,6 +341,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
   JNI_NULL_CHECK(env, j_types, "j_types is null", 0);
   JNI_NULL_CHECK(env, j_scales, "j_scales is null", 0);
   JNI_NULL_CHECK(env, j_precisions, "j_precisions is null", 0);
+  JNI_NULL_CHECK(env, j_decimal_digit_values, "j_decimal_digit_values is null", 0);
 
   JNI_TRY
   {
@@ -235,6 +353,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
     auto const scales       = cudf::jni::native_jintArray(env, j_scales).to_vector();
     auto const precisions   = cudf::jni::native_jintArray(env, j_precisions).to_vector();
+    auto const decimal_digit_values =
+      decimal_digit_values_for_schema(env, j_decimal_digit_values, types);
 
     CUDF_EXPECTS(col_names.size() > 0, "Invalid schema data: col_names.");
     CUDF_EXPECTS(col_names.size() == num_children.size(), "Invalid schema data: num_children.");
@@ -253,7 +373,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
                                              allow_leading_zeros,
                                              allow_nonnumeric_numbers,
                                              allow_unquoted_control,
-                                             is_us_locale)
+                                             is_us_locale,
+                                             decimal_digit_values)
         .release());
   }
   JNI_CATCH(env, 0);
@@ -268,13 +389,15 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
                                                               jintArray j_scales,
                                                               jintArray j_precisions,
                                                               jboolean allow_nonnumeric_numbers,
-                                                              jboolean is_us_locale)
+                                                              jboolean is_us_locale,
+                                                              jbyteArray j_decimal_digit_values)
 {
   JNI_NULL_CHECK(env, j_input, "j_input is null", 0);
   JNI_NULL_CHECK(env, j_num_children, "j_num_children is null", 0);
   JNI_NULL_CHECK(env, j_types, "j_types is null", 0);
   JNI_NULL_CHECK(env, j_scales, "j_scales is null", 0);
   JNI_NULL_CHECK(env, j_precisions, "j_precisions is null", 0);
+  JNI_NULL_CHECK(env, j_decimal_digit_values, "j_decimal_digit_values is null", 0);
 
   JNI_TRY
   {
@@ -285,6 +408,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
     auto const types        = cudf::jni::native_jintArray(env, j_types).to_vector();
     auto const scales       = cudf::jni::native_jintArray(env, j_scales).to_vector();
     auto const precisions   = cudf::jni::native_jintArray(env, j_precisions).to_vector();
+    auto const decimal_digit_values =
+      decimal_digit_values_for_schema(env, j_decimal_digit_values, types);
 
     CUDF_EXPECTS(num_children.size() > 0, "Invalid schema data: num_children.");
     CUDF_EXPECTS(num_children.size() == types.size(), "Invalid schema data: types.");
@@ -298,7 +423,8 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
                                              scales,
                                              precisions,
                                              allow_nonnumeric_numbers,
-                                             is_us_locale)
+                                             is_us_locale,
+                                             decimal_digit_values)
         .release());
   }
   JNI_CATCH(env, 0);

@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.AssertUtils;
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.ColumnView;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 
@@ -28,7 +30,10 @@ import java.util.List;
 
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.ENDPOINT_DELTA;
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.WEIGHTED_ENDPOINTS;
+import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.ASCENDING;
+import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.DESCENDING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class HistogramTest {
   private static final HostColumnVector.ListType DOUBLE_HISTOGRAM_TYPE =
@@ -76,6 +81,56 @@ public class HistogramTest {
   }
 
   @Test
+  void testNullInputsAreSkippedForListHistograms() {
+    try (ColumnVector values = ColumnVector.fromBoxedInts(5, 10, null, 30);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(1L, null, -1L, 1L);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, true);
+         ColumnVector percentiles = Histogram.percentileFromHistogram(histogram, new double[]{0.5},
+             false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(5.0, null, null, 30.0)) {
+      AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testNullInputsAreSkippedForStructHistograms() {
+    try (ColumnVector values = ColumnVector.fromBoxedInts(5, 10, null, 30);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(7L, null, -1L, 0L);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, false);
+         ColumnView histogramValues = histogram.getChildColumnView(0);
+         ColumnView histogramFreqs = histogram.getChildColumnView(1);
+         ColumnVector expectedValues = ColumnVector.fromBoxedInts(5, null, null, null);
+         ColumnVector expectedFreqs = ColumnVector.fromLongs(7, 1, 1, 1)) {
+      AssertUtils.assertColumnsAreEqual(expectedValues, histogramValues);
+      AssertUtils.assertColumnsAreEqual(expectedFreqs, histogramFreqs);
+    }
+  }
+
+  @Test
+  void testAllNullFrequenciesAreSkipped() {
+    try (ColumnVector values = ColumnVector.fromInts(5, 10);
+         ColumnVector freqs = ColumnVector.fromBoxedLongs(null, null);
+         ColumnVector histogram = Histogram.createHistogramIfValid(values, freqs, true);
+         ColumnVector percentiles = Histogram.percentileFromHistogram(histogram, new double[]{0.5},
+             false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null)) {
+      AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testNegativeFrequencyWithValidValueIsRejected() {
+    try (ColumnVector values = ColumnVector.fromInts(5);
+         ColumnVector freqs = ColumnVector.fromLongs(-1)) {
+      assertThrows(CudfException.class, () -> {
+        try (ColumnVector ignored = Histogram.createHistogramIfValid(values, freqs, true)) {
+          // The result must be closed if the expected exception is not thrown.
+        }
+      });
+    }
+  }
+
+  @Test
   void testAllNulls() {
     try (ColumnVector values = ColumnVector.fromBoxedInts(null, null, null);
          ColumnVector freqs = ColumnVector.fromLongs(1, 2, 3);
@@ -101,6 +156,47 @@ public class HistogramTest {
       assertDoubleColumnExactly(defaultResult, Double.NEGATIVE_INFINITY);
       assertDoubleColumnExactly(weightedResult, Double.NEGATIVE_INFINITY);
       assertDoubleColumnExactly(deltaResult, Double.NaN);
+    }
+  }
+
+  @Test
+  void testDescendingOrder() {
+    List<HostColumnVector.StructData> finiteWithNull =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 1L), entry(null, 10L));
+    List<HostColumnVector.StructData> weighted =
+        Arrays.asList(entry(0.0, 1L), entry(100.0, 2L), entry(null, 10L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, finiteWithNull, weighted);
+         ColumnVector ascendingResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 1.0}, false, WEIGHTED_ENDPOINTS, ASCENDING);
+         ColumnVector weightedResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, WEIGHTED_ENDPOINTS, DESCENDING);
+         ColumnVector deltaResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.0, 0.1, 1.0}, false, ENDPOINT_DELTA, DESCENDING)) {
+      assertDoubleColumnExactly(ascendingResult, 0.0, 100.0, 0.0, 100.0);
+      assertDoubleColumnExactly(weightedResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+      assertDoubleColumnExactly(deltaResult, 100.0, 90.0, 0.0, 100.0, 100.0, 0.0);
+    }
+  }
+
+  @Test
+  void testDescendingOrderSpecialValues() {
+    List<HostColumnVector.StructData> negativeInfinity =
+        Arrays.asList(entry(Double.NEGATIVE_INFINITY, 1L), entry(10.0, 1L));
+    List<HostColumnVector.StructData> positiveInfinity =
+        Arrays.asList(entry(10.0, 1L), entry(Double.POSITIVE_INFINITY, 1L));
+    List<HostColumnVector.StructData> nan =
+        Arrays.asList(entry(1.0, 1L), entry(Double.NaN, 1L));
+    try (ColumnVector histogram = histograms(
+             DOUBLE_HISTOGRAM_TYPE, negativeInfinity, positiveInfinity, nan);
+         ColumnVector weightedResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.2}, false, WEIGHTED_ENDPOINTS, DESCENDING);
+         ColumnVector deltaResult = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.2}, false, ENDPOINT_DELTA, DESCENDING)) {
+      assertDoubleColumnExactly(
+          weightedResult, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY, Double.NaN);
+      assertDoubleColumnExactly(
+          deltaResult, Double.NEGATIVE_INFINITY, Double.NaN, Double.NaN);
     }
   }
 

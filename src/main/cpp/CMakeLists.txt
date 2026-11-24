@@ -58,11 +58,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 option(CUDF_USE_PER_THREAD_DEFAULT_STREAM "Build with per-thread default stream" ON)
 option(USE_GDS "Build with GPUDirect Storage (GDS)/cuFile support" OFF)
+option(DEBUG_FROM_JSON "Enable debug output for from_json raw map conversion" OFF)
 option(BUILD_TESTS "Configure CMake to build tests" OFF)
 option(BUILD_BENCHMARKS "Configure CMake to build (google) benchmarks" OFF)
 option(BUILD_FAULTINJ "Configure CMake to build fault injection" ON)
 option(BUILD_PROFILER "Configure CMake to build profiler" ON)
 option(HIDE_PRIVATE_CUDA_SYMBOLS "Hide private symbols from static CUDA compiler libraries" ON)
+
+mark_as_advanced(DEBUG_FROM_JSON)
 
 message(
   VERBOSE "SPARK_RAPIDS_JNI: Build with per-thread default stream:
@@ -179,9 +182,34 @@ find_library(ARROW_LIB "libarrow.a" REQUIRED NO_DEFAULT_PATH
   HINTS "${CUDFJNI_BUILD_DIR}/_deps/arrow-build/release/"
 )
 
+# parquet
+find_library(PARQUET_LIB "libparquet.a" REQUIRED NO_DEFAULT_PATH
+  HINTS "${CUDFJNI_BUILD_DIR}/_deps/arrow-build/release/"
+)
+
+# Internal parquet headers
+set (GENERATED_PARQUET_INCLUDE
+    "${CUDFJNI_BUILD_DIR}/_deps/arrow-src/cpp/src/"
+    CACHE STRING "generated parquet thrift headers"
+)
+
+# thrift
+find_library(THRIFT_LIB "libthrift.a" REQUIRED NO_DEFAULT_PATH
+    HINTS "${CUDFJNI_BUILD_DIR}/lib/"
+)
+
 set(CUDFJNI_INCLUDE_DIRS
   "${CUDF_DIR}/java/src/main/native/include"
   "${CUDF_DIR}/java/src/main/native/src"
+)
+
+# Headers generated/vendored from Arrow and Thrift, fetched from upstream and not
+# something we edit; treated as SYSTEM below so their warnings (e.g. deprecated
+# declarations) don't trip our -Werror.
+set(CUDFJNI_VENDORED_INCLUDE_DIRS
+  "${GENERATED_PARQUET_INCLUDE}"
+  "${CUDFJNI_BUILD_DIR}/_deps/thrift-build/"
+  "${CUDFJNI_BUILD_DIR}/_deps/thrift-src/lib/cpp/src/"
 )
 
 # ##################################################################################################
@@ -209,11 +237,15 @@ add_library(
   src/MapJni.cpp
   src/MapUtilsJni.cpp
   src/MapZipWithUtilsJNI.cpp
+  src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
+  src/NativeFileSourceJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
+  src/PageablePoolJni.cpp
   src/ParseURIJni.cpp
   src/ProtobufJni.cpp
+  src/RangeSequenceJni.cpp
   src/RegexRewriteUtilsJni.cpp
   src/RowConversionJni.cpp
   src/SparkResourceAdaptorJni.cpp
@@ -262,6 +294,7 @@ add_library(
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
+  src/memory_utils.cu
   src/multiply.cu
   src/number_converter.cu
   src/parse_timestamp_with_format.cu
@@ -269,6 +302,7 @@ add_library(
   src/protobuf/protobuf.cu
   src/protobuf/protobuf_builders.cu
   src/protobuf/protobuf_kernels.cu
+  src/range_sequence.cu
   src/regex_rewrite_utils.cu
   src/reverse_strings.cu
   src/row_conversion.cu
@@ -310,9 +344,11 @@ target_include_directories(
 )
 
 # Mark include dirs we do not control as SYSTEM so -Werror does not trip on warnings
+# (e.g. deprecated declarations) originating from vendored/generated headers.
 target_include_directories(
   spark_rapids_jni SYSTEM
   PRIVATE "${JNI_INCLUDE_DIRS}"
+          "${CUDFJNI_VENDORED_INCLUDE_DIRS}"
           "${CUDAToolkit_INCLUDE_DIRS}"
 )
 
@@ -320,6 +356,10 @@ target_compile_definitions(
   spark_rapids_jni PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_DEFINITIONS}>"
                           "$<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_DEFINITIONS}>>"
 )
+
+if(DEBUG_FROM_JSON)
+  target_compile_definitions(spark_rapids_jni PRIVATE DEBUG_FROM_JSON)
+endif()
 
 # Per-thread default stream
 if(CUDF_USE_PER_THREAD_DEFAULT_STREAM)
@@ -338,6 +378,8 @@ target_link_libraries(
     cuco::cuco
     spdlog::spdlog_header_only
     ${ARROW_LIB}
+    ${PARQUET_LIB}
+    ${THRIFT_LIB}
 )
 if(HIDE_PRIVATE_CUDA_SYMBOLS)
   # These toolkit implementation symbols are not part of the cuDF or JNI ABI. Localizing them keeps

@@ -17,12 +17,12 @@
 #pragma once
 
 #include "protobuf/protobuf_types.cuh"
+#include "utilities/integer_utils.hpp"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
-#include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
@@ -126,7 +126,7 @@ inline rmm::device_buffer make_zeroed_atomic_flag_buffer(std::size_t num_rows,
 {
   static_assert(sizeof(bool) == 1);
   // Subword atomics access the containing 32-bit word, including the allocation tail.
-  auto const padded_size = cudf::util::round_up_safe(num_rows, sizeof(uint32_t));
+  auto const padded_size = spark_rapids_jni::util::round_up_safe(num_rows, sizeof(uint32_t));
   rmm::device_buffer flags(padded_size, alignof(uint32_t), stream, mr);
   if (padded_size != 0) {
     CUDF_CUDA_TRY(cudaMemsetAsync(flags.data(), 0, padded_size, stream.get()));
@@ -204,6 +204,15 @@ inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_row
                                         offsets.release(),
                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                         0);
+}
+
+inline std::unique_ptr<cudf::column> make_zero_offsets_column(cudf::size_type num_rows,
+                                                              cuda::stream_ref stream,
+                                                              rmm::device_async_resource_ref mr)
+{
+  return make_offsets_column(num_rows,
+                             cudf::detail::make_zeroed_device_uvector_async<int32_t>(
+                               static_cast<std::size_t>(num_rows) + 1, stream, mr));
 }
 
 inline rmm::device_uvector<int32_t> make_top_row_indices(
@@ -546,11 +555,6 @@ void validate_enum_values(rmm::device_uvector<int32_t> const& values,
 // Forward declarations of builder/utility functions
 // ============================================================================
 
-std::unique_ptr<cudf::column> make_null_column(cudf::data_type dtype,
-                                               cudf::size_type num_rows,
-                                               cuda::stream_ref stream,
-                                               rmm::device_async_resource_ref mr);
-
 // Schema-aware all-null builder: recurses into STRUCT children and wraps repeated fields
 // in a null-list, mirroring the shape `make_empty_struct_column_with_schema` would produce
 // but with `num_rows` all-null rows.
@@ -560,9 +564,15 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
                                                            cuda::stream_ref stream,
                                                            rmm::device_async_resource_ref mr);
 
-std::unique_ptr<cudf::column> make_null_list_column_with_child(
-  std::unique_ptr<cudf::column> child_col,
+// Assemble a STRUCT from `children`, which follow `child_indices`. Hidden children were only
+// validated and become all-null columns, so the struct's nulls go only into the visible ones.
+std::unique_ptr<cudf::column> make_struct_column_with_schema(
+  protobuf_schema const& schema,
+  std::vector<int> const& child_indices,
   cudf::size_type num_rows,
+  std::vector<std::unique_ptr<cudf::column>> children,
+  cudf::size_type null_count,
+  cuda::device_buffer<cudf::bitmask_type> null_mask,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr);
 
