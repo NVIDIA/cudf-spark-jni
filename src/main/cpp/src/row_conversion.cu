@@ -2324,17 +2324,21 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
 
   auto column_info = detail::compute_column_information(string_schema.begin(), string_schema.end());
   auto const size_per_row = cuda::round_up(column_info.size_per_row, JCUDF_ROW_ALIGNMENT);
+  bool const has_strings  = string_schema.size() != schema.size();
 
-  // The producer packs a STRING as one 8-byte (offset, length) compound slot and computes
-  // validity bytes from the REAL column count, while `size_per_row` above is derived from the
-  // expanded schema where each STRING became two INT32 columns - ceil(expanded_count / 8) can
-  // exceed ceil(real_count / 8) and demand 8 more bytes per row than a row of empty-payload
-  // strings actually occupies. The decode itself uses the row offsets and column_starts, which
-  // match the producer, so the guard below must derive its minimum from the real schema. The
-  // product is computed in 64 bits (num_rows * size_per_row overflows int for large inputs).
-  auto const real_info = detail::compute_column_information(schema.begin(), schema.end());
+  // The two row-size formulas below diverge for string schemas: the producer packs a STRING as
+  // one 8-byte (offset, length) slot and computes validity bytes from the real column count, while
+  // `size_per_row` is derived from the expanded schema where each STRING became two INT32 columns.
+  // The expanded validity count ceil(expanded/8) can exceed ceil(real/8) by enough to demand 8
+  // more bytes per row than a row of empty-payload strings occupies. The decode itself keys off
+  // the row offsets and column_starts, which match the producer, so the guard must use the real
+  // schema's minimum. The product is computed in 64 bits: num_rows * min_row_bytes overflows int
+  // for large inputs.
   auto const min_row_bytes =
-    cudf::util::round_up_unsafe(real_info.size_per_row, JCUDF_ROW_ALIGNMENT);
+    has_strings ? cuda::round_up(
+                    detail::compute_column_information(schema.begin(), schema.end()).size_per_row,
+                    JCUDF_ROW_ALIGNMENT)
+                : size_per_row;
   CUDF_EXPECTS(static_cast<int64_t>(min_row_bytes) * num_rows <= child.size(),
                "The layout of the data appears to be off");
   auto dev_col_starts = make_device_uvector_async(
@@ -2620,7 +2624,8 @@ std::unique_ptr<table> convert_from_rows_fixed_width_optimized(lists_column_view
   auto const size_per_row = detail::compute_fixed_width_layout(schema, column_start, column_size);
 
   // Ideally we would check that the offsets are all the same, etc. but for now this is probably
-  // fine. 64-bit product: size_per_row * num_rows overflows int for large inputs.
+  // fine. The product is computed in 64 bits: size_per_row * num_rows overflows int for large
+  // inputs.
   CUDF_EXPECTS(static_cast<int64_t>(size_per_row) * num_rows == child.size(),
                "The layout of the data appears to be off");
   auto dev_column_start =
