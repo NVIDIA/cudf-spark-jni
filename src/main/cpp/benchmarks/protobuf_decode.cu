@@ -21,6 +21,7 @@
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
 #include <rmm/device_buffer.hpp>
@@ -992,6 +993,85 @@ struct ManyRepeatedFieldsCase {
   }
 };
 
+// Case 9: Hidden fields — the plugin hides every field a query does not read.
+//   message HiddenFieldsMessage {
+//     num_fields top-level fields (cycling through int32, int64, string)
+//     Inner inner = num_fields + 1;   (present in every other row)
+//   }
+//   message Inner { num_fields fields (cycling through int32, int64, string) }
+// The first hidden_percent of the fields at each level are hidden. Absent `inner` messages and
+// null input rows give both structs nulls to push into their children.
+struct hidden_fields_case {
+  using enum cudf::type_id;
+  static constexpr auto FIELD_TYPES = get_types({INT32, INT64, STRING});
+
+  int num_fields;
+  int hidden_percent;
+
+  int num_hidden() const { return num_fields * hidden_percent / 100; }
+
+  protobuf::protobuf_decode_context build_context() const
+  {
+    std::vector<nested_field_descriptor> schema;
+    std::vector<bool> output_fields;
+    auto add_fields = [&](int parent_idx, int depth) {
+      for (int i = 0; i < num_fields; i++) {
+        auto const field_type = FIELD_TYPES[i % FIELD_TYPES.size()];
+        schema.push_back(make_field_descriptor(i + 1,
+                                               parent_idx,
+                                               depth,
+                                               field_type.wire_type,
+                                               field_type.output_type,
+                                               false,
+                                               field_type.encoding));
+        output_fields.push_back(i >= num_hidden());
+      }
+    };
+
+    add_fields(-1, 0);
+    auto const inner_idx = static_cast<int>(schema.size());
+    schema.push_back(
+      make_field_descriptor(num_fields + 1, -1, 0, proto_wire_type::LEN, cudf::type_id::STRUCT));
+    output_fields.push_back(true);
+    add_fields(inner_idx, 1);
+
+    return {std::move(schema), true, cudf::get_default_stream(), std::move(output_fields)};
+  }
+
+  std::vector<std::vector<uint8_t>> generate_messages(int num_rows, std::mt19937& rng) const
+  {
+    std::vector<std::vector<uint8_t>> messages(num_rows);
+    std::uniform_int_distribution<int32_t> int_dist(0, 100000);
+    std::uniform_int_distribution<int> str_len_dist(5, 30);
+    std::string alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+    auto encode_fields = [&](std::vector<uint8_t>& buf) {
+      for (int i = 0; i < num_fields; i++) {
+        switch (FIELD_TYPES[i % FIELD_TYPES.size()].output_type) {
+          case cudf::type_id::INT32:
+          case cudf::type_id::INT64: encode_varint_field(buf, i + 1, int_dist(rng)); break;
+          case cudf::type_id::STRING: {
+            std::string s(str_len_dist(rng), ' ');
+            for (auto& c : s) {
+              c = alphabet[rng() % alphabet.size()];
+            }
+            encode_string_field(buf, i + 1, s);
+            break;
+          }
+          default: CUDF_FAIL("unsupported generated hidden-field type");
+        }
+      }
+    };
+
+    for (int r = 0; r < num_rows; r++) {
+      auto& buf = messages[r];
+      encode_fields(buf);
+      if (r % 2 == 1) { encode_nested_message(buf, num_fields + 1, encode_fields); }
+    }
+    return messages;
+  }
+};
+
 template <typename T>
 struct constant_argument {
   char const* name;
@@ -1470,3 +1550,34 @@ NVBENCH_BENCH(BM_protobuf_many_repeated)
   .add_int64_axis("num_rows", {10'000, 100'000})
   .add_int64_axis("num_rep_fields",
                   {10, 20, 30, protobuf_detail::MAX_REPEATED_FIELDS_PER_KERNEL + 1});
+
+// ===========================================================================
+// Benchmark 11: Hidden fields — measures returning unread fields as all-null columns
+// ===========================================================================
+static void BM_protobuf_hidden_fields(nvbench::state& state)
+{
+  auto data = prepare_decode_benchmark<hidden_fields_case>(
+    state, int_axis_argument{"num_fields"}, int_axis_argument{"hidden_percent"});
+
+  cuda::stream_ref stream = cudf::get_default_stream();
+  // Null input rows give the top-level struct nulls to push into its children.
+  auto const num_null_rows = data.num_rows / 10;
+  auto null_mask           = cudf::create_null_mask(data.num_rows, cudf::mask_state::ALL_VALID);
+  cudf::set_null_mask(null_mask.data(), 0, num_null_rows, false, stream);
+  data.binary_col->set_null_mask(std::move(null_mask), num_null_rows);
+
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
+  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
+    auto result = protobuf::decode_protobuf_to_struct(
+      data.binary_col->view(), data.context, stream, cudf::get_current_device_resource_ref());
+  });
+
+  state.add_element_count(data.num_rows, "Rows");
+  state.add_global_memory_reads<nvbench::int8_t>(data.total_bytes);
+}
+
+NVBENCH_BENCH(BM_protobuf_hidden_fields)
+  .set_name("Protobuf Hidden Fields")
+  .add_int64_axis("num_rows", {100'000, 500'000})
+  .add_int64_axis("num_fields", {20, 100})
+  .add_int64_axis("hidden_percent", {0, 50, 90});
