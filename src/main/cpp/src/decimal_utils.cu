@@ -33,11 +33,13 @@
 
 #include <cuda/std/cmath>
 #include <cuda/std/functional>
+#include <cuda/std/limits>
 #include <cuda/stream>
 #include <thrust/tabulate.h>
 
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 
 namespace {
 
@@ -1199,29 +1201,30 @@ using namespace numeric::detail;
  *
  * @param input The floating point value to convert
  * @param pow10 The power of 10 to scale the floating-point value by
- * @return Integer representation of the floating-point value, rounding after scaled
+ * @param scaled_abs Estimate of the absolute value at the requested decimal scale
+ * @return Unsigned widened magnitude, rounded before checking the target precision
  */
 template <typename FloatType,
           typename IntType,
           CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
-__device__ inline IntType scaled_round(FloatType input, int32_t pow10)
+__device__ inline auto scaled_round(FloatType input, int32_t pow10, double scaled_abs)
+  -> cuda::std::make_unsigned_t<
+    cuda::std::conditional_t<cuda::std::is_same_v<IntType, std::int32_t>, std::int64_t, __int128_t>>
 {
+  using intermediate_type =
+    cuda::std::conditional_t<cuda::std::is_same_v<IntType, std::int32_t>, std::int64_t, __int128_t>;
   // Extract components of the (double-ized) floating point number
   using converter        = floating_converter<double>;
   auto const integer_rep = converter::bit_cast_to_integer(static_cast<double>(input));
   if (converter::is_zero(integer_rep)) { return 0; }
 
   // Note that the significand here is an unsigned integer with sizeof(double)
-  auto const is_negative                  = converter::get_is_negative(integer_rep);
   auto const [significand, floating_pow2] = converter::get_significand_and_pow2(integer_rep);
 
-  auto const unsigned_floating      = (input < 0) ? -input : input;
-  auto const rounding_wont_overflow = [&] {
-    auto const scale_factor = static_cast<double>(
-      multiply_power10<IntType>(cuda::std::make_unsigned_t<IntType>{1}, -pow10));
-    return 10.0 * static_cast<double>(unsigned_floating) * scale_factor <
-           static_cast<double>(cuda::std::numeric_limits<IntType>::max());
-  }();
+  auto const unsigned_floating = (input < 0) ? -input : input;
+  // The scale can be negative. Integer power helpers cannot represent a reciprocal.
+  auto const rounding_wont_overflow =
+    10.0 * scaled_abs < static_cast<double>(cuda::std::numeric_limits<IntType>::max());
 
   // Spark often wants to round the last decimal place, so we'll perform the conversion
   // with one lower power of 10 so that we can (optionally) round at the end.
@@ -1250,8 +1253,6 @@ __device__ inline IntType scaled_round(FloatType input, int32_t pow10)
 
   // Main algorithm: Apply the powers of 2 and 10 (except for the last power-of-10).
   // Use larger intermediate type for conversion to avoid overflow for last power-of-10.
-  using intermediate_type =
-    cuda::std::conditional_t<cuda::std::is_same_v<IntType, std::int32_t>, std::int64_t, __int128_t>;
   cuda::std::make_unsigned_t<intermediate_type> magnitude =
     [&, base2_value = base2_value, pow2 = pow2] {
       if constexpr (cuda::std::is_same_v<IntType, std::int32_t>) {
@@ -1316,10 +1317,8 @@ __device__ inline IntType scaled_round(FloatType input, int32_t pow10)
     magnitude            = multiply_power10<IntType>(truncated, floor_pow10);
   }
 
-  // Reapply the sign and return.
-  // NOTE: Cast can overflow!
-  auto const signed_magnitude = static_cast<IntType>(magnitude);
-  return is_negative ? -signed_magnitude : signed_magnitude;
+  // The caller must check precision before narrowing or applying the sign.
+  return magnitude;
 }
 
 template <typename FloatType, typename DecimalRepType>
@@ -1329,6 +1328,8 @@ struct floating_point_to_decimal_fn {
   cudf::size_type* failure_row_id;
   int32_t decimal_places;
   DecimalRepType exclusive_bound;
+  double scale_factor;
+  double coarse_input_bound;
 
   __device__ DecimalRepType operator()(cudf::size_type idx) const
   {
@@ -1339,13 +1340,25 @@ struct floating_point_to_decimal_fn {
       return DecimalRepType{0};
     }
 
-    auto const scaled_rounded = scaled_round<FloatType, DecimalRepType>(x, -decimal_places);
-    auto const is_out_of_bound =
-      -exclusive_bound >= scaled_rounded || scaled_rounded >= exclusive_bound;
+    auto const input_abs = cuda::std::abs(static_cast<double>(x));
+    // This loose envelope in input units prevents the conversion itself from overflowing,
+    // including DECIMAL128. Leave rounding-boundary decisions to the exact integer check below.
+    // 2 * 10^38 fits UINT128, and the extra-digit path has its own tighter safety check.
+    if (input_abs >= coarse_input_bound) {
+      *failure_row_id = idx;
+      validity[idx]   = false;
+      return DecimalRepType{0};
+    }
+
+    auto const scaled_abs = input_abs * scale_factor;
+    auto const magnitude  = scaled_round<FloatType, DecimalRepType>(x, -decimal_places, scaled_abs);
+    auto const is_out_of_bound = magnitude >= static_cast<decltype(magnitude)>(exclusive_bound);
     if (is_out_of_bound) { *failure_row_id = idx; }
     validity[idx] = !is_out_of_bound;
+    if (is_out_of_bound) { return DecimalRepType{0}; }
 
-    return is_out_of_bound ? DecimalRepType{0} : scaled_rounded;
+    auto const signed_magnitude = static_cast<DecimalRepType>(magnitude);
+    return x < 0 ? -signed_magnitude : signed_magnitude;
   }
 };
 
@@ -1381,17 +1394,27 @@ struct floating_point_to_decimal_dispatcher {
                   cuda::stream_ref stream) const
   {
     using DecimalRepType = cudf::device_storage_type_t<DecimalType>;
+    CUDF_EXPECTS(precision > 0 && precision <= cuda::std::numeric_limits<DecimalRepType>::digits10,
+                 "Precision must be between 1 and the decimal storage type's maximum precision",
+                 std::invalid_argument);
 
     auto const d_input_ptr =
       cudf::column_device_view::create(input, stream, cudf::get_current_device_resource_ref());
     auto const exclusive_bound = static_cast<DecimalRepType>(
       multiply_power10<DecimalRepType>(cuda::std::make_unsigned_t<DecimalRepType>{1}, precision));
 
+    auto const scale_factor       = std::pow(10.0, static_cast<double>(decimal_places));
+    auto const coarse_input_bound = 2.0 * static_cast<double>(exclusive_bound) / scale_factor;
     thrust::tabulate(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                      output.begin<DecimalRepType>(),
                      output.end<DecimalRepType>(),
-                     floating_point_to_decimal_fn<FloatType, DecimalRepType>{
-                       *d_input_ptr, validity, failure_row_id, decimal_places, exclusive_bound});
+                     floating_point_to_decimal_fn<FloatType, DecimalRepType>{*d_input_ptr,
+                                                                             validity,
+                                                                             failure_row_id,
+                                                                             decimal_places,
+                                                                             exclusive_bound,
+                                                                             scale_factor,
+                                                                             coarse_input_bound});
   }
 };
 
@@ -1404,10 +1427,14 @@ std::pair<std::unique_ptr<cudf::column>, cudf::size_type> floating_point_to_deci
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr)
 {
+  auto const decimal_places_wide = -static_cast<int64_t>(output_type.scale());
+  CUDF_EXPECTS(decimal_places_wide >= -38 && decimal_places_wide <= 38,
+               "Floating point to decimal conversion supports scales from -38 to 38",
+               std::invalid_argument);
   auto output = cudf::make_fixed_point_column(
     output_type, input.size(), cudf::mask_state::UNALLOCATED, stream, mr);
 
-  auto const decimal_places         = -output_type.scale();
+  auto const decimal_places         = static_cast<int32_t>(decimal_places_wide);
   auto const default_mr             = rmm::mr::get_current_device_resource_ref();
   auto const initial_failure_row_id = cudf::size_type{-1};
 
