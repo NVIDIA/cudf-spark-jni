@@ -35,7 +35,8 @@ __device__ inline uint32_t rotate_bits_left(uint32_t x, uint32_t r)
   return __funnelshift_l(x, x, r);
 }
 
-template <typename Key, CUDF_ENABLE_IF(not cudf::is_nested<Key>())>
+template <typename Key>
+  requires(not cudf::concepts::nested<Key>)
 struct MurmurHash3_32 {
   using result_type = murmur_hash_value_type;
 

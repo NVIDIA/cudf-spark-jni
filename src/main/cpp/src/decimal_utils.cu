@@ -32,6 +32,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/std/cmath>
+#include <cuda/std/concepts>
 #include <cuda/std/functional>
 #include <cuda/std/limits>
 #include <cuda/stream>
@@ -1204,9 +1205,7 @@ using namespace numeric::detail;
  * @param scaled_abs Estimate of the absolute value at the requested decimal scale
  * @return Unsigned widened magnitude, rounded before checking the target precision
  */
-template <typename FloatType,
-          typename IntType,
-          CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
+template <cuda::std::floating_point FloatType, typename IntType>
 __device__ inline auto scaled_round(FloatType input, int32_t pow10, double scaled_abs)
   -> cuda::std::make_unsigned_t<
     cuda::std::conditional_t<cuda::std::is_same_v<IntType, std::int32_t>, std::int64_t, __int128_t>>
@@ -1373,18 +1372,15 @@ struct floating_point_to_decimal_dispatcher {
             std::is_same_v<DecimalType, numeric::decimal128>);
   }
 
-  template <typename FloatType,
-            typename DecimalType,
-            typename... Args,
-            CUDF_ENABLE_IF(not supported_types<FloatType, DecimalType>())>
+  template <typename FloatType, typename DecimalType, typename... Args>
+    requires(not supported_types<FloatType, DecimalType>())
   void operator()(Args...) const
   {
     CUDF_FAIL("Unsupported types for floating_point_to_decimal_fn", cudf::data_type_error);
   }
 
-  template <typename FloatType,
-            typename DecimalType,
-            CUDF_ENABLE_IF(supported_types<FloatType, DecimalType>())>
+  template <typename FloatType, typename DecimalType>
+    requires(supported_types<FloatType, DecimalType>())
   void operator()(cudf::column_view const& input,
                   cudf::mutable_column_view const& output,
                   bool* validity,
