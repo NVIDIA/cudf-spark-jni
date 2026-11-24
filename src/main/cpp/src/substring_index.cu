@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,19 +88,22 @@ void compute_substring_indices(column_device_view const& d_column,
 
         end_char_pos[idx] = col_val_len;
 
+        // Spark's UTF8String.subStringIndex resumes one position past the start of the previous
+        // match (`find(delim, idx + 1)` / `rfind(delim, idx - 1)`), so matches of a
+        // multi-character delimiter may overlap.
         for (auto i = 0; i < nsearches; ++i) {
           char_pos = left_to_right ? col_val.find(delim_val, start_pos)
                                    : col_val.rfind(delim_val, 0, end_pos);
           if (char_pos == string_view::npos) return;
           if (left_to_right)
-            start_pos = char_pos + delimiter_len;
+            start_pos = char_pos + 1;
           else
-            end_pos = char_pos;
+            end_pos = char_pos + delimiter_len - 1;
         }
         if (left_to_right)
           end_char_pos[idx] = char_pos;
         else
-          start_char_pos[idx] = end_pos + delimiter_len;
+          start_char_pos[idx] = char_pos + delimiter_len;
       }
     });
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,4 +51,53 @@ TEST_F(SubstringIndexTests, ScalarDelimiter)
   auto results =
     spark_rapids_jni::substring_index(strings_column_view{col0}, string_scalar("."), 3);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, exp_results);
+}
+
+TEST_F(SubstringIndexTests, OverlappingDelimiter)
+{
+  // Spark's UTF8String.subStringIndex lets matches of a multi-character delimiter overlap.
+  auto const input =
+    test::strings_column_wrapper({"||||||", "aaaa", "aaaaa", "abababa", "千千千千"});
+  auto const view = strings_column_view{input};
+
+  {
+    auto const results = spark_rapids_jni::substring_index(view, string_scalar("|||"), 3);
+    auto const expected =
+      test::strings_column_wrapper({"||", "aaaa", "aaaaa", "abababa", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results = spark_rapids_jni::substring_index(view, string_scalar("|||"), -4);
+    auto const expected =
+      test::strings_column_wrapper({"|||", "aaaa", "aaaaa", "abababa", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results  = spark_rapids_jni::substring_index(view, string_scalar("aa"), 2);
+    auto const expected = test::strings_column_wrapper({"||||||", "a", "a", "abababa", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results  = spark_rapids_jni::substring_index(view, string_scalar("aa"), -2);
+    auto const expected = test::strings_column_wrapper({"||||||", "a", "a", "abababa", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results = spark_rapids_jni::substring_index(view, string_scalar("aba"), 2);
+    auto const expected =
+      test::strings_column_wrapper({"||||||", "aaaa", "aaaaa", "ab", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results = spark_rapids_jni::substring_index(view, string_scalar("aba"), -2);
+    auto const expected =
+      test::strings_column_wrapper({"||||||", "aaaa", "aaaaa", "ba", "千千千千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
+  {
+    auto const results = spark_rapids_jni::substring_index(view, string_scalar("千千"), 2);
+    auto const expected =
+      test::strings_column_wrapper({"||||||", "aaaa", "aaaaa", "abababa", "千"});
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*results, expected);
+  }
 }

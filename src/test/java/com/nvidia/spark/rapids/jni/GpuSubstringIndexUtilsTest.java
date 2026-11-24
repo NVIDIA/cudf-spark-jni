@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,6 +72,26 @@ public class GpuSubstringIndexUtilsTest {
                 } finally {
                     result.forEach(ColumnVector::close);
                 }
+            }
+        }
+    }
+
+    // Spark's UTF8String.subStringIndex lets matches of a multi-character delimiter overlap,
+    // see "overlapped delim" in Spark's UTF8StringSuite.
+    @Test
+    void gpuSubstringIndexOverlappingDelimiterTest() {
+        String[] inputs = {"||||||", "||||||", "aaaa", "aaaa", "aaaaa", "abababa", "abababa",
+            "千千千千"};
+        String[] delimiters = {"|||", "|||", "aa", "aa", "aa", "aba", "aba", "千千"};
+        int[] counts = {3, -4, 2, -2, 3, 2, -2, 2};
+        String[] expected = {"||", "|||", "a", "a", "aa", "ab", "ba", "千"};
+        for (int i = 0; i < inputs.length; i++) {
+            try (ColumnVector input = ColumnVector.fromStrings(inputs[i]);
+                 Scalar delimiter = Scalar.fromString(delimiters[i]);
+                 ColumnVector expectedCv = ColumnVector.fromStrings(expected[i]);
+                 ColumnVector result =
+                     GpuSubstringIndexUtils.substringIndex(input, delimiter, counts[i])) {
+                AssertUtils.assertColumnsAreEqual(expectedCv, result);
             }
         }
     }
