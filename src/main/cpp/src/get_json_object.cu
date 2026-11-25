@@ -43,6 +43,7 @@
 #include <cuda/hierarchy>
 #include <cuda/std/algorithm>
 #include <cuda/std/tuple>
+#include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
@@ -56,7 +57,6 @@
 #include <cstring>
 #include <numeric>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -130,6 +130,7 @@ class json_generator {
     }
   }
 
+  // Both parser variants validate children through the matching close.
   __device__ bool copy_current_structure(json_parser& parser, char* out_begin)
   {
     try_write_comma(out_begin);
@@ -860,15 +861,17 @@ __global__ void scratch_size_kernel(cudf::detail::input_offsetalator offsets,
   }
 }
 
-// Return scratch bytes and the absolute slice base.
+// Return scratch bytes and the absolute slice base; export the R=2 row bound in the same readback.
 cuda::std::pair<int64_t, int64_t> calc_scratch_size(cudf::strings_column_view const& input,
                                                     cudf::detail::input_offsetalator offsets,
+                                                    int64_t* max_row_size,
                                                     cuda::stream_ref stream)
 {
   rmm::device_uvector<int64_t> stats(3, stream);
   scratch_size_kernel<<<1, 256, 0, stream.get()>>>(offsets, input.size(), stats.data());
   CUDF_CUDA_TRY(cudaPeekAtLastError());
   auto const host = cudf::detail::make_pinned_vector(stats, stream);
+  if (max_row_size != nullptr) { *max_row_size = host[0]; }
   return {host[0] * 10 + host[1], host[2]};
 }
 
@@ -881,8 +884,11 @@ bool check_error(cudf::host_span<int8_t const> flags)
 
 namespace {
 
-constexpr int k_merged_max_depth         = 2;
-constexpr std::size_t k_merged_min_paths = 16;
+// Depth-five admission requires eight deep paths; only then may they absorb shallow paths.
+constexpr int k_merged_max_depth              = 2;
+constexpr int k_merged_deep_max_depth         = 5;
+constexpr std::size_t k_merged_min_paths      = 8;
+constexpr std::size_t k_deep_merged_min_paths = 8;
 // Launch overhead dominates small inputs; four warps times 16 B per path gives 768 in 48 KiB.
 constexpr int k_min_rows_per_family      = 32;
 constexpr std::size_t k_merged_max_paths = 768;
@@ -904,6 +910,11 @@ struct merged_trie_view {
   // Flat-order names avoid a slot-ID lookup.
   int32_t const* flat_name_off;
   int32_t const* flat_name_len;
+  uint64_t const* flat_name_sig;
+  // For multi-child nodes, the length row includes a final sentinel.
+  int32_t const* len_prefix;
+  std::size_t const* len_prefix_beg;
+  int32_t const* max_name_len;
 };
 
 // A negative begin means unset; dead paths cannot be revived by later duplicate keys.
@@ -913,8 +924,10 @@ struct alignas(8) merged_path_out {
   int8_t kind    = 0;
 };
 
-constexpr int8_t k_merged_kind_string = 1;
-constexpr int8_t k_merged_kind_dead   = 3;
+constexpr int8_t k_merged_kind_string     = 1;
+constexpr int8_t k_merged_kind_dead       = 3;
+constexpr int8_t k_merged_kind_string_raw = 4;
+constexpr int8_t k_merged_kind_value_raw  = 5;
 
 constexpr int k_merged_block_size        = 128;
 constexpr int k_merged_min_blocks_per_sm = 8;
@@ -938,7 +951,29 @@ __device__ __forceinline__ void store_record(merged_path_out& r,
   r = {static_cast<uint32_t>(begin) | (static_cast<uint64_t>(end) << 32), kind};
 }
 
-// Escapes compare through the parser instead of raw-byte equality.
+// Two rows per warp fit the same shared memory by using 29 bits for the exclusive end.
+struct merged_path_packed {
+  uint64_t word = 0xffffffffu;
+};
+constexpr int64_t k_packed_end_max = (uint64_t{1} << 29) - 1;
+
+__device__ __forceinline__ merged_rec_view load_record(merged_path_packed const& r)
+{
+  return {static_cast<int32_t>(r.word),
+          static_cast<int32_t>((r.word >> 32) & k_packed_end_max),
+          static_cast<int8_t>(r.word >> 61)};
+}
+
+__device__ __forceinline__ void store_record(merged_path_packed& r,
+                                             int32_t begin,
+                                             int32_t end,
+                                             int8_t kind)
+{
+  r.word = static_cast<uint32_t>(begin) | (static_cast<uint64_t>(end) << 32) |
+           (static_cast<uint64_t>(kind) << 61);
+}
+
+// Returns the matching slot ID, not the flat child position, or -1 within the supplied child range.
 __device__ __forceinline__ int32_t merged_exact_scan(merged_trie_view const& trie,
                                                      char_range const& raw,
                                                      int32_t from,
@@ -952,40 +987,229 @@ __device__ __forceinline__ int32_t merged_exact_scan(merged_trie_view const& tri
   return -1;
 }
 
-// Advance one member; -1 also covers END_OBJECT and ERROR.
-__device__ inline int32_t merged_scan_member(json_parser& p,
+// Packs the first and last nonoverlapping bytes, up to four each; equal signatures alone never
+// certify equal names. E.g. abcde packs abcd in the low half and e in the high half; there is
+// no repeated overlap. Host and device use the same formula.
+__host__ __device__ inline uint64_t name_sig(char const* p, int32_t n)
+{
+  uint64_t sig     = 0;
+  int32_t const hn = n < 4 ? n : 4;
+  int32_t const tn = n - 4 > hn ? 4 : n > 4 ? n - 4 : 0;
+  for (int32_t i = 0; i < hn; ++i) {
+    sig |= static_cast<uint64_t>(static_cast<uint8_t>(p[i])) << (i * 8);
+  }
+  for (int32_t i = 0; i < tn; ++i) {
+    sig |= static_cast<uint64_t>(static_cast<uint8_t>(p[n - tn + i])) << (32 + i * 8);
+  }
+  return sig;
+}
+
+// Full byte comparison defends against length-bucket and signature collisions.
+__device__ __forceinline__ bool signature_match(merged_trie_view const& trie,
+                                                char_range const& raw,
+                                                int32_t inner,
+                                                int32_t c)
+{
+  int32_t const cand_len = trie.flat_name_len[c];
+  if (cand_len != inner) { return false; }  // bucket drift defense
+  char const* cand = trie.names + trie.flat_name_off[c];
+  for (int32_t i = 0; i < inner; ++i) {
+    if (cand[i] != raw.data()[1 + i]) { return false; }
+  }
+  return true;
+}
+
+/**
+ * Certifies byte-identical serialization of a parsed subtree; this is not a JSON validator.
+ * Requires double quotes, simple round-trip escapes, compact separators and canonical
+ * integers/literals. Other forms (including floats, -0, Unicode/slash escapes) use the writer.
+ * Keep raw eligibility in sync if the writer stops preserving bytes >=0x80, e.g. astral UTF-8.
+ */
+__device__ __forceinline__ bool certify_raw_subtree(char const* data, int32_t len)
+{
+  bool in_string = false;
+  int32_t i      = 0;
+  // Track object-key positions in the already-validated structure.
+  uint8_t kind_stack[MAX_JSON_NESTING_DEPTH];
+  int32_t stack_top   = 0;
+  bool expect_obj_key = false;
+  while (i < len) {
+    char const b = data[i];
+    if (in_string) {
+      if (b == '\\') {
+        // Only \" \\ \b \f \n \r \t round-trip; \/ and \u fall back.
+        if (i + 1 >= len) { return false; }
+        char const e = data[i + 1];
+        bool const canonical =
+          e == '"' || e == '\\' || e == 'b' || e == 'f' || e == 'n' || e == 'r' || e == 't';
+        if (!canonical) { return false; }
+        i += 2;  // consume backslash + escape char
+      } else if (b == '"') {
+        in_string = false;
+        ++i;
+      } else if (static_cast<uint8_t>(b) < 0x20) {
+        return false;
+      } else {
+        // run >= 1: data[i] is safe because the aligned head load masks bytes before the
+        // cursor; the outer scanner consumes the stop byte.
+        char_range_reader r{char_range(data + i, len - i)};
+        i += json_parser::swar_safe_run<true>(r, nullptr, '"', false);
+        if (i >= len) { return false; }  // unterminated string: parse would have failed
+        continue;                        // scalar decisions handle the stop byte
+      }
+      continue;
+    }
+    if (expect_obj_key) {
+      // Only a quoted key or an immediate `{"}` empty-object close is canonical.
+      if (b != '"' && !(b == '}' && i > 0 && data[i - 1] == '{')) { return false; }
+    }
+    if (b == '"') {
+      expect_obj_key = false;  // this quote opens the key itself when the gate passed
+      in_string      = true;
+      ++i;
+    } else if (b == '{' || b == '[') {
+      // Track whether a comma must precede an object key.
+      if (stack_top >= MAX_JSON_NESTING_DEPTH) {
+        return false;  // deeper than the parser's own cap — uncertified, not parseable input
+      }
+      kind_stack[stack_top++] = (b == '{') ? 1 : 0;
+      expect_obj_key          = (b == '{');
+      ++i;
+    } else if (b == '}' || b == ']') {
+      if (stack_top == 0) { return false; }  // unbalanced — parse would have failed
+      bool const was_object = kind_stack[--stack_top] == 1;
+      if ((b == '}') != was_object) { return false; }  // mismatched closer
+      expect_obj_key = false;
+      ++i;
+    } else if (b == ',' || b == ':') {
+      // The parent container determines whether a comma requires an object key.
+      if (b == ',') {
+        if (stack_top == 0) { return false; }  // top-level comma — parse would have failed
+        expect_obj_key = kind_stack[stack_top - 1] == 1;
+      }
+      ++i;
+    } else if ((b >= '0' && b <= '9') || b == '-') {
+      // Ints only (no float, no -0, no leading zero).
+      int32_t const beg = i;
+      while (i < len) {
+        char const nb = data[i];
+        if ((nb >= '0' && nb <= '9') || nb == '.' || nb == 'e' || nb == 'E' || nb == '+' ||
+            nb == '-') {
+          ++i;
+        } else {
+          break;
+        }
+      }
+      int32_t digits_beg = beg;
+      if (data[digits_beg] == '-') { ++digits_beg; }
+      int32_t const digits_len = i - digits_beg;
+      if (digits_len == 0) { return false; }  // bare `-`
+      for (int32_t j = digits_beg; j < i; ++j) {
+        if (data[j] < '0' || data[j] > '9') { return false; }  // float/exponent
+      }
+      if (digits_len > 1 && data[digits_beg] == '0') { return false; }  // leading zero
+      if (data[beg] == '-' && digits_len == 1 && data[digits_beg] == '0') {
+        return false;  // literal `-0` rewrites to `0`; `-1`..`-9` are verbatim
+      }
+    } else if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')) {
+      int32_t const beg = i;
+      while (i < len) {
+        char const lb = data[i];
+        if ((lb >= 'a' && lb <= 'z') || (lb >= 'A' && lb <= 'Z')) {
+          ++i;
+        } else {
+          break;
+        }
+      }
+      int32_t const run_len = i - beg;
+      bool const is_literal =
+        (run_len == 4 && data[beg] == 't' && data[beg + 1] == 'r' && data[beg + 2] == 'u' &&
+         data[beg + 3] == 'e') ||
+        (run_len == 5 && data[beg] == 'f' && data[beg + 1] == 'a' && data[beg + 2] == 'l' &&
+         data[beg + 3] == 's' && data[beg + 4] == 'e') ||
+        (run_len == 4 && data[beg] == 'n' && data[beg + 1] == 'u' && data[beg + 2] == 'l' &&
+         data[beg + 3] == 'l');
+      if (!is_literal) { return false; }
+    } else {
+      // Other bytes either normalize on write or fail the parser grammar.
+      return false;
+    }
+  }
+  return !in_string;
+}
+
+// One member scan uses the parser's matcher for one child, or bucket-filtered exact matching.
+// Advances one object-member token; returns its slot or -1, leaving END_OBJECT/ERROR in the parser.
+// The caller must inspect the token before treating -1 as an unmatched name or reading its value.
+__device__ inline int32_t merged_scan_member(json_parser_impl<true>& p,
                                              merged_trie_view const& trie,
                                              int32_t node)
 {
-  auto const begin = trie.children_beg[node];
-  auto const count = trie.children_cnt[node];
-  if (count == 1) {
-    bool const match = p.parse_next_token_with_matching(
-      cudf::string_view{trie.names + trie.flat_name_off[begin], trie.flat_name_len[begin]});
-    return match && p.get_current_token() == json_token::FIELD_NAME ? trie.flat_children[begin]
-                                                                    : -1;
+  int32_t const beg = trie.children_beg[node];
+  int32_t const cnt = trie.children_cnt[node];
+  if (cnt == 1) {
+    int32_t const slot = trie.flat_children[beg];
+    cudf::string_view const first_name(trie.names + trie.flat_name_off[beg],
+                                       trie.flat_name_len[beg]);
+    bool const matched = p.parse_next_token_with_matching(first_name);
+    // The parser's match flag is only meaningful for a FIELD_NAME token.
+    if (json_token::FIELD_NAME == p.get_current_token() && matched) { return slot; }
+    return -1;
   }
-  return p.next_token() == json_token::FIELD_NAME
-           ? merged_exact_scan(trie, p.current_range(), begin, begin + count)
-           : -1;
+
+  // With multiple candidates the parser's match flag is useless, so scan all of them after
+  // parsing the FIELD_NAME token; a single candidate lets the parser match during tokenization.
+  p.next_token();
+  if (json_token::FIELD_NAME != p.get_current_token() || cnt == 0) { return -1; }
+
+  // Escaped names need decoded comparison; raw-length buckets are sound only without
+  // backslashes.
+  char_range const raw  = p.current_range();
+  int32_t const tok_len = raw.size();  // raw, incl. quotes
+  if (tok_len < 2 || p.current_token_is_escaped_field_name()) {
+    return merged_exact_scan(trie, raw, beg, beg + cnt);
+  }
+
+  int32_t const inner = tok_len - 2;
+
+  if (inner > trie.max_name_len[node]) { return -1; }
+  // Length-sorted children occupy [beg + row[L], beg + row[L+1]).
+  int32_t const* row = trie.len_prefix + trie.len_prefix_beg[node];
+  int32_t const lo   = beg + row[inner];
+  int32_t const hi   = beg + row[inner + 1];
+  if (lo == hi) { return -1; }
+
+  // Signature filters only; full raw-byte comparison decides every match.
+  uint64_t const sig = name_sig(raw.data() + 1, inner);
+  if (lo + 1 < hi) {
+    for (int32_t c = lo; c < hi; ++c) {
+      if (trie.flat_name_sig[c] != sig) { continue; }
+      if (signature_match(trie, raw, inner, c)) { return trie.flat_children[c]; }
+    }
+    return -1;
+  }
+  // Singleton buckets skip signature loads and compare the only candidate.
+  if (signature_match(trie, raw, inner, lo)) { return trie.flat_children[lo]; }
+  return -1;
 }
 
 // One trie walk per row group. All its lanes parse in lockstep; only its leader records
 // intervals. First matches own their subtree even for nulls or missing descendants.
-
+template <int max_trie_depth, int R>
 __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
   void get_json_object_kernel_merged_named(cudf::column_device_view input,
                                            cudf::device_span<json_path_processing_data> paths,
                                            merged_trie_view trie,
                                            int8_t* depth_error)
 {
-  using record        = merged_path_out;
-  constexpr int width = warp_size;
+  using record        = cuda::std::conditional_t<R == 1, merged_path_out, merged_path_packed>;
+  constexpr int width = warp_size / R;
   auto const row = static_cast<cudf::size_type>(cudf::detail::grid_1d::global_thread_id() / width);
   if (row >= input.size()) { return; }
-  auto const row_lane     = threadIdx.x % width;
-  constexpr unsigned mask = 0xffffffffu;
-  auto const count        = static_cast<int32_t>(paths.size());
+  auto const lane     = threadIdx.x % warp_size;
+  auto const row_lane = lane % width;
+  auto const mask     = width == 32 ? 0xffffffffu : (0xffffu << ((lane / width) * width));
+  auto const count    = static_cast<int32_t>(paths.size());
   extern __shared__ __align__(8) unsigned char records[];
   auto* const out  = reinterpret_cast<record*>(records) + (threadIdx.x / width) * count;
   bool const owner = row_lane == 0;
@@ -1002,7 +1226,8 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     }
   }
 
-  json_parser p{char_range{str}};
+  json_parser_impl<true> p{char_range{str}};
+  p.enable_warp_cooperative_skip(static_cast<int>(lane), width, mask);
   auto const offset = [&] { return static_cast<int32_t>(p.current_range().data() - str.data()); };
   auto const record_slot = [&](int32_t slot, int32_t begin, int32_t end, int8_t kind) {
     for (int32_t i = 0; i < trie.paths_cnt[slot]; ++i) {
@@ -1018,7 +1243,9 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     }
   };
   auto const record_subtree = [&](int32_t slot, int32_t begin, int32_t end) {
-    record_slot(slot, begin, end, 0);
+    auto const kind =
+      certify_raw_subtree(str.data() + begin, end - begin) ? k_merged_kind_value_raw : int8_t{0};
+    record_slot(slot, begin, end, kind);
   };
   bool valid = true;
   if (p.next_token() != json_token::START_OBJECT) {
@@ -1027,7 +1254,7 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     struct frame {
       int32_t node, parent_slot, begin;
     };
-    frame stack[k_merged_max_depth];
+    frame stack[max_trie_depth];
     int sp = 0, node = 0;
     while (true) {
       auto const slot  = merged_scan_member(p, trie, node);
@@ -1066,7 +1293,7 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
       auto const child = trie.child_node[slot];
       auto const begin = offset();
       if (value == json_token::START_OBJECT && child >= 0 && trie.children_cnt[child] > 0) {
-        if (sp == k_merged_max_depth) {
+        if (sp == max_trie_depth) {
           valid = false;
           break;
         }
@@ -1084,8 +1311,17 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
           if (container) {
             record_subtree(slot, begin, offset() + 1);
           } else {
-            auto const end  = begin + static_cast<int32_t>(p.current_range().size());
-            auto const kind = value == json_token::VALUE_STRING ? k_merged_kind_string : int8_t{0};
+            auto const end = begin + static_cast<int32_t>(p.current_range().size());
+            int8_t kind    = 0;
+            if (value == json_token::VALUE_STRING) {
+              kind = p.current_token_is_escaped_string() ? k_merged_kind_string
+                                                         : k_merged_kind_string_raw;
+            } else if (value == json_token::VALUE_TRUE || value == json_token::VALUE_FALSE ||
+                       (value == json_token::VALUE_NUMBER_INT &&
+                        !(end - begin == 2 && str.data()[begin] == '-' &&
+                          str.data()[begin + 1] == '0'))) {
+              kind = k_merged_kind_value_raw;
+            }
             record_slot(slot, begin, end, kind);
           }
         }
@@ -1117,11 +1353,18 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
     // Use this path's offsets: retry slots can differ even for the same input row.
     auto const base      = path.offsets[row];
     char* const dest     = path.out_buf + (base - path.base_offset);
-    auto const* chars    = dest;
+    char const* chars    = dest;
     auto const value     = char_range{str.data() + rec.begin, rec.end - rec.begin};
     cudf::size_type size = 0;
     bool ok              = true;
-    if (rec.kind == k_merged_kind_string) {
+    // Borrow raw bytes through gather; a valid empty string still has a non-null pointer.
+    if (rec.kind == k_merged_kind_string_raw) {
+      chars = value.data() + 1;
+      size  = value.size() - 2;
+    } else if (rec.kind == k_merged_kind_value_raw) {
+      chars = value.data();
+      size  = value.size();
+    } else if (rec.kind == k_merged_kind_string) {
       char_range_reader reader{value};
       size = json_parser::write_string(reader, dest, escape_style::UNESCAPED);
     } else {
@@ -1140,7 +1383,7 @@ __launch_bounds__(k_merged_block_size, k_merged_min_blocks_per_sm) CUDF_KERNEL
 // Host offsets accompany one aligned upload; each section has its native alignment.
 struct merged_group_plan {
   std::vector<uint8_t> h_blob;
-  std::array<std::size_t, 13> offsets;
+  std::array<std::size_t, 17> offsets;
   merged_trie_view view{};
   int32_t num_paths;
   int max_trie_depth;
@@ -1193,18 +1436,35 @@ merged_group_plan build_merged_named_plan(path_batch const& paths,
     subtree_beg(slots.size()), subtree_cnt(slots.size());
   std::vector<int32_t> terminal_ids, subtree_pids;
   std::string names;
+  std::vector<uint64_t> flat_name_sig;
+  std::vector<int32_t> len_prefix, max_name_len;
+  std::vector<std::size_t> len_prefix_beg;
   for (auto& children : nodes) {
     std::stable_sort(children.begin(), children.end(), [&](int32_t a, int32_t b) {
       return slots[a].name.size() < slots[b].name.size();
     });
     children_beg.push_back(static_cast<int32_t>(flat_children.size()));
     children_cnt.push_back(static_cast<int32_t>(children.size()));
+    len_prefix_beg.push_back(len_prefix.size());
+    max_name_len.push_back(
+      children.size() <= 1 ? 0 : static_cast<int32_t>(slots[children.back()].name.size()));
+    if (children.size() > 1) {
+      // Row[L] counts children shorter than L. Size by node to bound long-name metadata.
+      std::size_t len = 0;
+      for (std::size_t c = 0; c < children.size(); ++c) {
+        auto const end = slots[children[c]].name.size() + 1;
+        len_prefix.insert(len_prefix.end(), end - len, static_cast<int32_t>(c));
+        len = end;
+      }
+      len_prefix.push_back(static_cast<int32_t>(children.size()));
+    }
     for (auto const s : children) {
       auto const& slot = slots[s];
       flat_children.push_back(s);
       flat_name_off.push_back(static_cast<int32_t>(names.size()));
       flat_name_len.push_back(static_cast<int32_t>(slot.name.size()));
       names += slot.name;
+      flat_name_sig.push_back(name_sig(slot.name.data(), flat_name_len.back()));
       child_node[s]           = slot.child;
       auto const append_paths = [](std::vector<int32_t>& ids,
                                    std::vector<int32_t> const& selected,
@@ -1239,7 +1499,11 @@ merged_group_plan build_merged_named_plan(path_batch const& paths,
                                    bytes_of(subtree_cnt),
                                    bytes_of(subtree_pids),
                                    bytes_of(flat_name_off),
-                                   bytes_of(flat_name_len)};
+                                   bytes_of(flat_name_len),
+                                   bytes_of(flat_name_sig),
+                                   bytes_of(len_prefix),
+                                   bytes_of(len_prefix_beg),
+                                   bytes_of(max_name_len)};
   std::size_t total   = 0;
   for (std::size_t i = 0; i < sections.size(); ++i) {
     auto const alignment = sections[i].alignment;
@@ -1271,36 +1535,50 @@ void bind_merged_plan_view(merged_group_plan& plan, uint8_t const* base)
                      ints(9),
                      ints(10),
                      ints(11),
-                     ints(12)};
+                     ints(12),
+                     reinterpret_cast<uint64_t const*>(base + s[13]),
+                     ints(14),
+                     reinterpret_cast<std::size_t const*>(base + s[15]),
+                     ints(16)};
 }
 
 // Both kernels require the bound trie and group-ordered path data through completion.
 void launch_merged_named(cudf::column_device_view const& input,
                          cudf::device_span<json_path_processing_data> paths,
                          merged_group_plan const& plan,
+                         int64_t max_row_size,
                          int8_t* depth_error,
                          cuda::stream_ref stream)
 {
   constexpr auto warps = k_merged_block_size / warp_size;
   static_assert(warps * k_merged_max_paths * sizeof(merged_path_out) <= 48 * 1024);
-  auto const rows   = static_cast<std::size_t>(input.size());
-  auto const smem   = warps * plan.num_paths * sizeof(merged_path_out);
-  auto const blocks = (rows + warps - 1) / warps;
-  get_json_object_kernel_merged_named<<<blocks, k_merged_block_size, smem, stream.get()>>>(
-    input, paths, plan.view, depth_error);
-}
-
-// The 63/20 cutoff separates the measured 124/40 deny and 120/38 admit; it is not break-even.
-bool admits_fanout(path_batch const& paths, std::vector<std::size_t> const& indices)
-{
-  if (indices.size() < k_merged_min_paths) { return false; }
-  std::set<std::string_view> roots;
-  std::set<std::vector<std::tuple<path_instruction_type, std::string, int32_t>>> unique;
-  for (auto const i : indices) {
-    roots.insert(std::get<1>(paths[i].front()));
-    unique.emplace(paths[i].begin(), paths[i].end());
+  static_assert(sizeof(merged_path_out) == 2 * sizeof(merged_path_packed));
+  auto const rows = static_cast<std::size_t>(input.size());
+  auto const smem = warps * plan.num_paths * sizeof(merged_path_out);
+  int device = 0, sms = 0;
+  CUDF_CUDA_TRY(cudaGetDevice(&device));
+  CUDF_CUDA_TRY(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+  // Two rows per warp pay off after one estimated walk round, if row offsets fit 29 bits.
+  bool const pair_rows =
+    rows > sms * warps * k_merged_min_blocks_per_sm && max_row_size <= k_packed_end_max;
+  auto const launch = [&]<int Depth, int R>() {
+    auto const blocks = (rows + R * warps - 1) / (R * warps);
+    get_json_object_kernel_merged_named<Depth, R>
+      <<<blocks, k_merged_block_size, smem, stream.get()>>>(input, paths, plan.view, depth_error);
+  };
+  if (plan.max_trie_depth == k_merged_max_depth) {
+    if (pair_rows) {
+      launch.template operator()<k_merged_max_depth, 2>();
+    } else {
+      launch.template operator()<k_merged_max_depth, 1>();
+    }
+  } else {
+    if (pair_rows) {
+      launch.template operator()<k_merged_deep_max_depth, 2>();
+    } else {
+      launch.template operator()<k_merged_deep_max_depth, 1>();
+    }
   }
-  return unique.size() * 20 >= roots.size() * 63;
 }
 
 // Per-path codes survive retry compaction; a different evaluator can exceed measured slots.
@@ -1308,11 +1586,12 @@ struct grouped_routes {
   std::vector<char> codes;
   std::vector<std::size_t> general;
   std::vector<std::size_t> merged;
+  bool deep = false;
 };
 
 int named_depth(cudf::host_span<std::tuple<path_instruction_type, std::string, int32_t> const> path)
 {
-  return path.size() <= k_merged_max_depth &&
+  return path.size() <= k_merged_deep_max_depth &&
              std::all_of(
                path.begin(),
                path.end(),
@@ -1321,24 +1600,36 @@ int named_depth(cudf::host_span<std::tuple<path_instruction_type, std::string, i
            : 0;
 }
 
-// Preserve batch order when assigning the shallow family.
+// Preserve batch order within each family. A deep group must qualify before absorbing shallow.
 grouped_routes plan_routes(path_batch const& paths, cudf::size_type rows, bool last_non_null)
 {
-  grouped_routes plan{std::vector<char>(paths.size()), {}, {}};
+  grouped_routes plan{std::vector<char>(paths.size()), {}, {}, false};
+  std::vector<std::size_t> deep;
   for (std::size_t i = 0; i < paths.size(); ++i) {
     auto const depth = last_non_null || rows < k_min_rows_per_family ? 0 : named_depth(paths[i]);
-    if (depth == 0 || plan.merged.size() == k_merged_max_paths) {
+    if (depth == 0 || plan.merged.size() + deep.size() == k_merged_max_paths) {
       plan.general.push_back(i);
+    } else if (depth > k_merged_max_depth) {
+      deep.push_back(i);
     } else {
       plan.merged.push_back(i);
     }
   }
-  if (!admits_fanout(paths, plan.merged)) {
+  if (deep.size() >= k_deep_merged_min_paths) {
+    plan.deep = true;
+    plan.merged.insert(plan.merged.end(), deep.begin(), deep.end());
+    for (auto const i : deep) {
+      plan.codes[i] = 2;
+    }
+  } else {
+    plan.general.insert(plan.general.end(), deep.begin(), deep.end());
+  }
+  if (!plan.deep && plan.merged.size() < k_merged_min_paths) {
     plan.general.insert(plan.general.end(), plan.merged.begin(), plan.merged.end());
     plan.merged.clear();
   }
   for (auto const i : plan.merged) {
-    plan.codes[i] = 1;
+    if (plan.codes[i] == 0) { plan.codes[i] = 1; }
   }
   return plan;
 }
@@ -1346,9 +1637,10 @@ grouped_routes plan_routes(path_batch const& paths, cudf::size_type rows, bool l
 // Retry only the flagged paths, in first-pass route order, without reapplying admission.
 grouped_routes retry_routes(std::vector<char> codes)
 {
-  grouped_routes plan{std::move(codes), {}, {}};
+  grouped_routes plan{std::move(codes), {}, {}, false};
   for (std::size_t i = 0; i < plan.codes.size(); ++i) {
     (plan.codes[i] == 0 ? plan.general : plan.merged).push_back(i);
+    plan.deep = plan.deep || plan.codes[i] == 2;
   }
   return plan;
 }
@@ -1366,6 +1658,7 @@ std::optional<grouped_upload> launch_grouped(
   std::vector<json_path_processing_data> const& host_paths,
   int8_t* depth_error,
   bool use_last_non_null,
+  int64_t max_row_size,
   cuda::stream_ref stream)
 {
   auto const mr = cudf::get_current_device_resource_ref();
@@ -1374,7 +1667,7 @@ std::optional<grouped_upload> launch_grouped(
     kernel_launcher::exec(input, data, depth_error, use_last_non_null, stream);
     return std::nullopt;
   }
-  auto const depth         = k_merged_max_depth;
+  auto const depth         = routes.deep ? k_merged_deep_max_depth : k_merged_max_depth;
   auto plan                = build_merged_named_plan(paths, routes.merged, depth);
   constexpr auto alignment = alignof(json_path_processing_data);
   auto const group_begin   = (plan.h_blob.size() + alignment - 1) & ~(alignment - 1);
@@ -1399,10 +1692,10 @@ std::optional<grouped_upload> launch_grouped(
     cudaMemcpyAsync(device.data(), host.data(), bytes, cudaMemcpyDefault, stream.get()));
   bind_merged_plan_view(plan, reinterpret_cast<uint8_t const*>(device.data()));
   if (general.empty()) {
-    launch_merged_named(input, merged, plan, depth_error, stream);
+    launch_merged_named(input, merged, plan, max_row_size, depth_error, stream);
   } else {
     auto fork = cudf::detail::fork_streams(stream, 1);
-    launch_merged_named(input, merged, plan, depth_error, stream);
+    launch_merged_named(input, merged, plan, max_row_size, depth_error, stream);
     kernel_launcher::exec(input, general, depth_error, use_last_non_null, fork[0]);
     cudf::detail::join_streams(fork, stream);
   }
@@ -1418,6 +1711,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
   path_batch const& paths,
   int64_t scratch_size,
   bool use_last_non_null,
+  int64_t max_row_size,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
   std::vector<char>* routes_out)
@@ -1462,6 +1756,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
                                                         host_paths,
                                                         errors.data() + pass_paths.size(),
                                                         use_last_non_null,
+                                                        max_row_size,
                                                         stream);
     CUDF_CUDA_TRY(cudaMemcpyAsync(
       host_flags.data(), errors.data(), errors.size(), cudaMemcpyDefault, stream.get()));
@@ -1556,7 +1851,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   std::vector<std::size_t> order(count);
   std::iota(order.begin(), order.end(), std::size_t{0});
   std::sort(order.begin(), order.end(), [&](auto a, auto b) { return paths[a] < paths[b]; });
-  auto const [scratch_size, base_offset] = calc_scratch_size(input, offsets, stream);
+  int64_t max_row_size                   = 0;
+  auto const [scratch_size, base_offset] = calc_scratch_size(input, offsets, &max_row_size, stream);
   auto const device_input                = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());
   // A budget charges each path after accepting it, even if a single path exceeds the budget.
@@ -1578,6 +1874,7 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
                                       batch,
                                       scratch_size,
                                       use_last_non_null,
+                                      max_row_size,
                                       stream,
                                       mr,
                                       routes_out == nullptr ? nullptr : &batch_routes);
