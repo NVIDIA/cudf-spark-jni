@@ -26,6 +26,7 @@ import ai.rapids.cudf.HostColumnVector;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation.ENDPOINT_DELTA;
@@ -34,6 +35,7 @@ import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.ASCENDING;
 import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.DESCENDING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
 
 public class HistogramTest {
   private static final HostColumnVector.ListType DOUBLE_HISTOGRAM_TYPE =
@@ -139,6 +141,131 @@ public class HistogramTest {
              false);
          ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null, null)) {
       AssertUtils.assertColumnsAreEqual(percentiles, expected);
+    }
+  }
+
+  @Test
+  void testLeadingEmptyHistogramWithNullValues() {
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Collections.emptyList(), Arrays.asList(entry(null, 1L)),
+             Arrays.asList(entry(10.0, 1L)));
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.5}, false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null, 10.0)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testRoundedRankPastLastCount() {
+    // 2^53 + 3 rounds to 2^53 + 4, the total count of the first histogram.
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(5.0, 1L), entry(9.0, (1L << 53) + 3)),
+             Arrays.asList(entry(47.0, 1L)))) {
+      assertThrowsExactly(IndexOutOfBoundsException.class, () -> {
+        try (ColumnVector ignored = Histogram.percentileFromHistogram(
+            histogram, new double[]{0.5, 1.0}, false)) {
+          // Close the result if the expected exception is not thrown.
+        }
+      });
+    }
+  }
+
+  @Test
+  void testHigherRankPastLastCount() {
+    // Counts wrap to [Long.MAX_VALUE, -2, 0]. At p = 0.5, only the higher rank is past end.
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(1.0, Long.MAX_VALUE), entry(2.0, Long.MAX_VALUE),
+                 entry(3.0, 2L)),
+             Arrays.asList(entry(47.0, 1L)))) {
+      assertThrowsExactly(IndexOutOfBoundsException.class, () -> {
+        try (ColumnVector ignored = Histogram.percentileFromHistogram(
+            histogram, new double[]{0.5}, false)) {
+          // Close the result if the expected exception is not thrown.
+        }
+      });
+    }
+  }
+
+  @Test
+  void testLongMaxFrequencyRank() {
+    // Spark converts the rounded position to Long.MAX_VALUE, then rank + 1 wraps.
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(5.0, 1L), entry(9.0, Long.MAX_VALUE - 1)));
+         ColumnVector result = Histogram.percentileFromHistogramWithOptions(
+             histogram, new double[]{0.5, 1.0, Double.NaN}, false, ENDPOINT_DELTA, ASCENDING)) {
+      assertDoubleColumnExactly(result, 9.0, 5.0, 5.0);
+    }
+  }
+
+  @Test
+  void testWrappedCumulativeCounts() {
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(1.0, Long.MAX_VALUE), entry(2.0, 9L),
+                 entry(3.0, Long.MAX_VALUE), entry(4.0, 3L), entry(5.0, 7L)));
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.0, 0.5, 1.0}, false)) {
+      assertDoubleColumnExactly(result, 1.0, 4.0, 5.0);
+    }
+  }
+
+  @Test
+  void testSlicedHistogram() {
+    HostColumnVector.ListType type = new HostColumnVector.ListType(true,
+        new HostColumnVector.StructType(false, new HostColumnVector.BasicType(true, DType.FLOAT64),
+            new HostColumnVector.BasicType(true, DType.INT64)));
+    try (ColumnVector histogram = histograms(type,
+             Arrays.asList(new HostColumnVector.StructData(-100.0, null)),
+             Arrays.asList(entry(10.0, 1L), entry(20.0, 1L)))) {
+      ColumnView[] slices = histogram.splitAsViews(1);
+      try (ColumnView invalid = slices[0];
+           ColumnView input = slices[1];
+           ColumnVector result = Histogram.percentileFromHistogram(
+               input, new double[]{0.5}, false)) {
+        assertDoubleColumnExactly(result, 15.0);
+        assertThrows(CudfException.class, () -> {
+          try (ColumnVector ignored = Histogram.percentileFromHistogram(
+              invalid, new double[]{0.5}, false)) {
+            // Close the result if the expected exception is not thrown.
+          }
+        });
+      }
+    }
+  }
+
+  @Test
+  void testFlatPercentilesRepeatNullValidity() {
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(null, 1L)), Arrays.asList(entry(42.0, 1L)));
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.25, 0.75}, false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null, 42.0, 42.0)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testFlatPercentilesFromEmptyHistograms() {
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Collections.emptyList(), Collections.emptyList());
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.25, 0.75}, false);
+         ColumnVector expected = ColumnVector.fromBoxedDoubles(null, null, null, null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
+  void testListPercentilesFromEmptyHistograms() {
+    HostColumnVector.ListType resultType = new HostColumnVector.ListType(true,
+        new HostColumnVector.BasicType(true, DType.FLOAT64));
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Collections.emptyList(), Collections.emptyList());
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.25, 0.75}, true);
+         ColumnVector expected = ColumnVector.fromLists(
+             resultType, (List<Double>) null, (List<Double>) null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
     }
   }
 

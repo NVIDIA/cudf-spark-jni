@@ -40,27 +40,6 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_createHistogr
   JNI_CATCH(env, 0);
 }
 
-JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogram(
-  JNIEnv* env, jclass, jlong input_handle, jdoubleArray jpercentages, jboolean output_as_lists)
-{
-  JNI_NULL_CHECK(env, input_handle, "input_handle is null", 0);
-  JNI_NULL_CHECK(env, jpercentages, "jpercentages is null", 0);
-
-  JNI_TRY
-  {
-    cudf::jni::auto_set_device(env);
-
-    auto const input       = std::bit_cast<cudf::column_view const*>(input_handle);
-    auto const percentages = [&] {
-      auto const native_percentages = cudf::jni::native_jdoubleArray(env, jpercentages);
-      return std::vector<double>(native_percentages.begin(), native_percentages.end());
-    }();
-    return cudf::jni::ptr_as_jlong(
-      spark_rapids_jni::percentile_from_histogram(*input, percentages, output_as_lists).release());
-  }
-  JNI_CATCH(env, 0);
-}
-
 JNIEXPORT jlong JNICALL
 Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithOptions(
   JNIEnv* env,
@@ -92,7 +71,31 @@ Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithOptions(
         static_cast<spark_rapids_jni::value_order>(value_order))
         .release());
   }
-  JNI_CATCH(env, 0);
+  JNI_CATCH_BEGIN(env, 0)
+  catch (spark_rapids_jni::percentile_rank_out_of_range const& e)
+  {
+    JNI_EXCEPTION_OCCURRED_CHECK(env, 0);
+    JNI_THROW_NEW(env, "java/lang/IndexOutOfBoundsException", e.what(), 0);
+  }
+  CATCH_SPECIAL_EXCEPTION(env, 0)
+  CATCH_STD_EXCEPTION(env, 0);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogram(JNIEnv* env,
+                                                                   jclass clazz,
+                                                                   jlong input_handle,
+                                                                   jdoubleArray jpercentages,
+                                                                   jboolean output_as_lists)
+{
+  return Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithOptions(
+    env,
+    clazz,
+    input_handle,
+    jpercentages,
+    output_as_lists,
+    static_cast<jint>(spark_rapids_jni::percentile_interpolation::WEIGHTED_ENDPOINTS),
+    static_cast<jint>(spark_rapids_jni::value_order::ASCENDING));
 }
 
 }  // extern "C"

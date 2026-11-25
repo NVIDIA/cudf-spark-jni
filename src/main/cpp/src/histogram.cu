@@ -24,6 +24,7 @@
 #include <cudf/detail/labeling/label_segments.cuh>
 #include <cudf/detail/sizes_to_offsets_iterator.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/detail/valid_if.cuh>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/null_mask.hpp>
 #include <cudf/reduction/detail/histogram.hpp>
@@ -33,17 +34,23 @@
 #include <cudf/transform.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
+#include <cuda/atomic>
 #include <cuda/std/functional>
+#include <cuda/std/limits>
 #include <cuda/stream>
-#include <thrust/binary_search.h>
+#include <thrust/find.h>
 #include <thrust/for_each.h>
 #include <thrust/scan.h>
 
+#include <limits>
+#include <stdexcept>
 #include <type_traits>
 
 namespace spark_rapids_jni {
 
 namespace {
+
+enum class percentile_status : int32_t { VALID = 0, EMPTY, INVALID_RANK };
 
 template <percentile_interpolation Interpolation,
           typename ElementIterator,
@@ -57,37 +64,42 @@ struct fill_percentile_fn {
     // only stores unique elements) and that null is sorted to stay at the end.
     // We need to ignore null thus we will shift the end point if we see a null.
 
-    auto const start     = offsets[histogram_idx];
-    auto const try_end   = offsets[histogram_idx + 1];
-    auto const all_valid = sorted_validity[try_end - 1];
-    auto const end       = all_valid ? try_end : try_end - 1;
-
-    // If the end point after shifting coincides with the start point, we don't have any
-    // other valid element.
-    auto const has_all_nulls = start >= end;
+    // The child columns and sorted indices are relative to the sliced input.
+    auto const base    = offsets[0];
+    auto const start   = offsets[histogram_idx] - base;
+    auto const try_end = offsets[histogram_idx + 1] - base;
+    // Empty histograms have no last element whose validity can be inspected.
+    auto const end = start < try_end && !sorted_validity[try_end - 1] ? try_end - 1 : try_end;
 
     auto const percentage_idx = idx % percentages.size();
-    if (percentage_idx == 0) {
-      // If the histogram only contains null elements, the output percentile will be null.
-      out_validity[histogram_idx] = !has_all_nulls;
+    if (start >= end) {
+      if (percentage_idx == 0) { status[histogram_idx] = percentile_status::EMPTY; }
+      return;
     }
 
-    if (has_all_nulls) { return; }
+    // Spark computes positions with wrapping Long arithmetic and a Double
+    // multiplication.
+    auto const max_position =
+      static_cast<int64_t>(static_cast<uint64_t>(accumulated_counts[end - 1]) - 1);
+    auto const position     = static_cast<double>(max_position) * percentages[percentage_idx];
+    auto const lower        = to_spark_long(floor(position));
+    auto const higher       = to_spark_long(ceil(position));
+    auto const lower_index  = search_counts(lower, start, end);
+    auto const higher_index = lower == higher ? lower_index : search_counts(higher, start, end);
+    if (lower_index == end || higher_index == end) {
+      // A large frequency can round the last position up to the cumulative
+      // count.
+      cuda::atomic_ref<percentile_status, cuda::thread_scope_device>{status[histogram_idx]}.store(
+        percentile_status::INVALID_RANK, cuda::memory_order_relaxed);
+      return;
+    }
 
-    auto const max_positions = accumulated_counts[end - 1] - 1L;
-    auto const percentage    = percentages[percentage_idx];
-    auto const position      = static_cast<double>(max_positions) * percentage;
-    auto const lower         = static_cast<int64_t>(floor(position));
-    auto const higher        = static_cast<int64_t>(ceil(position));
-
-    auto const lower_index   = search_counts(lower + 1, start, end);
     auto const lower_element = sorted_input[lower_index];
     if (higher == lower) {
       output[idx] = lower_element;
       return;
     }
 
-    auto const higher_index   = search_counts(higher + 1, start, end);
     auto const higher_element = sorted_input[higher_index];
     if (higher_element == lower_element) {
       output[idx] = lower_element;
@@ -95,22 +107,23 @@ struct fill_percentile_fn {
     }
 
     if constexpr (Interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS) {
-      // Using `volatile` qualifier to prevent the compiler from combining `lower_part` and
-      // `upper_part` which may lead to output with different round-off error.
-      double const volatile lower_part =
-        (static_cast<double>(higher) - position) * static_cast<double>(lower_element);
-      double const volatile higher_part =
-        (position - static_cast<double>(lower)) * static_cast<double>(higher_element);
-      output[idx] = lower_part + higher_part;
+      // Use explicit round-to-nearest operations to match Spark and prevent FMA
+      // contraction. Volatile temporaries do not reliably prevent contraction
+      // on all CUDA targets.
+      auto const lower_part  = __dmul_rn(__dsub_rn(static_cast<double>(higher), position),
+                                        static_cast<double>(lower_element));
+      auto const higher_part = __dmul_rn(__dsub_rn(position, static_cast<double>(lower)),
+                                         static_cast<double>(higher_element));
+      output[idx]            = __dadd_rn(lower_part, higher_part);
     } else {
       // Keep the subtraction, multiplication, and addition as separate operations to match
       // Spark's endpoint-delta interpolation and prevent fused multiply-add from changing
       // rounding behavior.
-      double const volatile fraction = position - static_cast<double>(lower);
-      double const volatile endpoint_delta =
-        static_cast<double>(higher_element) - static_cast<double>(lower_element);
-      double const volatile scaled_delta = fraction * endpoint_delta;
-      output[idx]                        = static_cast<double>(lower_element) + scaled_delta;
+      auto const fraction = __dsub_rn(position, static_cast<double>(lower));
+      auto const endpoint_delta =
+        __dsub_rn(static_cast<double>(higher_element), static_cast<double>(lower_element));
+      auto const scaled_delta = __dmul_rn(fraction, endpoint_delta);
+      output[idx]             = __dadd_rn(static_cast<double>(lower_element), scaled_delta);
     }
   }
 
@@ -120,25 +133,46 @@ struct fill_percentile_fn {
                      cudf::device_span<int64_t const> const accumulated_counts_,
                      cudf::device_span<double const> const percentages_,
                      double* const output_,
-                     bool* const out_validity_)
+                     percentile_status* const status_)
     : offsets{offsets_},
       sorted_input{sorted_input_},
       sorted_validity{sorted_validity_},
       accumulated_counts{accumulated_counts_},
       percentages{percentages_},
       output{output_},
-      out_validity{out_validity_}
+      status{status_}
   {
   }
 
  private:
-  __device__ cudf::size_type search_counts(int64_t position,
+  // JVM narrowing maps NaN to zero and saturates at the limits of Long.
+  __device__ static int64_t to_spark_long(double x)
+  {
+    if (isnan(x)) { return 0; }
+    if (x >= 0x1p63) { return cuda::std::numeric_limits<int64_t>::max(); }
+    if (x <= -0x1p63) { return cuda::std::numeric_limits<int64_t>::min(); }
+    return static_cast<int64_t>(x);
+  }
+
+  __device__ cudf::size_type search_counts(int64_t rank,
                                            cudf::size_type start,
                                            cudf::size_type end) const
   {
-    auto const it = thrust::lower_bound(
-      thrust::seq, accumulated_counts.begin() + start, accumulated_counts.begin() + end, position);
-    return static_cast<cudf::size_type>(cuda::std::distance(accumulated_counts.begin(), it));
+    auto const target = static_cast<int64_t>(static_cast<uint64_t>(rank) + 1);
+    // Match java.util.Arrays.binarySearch, including its choice of midpoint if
+    // counts wrap.
+    auto high = end - 1;
+    while (start <= high) {
+      auto const mid   = start + (high - start) / 2;
+      auto const count = accumulated_counts[mid];
+      if (count == target) { return mid; }
+      if (count < target) {
+        start = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return start;
   }
 
   cudf::size_type const* const offsets;
@@ -147,7 +181,7 @@ struct fill_percentile_fn {
   cudf::device_span<int64_t const> const accumulated_counts;
   cudf::device_span<double const> const percentages;
   double* const output;
-  bool* const out_validity;
+  percentile_status* const status;
 };
 
 struct percentile_dispatcher {
@@ -185,13 +219,16 @@ struct percentile_dispatcher {
   {
     // Returns all nulls for totally empty input.
     if (data.size() == 0 || percentages.size() == 0) {
-      return {cudf::make_numeric_column(cudf::data_type{cudf::type_id::FLOAT64},
-                                        num_histograms,
-                                        cudf::mask_state::UNALLOCATED,
-                                        stream,
-                                        mr),
-              cudf::create_null_mask(num_histograms, cudf::mask_state::ALL_NULL, stream, mr),
-              num_histograms};
+      return {
+        cudf::make_numeric_column(
+          cudf::data_type{cudf::type_id::FLOAT64},
+          percentages.empty() ? num_histograms
+                              : num_histograms * static_cast<cudf::size_type>(percentages.size()),
+          cudf::mask_state::UNALLOCATED,
+          stream,
+          mr),
+        cudf::create_null_mask(num_histograms, cudf::mask_state::ALL_NULL, stream, mr),
+        num_histograms};
     }
 
     auto percentiles =
@@ -201,11 +238,8 @@ struct percentile_dispatcher {
                                 stream,
                                 mr);
 
-    // We may always have nulls in the output due to either:
-    // - Having nulls in the input, and/or,
-    // - Having empty histograms.
-    auto out_validities =
-      rmm::device_uvector<bool>(num_histograms, stream, rmm::mr::get_current_device_resource_ref());
+    auto status = cudf::detail::make_zeroed_device_uvector_async<percentile_status>(
+      num_histograms, stream, cudf::get_current_device_resource_ref());
 
     auto const fill_percentile = [&](auto const sorted_validity_it) {
       auto const sorted_input_it =
@@ -224,7 +258,7 @@ struct percentile_dispatcher {
                                    accumulated_counts,
                                    percentages,
                                    percentiles->mutable_view().begin<double>(),
-                                   out_validities.begin()});
+                                   status.data()});
       };
 
       switch (interpolation) {
@@ -247,40 +281,27 @@ struct percentile_dispatcher {
       fill_percentile(sorted_validity_it);
     }
 
-    auto [null_mask, null_count] =
-      cudf::bools_to_mask(cudf::device_span<bool const>(out_validities), stream, mr);
+    auto [null_mask, null_count] = cudf::detail::valid_if(
+      status.begin(),
+      status.end(),
+      [] __device__(auto state) { return state == percentile_status::VALID; },
+      stream,
+      mr);
     if (null_count > 0) {
-      return {std::move(percentiles), std::move(*null_mask.release()), null_count};
+      auto const invalid =
+        thrust::find(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                     status.begin(),
+                     status.end(),
+                     percentile_status::INVALID_RANK);
+      CUDF_EXPECTS(invalid == status.end(),
+                   "Percentile rank is outside the histogram.",
+                   percentile_rank_out_of_range);
+      return {std::move(percentiles), std::move(null_mask), null_count};
     }
 
     return {std::move(percentiles), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0};
   }
 };
-
-void check_input(cudf::column_view const& input, std::vector<double> const& percentages)
-{
-  CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,
-               "The input column must be of type LIST.",
-               std::invalid_argument);
-
-  auto const child = input.child(cudf::lists_column_view::child_column_index);
-  CUDF_EXPECTS(
-    !child.has_nulls(), "Child of the input column must not have nulls.", std::invalid_argument);
-  CUDF_EXPECTS(child.type().id() == cudf::type_id::STRUCT && child.num_children() == 2,
-               "Child of the input column must be of STRUCT type having two children.",
-               std::invalid_argument);
-  CUDF_EXPECTS(!child.child(1).has_nulls(),
-               "Child of the input column must have its second child containing non-null elements.",
-               std::invalid_argument);
-  CUDF_EXPECTS(child.child(1).type().id() == cudf::type_id::INT64,
-               "Child of the input column must have its second child of type INT64.",
-               std::invalid_argument);
-
-  CUDF_EXPECTS(static_cast<std::size_t>(input.size()) * percentages.size() <=
-                 static_cast<std::size_t>(std::numeric_limits<cudf::size_type>::max()),
-               "Size of output exceeds cudf column size limit.",
-               std::overflow_error);
-}
 
 // Wrap the input column in a lists column, to satisfy the requirement type in Spark.
 std::unique_ptr<cudf::column> wrap_in_list(std::unique_ptr<cudf::column>&& input,
@@ -453,7 +474,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
     // By doing so, input rows with unusable frequencies will be output as empty lists.
     auto [null_mask, null_count] = cudf::bools_to_mask(
       cudf::device_span<bool const>(check_frequency_usable), stream, default_mr);
-    lists_histograms->set_null_mask(std::move(*null_mask.release()), null_count);
+    lists_histograms->set_null_mask(std::move(*null_mask), null_count);
     lists_histograms = cudf::purge_nonempty_nulls(lists_histograms->view(), stream, mr);
     lists_histograms->set_null_mask(cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
     return lists_histograms;
@@ -465,7 +486,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
     // We nullify the values corresponding to unusable frequencies.
     auto [null_mask, null_count] =
       cudf::bools_to_mask(cudf::device_span<bool const>(check_frequency_usable), stream, mr);
-    return make_structs_histogram(std::move(*null_mask.release()), null_count);
+    return make_structs_histogram(std::move(*null_mask), null_count);
   }
 }
 
@@ -488,7 +509,13 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                                         cuda::stream_ref stream,
                                                         rmm::device_async_resource_ref mr)
 {
-  check_input(input, percentages);
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::LIST,
+               "The input column must be of type LIST.",
+               std::invalid_argument);
+  CUDF_EXPECTS(static_cast<std::size_t>(input.size()) * percentages.size() <=
+                 static_cast<std::size_t>(std::numeric_limits<cudf::size_type>::max()),
+               "Size of output exceeds cudf column size limit.",
+               std::overflow_error);
   CUDF_EXPECTS(interpolation == percentile_interpolation::WEIGHTED_ENDPOINTS ||
                  interpolation == percentile_interpolation::ENDPOINT_DELTA,
                "Unsupported percentile interpolation algorithm.",
@@ -500,8 +527,21 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
 
   auto const lcv_histograms = cudf::lists_column_view{input};
   auto const histograms     = lcv_histograms.get_sliced_child(stream);
-  auto const data_col       = cudf::structs_column_view{histograms}.get_sliced_child(0);
-  auto const counts_col     = cudf::structs_column_view{histograms}.get_sliced_child(1);
+  CUDF_EXPECTS(!histograms.has_nulls(),
+               "Child of the input column must not have nulls.",
+               std::invalid_argument);
+  CUDF_EXPECTS(histograms.type().id() == cudf::type_id::STRUCT && histograms.num_children() == 2,
+               "Child of the input column must be of STRUCT type having two children.",
+               std::invalid_argument);
+  auto const entries    = cudf::structs_column_view{histograms};
+  auto const data_col   = entries.get_sliced_child(0, stream);
+  auto const counts_col = entries.get_sliced_child(1, stream);
+  CUDF_EXPECTS(!counts_col.has_nulls(),
+               "Child of the input column must have its second child containing non-null elements.",
+               std::invalid_argument);
+  CUDF_EXPECTS(counts_col.type().id() == cudf::type_id::INT64,
+               "Child of the input column must have its second child of type INT64.",
+               std::invalid_argument);
 
   auto const default_mr    = rmm::mr::get_current_device_resource_ref();
   auto const d_data        = cudf::column_device_view::create(data_col, stream, default_mr);
@@ -545,7 +585,9 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
       histogram_labels.begin(),
       histogram_labels.end(),
       sorted_counts,
-      accumulated_counts.begin());
+      accumulated_counts.begin(),
+      cuda::std::equal_to<>{},
+      cuda::std::plus<uint64_t>{});
     return accumulated_counts;
   }();
 
@@ -571,6 +613,22 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                         static_cast<cudf::size_type>(percentages.size()),
                         stream,
                         mr);
+  }
+  if (null_count > 0 && percentages.size() > 1) {
+    // The dispatcher returns one validity bit per histogram. Flat output needs
+    // one per value.
+    auto const num_percentages             = static_cast<cudf::size_type>(percentages.size());
+    auto const begin                       = cuda::make_counting_iterator(cudf::size_type{0});
+    auto [flat_null_mask, flat_null_count] = cudf::detail::valid_if(
+      begin,
+      begin + percentiles->size(),
+      [mask = null_mask.data(), num_percentages] __device__(auto const idx) {
+        return cudf::bit_is_set(mask, idx / num_percentages);
+      },
+      stream,
+      mr);
+    null_mask  = std::move(flat_null_mask);
+    null_count = flat_null_count;
   }
   percentiles->set_null_mask(std::move(null_mask), null_count);
   return std::move(percentiles);
