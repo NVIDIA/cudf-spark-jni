@@ -1146,6 +1146,13 @@ __global__ void scan_request_kernel(cudf::detail::input_offsetalator offsets,
     auto const base = rows > 0 ? offsets[0] : int64_t{0};
     *out            = {longest, rows > 0 ? offsets[rows] - base : int64_t{0}, base, k_request_deny};
   }
+  // At the merged-record cap the member/credit cutoffs fire long before rows are counted, so
+  // the walk prices counts only and lets the caller treat cap saturation as its limit signal.
+  // The cutoff-free limit prices the full-cap design point on purpose: the cost model's
+  // width-linear extrapolation is invalid there, so the budget clamp that narrows `eligible`
+  // below governs only the non-saturated branch, and narrower executing batches still admit
+  // from the merged minimum.
+  bool const cap_saturated = sample_members && eligible_upper == k_merged_max_paths;
   if constexpr (sample_members) {
     __shared__ int64_t eligible;
     __shared__ request_limit limit;
@@ -1161,7 +1168,10 @@ __global__ void scan_request_kernel(cudf::detail::input_offsetalator offsets,
                              : budget > 0          ? 1 + (budget - 1) / scratch
                                                    : eligible_upper;
         eligible           = cuda::std::min<int64_t>(eligible_upper, cap);
-        if (eligible >= k_merged_min_paths) { limit = make_request_limit(avg, eligible); }
+        if (eligible >= k_merged_min_paths) {
+          limit = cap_saturated ? request_limit{avg, INT64_MAX, INT64_MAX}
+                                : make_request_limit(avg, eligible);
+        }
       }
     }
     __syncthreads();
@@ -1181,6 +1191,10 @@ __global__ void scan_request_kernel(cudf::detail::input_offsetalator offsets,
         if (s.state == request_walk_state::deny || limit.denies(s.count, s.credit)) { return; }
         max_m = cuda::std::max(max_m, s.count);
         complete &= s.state == request_walk_state::complete;
+      }
+      if (cap_saturated) {
+        if (complete) { out->min_eligible = k_merged_max_paths; }
+        return;
       }
       auto const upper =
         request_threshold(request_score(max_m, limit.avg, k_request_credit * max_m), limit.avg);
@@ -2333,6 +2347,13 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
     stream.sync();
     scan.min_eligible = h_scan[0].min_eligible;
     if (scan_mode != nullptr) { *scan_mode = gjo_scan_mode::exact; }
+  } else if (scan.min_eligible == k_merged_max_paths && eligible == k_merged_max_paths) {
+    // Cap saturation is the cost model's validity limit: the model's linear width extrapolation
+    // cannot price the general route's per-path work, so the sampled completeness evidence alone
+    // admits the request at its design point. Batches below the minimum still spill general.
+    // The design point prices the request's path census, not the executing chunk width:
+    // budget-clamped widths and tail chunks below the cap still admit from the merged minimum.
+    scan.min_eligible = k_merged_min_paths;
   }
   auto const device = cudf::column_device_view::create(
     input.parent(), stream, cudf::get_current_device_resource_ref());

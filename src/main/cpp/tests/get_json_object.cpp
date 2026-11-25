@@ -943,6 +943,49 @@ TEST_F(GetJsonObjectTest, MergedRouteRequestFloorSurvivesBatchSplit)
                         {-1, 0}});
 }
 
+TEST_F(GetJsonObjectTest, MergedRouteCapSaturationAdmitsSampledComplete)
+{
+  // A request that fills the merged record budget (k_merged_max_paths) trips the sampled walk's
+  // member/credit cutoffs long before counting rows, so without the cap handler its batches all
+  // route general. With the handler, sampled-complete evidence admits the cap-sized request the
+  // way an unsaturated budget-width request is admitted. The same rows with a single-quoted name
+  // deny in the walk and must keep routing general.
+  std::string row = "{";
+  for (int p = 0; p < 768; ++p) {
+    if (p > 0) { row += ","; }
+    row += R"("p)" + std::to_string(p) + R"(":"V)" + std::to_string(p) + R"(")";
+  }
+  row += R"(,"pad":")" + std::string(1024, 'x') + R"("})";
+  auto const rows = same_rows(32, row);
+
+  multi_paths paths;
+  paths.reserve(768);
+  for (int p = 0; p < 768; ++p) {
+    paths.push_back(named({"p" + std::to_string(p)}));
+  }
+  auto out = routed(cudf::strings_column_view{col_from(rows)}, paths, std::vector<char>(768, 1));
+  for (std::size_t col = 0; col < out.size(); ++col) {
+    SCOPED_TRACE(testing::Message() << "capped path " << col);
+    multi_outputs one;
+    one.push_back(std::move(out[col]));
+    ASSERT_NO_FATAL_FAILURE(expect_uniform(one, 32, "V" + std::to_string(col)));
+  }
+
+  // Defect rows keep the model's deny: the single-quoted name makes the walk report deny, so the
+  // cap handler never fires and every batch stays general.
+  std::string denied_row = row;
+  denied_row.replace(denied_row.find("\"p0\":"), 5, "'p0':");
+  auto denied = routed(cudf::strings_column_view{col_from(same_rows(32, denied_row))},
+                       paths,
+                       std::vector<char>(768, 0));
+  for (std::size_t col = 0; col < denied.size(); ++col) {
+    SCOPED_TRACE(testing::Message() << "denied path " << col);
+    multi_outputs one;
+    one.push_back(std::move(denied[col]));
+    ASSERT_NO_FATAL_FAILURE(expect_uniform(one, 32, "V" + std::to_string(col)));
+  }
+}
+
 TEST_F(GetJsonObjectTest, MergedRouteScanBoundaries)
 {
   auto const pad = R"(,"pad":")" + std::string(1024, 'p') + "\"}";
