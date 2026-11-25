@@ -172,6 +172,22 @@ public class HistogramTest {
   }
 
   @Test
+  void testHigherRankPastLastCount() {
+    // Counts wrap to [Long.MAX_VALUE, -2, 0]. At p = 0.5, only the higher rank is past end.
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Arrays.asList(entry(1.0, Long.MAX_VALUE), entry(2.0, Long.MAX_VALUE),
+                 entry(3.0, 2L)),
+             Arrays.asList(entry(47.0, 1L)))) {
+      assertThrowsExactly(IndexOutOfBoundsException.class, () -> {
+        try (ColumnVector ignored = Histogram.percentileFromHistogram(
+            histogram, new double[]{0.5}, false)) {
+          // Close the result if the expected exception is not thrown.
+        }
+      });
+    }
+  }
+
+  @Test
   void testLongMaxFrequencyRank() {
     // Spark converts the rounded position to Long.MAX_VALUE, then rank + 1 wraps.
     try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
