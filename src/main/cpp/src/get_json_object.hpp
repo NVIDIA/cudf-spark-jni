@@ -103,6 +103,9 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
 
 namespace detail {
 
+// Scan work selected for the request; offset sizing is exact in all three modes.
+enum class gjo_scan_mode { offset_only, sampled, exact };
+
 // The optional test observer records first-pass routes in request order: 0 general, 1 shallow;
 // higher codes are reserved for deeper families. It does not change admission.
 std::vector<std::unique_ptr<cudf::column>> get_json_object(
@@ -114,7 +117,8 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   bool use_last_non_null,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
-  std::vector<char>* merged_routed_out = nullptr);
+  std::vector<char>* merged_routed_out = nullptr,
+  gjo_scan_mode* scan_mode             = nullptr);
 
 }  // namespace detail
 

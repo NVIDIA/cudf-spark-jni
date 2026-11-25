@@ -31,6 +31,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -541,6 +542,7 @@ namespace {
 using path_list     = std::vector<path_spec>;
 using multi_paths   = std::vector<path_list>;
 using multi_outputs = std::vector<std::unique_ptr<cudf::column>>;
+using spark_rapids_jni::detail::gjo_scan_mode;
 
 path_list named(std::initializer_list<std::string> keys)
 {
@@ -573,14 +575,18 @@ void expect_rows_eq(cudf::column const& col, std::string const& expected, bool a
 multi_outputs routed(cudf::strings_column_view const& input,
                      multi_paths const& paths,
                      std::vector<char> const& expected,
-                     bool last = false)
+                     gjo_scan_mode scan = gjo_scan_mode::sampled,
+                     int64_t budget     = -1,
+                     bool last          = false)
 {
   std::vector<char> routes;
+  auto mode         = static_cast<gjo_scan_mode>(-1);
   auto const stream = cudf::get_default_stream();
   auto const mr     = cudf::get_current_device_resource_ref();
-  auto out =
-    spark_rapids_jni::detail::get_json_object(input, paths, -1, -1, last, stream, mr, &routes);
+  auto out          = spark_rapids_jni::detail::get_json_object(
+    input, paths, budget, -1, last, stream, mr, &routes, &mode);
   EXPECT_EQ(routes, expected);
+  EXPECT_EQ(mode, scan);
   EXPECT_EQ(out.size(), paths.size());
   return out;
 }
@@ -601,6 +607,42 @@ std::string quote_bomb(int n, bool escaped = false)
     out += escaped ? R"(\")" : "\"";
   }
   return out + (escaped ? "\"}" : "'}");
+}
+
+std::string flat_row(int members, int value_bytes, int first_key, int extra = 0)
+{
+  std::string row = "{";
+  for (int i = 0; i < members; ++i) {
+    if (i != 0) { row += ','; }
+    row += "\"k" + std::to_string(first_key + i) + "\":\"" +
+           std::string(value_bytes + (i == 0 ? extra : 0), 'A') + '"';
+  }
+  return row + '}';
+}
+
+void expect_budget_routes(int rows,
+                          int members,
+                          int value_bytes,
+                          int extra,
+                          std::initializer_list<std::pair<int64_t, int>> budgets)
+{
+  auto const col = col_from(same_rows(rows, flat_row(members, value_bytes, 100, extra)));
+  multi_paths paths;
+  for (int i = 223; i >= 100; --i) {
+    paths.push_back(named({"k" + std::to_string(i)}));
+  }
+  auto const ordinary = col_from(same_rows(rows, std::string(value_bytes, 'A')));
+  auto const first    = col_from(same_rows(rows, std::string(value_bytes + extra, 'A')));
+  for (auto const [budget, spill] : budgets) {
+    SCOPED_TRACE(budget);
+    std::vector<char> routes(124, 1);
+    std::fill_n(routes.begin(), spill, 0);
+    auto const out =
+      routed(cudf::strings_column_view{col}, paths, routes, gjo_scan_mode::sampled, budget);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(i == 123 ? first : ordinary, *out[i]);
+    }
+  }
 }
 
 }  // namespace
@@ -689,13 +731,16 @@ TEST_F(GetJsonObjectTest, MergedRouteDepthFloors)
   auto valid      = std::vector<bool>(32, true);
   valid[1]        = false;
   auto const five = expected_column(same_rows(32, "five"), valid);
-  for (auto const [shallow, deep] : std::array{std::pair{7, 0}, std::pair{8, 7}, std::pair{1, 8}}) {
+  for (auto const [shallow, deep] : std::array{std::pair{3, 0}, std::pair{4, 7}, std::pair{1, 8}}) {
     SCOPED_TRACE(shallow);
     multi_paths paths(shallow, named({"s", "v"}));
     paths.insert(paths.end(), deep, named({"d", "e", "f", "g", "h"}));
-    std::vector<char> routes(shallow, shallow >= 8 || deep == 8 ? 1 : 0);
+    std::vector<char> routes(shallow, shallow >= 4 || deep == 8 ? 1 : 0);
     routes.insert(routes.end(), deep, deep == 8 ? 2 : 0);
-    auto const out = routed(cudf::strings_column_view{col}, paths, routes);
+    auto const out = routed(cudf::strings_column_view{col},
+                            paths,
+                            routes,
+                            shallow == 3 ? gjo_scan_mode::offset_only : gjo_scan_mode::sampled);
     for (int i = 0; i < shallow + deep; ++i) {
       CUDF_TEST_EXPECT_COLUMNS_EQUAL(i < shallow ? two : five, *out.at(i));
     }
@@ -718,7 +763,7 @@ TEST_F(GetJsonObjectTest, MergedRouteMixedDepthCapParity)
   std::vector<char> routes(5, 0);
   routes.insert(routes.end(), 760, 1);
   routes.insert(routes.end(), 8, 2);
-  auto const out = routed(cudf::strings_column_view{col}, paths, routes);
+  auto const out = routed(cudf::strings_column_view{col}, paths, routes, gjo_scan_mode::exact);
   std::array const values{"Z", "T", "[1,2]", "2", "six", "S", R"({"i":"six"})"};
   std::vector<cudf::test::strings_column_wrapper> expected;
   for (auto const* value : values) {
@@ -740,12 +785,13 @@ TEST_F(GetJsonObjectTest, MergedRouteDeadPathDepthErrorDoesNotThrow)
     paths.push_back(named({"a", "missing" + std::to_string(i)}));
   }
   auto const routes = std::vector<char>(16, 1);
-  auto const out    = routed(cudf::strings_column_view{dead_col}, paths, routes);
+  auto const out = routed(cudf::strings_column_view{dead_col}, paths, routes, gjo_scan_mode::exact);
   auto const nulls = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
   for (auto const& col : out) {
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *col);
   }
-  EXPECT_THROW(routed(cudf::strings_column_view{live_col}, paths, routes), cudf::logic_error);
+  EXPECT_THROW(routed(cudf::strings_column_view{live_col}, paths, routes, gjo_scan_mode::exact),
+               cudf::logic_error);
 }
 
 TEST_F(GetJsonObjectTest, LastNonNullWideNamedBatches)
@@ -756,7 +802,8 @@ TEST_F(GetJsonObjectTest, LastNonNullWideNamedBatches)
   auto const input = cudf::strings_column_view{col};
   multi_paths paths(40, named({"k"}));
   paths[0] = named({"e"});
-  auto const out   = routed(input, paths, std::vector<char>(40, 0), true);
+  auto const out =
+    routed(input, paths, std::vector<char>(40, 0), gjo_scan_mode::offset_only, -1, true);
   auto const last  = col_from(same_rows(32, "last"));
   auto const empty = col_from(same_rows(32, ""));
   for (std::size_t i = 0; i < out.size(); ++i) {
@@ -828,12 +875,157 @@ TEST_F(GetJsonObjectTest, MergedRetryDeepRouteAfterMatch)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(33, "G")), *out.at(8));
 }
 
+TEST_F(GetJsonObjectTest, MergedRouteFanoutPairRoutesMerged)
+{
+  auto const col = col_from(same_rows(32, R"({"k0":"AA","k1":"AA"})"));
+  for (int n : {43, 44}) {
+    multi_paths paths(n, named({"k0"}));
+    for (int i = 1; i < n; i += 2) {
+      paths[i] = named({"k1"});
+    }
+    expect_uniform(
+      routed(cudf::strings_column_view{col}, paths, std::vector<char>(n, n == 44)), 32, "AA");
+  }
+}
+
 TEST_F(GetJsonObjectTest, MergedRouteRowFloorDenyBoundary)
 {
-  multi_paths const paths(8, named({"k", "v"}));
+  multi_paths const paths(47, named({"k0"}));
   for (int n : {31, 32}) {
-    auto const col = col_from(same_rows(n, R"({"k":{"v":"A"}})"));
+    auto const col  = col_from(same_rows(n, R"({"k0":"A"})"));
+    auto const mode = n == 32 ? gjo_scan_mode::sampled : gjo_scan_mode::offset_only;
     expect_uniform(
-      routed(cudf::strings_column_view{col}, paths, std::vector<char>(8, n == 32)), n, "A");
+      routed(cudf::strings_column_view{col}, paths, std::vector<char>(47, n == 32), mode), n, "A");
   }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteMemberBandDenyBoundary)
+{
+  multi_paths paths;
+  for (int i = 0; i < 16; ++i) {
+    paths.push_back(named({"k" + std::to_string(i % 4)}));
+  }
+  for (int bytes : {1, 100}) {
+    auto const col = col_from(same_rows(32, flat_row(4, bytes, 0)));
+    expect_uniform(
+      routed(cudf::strings_column_view{col}, paths, std::vector<char>(16, bytes == 100)),
+      32,
+      std::string(bytes, 'A'));
+  }
+  // Child members give Q=4 with actual credit and Q=7 with its upper bound.
+  auto const col = col_from(same_rows(32, R"({"r":)" + flat_row(40, 194, 100) + '}'));
+  auto const out = routed(cudf::strings_column_view{col},
+                          multi_paths(4, named({"r", "k100"})),
+                          {1, 1, 1, 1},
+                          gjo_scan_mode::exact);
+  expect_uniform(out, 32, std::string(194, 'A'));
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteBatchCountCostBoundary)
+{
+  // Q=31 at 3151 B/row; capacities 9 and 36 leave tails of 7 and 16, respectively.
+  expect_budget_routes(64, 150, 11, 0, {{2 << 20, 124}, {8 << 20, 16}, {-1, 0}});
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteRequestFloorSurvivesBatchSplit)
+{
+  // Q=23 with 204800 B scratch/path. Adding one byte moves capacity from 22 to 23.
+  constexpr int64_t budget = 22 * 204800;
+  expect_budget_routes(40,
+                       124,
+                       23,
+                       3,
+                       {{1 << 20, 124},
+                        {2 << 20, 124},
+                        {budget, 124},
+                        {budget + 1, 9},
+                        {budget + 204800, 9},
+                        {-1, 0}});
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteScanBoundaries)
+{
+  auto const pad = R"(,"pad":")" + std::string(1024, 'p') + "\"}";
+  auto const row = R"({"k":'ok')" + pad;
+  multi_paths const paths(4, named({"k"}));
+  for (auto const& [json, merged] : std::array{std::pair{row + ' ', true},
+                                               std::pair{row + "  ", false},
+                                               std::pair{R"({'k':'ok')" + pad, false}}) {
+    auto const col = col_from(same_rows(32, json));
+    expect_uniform(
+      routed(cudf::strings_column_view{col}, paths, std::vector<char>(4, merged)), 32, "ok");
+  }
+  auto const open  = col_from(same_rows(32, row.substr(0, row.size() - 1)));
+  auto const nulls = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
+  for (auto const& col : routed(cudf::strings_column_view{open}, paths, std::vector<char>(4))) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *col);
+  }
+  for (int bytes : {4095, 4096}) {
+    auto const key   = std::string(bytes, 'L');
+    auto rival       = key;
+    rival[bytes / 2] = 'M';
+    auto const col =
+      col_from(same_rows(32, "{\"" + rival + R"(":"other",")" + key + R"(":"hit"})"));
+    auto const merged = bytes == 4095;
+    auto const mode   = bytes == 4095 ? gjo_scan_mode::sampled : gjo_scan_mode::exact;
+    auto const out    = routed(cudf::strings_column_view{col},
+                               {named({key}), named({rival}), named({key}), named({rival})},
+                            std::vector<char>(4, merged),
+                            mode);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(32, i % 2 == 0 ? "hit" : "other")),
+                                     *out[i]);
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteExactScanCountsMaskedBytes)
+{
+  using scan_case = std::tuple<int, int, char, gjo_scan_mode>;
+  // Slice-relative row 1 is not sampled; row 9 is. Both retain their bytes under a null.
+  for (auto const& [bytes, poison, route, scan] :
+       std::array{scan_case{12288, 1, 1, gjo_scan_mode::sampled},
+                  scan_case{12288, 9, 0, gjo_scan_mode::sampled},
+                  scan_case{12289, 1, 0, gjo_scan_mode::exact},
+                  scan_case{12289, -1, 1, gjo_scan_mode::exact}}) {
+    std::string const prefix = R"({"k":"ok","pad":")";
+    auto rows    = same_rows(66, prefix + std::string(bytes - prefix.size() - 2, 'p') + "\"}");
+    rows.front() = R"({'outside':1})" + std::string(20'000, ' ');
+    rows.back()  = R"({"outside":)";
+    std::vector<bool> valid(66, true);
+    if (poison >= 0) {
+      rows[poison + 1][1] = rows[poison + 1][3] = '\'';
+      valid[poison + 1]                         = false;
+    }
+    auto const col   = make_nonempty_nulls(rows, valid);
+    auto const input = cudf::strings_column_view{cudf::slice(*col, {1, 65}).front()};
+    // One extra budget byte permits four paths only with slice-relative scratch sizing.
+    auto const out = routed(
+      input, multi_paths(4, named({"k"})), std::vector<char>(4, route), scan, 3 * 74 * bytes + 1);
+    auto const expected =
+      poison < 0 ? col_from(same_rows(64, "ok"))
+                 : expected_column(same_rows(64, "ok"),
+                                   std::vector<bool>(valid.begin() + 1, valid.end() - 1));
+    for (auto const& result : out) {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected, *result);
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, ParallelOverrideForcesBatchWidth)
+{
+  // Override 4 splits 8 identical k0 paths into two admitted width-4 batches; columns hold.
+  auto const col =
+    col_from(same_rows(32, R"({"k0":"AA","pad":")" + std::string(512, 'x') + "\"})"));
+  multi_paths const paths(8, named({"k0"}));
+  std::vector<char> routes;
+  auto mode         = static_cast<gjo_scan_mode>(-1);
+  auto const stream = cudf::get_default_stream();
+  auto const mr     = cudf::get_current_device_resource_ref();
+  auto const out    = spark_rapids_jni::detail::get_json_object(
+    cudf::strings_column_view{col}, paths, -1, 4, false, stream, mr, &routes, &mode);
+  EXPECT_EQ(routes, std::vector<char>(8, 1));
+  EXPECT_EQ(mode, gjo_scan_mode::sampled);
+  EXPECT_EQ(out.size(), paths.size());
+  expect_uniform(out, 32, "AA");
 }
