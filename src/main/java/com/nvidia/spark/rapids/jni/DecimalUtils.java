@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.ColumnView;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.NativeDepsLoader;
 import ai.rapids.cudf.Table;
@@ -200,9 +201,10 @@ public class DecimalUtils {
    * Cast floating point values to decimals, matching the behavior of Spark.
    *
    * @param input The input column, which is either FLOAT32 or FLOAT64
-   * @param outputType The output decimal type
-   * @return The decimal column resulting from the cast operation and a boolean value indicating
-   *         whether the cast operation has failed for any input rows
+   * @param outputType The output decimal type, with cuDF scale between -38 and 38 inclusive
+   * @param precision Decimal precision, between 1 and the output storage type's maximum precision
+   * @throws CudfException if the scale or precision is outside the supported range
+   * @return The decimal column and an overflowing row index, or a negative index if no row overflowed
    */
   public static CastFloatToDecimalResult floatingPointToDecimal(ColumnView input, DType outputType,
                                                                 int precision) {

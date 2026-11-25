@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -157,11 +157,16 @@ public final class ProtobufSchemaDescriptorBuilder {
   }
 
   public ProtobufSchemaDescriptorBuilder required() {
-    current().isRequired = true;
+    return required(true);
+  }
+
+  /** Set whether the current field is required. */
+  public ProtobufSchemaDescriptorBuilder required(boolean value) {
+    current().isRequired = value;
     return this;
   }
 
-  /** Mark the current field hidden: decoded for validation but dropped from the output struct. */
+  /** Set whether the current field is output; hidden ones are returned as all-null columns. */
   public ProtobufSchemaDescriptorBuilder isOutput(boolean isOutput) {
     current().isOutput = isOutput;
     return this;

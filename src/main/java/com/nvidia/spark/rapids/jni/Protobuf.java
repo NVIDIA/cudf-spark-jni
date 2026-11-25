@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -72,7 +72,8 @@ public class Protobuf {
    * @param schema descriptor containing flattened schema arrays (field numbers, types, defaults, etc.)
    * @param failOnErrors if true, throw an exception on malformed protobuf messages. If false,
    *                     malformed top-level messages produce null STRUCT rows.
-   * @return a cudf STRUCT column with nested structure.
+   * @return a cudf STRUCT column with nested structure. Fields that the schema marks hidden
+   *         ({@code isOutput == false}) are validated but returned as all-null columns.
    */
   public static ColumnVector decodeToStruct(ColumnView binaryInput,
                                             ProtobufSchemaDescriptor schema,

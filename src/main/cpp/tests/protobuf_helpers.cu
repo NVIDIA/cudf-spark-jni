@@ -86,6 +86,28 @@ TEST_F(ProtobufHelpersTest, NumericEnumDefaultMustFitInt32)
   EXPECT_THROW(make_numeric_enum_context(int64_t{1} << 42), std::invalid_argument);
 }
 
+TEST_F(ProtobufHelpersTest, VisibleFieldUnderHiddenParentIsRejected)
+{
+  auto make_context = [](std::vector<bool> output_fields) {
+    std::vector<protobuf::nested_field_descriptor> schema{
+      {.field_number = 1,
+       .parent_idx   = -1,
+       .wire_type    = protobuf::proto_wire_type::LEN,
+       .output_type  = cudf::type_id::STRUCT,
+       .encoding     = protobuf::proto_encoding::DEFAULT},
+      {.field_number = 1,
+       .parent_idx   = 0,
+       .depth        = 1,
+       .wire_type    = protobuf::proto_wire_type::VARINT,
+       .output_type  = cudf::type_id::INT32,
+       .encoding     = protobuf::proto_encoding::DEFAULT}};
+    return protobuf::protobuf_decode_context{
+      std::move(schema), true, cudf::get_default_stream(), std::move(output_fields)};
+  };
+  EXPECT_NO_THROW(make_context({true, false}));
+  EXPECT_THROW(make_context({false, true}), std::invalid_argument);
+}
+
 TEST_F(ProtobufHelpersTest, AtomicFlagBufferIsPaddedAndZeroed)
 {
   auto const stream = cudf::get_default_stream();
