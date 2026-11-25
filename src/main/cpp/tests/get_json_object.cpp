@@ -549,15 +549,12 @@ path_list named(std::initializer_list<std::string> keys)
   return path;
 }
 
-cudf::test::strings_column_wrapper col_from(std::vector<std::string> const& rows)
+auto col_from(std::vector<std::string> const& rows)
 {
   return cudf::test::strings_column_wrapper(rows.begin(), rows.end());
 }
 
-std::vector<std::string> same_rows(int n, std::string const& row)
-{
-  return std::vector<std::string>(n, row);
-}
+auto same_rows(int n, std::string const& row) { return std::vector<std::string>(n, row); }
 
 multi_outputs run_fused(cudf::strings_column_view const& input, multi_paths const& paths)
 {
