@@ -24,6 +24,8 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.util.Arrays;
 
 import static ai.rapids.cudf.AssertUtils.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -843,6 +845,250 @@ public class DecimalUtilsTest {
           }
         });
         assertTrue(error.getMessage().contains("Precision must be between 1"));
+      }
+    }
+  }
+
+  private static ColumnVector makeDec128ColumnFromBigDecimals(BigDecimal[] values, int cudfScale) {
+    BigInteger[] unscaled = new BigInteger[values.length];
+    for (int i = 0; i < values.length; i++) {
+      unscaled[i] = values[i] == null ? null : values[i].unscaledValue();
+    }
+    return ColumnVector.decimalFromBigInt(cudfScale, unscaled);
+  }
+
+  @Test
+  void addSubLargeBatchAllRescaleExponents() {
+    int numRows = 600;
+    boolean[] noOverflow = new boolean[numRows];
+    BigDecimal[] aVals = new BigDecimal[numRows];
+    BigDecimal[] bVals = new BigDecimal[numRows];
+    for (int i = 0; i < numRows; i++) {
+      aVals[i] = BigDecimal.valueOf(i - 300);
+      bVals[i] = BigDecimal.valueOf(i % 13, 30);
+    }
+    try (ColumnVector lhs = makeDec128ColumnFromBigDecimals(aVals, 0);
+         ColumnVector rhs = makeDec128ColumnFromBigDecimals(bVals, -30);
+         ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int drop = 1; drop <= 30; drop++) {
+        int outBigDecimalScale = 30 - drop;
+        int outCudfScale = -outBigDecimalScale;
+        BigDecimal[] expectedAddVals = new BigDecimal[numRows];
+        BigDecimal[] expectedSubVals = new BigDecimal[numRows];
+        for (int i = 0; i < numRows; i++) {
+          expectedAddVals[i] = aVals[i].add(bVals[i])
+              .setScale(outBigDecimalScale, RoundingMode.HALF_UP);
+          expectedSubVals[i] = aVals[i].subtract(bVals[i])
+              .setScale(outBigDecimalScale, RoundingMode.HALF_UP);
+        }
+        try (ColumnVector expectedAdd = makeDec128ColumnFromBigDecimals(expectedAddVals, outCudfScale);
+             ColumnVector expectedSub = makeDec128ColumnFromBigDecimals(expectedSubVals, outCudfScale);
+             Table addRes = DecimalUtils.add128(lhs, rhs, outCudfScale);
+             Table subRes = DecimalUtils.subtract128(lhs, rhs, outCudfScale)) {
+          assertColumnsAreEqual(expectedOverflow, addRes.getColumn(0));
+          assertColumnsAreEqual(expectedAdd, addRes.getColumn(1));
+          assertColumnsAreEqual(expectedOverflow, subRes.getColumn(0));
+          assertColumnsAreEqual(expectedSub, subRes.getColumn(1));
+        }
+      }
+    }
+  }
+
+  @Test
+  void addSubLargeBatchHighRaiseExponents() {
+    int numRows = 600;
+    boolean[] noOverflow = new boolean[numRows];
+    int[] raises = {38, 50, 68, 73, 75};
+    BigDecimal[] bVals = new BigDecimal[numRows];
+    Arrays.fill(bVals, BigDecimal.ZERO.setScale(38, RoundingMode.UNNECESSARY));
+    try (ColumnVector rhs = makeDec128ColumnFromBigDecimals(bVals, -38);
+         ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int raise : raises) {
+        int lhsCudfScale = raise - 38;
+        BigInteger[] aUnscaled = new BigInteger[numRows];
+        BigDecimal[] expectedAddVals = new BigDecimal[numRows];
+        BigDecimal[] expectedSubVals = new BigDecimal[numRows];
+        for (int i = 0; i < numRows; i++) {
+          long v = (i % 7) - 3;
+          aUnscaled[i] = BigInteger.valueOf(v);
+          BigDecimal expected = BigDecimal.valueOf(v).scaleByPowerOfTen(lhsCudfScale)
+              .setScale(0, RoundingMode.UNNECESSARY);
+          expectedAddVals[i] = expected;
+          expectedSubVals[i] = expected;
+        }
+        try (ColumnVector lhs = ColumnVector.decimalFromBigInt(lhsCudfScale, aUnscaled);
+             ColumnVector expectedAdd = makeDec128ColumnFromBigDecimals(expectedAddVals, 0);
+             ColumnVector expectedSub = makeDec128ColumnFromBigDecimals(expectedSubVals, 0);
+             Table addRes = DecimalUtils.add128(lhs, rhs, 0);
+             Table subRes = DecimalUtils.subtract128(lhs, rhs, 0);
+             Table swappedAddRes = DecimalUtils.add128(rhs, lhs, 0)) {
+          assertColumnsAreEqual(expectedOverflow, addRes.getColumn(0));
+          assertColumnsAreEqual(expectedAdd, addRes.getColumn(1));
+          assertColumnsAreEqual(expectedOverflow, subRes.getColumn(0));
+          assertColumnsAreEqual(expectedSub, subRes.getColumn(1));
+          assertColumnsAreEqual(expectedOverflow, swappedAddRes.getColumn(0));
+          assertColumnsAreEqual(expectedAdd, swappedAddRes.getColumn(1));
+        }
+      }
+    }
+  }
+
+  @Test
+  void intDivideLargeBatchAllScaleDiffs() {
+    int numRows = 600;
+    boolean[] noOverflow = new boolean[numRows];
+    BigDecimal[] aVals = new BigDecimal[numRows];
+    for (int i = 0; i < numRows; i++) {
+      aVals[i] = BigDecimal.valueOf((i - 300) * 13L, 1);
+    }
+    try (ColumnVector lhs = makeDec128ColumnFromBigDecimals(aVals, -1);
+         ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int shift = 1; shift <= 30; shift++) {
+        int bScale = 1 + shift;
+        BigDecimal[] bVals = new BigDecimal[numRows];
+        long[] expectedQuot = new long[numRows];
+        for (int i = 0; i < numRows; i++) {
+          BigDecimal denom = BigDecimal.valueOf(((i % 7) + 1) * 25L, 2)
+              .setScale(bScale, RoundingMode.UNNECESSARY);
+          bVals[i] = denom;
+          expectedQuot[i] = aVals[i].divideToIntegralValue(denom).longValueExact();
+        }
+        try (ColumnVector rhs = makeDec128ColumnFromBigDecimals(bVals, -bScale);
+             ColumnVector expected = ColumnVector.fromLongs(expectedQuot);
+             Table res = DecimalUtils.integerDivide128(lhs, rhs)) {
+          assertColumnsAreEqual(expectedOverflow, res.getColumn(0));
+          assertColumnsAreEqual(expected, res.getColumn(1));
+        }
+      }
+    }
+
+    // Also exercise n_shift_exp > 0 (lhs scale smaller than rhs scale)
+    int[] posShifts = {11, 14, 16, 18};
+    BigDecimal[] aFineVals = new BigDecimal[numRows];
+    for (int i = 0; i < numRows; i++) {
+      aFineVals[i] = BigDecimal.valueOf((i - 300) * 13L).scaleByPowerOfTen(-1)
+          .setScale(20, RoundingMode.UNNECESSARY);
+    }
+    try (ColumnVector lhs = makeDec128ColumnFromBigDecimals(aFineVals, -20);
+         ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int shift : posShifts) {
+        int bScale = 20 - shift;
+        BigDecimal[] bVals = new BigDecimal[numRows];
+        long[] expectedQuot = new long[numRows];
+        for (int i = 0; i < numRows; i++) {
+          BigDecimal denom = BigDecimal.valueOf(((i % 7) + 1) * 25L, 2)
+              .setScale(bScale, RoundingMode.UNNECESSARY);
+          bVals[i] = denom;
+          expectedQuot[i] = aFineVals[i].divideToIntegralValue(denom).longValueExact();
+        }
+        try (ColumnVector rhs = makeDec128ColumnFromBigDecimals(bVals, -bScale);
+             ColumnVector expected = ColumnVector.fromLongs(expectedQuot);
+             Table res = DecimalUtils.integerDivide128(lhs, rhs)) {
+          assertColumnsAreEqual(expectedOverflow, res.getColumn(0));
+          assertColumnsAreEqual(expected, res.getColumn(1));
+        }
+      }
+    }
+
+    // Also exercise n_shift_exp < -38 (remaining_exp = 11, 14, 16, 18)
+    BigDecimal[] bScale38Vals = new BigDecimal[numRows];
+    for (int i = 0; i < numRows; i++) {
+      bScale38Vals[i] = BigDecimal.valueOf(((i % 3) + 1) * 25L, 2)
+          .setScale(38, RoundingMode.UNNECESSARY);
+    }
+    try (ColumnVector rhs = makeDec128ColumnFromBigDecimals(bScale38Vals, -38);
+         ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int remExp : posShifts) {
+        BigInteger[] aUnscaled = new BigInteger[numRows];
+        long[] expectedQuot = new long[numRows];
+        for (int i = 0; i < numRows; i++) {
+          long v = (i % 3) - 1;
+          aUnscaled[i] = BigInteger.valueOf(v);
+          BigDecimal num = BigDecimal.valueOf(v).scaleByPowerOfTen(remExp);
+          expectedQuot[i] = num.divideToIntegralValue(bScale38Vals[i]).longValueExact();
+        }
+        try (ColumnVector lhs = ColumnVector.decimalFromBigInt(remExp, aUnscaled);
+             ColumnVector expected = ColumnVector.fromLongs(expectedQuot);
+             Table res = DecimalUtils.integerDivide128(lhs, rhs)) {
+          assertColumnsAreEqual(expectedOverflow, res.getColumn(0));
+          assertColumnsAreEqual(expected, res.getColumn(1));
+        }
+      }
+    }
+  }
+
+  @Test
+  void divideMultiplyRemainderLargeBatchLargeScaleDiffs() {
+    int numRows = 600;
+    boolean[] noOverflow = new boolean[numRows];
+    int[] shifts = {11, 14, 16, 18, 25};
+    try (ColumnVector expectedOverflow = ColumnVector.fromBooleans(noOverflow)) {
+      for (int shift : shifts) {
+        int bScale = 1 + shift;
+        int divOutScale = 6;
+        int mulOutScale = 6;
+        BigDecimal[] aVals = new BigDecimal[numRows];
+        BigDecimal[] bVals = new BigDecimal[numRows];
+        BigDecimal[] expDiv = new BigDecimal[numRows];
+        BigDecimal[] expMul = new BigDecimal[numRows];
+        BigDecimal[] expRem = new BigDecimal[numRows];
+        for (int i = 0; i < numRows; i++) {
+          BigDecimal a = BigDecimal.valueOf((i - 300) * 13L, 1);
+          BigDecimal b = BigDecimal.valueOf(((i % 7) + 1) * 25L, 2)
+              .setScale(bScale, RoundingMode.UNNECESSARY);
+          aVals[i] = a;
+          bVals[i] = b;
+          expDiv[i] = a.divide(b, divOutScale, RoundingMode.HALF_UP);
+          expMul[i] = a.multiply(b).setScale(mulOutScale, RoundingMode.HALF_UP);
+          expRem[i] = a.remainder(b).setScale(bScale, RoundingMode.UNNECESSARY);
+        }
+        try (ColumnVector lhs = makeDec128ColumnFromBigDecimals(aVals, -1);
+             ColumnVector rhs = makeDec128ColumnFromBigDecimals(bVals, -bScale);
+             ColumnVector expDivCol = makeDec128ColumnFromBigDecimals(expDiv, -divOutScale);
+             ColumnVector expMulCol = makeDec128ColumnFromBigDecimals(expMul, -mulOutScale);
+             ColumnVector expRemCol = makeDec128ColumnFromBigDecimals(expRem, -bScale);
+             Table divRes = DecimalUtils.divide128(lhs, rhs, -divOutScale);
+             Table mulRes = DecimalUtils.multiply128(lhs, rhs, -mulOutScale, false);
+             Table remRes = DecimalUtils.remainder128(lhs, rhs, -bScale)) {
+          assertColumnsAreEqual(expectedOverflow, divRes.getColumn(0));
+          assertColumnsAreEqual(expDivCol, divRes.getColumn(1));
+          assertColumnsAreEqual(expectedOverflow, mulRes.getColumn(0));
+          assertColumnsAreEqual(expMulCol, mulRes.getColumn(1));
+          assertColumnsAreEqual(expectedOverflow, remRes.getColumn(0));
+          assertColumnsAreEqual(expRemCol, remRes.getColumn(1));
+        }
+      }
+
+      // Also exercise multiply128 scale-up (exponent < 0) and precision10 via interimCast
+      BigDecimal[] smallA = new BigDecimal[numRows];
+      BigDecimal[] smallB = new BigDecimal[numRows];
+      BigDecimal[] expMulUp = new BigDecimal[numRows];
+      BigDecimal[] bigA = new BigDecimal[numRows];
+      BigDecimal[] bigB = new BigDecimal[numRows];
+      BigDecimal[] expBigMul = new BigDecimal[numRows];
+      for (int i = 0; i < numRows; i++) {
+        smallA[i] = BigDecimal.valueOf(i - 300);
+        smallB[i] = BigDecimal.valueOf((i % 9) - 4);
+        expMulUp[i] = smallA[i].multiply(smallB[i]).setScale(16, RoundingMode.UNNECESSARY);
+
+        // Product has >38 digits (precision10 > 38), exercising interimCast & precision10 loop
+        bigA[i] = BigDecimal.valueOf(1_000_000_000L + i).scaleByPowerOfTen(15)
+            .setScale(10, RoundingMode.UNNECESSARY);
+        bigB[i] = BigDecimal.valueOf(100 + (i % 17)).setScale(10, RoundingMode.UNNECESSARY);
+        expBigMul[i] = bigA[i].multiply(bigB[i]).setScale(6, RoundingMode.HALF_UP);
+      }
+      try (ColumnVector lhsSmall = makeDec128ColumnFromBigDecimals(smallA, 0);
+           ColumnVector rhsSmall = makeDec128ColumnFromBigDecimals(smallB, 0);
+           ColumnVector expMulUpCol = makeDec128ColumnFromBigDecimals(expMulUp, -16);
+           Table mulUpRes = DecimalUtils.multiply128(lhsSmall, rhsSmall, -16, false);
+           ColumnVector lhsBig = makeDec128ColumnFromBigDecimals(bigA, -10);
+           ColumnVector rhsBig = makeDec128ColumnFromBigDecimals(bigB, -10);
+           ColumnVector expBigMulCol = makeDec128ColumnFromBigDecimals(expBigMul, -6);
+           Table bigMulRes = DecimalUtils.multiply128(lhsBig, rhsBig, -6, true)) {
+        assertColumnsAreEqual(expectedOverflow, mulUpRes.getColumn(0));
+        assertColumnsAreEqual(expMulUpCol, mulUpRes.getColumn(1));
+        assertColumnsAreEqual(expectedOverflow, bigMulRes.getColumn(0));
+        assertColumnsAreEqual(expBigMulCol, bigMulRes.getColumn(1));
       }
     }
   }
