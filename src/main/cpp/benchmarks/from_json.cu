@@ -22,6 +22,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/io/json.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/lists/lists_column_view.hpp>
@@ -31,10 +32,10 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/buffer>
 #include <cuda/functional>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -323,7 +324,8 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
   // Offsets must be int64: at the largest axis the total byte count exceeds INT32_MAX, so an int32
   // scan would overflow. Scan row_count+1 inputs (the trailing element reads 0) into an int64
   // buffer so the prefix sum accumulates in int64 and the final offset holds the total byte count.
-  rmm::device_uvector<int64_t> offsets(num_rows + 1, stream);
+  cuda::device_buffer<int64_t> offsets(
+    stream, cudf::get_current_device_resource_ref(), num_rows + 1, cuda::no_init);
   auto const sizes_in = thrust::make_transform_iterator(
     thrust::counting_iterator<cudf::size_type>{0},
     cuda::proclaim_return_type<int64_t>(
@@ -335,10 +337,14 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
                          sizes_in + (num_rows + 1),
                          offsets.begin(),
                          int64_t{0});
-  auto const total_bytes = offsets.element(num_rows, stream);
+  int64_t total_bytes;
+  CUDF_CUDA_TRY(cudaMemcpyAsync(
+    &total_bytes, offsets.data() + num_rows, sizeof(total_bytes), cudaMemcpyDefault, stream.get()));
+  cudf::detail::sync_stream(stream);
 
   // Char pass: write each row's bytes at d_chars + d_offsets[row].
-  rmm::device_uvector<char> chars(total_bytes, stream);
+  cuda::device_buffer<char> chars(
+    stream, cudf::get_current_device_resource_ref(), total_bytes, cuda::no_init);
   fn.d_chars   = chars.data();
   fn.d_offsets = offsets.data();
   thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
@@ -350,7 +356,7 @@ std::unique_ptr<cudf::column> generate_map_of_array_input(std::size_t num_rows,
     std::move(offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   return cudf::make_strings_column(row_count,
                                    std::move(offsets_col),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    0,
                                    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }

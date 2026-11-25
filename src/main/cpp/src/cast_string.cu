@@ -28,6 +28,7 @@
 
 #include <cooperative_groups.h>
 #include <cub/warp/warp_reduce.cuh>
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/std/algorithm>
 #include <cuda/std/limits>
@@ -780,12 +781,12 @@ struct string_to_integer_impl {
     if (string_col.size() == 0) {
       return std::make_unique<column>(data_type{type_to_id<T>()},
                                       0,
-                                      rmm::device_buffer{},
+                                      cuda::device_buffer<std::byte>{stream, mr},
                                       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                       0);
     }
 
-    rmm::device_uvector<T> data(string_col.size(), stream, mr);
+    cuda::device_buffer<T> data(stream, mr, string_col.size(), cuda::no_init);
     auto null_mask =
       cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
@@ -807,7 +808,7 @@ struct string_to_integer_impl {
 
     auto col = std::make_unique<column>(data_type{type_to_id<T>()},
                                         string_col.size(),
-                                        data.release(),
+                                        std::move(data),
                                         std::move(null_mask),
                                         null_count);
 
@@ -860,7 +861,7 @@ struct string_to_decimal_impl {
 
     using Type = device_storage_type_t<T>;
 
-    rmm::device_uvector<Type> data(string_col.size(), stream, mr);
+    cuda::device_buffer<Type> data(stream, mr, string_col.size(), cuda::no_init);
     auto null_mask =
       cudf::create_null_mask(string_col.size(), cudf::mask_state::UNINITIALIZED, stream, mr);
 
@@ -883,7 +884,7 @@ struct string_to_decimal_impl {
       reinterpret_cast<bitmask_type*>(null_mask.data()), 0, string_col.size(), stream);
 
     auto col = std::make_unique<column>(
-      dtype, string_col.size(), data.release(), std::move(null_mask), null_count);
+      dtype, string_col.size(), std::move(data), std::move(null_mask), null_count);
 
     if (ansi_mode) { validate_ansi_column(col->view(), string_col, stream); }
 
@@ -990,8 +991,11 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
   }();
 
   if (string_col.size() == 0) {
-    return std::make_unique<column>(
-      dtype, 0, rmm::device_buffer{}, cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
+    return std::make_unique<column>(dtype,
+                                    0,
+                                    cuda::device_buffer<std::byte>{stream, mr.get_output_mr()},
+                                    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                                    0);
   }
 
   if (string_col.offset() != 0) {

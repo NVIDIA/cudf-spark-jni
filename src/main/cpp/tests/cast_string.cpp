@@ -32,6 +32,8 @@
 #include <rmm/mr/callback_memory_resource.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
 
+#include <cuda/buffer>
+
 #include <cast_string.hpp>
 
 #include <algorithm>
@@ -1622,11 +1624,13 @@ TYPED_TEST(StringToIntegerTests, Overflow)
 
 TYPED_TEST(StringToIntegerTests, Empty)
 {
-  auto empty = std::make_unique<column>(data_type{type_id::STRING},
-                                        0,
-                                        rmm::device_buffer{},
-                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                        0);
+  auto empty =
+    std::make_unique<column>(data_type{type_id::STRING},
+                             0,
+                             cuda::device_buffer<std::byte>{
+                               cudf::get_default_stream(), cudf::get_current_device_resource_ref()},
+                             cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                             0);
 
   auto result = spark_rapids_jni::string_to_integer(data_type{type_to_id<TypeParam>()},
                                                     strings_column_view{empty->view()},
@@ -1961,11 +1965,13 @@ TEST_F(StringToDecimalTests, Edges)
 
 TEST_F(StringToDecimalTests, Empty)
 {
-  auto empty = std::make_unique<column>(data_type{type_id::STRING},
-                                        0,
-                                        rmm::device_buffer{},
-                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                        0);
+  auto empty =
+    std::make_unique<column>(data_type{type_id::STRING},
+                             0,
+                             cuda::device_buffer<std::byte>{
+                               cudf::get_default_stream(), cudf::get_current_device_resource_ref()},
+                             cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                             0);
 
   auto const result = spark_rapids_jni::string_to_decimal(
     8, 2, strings_column_view{empty->view()}, false, true, cudf::get_default_stream());
@@ -2280,11 +2286,13 @@ TYPED_TEST(StringToFloatTests, TrickyValues)
 
 TYPED_TEST(StringToFloatTests, Empty)
 {
-  auto empty = std::make_unique<column>(data_type{type_id::STRING},
-                                        0,
-                                        rmm::device_buffer{},
-                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
-                                        0);
+  auto empty =
+    std::make_unique<column>(data_type{type_id::STRING},
+                             0,
+                             cuda::device_buffer<std::byte>{
+                               cudf::get_default_stream(), cudf::get_current_device_resource_ref()},
+                             cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                             0);
 
   auto const result = spark_rapids_jni::string_to_float(data_type{type_to_id<TypeParam>()},
                                                         strings_column_view{empty->view()},

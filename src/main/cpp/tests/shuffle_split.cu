@@ -28,6 +28,7 @@
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <cub/device/device_memcpy.cuh>
+#include <cuda/buffer>
 #include <cuda/functional>
 #include <cuda/stream>
 
@@ -435,11 +436,13 @@ TEST_F(ShuffleSplitTests, PurgeNulls)
                                                 cudf::mask_state::UNINITIALIZED,
                                                 cudf::get_default_stream(),
                                                 rmm::mr::get_current_device_resource_ref());
-  auto col             = std::make_unique<cudf::column>(cudf::data_type{cudf::type_to_id<float>()},
-                                            0,
-                                            rmm::device_buffer{},
-                                            std::move(validity_buffer),
-                                            0);
+  auto col             = std::make_unique<cudf::column>(
+    cudf::data_type{cudf::type_to_id<float>()},
+    0,
+    cuda::device_buffer<std::byte>{cudf::get_default_stream(),
+                                               cudf::get_current_device_resource_ref()},
+    std::move(validity_buffer),
+    0);
   CUDF_EXPECTS(col->nullable(), "Expected a nullable input column");
 
   cudf::table_view tbl{{*col}};

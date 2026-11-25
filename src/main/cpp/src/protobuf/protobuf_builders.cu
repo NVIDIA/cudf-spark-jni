@@ -21,6 +21,7 @@
 #include <cudf/strings/detail/strings_column_factories.cuh>
 #include <cudf/unary.hpp>
 
+#include <cuda/buffer>
 #include <cuda/iterator>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
@@ -303,15 +304,18 @@ std::unique_ptr<cudf::column> build_enum_string_values_column(
   auto [offsets_col, total_chars] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
 
-  rmm::device_uvector<char> chars(total_chars, stream, mr);
+  cuda::device_buffer<char> chars(stream, mr, total_chars, cuda::no_init);
   if (total_chars > 0) {
     launch_copy_enum_string_chars(
       input, lookup.view(), offsets_col->view().data<int32_t>(), chars.data(), stream);
   }
 
   auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
-  return cudf::make_strings_column(
-    num_rows, std::move(offsets_col), chars.release(), null_count, std::move(mask));
+  return cudf::make_strings_column(num_rows,
+                                   std::move(offsets_col),
+                                   std::move(chars).template as_bytes<std::byte>(),
+                                   null_count,
+                                   std::move(mask));
 }
 
 std::unique_ptr<cudf::column> build_enum_string_column(rmm::device_uvector<int32_t>& enum_values,
@@ -399,7 +403,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   auto [str_offsets_col, total_chars] = cudf::strings::detail::make_offsets_child_column(
     str_lengths.begin(), str_lengths.end(), stream, mr);
 
-  rmm::device_uvector<char> chars(total_chars, stream, mr);
+  cuda::device_buffer<char> chars(stream, mr, total_chars, cuda::no_init);
   if (total_chars > 0) {
     auto const* offsets_data = str_offsets_col->view().data<cudf::size_type>();
     auto const* message_data = input.message_data;
@@ -448,12 +452,11 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
 
   std::unique_ptr<cudf::column> child_col;
   if (is_bytes) {
-    // Transfer ownership of the chars buffer instead of copying — the strings path below uses
-    // `chars.release()` for the same reason.
+    // Transfer ownership of the chars buffer instead of copying.
     auto bytes_child =
       std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
                                      total_chars,
-                                     chars.release(),
+                                     std::move(chars).template as_bytes<std::byte>(),
                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                      0);
     child_col = cudf::make_lists_column(total_count,
@@ -464,7 +467,7 @@ std::unique_ptr<cudf::column> build_repeated_string_column(
   } else {
     child_col = cudf::make_strings_column(total_count,
                                           std::move(str_offsets_col),
-                                          chars.release(),
+                                          std::move(chars).template as_bytes<std::byte>(),
                                           0,
                                           cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }

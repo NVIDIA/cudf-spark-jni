@@ -43,6 +43,7 @@
 
 #include <cub/device/device_segmented_reduce.cuh>
 #include <cuda/atomic>
+#include <cuda/buffer>
 #include <cuda/functional>
 #include <cuda/std/functional>
 #include <cuda/std/tuple>
@@ -331,7 +332,7 @@ void nullify_rows(cudf::column& input,
   children.emplace_back(std::move(child_column));
   auto output = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
                                                num_rows,
-                                               rmm::device_buffer{},
+                                               cuda::device_buffer<std::byte>{stream, mr},
                                                std::move(null_mask),
                                                null_count,
                                                std::move(children));
@@ -360,7 +361,7 @@ void nullify_rows(cudf::column& input,
 
   return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRUCT},
                                         num_rows,
-                                        rmm::device_buffer{},
+                                        cuda::device_buffer<std::byte>{stream, mr},
                                         std::move(null_mask),
                                         null_count,
                                         std::move(children));
@@ -589,7 +590,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes_for_floats(
 
   return {cudf::make_strings_column(string_count,
                                     std::move(offsets_column),
-                                    chars_data.release(),
+                                    std::move(chars_data).template as_bytes<std::byte>(),
                                     input.null_count(),
                                     cudf::copy_bitmask(input, stream, mr)),
           true};
@@ -735,7 +736,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
 
   auto const out_offsets =
     cudf::detail::offsetalator_factory::make_input_iterator(offsets_column->view());
-  auto chars_data = rmm::device_uvector<char>(bytes, stream, mr);
+  auto chars_data = cuda::device_buffer<char>(stream, mr, bytes, cuda::no_init);
 
   // Since the strings store decimal numbers, they should not be very long.
   // As such, using one thread per string should be fine.
@@ -755,7 +756,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                      // string. Such string may still contain other alphabet characters, but that
                      // should be handled in the conversion function later on.
                      if (in_size == out_size) {
-                       memcpy(output + out_offsets[idx], input + in_offsets[idx], in_size);
+                       memcpy(&output[out_offsets[idx]], input + in_offsets[idx], in_size);
                      } else {
                        auto const is_quoted = quote_counts[idx] != 0;
                        auto in_ptr          = input + in_offsets[idx];
@@ -771,7 +772,7 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                            *out_ptr = ascii_digit;
                            ++out_ptr;
                          } else if (!is_quoted || (*in_ptr != '"' && *in_ptr != ',')) {
-                           memcpy(out_ptr, in_ptr, character_width);
+                           memcpy(&*out_ptr, in_ptr, character_width);
                            out_ptr += character_width;
                          }
                          in_ptr += character_width;
@@ -779,11 +780,12 @@ std::unique_ptr<cudf::column> cast_strings_to_decimals(cudf::column_view const& 
                      }
                    });
 
-  auto const unquoted_strings = cudf::make_strings_column(string_count,
-                                                          std::move(offsets_column),
-                                                          chars_data.release(),
-                                                          input.null_count(),
-                                                          cudf::copy_bitmask(input, stream, mr));
+  auto const unquoted_strings =
+    cudf::make_strings_column(string_count,
+                              std::move(offsets_column),
+                              std::move(chars_data).template as_bytes<std::byte>(),
+                              input.null_count(),
+                              cudf::copy_bitmask(input, stream, mr));
 
   return spark_rapids_jni::string_to_decimal(precision,
                                              output_type.scale(),
@@ -855,7 +857,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
     auto output = cudf::make_strings_column(
       string_count,
       std::move(offsets_column),
-      chars_data.release(),
+      std::move(chars_data).template as_bytes<std::byte>(),
       0,
       cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, mr));
 
@@ -872,7 +874,7 @@ std::pair<std::unique_ptr<cudf::column>, bool> try_remove_quotes(
 
   return {cudf::make_strings_column(string_count,
                                     std::move(offsets_column),
-                                    chars_data.release(),
+                                    std::move(chars_data).template as_bytes<std::byte>(),
                                     input.null_count(),
                                     cudf::copy_bitmask(input.parent(), stream, mr)),
           true};

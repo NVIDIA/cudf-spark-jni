@@ -31,11 +31,14 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/aligned.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
+#include <cuda/std/execution>
 #include <cuda/std/utility>
 #include <cuda/stream>
 #include <thrust/logical.h>
@@ -312,7 +315,12 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_create(int version,
   auto [bloom_filter_size, buf_size] = get_bloom_filter_stride(version, bloom_filter_longs);
   auto const hdr_size                = bloom_filter_header_size_for_version(version);
 
-  rmm::device_buffer buf{static_cast<size_t>(buf_size), stream, mr};
+  cuda::device_buffer<uint8_t> buf{
+    stream,
+    mr,
+    static_cast<size_t>(buf_size),
+    cuda::no_init,
+    cuda::std::execution::prop{cuda::allocation_alignment, rmm::CUDA_ALLOCATION_ALIGNMENT}};
 
   bloom_filter_header header{version, num_hashes, bloom_filter_longs};
   pack_bloom_filter_header({static_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)},
@@ -423,7 +431,12 @@ std::unique_ptr<cudf::list_scalar> bloom_filter_merge(cudf::column_view const& b
         {raw_hdr[0], raw_hdr[1], raw_hdr[2], raw_hdr[3]}, header_field_count, *dv, buf_size}),
     "Mismatch of bloom filter parameters");
 
-  rmm::device_buffer buf{static_cast<size_t>(buf_size), stream, mr};
+  cuda::device_buffer<uint8_t> buf{
+    stream,
+    mr,
+    static_cast<size_t>(buf_size),
+    cuda::no_init,
+    cuda::std::execution::prop{cuda::allocation_alignment, rmm::CUDA_ALLOCATION_ALIGNMENT}};
   pack_bloom_filter_header(
     {static_cast<uint8_t*>(buf.data()), static_cast<size_t>(buf_size)}, header, stream, seed);
 

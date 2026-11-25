@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -247,7 +247,7 @@ decode_result decode_gbk(cudf::column_view const& input,
 
   auto column = cudf::make_strings_column(num_rows,
                                           std::move(new_offsets),
-                                          new_chars.release(),
+                                          std::move(new_chars).template as_bytes<std::byte>(),
                                           input.null_count(),
                                           cudf::copy_bitmask(input, stream, mr));
   return decode_result{std::move(column), false};

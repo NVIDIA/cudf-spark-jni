@@ -34,6 +34,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/device/device_memcpy.cuh>
+#include <cuda/buffer>
 #include <cuda/functional>
 #include <cuda/iterator>
 #include <cuda/std/bit>
@@ -563,7 +564,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
 {
   auto const num_rows = num_values;
   if (num_rows == 0) { return cudf::make_empty_column(field.output_type); }
-  rmm::device_uvector<T> out(num_rows, stream, mr);
+  cuda::device_buffer<T> out(stream, mr, num_rows, cuda::no_init);
   // Validity is temporary extraction state; only output data and its null mask use the caller MR.
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   rmm::device_uvector<bool> valid(num_rows, stream, scratch_mr);
@@ -582,7 +583,7 @@ std::unique_ptr<cudf::column> extract_and_build_scalar_field_column(
   }
   auto [mask, null_count] = make_null_mask_from_valid(valid, num_rows, stream, mr);
   return std::make_unique<cudf::column>(
-    field.output_type, num_rows, out.release(), std::move(mask), null_count);
+    field.output_type, num_rows, std::move(out), std::move(mask), null_count);
 }
 
 template <typename LocationProvider, typename ValidityFn>
@@ -624,7 +625,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
   auto [offsets_col, total_size] =
     cudf::strings::detail::make_offsets_child_column(lengths.begin(), lengths.end(), stream, mr);
 
-  rmm::device_uvector<char> chars(total_size, stream, mr);
+  cuda::device_buffer<char> chars(stream, mr, total_size, cuda::no_init);
   if (total_size > 0) {
     auto const* offsets_data = offsets_col->view().data<cudf::size_type>();
     auto* chars_ptr          = chars.data();
@@ -675,7 +676,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
       auto bytes_child =
         std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
                                        0,
-                                       rmm::device_buffer{},
+                                       cuda::device_buffer<std::byte>{stream, mr},
                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                        0);
       return cudf::make_lists_column(0,
@@ -686,7 +687,7 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     }
     return cudf::make_strings_column(0,
                                      std::move(offsets_col),
-                                     chars.release(),
+                                     std::move(chars).template as_bytes<std::byte>(),
                                      0,
                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }
@@ -702,15 +703,18 @@ inline std::unique_ptr<cudf::column> extract_and_build_string_or_bytes_column(
     auto bytes_child =
       std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::UINT8},
                                      total_size,
-                                     chars.release(),
+                                     std::move(chars).template as_bytes<std::byte>(),
                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                      0);
     return cudf::make_lists_column(
       num_rows, std::move(offsets_col), std::move(bytes_child), null_count, std::move(mask));
   }
 
-  return cudf::make_strings_column(
-    num_rows, std::move(offsets_col), chars.release(), null_count, std::move(mask));
+  return cudf::make_strings_column(num_rows,
+                                   std::move(offsets_col),
+                                   std::move(chars).template as_bytes<std::byte>(),
+                                   null_count,
+                                   std::move(mask));
 }
 
 template <typename LocationProvider>
@@ -832,7 +836,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
   }
 
   if (child_col == nullptr) {
-    rmm::device_uvector<T> values(total_count, stream, mr);
+    cuda::device_buffer<T> values(stream, mr, total_count, cuda::no_init);
     extract_scalar_into_buffers<T, field_occurrence_location_provider>(
       input.message_data,
       loc_provider,
@@ -844,7 +848,7 @@ inline std::unique_ptr<cudf::column> build_repeated_scalar_column(
     child_col =
       std::make_unique<cudf::column>(field.output_type,
                                      total_count,
-                                     values.release(),
+                                     std::move(values),
                                      cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                      0);
   }

@@ -164,7 +164,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
                      init_curand_fn{states.data(), seed});
 
   // generate offsets for the UUIDs
-  rmm::device_uvector<cudf::size_type> offsets(row_count + 1, stream, mr);
+  cuda::device_buffer<cudf::size_type> offsets(stream, mr, row_count + 1, cuda::no_init);
   thrust::sequence(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                    offsets.begin(),
                    offsets.end(),
@@ -173,7 +173,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
 
   // generate chars for the UUIDs
   auto const num_chars = row_count * CHAR_COUNT_PER_UUID;
-  rmm::device_uvector<char> chars(num_chars, stream, mr);
+  cuda::device_buffer<char> chars(stream, mr, num_chars, cuda::no_init);
   auto const num_blocks =
     cuda::ceil_div(static_cast<cudf::thread_index_type>(num_states), block_size);
   CUDF_EXPECTS(num_blocks > 0, "num_blocks must be > 0");
@@ -184,7 +184,7 @@ std::unique_ptr<cudf::column> generate_uuids(cudf::size_type row_count,
     row_count,
     std::make_unique<cudf::column>(
       std::move(offsets), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0),
-    chars.release(),
+    std::move(chars).template as_bytes<std::byte>(),
     0,                                                        // null count
     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)  // all UUIDs are non-null
   );

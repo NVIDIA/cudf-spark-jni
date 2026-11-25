@@ -749,7 +749,7 @@ std::unique_ptr<cudf::column> extract_keys_or_values(
     substring_fn{input_json, extracted_ranges}, num_extract, stream, mr);
   return cudf::make_strings_column(num_extract,
                                    std::move(offsets),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    0,
                                    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
@@ -797,7 +797,7 @@ std::unique_ptr<cudf::column> compute_list_offsets(
                    });
   if (debug_from_json) { print_debug(node_child_counts, "Nodes' child keys counts", ", ", stream); }
 
-  auto list_offsets   = rmm::device_uvector<cudf::size_type>(n_lists + 1, stream, mr);
+  auto list_offsets = cuda::device_buffer<cudf::size_type>(stream, mr, n_lists + 1, cuda::no_init);
   auto const copy_end = copy_if(
     node_child_counts.begin(),
     node_child_counts.end(),
@@ -1092,7 +1092,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(cudf::strings_column_view con
 
   return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
                                         input.size(),
-                                        rmm::device_buffer{},
+                                        cuda::device_buffer<std::byte>{stream, mr},
                                         std::move(null_mask),
                                         null_count,
                                         std::move(list_children));
@@ -1218,7 +1218,8 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   // Inner offsets: per value node, the number of its array elements. Length is `num_values + 1`;
   // a null/scalar/object value is still a value node and contributes a 0-count slot (its inner
   // list is masked null below, but the offset slot must exist).
-  auto inner_offsets = rmm::device_uvector<cudf::size_type>(num_values + 1, stream, mr);
+  auto inner_offsets =
+    cuda::device_buffer<cudf::size_type>(stream, mr, num_values + 1, cuda::no_init);
   thrust::uninitialized_fill(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     inner_offsets.begin(),
@@ -1278,7 +1279,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
   auto inner_list = std::make_unique<cudf::column>(
     cudf::data_type{cudf::type_id::LIST},
     num_values,
-    rmm::device_buffer{},
+    cuda::device_buffer<std::byte>{stream, mr},
     inner_null_count > 0 ? std::move(*inner_mask)
                          : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
     inner_null_count > 0 ? inner_null_count : 0,
@@ -1370,7 +1371,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map_array_values(
 
   auto result = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::LIST},
                                                input.size(),
-                                               rmm::device_buffer{},
+                                               cuda::device_buffer<std::byte>{stream, mr},
                                                std::move(null_mask),
                                                null_count,
                                                std::move(list_children));

@@ -20,8 +20,7 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/device_buffer.hpp>
-
+#include <cuda/buffer>
 #include <cuda/stream>
 
 #include <cstdint>
@@ -149,10 +148,10 @@ std::unique_ptr<cudf::column> remove_quotes(
  *         character, and a BOOL8 column indicating which rows should be nullified after parsing
  *         the concatenated buffer
  */
-std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
-  cudf::strings_column_view const& input,
-  bool nullify_invalid_rows         = false,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+std::tuple<std::unique_ptr<cuda::device_buffer<std::byte>>, char, std::unique_ptr<cudf::column>>
+concat_json(cudf::strings_column_view const& input,
+            bool nullify_invalid_rows         = false,
+            cuda::stream_ref stream           = cudf::get_default_stream(),
+            rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni

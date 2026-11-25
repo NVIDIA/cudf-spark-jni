@@ -36,15 +36,18 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/traits.hpp>
 
+#include <rmm/aligned.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cooperative_groups.h>
 #include <cuda/barrier>
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/std/bit>
+#include <cuda/std/execution>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
@@ -191,9 +194,9 @@ struct tile_info {
  *
  */
 struct row_batch {
-  size_type num_bytes;                    // number of bytes in this batch
-  size_type row_count;                    // number of rows in the batch
-  device_uvector<size_type> row_offsets;  // offsets column of output cudf column
+  size_type num_bytes;                         // number of bytes in this batch
+  size_type row_count;                         // number of rows in the batch
+  cuda::device_buffer<size_type> row_offsets;  // offsets column of output cudf column
 };
 
 /**
@@ -1577,7 +1580,7 @@ batch_data build_batches(size_type num_rows,
 
     // build offset list for each row in this batch
     auto const num_entries = row_end - last_row_end + 1;
-    device_uvector<size_type> output_batch_row_offsets(num_entries, stream, mr);
+    cuda::device_buffer<size_type> output_batch_row_offsets(stream, mr, num_entries, cuda::no_init);
 
     auto row_size_iter_bounded = spark_rapids_jni::util::make_counting_transform_iterator(
       0, row_size_functor(row_end, row_sizes, last_row_end));
@@ -1587,7 +1590,13 @@ batch_data build_batches(size_type num_rows,
                            row_size_iter_bounded + num_entries,
                            output_batch_row_offsets.begin());
 
-    auto const batch_bytes = output_batch_row_offsets.element(num_rows_in_batch, stream);
+    size_type batch_bytes;
+    CUDF_CUDA_TRY(cudaMemcpyAsync(&batch_bytes,
+                                  output_batch_row_offsets.data() + num_rows_in_batch,
+                                  sizeof(size_type),
+                                  cudaMemcpyDefault,
+                                  stream.get()));
+    cudf::detail::sync_stream(stream);
 
     // The output_batch_row_offsets vector is used as the offset column of the returned data. This
     // needs to be individually allocated, but the kernel needs a contiguous array of offsets or
@@ -1876,7 +1885,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
   // the first batch always exists unless we were sent an empty table
   auto const first_batch_size = batch_info.row_batches[0].row_count;
 
-  std::vector<rmm::device_buffer> output_buffers;
+  std::vector<cuda::device_buffer<int8_t>> output_buffers;
   std::vector<int8_t*> output_data;
   output_data.reserve(batch_info.row_batches.size());
   output_buffers.reserve(batch_info.row_batches.size());
@@ -1884,7 +1893,14 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
     batch_info.row_batches.begin(),
     batch_info.row_batches.end(),
     std::back_inserter(output_buffers),
-    [&](auto const& batch) { return rmm::device_buffer(batch.num_bytes, stream, mr); });
+    [&](auto const& batch) {
+      return cuda::device_buffer<int8_t>(
+        stream,
+        mr,
+        batch.num_bytes,
+        cuda::no_init,
+        cuda::std::execution::prop{cuda::allocation_alignment, rmm::CUDA_ALLOCATION_ALIGNMENT});
+    });
   std::transform(
     output_buffers.begin(), output_buffers.end(), std::back_inserter(output_data), [](auto& buf) {
       return static_cast<int8_t*>(buf.data());
@@ -2028,7 +2044,7 @@ std::vector<std::unique_ptr<column>> convert_to_rows(
       auto offsets =
         std::make_unique<column>(data_type{type_id::INT32},
                                  (size_type)offset_count,
-                                 batch_info.row_batches[batch].row_offsets.release(),
+                                 std::move(batch_info.row_batches[batch].row_offsets),
                                  cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                  0);
       auto data = std::make_unique<column>(data_type{type_id::INT8},
@@ -2383,7 +2399,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
   // build the row_batches from the passed in list column
   std::vector<detail::row_batch> row_batches;
   row_batches.push_back(
-    {detail::row_batch{child.size(), num_rows, device_uvector<size_type>(0, stream)}});
+    {detail::row_batch{child.size(), num_rows, cuda::device_buffer<size_type>{stream, mr}}});
 
   auto dev_output_data =
     make_device_uvector_async(output_data, stream, rmm::mr::get_current_device_resource_ref());
@@ -2501,12 +2517,12 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         dev_validity_tile_infos,
         child.data<int8_t>());
 
-    std::vector<device_uvector<size_type>> string_col_offsets;
-    std::vector<rmm::device_uvector<char>> string_data_cols;
+    std::vector<cuda::device_buffer<size_type>> string_col_offsets;
+    std::vector<cuda::device_buffer<char>> string_data_cols;
     std::vector<size_type*> string_col_offset_ptrs;
     std::vector<char*> string_data_col_ptrs;
     for (auto& col_string_lengths : string_lengths) {
-      device_uvector<size_type> output_string_offsets(num_rows + 1, stream, mr);
+      cuda::device_buffer<size_type> output_string_offsets(stream, mr, num_rows + 1, cuda::no_init);
       auto tmp = cuda::proclaim_return_type<int32_t>(
         [num_rows, col_string_lengths] __device__(auto const& i) {
           return i < num_rows ? col_string_lengths[i] : 0;
@@ -2519,8 +2535,14 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
         output_string_offsets.begin());
 
       // allocate destination string column
-      rmm::device_uvector<char> string_data(
-        output_string_offsets.element(num_rows, stream), stream, mr);
+      size_type chars_size;
+      CUDF_CUDA_TRY(cudaMemcpyAsync(&chars_size,
+                                    output_string_offsets.data() + num_rows,
+                                    sizeof(size_type),
+                                    cudaMemcpyDefault,
+                                    stream.get()));
+      cudf::detail::sync_stream(stream);
+      cuda::device_buffer<char> string_data(stream, mr, chars_size, cuda::no_init);
 
       string_col_offset_ptrs.push_back(output_string_offsets.data());
       string_data_col_ptrs.push_back(string_data.data());
@@ -2558,7 +2580,7 @@ std::unique_ptr<table> convert_from_rows(lists_column_view const& input,
           std::make_unique<cudf::column>(std::move(string_col_offsets[string_idx]),
                                          cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                          0),
-          string_data_cols[string_idx].release(),
+          std::move(string_data_cols[string_idx]).template as_bytes<std::byte>(),
           0,
           std::move(*string_data.null_mask.release()));
         // Null count set to 0, temporarily. Will be fixed up before return.

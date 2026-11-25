@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@
 #include "generate_input.hpp"
 
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
-#include <rmm/device_uvector.hpp>
-
+#include <cuda/buffer>
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/random/normal_distribution.h>
@@ -137,7 +137,7 @@ struct value_generator {
 };
 
 template <typename T>
-using distribution_fn = std::function<rmm::device_uvector<T>(thrust::minstd_rand&, size_t)>;
+using distribution_fn = std::function<cuda::device_buffer<T>(thrust::minstd_rand&, size_t)>;
 
 template <
   typename T,
@@ -147,8 +147,9 @@ distribution_fn<T> make_distribution(distribution_id dist_id, T lower_bound, T u
   switch (dist_id) {
     case distribution_id::NORMAL:
       return [lower_bound, upper_bound, dist = make_normal_dist(lower_bound, upper_bound)](
-               thrust::minstd_rand& engine, size_t size) -> rmm::device_uvector<T> {
-        rmm::device_uvector<T> result(size, cudf::get_default_stream());
+               thrust::minstd_rand& engine, size_t size) -> cuda::device_buffer<T> {
+        cuda::device_buffer<T> result(
+          cudf::get_default_stream(), cudf::get_current_device_resource_ref(), size, cuda::no_init);
         thrust::tabulate(thrust::device,
                          result.begin(),
                          result.end(),
@@ -157,8 +158,9 @@ distribution_fn<T> make_distribution(distribution_id dist_id, T lower_bound, T u
       };
     case distribution_id::UNIFORM:
       return [lower_bound, upper_bound, dist = make_uniform_dist(lower_bound, upper_bound)](
-               thrust::minstd_rand& engine, size_t size) -> rmm::device_uvector<T> {
-        rmm::device_uvector<T> result(size, cudf::get_default_stream());
+               thrust::minstd_rand& engine, size_t size) -> cuda::device_buffer<T> {
+        cuda::device_buffer<T> result(
+          cudf::get_default_stream(), cudf::get_current_device_resource_ref(), size, cuda::no_init);
         thrust::tabulate(thrust::device,
                          result.begin(),
                          result.end(),
@@ -168,8 +170,9 @@ distribution_fn<T> make_distribution(distribution_id dist_id, T lower_bound, T u
     case distribution_id::GEOMETRIC:
       // kind of exponential distribution from lower_bound to upper_bound.
       return [lower_bound, upper_bound, dist = geometric_distribution<T>(lower_bound, upper_bound)](
-               thrust::minstd_rand& engine, size_t size) -> rmm::device_uvector<T> {
-        rmm::device_uvector<T> result(size, cudf::get_default_stream());
+               thrust::minstd_rand& engine, size_t size) -> cuda::device_buffer<T> {
+        cuda::device_buffer<T> result(
+          cudf::get_default_stream(), cudf::get_current_device_resource_ref(), size, cuda::no_init);
         thrust::tabulate(thrust::device,
                          result.begin(),
                          result.end(),
