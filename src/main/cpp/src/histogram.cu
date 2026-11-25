@@ -356,7 +356,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
   // must be sanitized because it is null or non-positive. Null values with positive frequencies
   // need no extra work because the existing value mask already excludes them downstream.
   auto check_invalid_and_sanitize =
-    cudf::detail::make_zeroed_device_uvector_async<int32_t>(2, stream, default_mr);
+    cudf::detail::make_zeroed_device_uvector_async<int8_t>(2, stream, default_mr);
 
   // Frequencies that are valid and positive can safely flow downstream unchanged.
   auto check_frequency_usable = rmm::device_uvector<bool>(frequencies.size(), stream, default_mr);
@@ -380,11 +380,8 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(cudf::column_view const&
         cudf::bit_is_set(frequencies_null_mask, frequencies_offset + idx);
       auto const frequency_is_usable = frequency_is_valid && frequencies[idx] > 0;
 
-      using flag_ref = cuda::atomic_ref<int32_t, cuda::thread_scope_device>;
-      if (value_is_valid && frequency_is_valid && frequencies[idx] < 0) {
-        flag_ref{*check_invalid}.store(1, cuda::memory_order_relaxed);
-      }
-      if (!frequency_is_usable) { flag_ref{*check_sanitize}.store(1, cuda::memory_order_relaxed); }
+      if (value_is_valid && frequency_is_valid && frequencies[idx] < 0) { *check_invalid = 1; }
+      if (!frequency_is_usable) { *check_sanitize = 1; }
       check_frequency_usable[idx] = frequency_is_usable;
     });
 
