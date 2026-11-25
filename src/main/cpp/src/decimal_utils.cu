@@ -246,7 +246,7 @@ __device__ chunked256 integer_divide(chunked256 const& n, __int128_t const& d)
 import java.math.BigInteger
 import java.lang.Long.toHexString
 
-def printAsInt128s(v: BigInteger): Unit = {
+def printAsUint64Chunks(v: BigInteger): Unit = {
   System.out.print(s"0x${toHexString(v.shiftRight(192).longValue())}ULL, ")
   System.out.print(s"0x${toHexString(v.shiftRight(128).longValue())}ULL, ")
   System.out.print(s"0x${toHexString(v.shiftRight(64).longValue())}ULL, ")
@@ -257,13 +257,15 @@ def printAsInt128s(v: BigInteger): Unit = {
   val ret = BigInteger.TEN.pow(exp)
   System.out.println(s"  // $ret")
   System.out.print("  {")
-  printAsInt128s(ret)
+  printAsUint64Chunks(ret)
   System.out.println("},")
 }
 */
+constexpr int max_pow_ten_exp = 76;
+
 // Stored as a constant-memory table instead of a 77-case switch to avoid a CUDA 12.9 ptxas
 // miscompile on sm_120 where 64-bit constants are truncated to 33-bit immediates in USEL.64.
-__constant__ uint64_t const pow_ten_table[77][4] = {
+__constant__ uint64_t const pow_ten_table[max_pow_ten_exp + 1][4] = {
   // 1
   {0x0ULL, 0x0ULL, 0x0ULL, 0x1ULL},
   // 10
@@ -422,7 +424,7 @@ __constant__ uint64_t const pow_ten_table[77][4] = {
 
 inline __device__ chunked256 pow_ten(int exp)
 {
-  if (exp < 0 || exp > 76) {
+  if (exp < 0 || exp > max_pow_ten_exp) {
     // This is not a supported value...
     CUDF_UNREACHABLE("exponent exceeds supported value");
   }
@@ -437,6 +439,14 @@ void check_scale_divisor(int source_scale, int target_scale)
   CUDF_EXPECTS(exponent <= cuda::std::numeric_limits<__int128_t>::digits10, "divisor too big");
 }
 
+void check_add_sub_scale_diff(int a_scale, int b_scale)
+{
+  int64_t const diff = static_cast<int64_t>(a_scale) - static_cast<int64_t>(b_scale);
+  CUDF_EXPECTS(diff >= -max_pow_ten_exp && diff <= max_pow_ten_exp,
+               "The intermediate scale for calculating the result exceeds 256-bit representation",
+               std::invalid_argument);
+}
+
 inline __device__ int precision10(chunked256 value)
 {
   if (value.sign() < 0) {
@@ -447,7 +457,7 @@ inline __device__ int precision10(chunked256 value)
   // be able to approximate the log10 using the leading zeros similar to
   // http://graphics.stanford.edu/~seander/bithacks.html and then start
   // the search around the guess.
-  for (int i = 0; i <= 76; i++) {
+  for (int i = 0; i <= max_pow_ten_exp; i++) {
     chunked256 tmp = pow_ten(i);
     if (tmp.gte_unsigned(value)) { return i; }
   }
@@ -1043,6 +1053,7 @@ std::unique_ptr<cudf::table> add_decimal128(cudf::column_view const& a,
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
+  check_add_sub_scale_diff(a.type().scale(), b.type().scale());
   auto const num_rows = a.size();
   CUDF_EXPECTS(num_rows == b.size(), "inputs have mismatched row counts");
   auto [result_null_mask, result_null_count] =
@@ -1078,6 +1089,7 @@ std::unique_ptr<cudf::table> sub_decimal128(cudf::column_view const& a,
 {
   CUDF_EXPECTS(a.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
   CUDF_EXPECTS(b.type().id() == cudf::type_id::DECIMAL128, "not a DECIMAL128 column");
+  check_add_sub_scale_diff(a.type().scale(), b.type().scale());
   auto const num_rows = a.size();
   CUDF_EXPECTS(num_rows == b.size(), "inputs have mismatched row counts");
   auto [result_null_mask, result_null_count] =
