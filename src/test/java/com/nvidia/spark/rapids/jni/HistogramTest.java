@@ -256,6 +256,20 @@ public class HistogramTest {
   }
 
   @Test
+  void testListPercentilesFromEmptyHistograms() {
+    HostColumnVector.ListType resultType = new HostColumnVector.ListType(true,
+        new HostColumnVector.BasicType(true, DType.FLOAT64));
+    try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
+             Collections.emptyList(), Collections.emptyList());
+         ColumnVector result = Histogram.percentileFromHistogram(
+             histogram, new double[]{0.25, 0.75}, true);
+         ColumnVector expected = ColumnVector.fromLists(
+             resultType, (List<Double>) null, (List<Double>) null)) {
+      AssertUtils.assertColumnsAreEqual(expected, result);
+    }
+  }
+
+  @Test
   void testInterpolationModesAcrossNegativeInfinity() {
     List<HostColumnVector.StructData> row =
         Arrays.asList(entry(Double.NEGATIVE_INFINITY, 1L), entry(10.0, 1L));
