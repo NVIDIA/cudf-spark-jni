@@ -31,27 +31,24 @@
 
 namespace spark_rapids_jni {
 
-/**
- * @brief The maximum supported depth that a JSON path can reach.
- */
+/// @brief Maximum JSON path depth
 constexpr int MAX_JSON_PATH_DEPTH = 16;
 
-/**
- * @brief Type of instruction in a JSON path.
- */
+/// @brief JSON path instruction kind
 enum class path_instruction_type : int8_t { WILDCARD, INDEX, NAMED };
 
-/**
- * @brief Additional named-field selection policy for Spark json_tuple.
- */
+/// @brief Named-field selection policy for Spark `json_tuple`
 enum class named_field_match_policy : int32_t { LAST_NON_NULL = 1 };
 
 /**
- * @brief Extract JSON object from a JSON string based on the specified JSON path.
+ * @brief Extracts one JSON path per input row.
  *
- * If the input JSON string is invalid, or it does not contain the object at the given path, a null
- * will be returned.
- * A null input row produces null regardless of retained string bytes.
+ * Invalid JSON, missing values and null rows return null, regardless of retained bytes.
+ * @param[in] input        JSON strings
+ * @param[in] instructions Path instructions
+ * @param[in] stream       CUDA stream
+ * @param[in] mr           Output memory resource
+ * @return One strings column in input row order
  */
 std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
@@ -60,18 +57,16 @@ std::unique_ptr<cudf::column> get_json_object(
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
- * @brief Extract multiple JSON objects from a JSON string based on the specified JSON paths.
+ * @brief Extracts JSON paths in parallel batches, trading scratch memory for throughput.
  *
- * This function processes all the JSON paths in parallel, which may be faster than calling
- * to `get_json_object` on the individual JSON paths. However, it may consume much more GPU
- * memory, proportional to the number of JSON paths.
- * A null input row produces null for every path regardless of retained string bytes.
- * @param input the input string column to parse JSON from
- * @param json_paths the path operations to read extract
- * @param memory_budget_bytes a memory budget for temporary memory usage if > 0
- * @param parallel_override if this value is greater than 0 then it specifies the
- *        number of paths to process in parallel (this will cause the
- *        `memory_budget_bytes` paramemter to be ignored)
+ * Null input rows return null for every path, regardless of retained bytes.
+ * @param[in] input               JSON strings
+ * @param[in] json_paths          Path instructions
+ * @param[in] memory_budget_bytes Soft scratch budget if positive
+ * @param[in] parallel_override   Paths per batch if positive; overrides the budget
+ * @param[in] stream              CUDA stream
+ * @param[in] mr                  Output memory resource
+ * @return One strings column per path, in path order
  */
 std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   cudf::strings_column_view const& input,
@@ -83,22 +78,18 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource_ref());
 
 /**
- * @brief Extract multiple JSON objects using the specified named-field match policy.
+ * @brief Extracts the last non-null occurrence of each named field for Spark `json_tuple`.
  *
- * `LAST_NON_NULL` selects the last non-null occurrence of each top-level named field, as required
- * by Spark json_tuple. Every path must contain exactly one `NAMED` instruction. Use the overload
- * without `match_policy` for ordinary get_json_object path evaluation.
- * A null input row produces null for every path regardless of retained string bytes.
- *
- * @throw cudf::logic_error If `match_policy` is invalid or a path shape is unsupported by it
- * @param[in] input The input string column to parse JSON from
- * @param[in] json_paths The JSON path instructions to extract
- * @param[in] memory_budget_bytes A soft temporary-memory budget when greater than zero
- * @param[in] parallel_override A positive override for the number of paths processed in parallel
- * @param[in] match_policy The duplicate named-field selection policy
- * @param[in] stream CUDA stream used for device memory operations and kernel launches
- * @param[in] mr Device memory resource used to allocate returned columns
- * @return One output strings column for each input path, in path order
+ * Each path must be one `NAMED` instruction. Null rows return null regardless of retained bytes.
+ * @param[in] input               JSON strings
+ * @param[in] json_paths          Top-level named paths
+ * @param[in] memory_budget_bytes Soft scratch budget if positive
+ * @param[in] parallel_override   Paths per batch if positive; overrides the budget
+ * @param[in] match_policy        Duplicate-field policy (`LAST_NON_NULL`)
+ * @param[in] stream              CUDA stream
+ * @param[in] mr                  Output memory resource
+ * @return One strings column per path, in path order
+ * @throws cudf::logic_error Unsupported policy or path shape
  */
 std::vector<std::unique_ptr<cudf::column>> get_json_object_multiple_paths(
   cudf::strings_column_view const& input,
