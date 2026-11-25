@@ -21,6 +21,7 @@
 #include <cudf_test/type_lists.hpp>
 
 #include <cudf/detail/iterator.cuh>
+#include <cudf/detail/utilities/buffer_factories.hpp>
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/hashing.hpp>
 
@@ -209,7 +210,8 @@ TEST_F(SparkMurmurHash3Test, NonCanonicalBool)
   // canonicalizes its inputs, so construct this column from raw bytes instead.
   auto const stream = cudf::get_default_stream();
   std::vector<uint8_t> const raw{0, 1, 2, 255};
-  auto data = rmm::device_buffer{raw.data(), raw.size(), stream};
+  auto data =
+    cudf::detail::make_device_buffer_async(raw, stream, cudf::get_current_device_resource_ref());
   auto const col =
     std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::BOOL8},
                                    static_cast<cudf::size_type>(raw.size()),

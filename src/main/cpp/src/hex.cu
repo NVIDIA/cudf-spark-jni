@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,9 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/atomic>
+#include <cuda/buffer>
 #include <cuda/functional>
+#include <cuda/std/execution>
 #include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/for_each.h>
@@ -255,8 +257,8 @@ struct copy_chunk_fn {
     auto row = static_cast<cudf::size_type>(cuda::std::distance(d_compact_offsets, row_end) - 1);
     int64_t row_stop = d_compact_offsets[row + 1];
     auto const* src  = d_bytes + d_offsets[row] - d_compact_offsets[row];
-    // Each lane writes an aligned word per step. The output is allocated with
-    // `rmm::device_uvector`, so the chunk begins at a word boundary.
+    // Each lane writes an aligned word per step. The output buffer requests
+    // word alignment, so the chunk begins at a word boundary.
     for (auto idx = chunk_begin + bytes_per_word * (thread % cudf::detail::warp_size);
          idx < chunk_end;
          idx += bytes_per_word * cudf::detail::warp_size) {
@@ -331,7 +333,7 @@ std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& inpu
     sizes_itr, sizes_itr + input.size(), stream, mr);
 
   // Write hex chars in a single pass.
-  auto chars = rmm::device_uvector<char>(total_bytes, stream, mr);
+  auto chars = cuda::device_buffer<char>(stream, mr, total_bytes, cuda::no_init);
   if (total_bytes > 0) {
     auto const d_column = cudf::column_device_view::create(
       input.parent(), stream, cudf::get_current_device_resource_ref());
@@ -343,7 +345,7 @@ std::unique_ptr<cudf::column> bytes_to_hex(cudf::strings_column_view const& inpu
 
   return cudf::make_strings_column(input.size(),
                                    std::move(offsets_column),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    input.null_count(),
                                    cudf::copy_bitmask(input.parent(), stream, mr));
 }
@@ -385,7 +387,12 @@ std::unique_ptr<cudf::column> hex_to_bytes(cudf::strings_column_view const& inpu
   auto const sizes = thrust::make_transform_iterator(rows, decoded_size_fn{*d_column, d_mask});
   auto [offsets, total_bytes] =
     cudf::detail::make_offsets_child_column(sizes, sizes + input.size(), stream, mr);
-  auto bytes = rmm::device_uvector<uint8_t>(total_bytes, stream, mr);
+  auto bytes = cuda::device_buffer<uint8_t>(
+    stream,
+    mr,
+    total_bytes,
+    cuda::no_init,
+    cuda::std::execution::prop{cuda::allocation_alignment, alignof(uint64_t)});
   // The number of rows found invalid and the output bytes they reserved.
   auto dropped = std::vector<int64_t>{0, 0};
   if (total_bytes > 0) {
@@ -414,7 +421,12 @@ std::unique_ptr<cudf::column> hex_to_bytes(cudf::strings_column_view const& inpu
     auto const d_compact_offsets = compact_offsets->mutable_view().begin<cudf::size_type>();
     CUDF_CUDA_TRY(cudaMemsetAsync(d_compact_offsets, 0, sizeof(cudf::size_type), stream.get()));
     thrust::inclusive_scan(policy, sizes, sizes + input.size(), d_compact_offsets + 1);
-    auto compact         = rmm::device_uvector<uint8_t>(compact_bytes, stream, mr);
+    auto compact = cuda::device_buffer<uint8_t>(
+      stream,
+      mr,
+      compact_bytes,
+      cuda::no_init,
+      cuda::std::execution::prop{cuda::allocation_alignment, alignof(uint64_t)});
     auto const d_offsets = offsets->view().begin<cudf::size_type>();
     if (by_row) {
       thrust::for_each_n(policy,

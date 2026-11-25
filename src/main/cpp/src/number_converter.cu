@@ -402,7 +402,7 @@ std::unique_ptr<cudf::column> convert_impl(cudf::size_type num_rows,
 
   return cudf::make_strings_column(num_rows,
                                    std::move(offsets),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    null_count,
                                    null_count
                                      ? std::move(*null_mask.release())

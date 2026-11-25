@@ -18,6 +18,7 @@
 #include "protobuf/protobuf_kernels.cuh"
 
 #include <cudf/column/column_factories.hpp>
+#include <cudf/detail/utilities/buffer_factories.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
@@ -28,6 +29,7 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/buffer>
 #include <cuda/stream>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -167,8 +169,8 @@ std::unique_ptr<cudf::column> make_binary_column(std::vector<std::vector<uint8_t
     h_data.insert(h_data.end(), m.begin(), m.end());
   }
 
-  rmm::device_buffer d_data(h_data.data(), h_data.size(), stream, mr);
-  rmm::device_buffer d_offsets(h_offsets.data(), h_offsets.size() * sizeof(int32_t), stream, mr);
+  auto d_data    = cudf::detail::make_device_buffer_async(h_data, stream, mr);
+  auto d_offsets = cudf::detail::make_device_buffer_async(h_offsets, stream, mr);
   stream.sync();
 
   auto child_col =
@@ -1470,7 +1472,7 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
 
     for (int child_idx = 0; child_idx < num_repeated_children; ++child_idx) {
       auto const& work = child_work[child_idx];
-      rmm::device_uvector<int32_t> list_offsets(num_rows + 1, stream, mr);
+      cuda::device_buffer<int32_t> list_offsets(stream, mr, num_rows + 1, cuda::no_init);
       thrust::exclusive_scan(rmm::exec_policy_nosync(stream, mr),
                              work.counts.begin(),
                              work.counts.end(),
@@ -1501,7 +1503,7 @@ static void BM_protobuf_repeated_child_string_build(nvbench::state& state)
       auto offsets_column =
         std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                        num_rows + 1,
-                                       list_offsets.release(),
+                                       std::move(list_offsets),
                                        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                        0);
       results.push_back(

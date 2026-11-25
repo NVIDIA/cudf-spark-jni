@@ -24,11 +24,13 @@
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
+#include <cuda/buffer>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <ranges>
@@ -144,7 +146,7 @@ std::unique_ptr<cudf::column> make_null_column_with_schema(protobuf_schema const
     case cudf::type_id::STRING:
       return cudf::make_strings_column(num_rows,
                                        make_zero_offsets_column(num_rows, stream, mr),
-                                       rmm::device_buffer{},
+                                       cuda::device_buffer<std::byte>{stream, mr},
                                        num_rows,
                                        all_null_mask());
     case cudf::type_id::LIST:  // bytes
@@ -642,7 +644,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
         int const nf = static_cast<int>(indices.size());
         if (nf == 0) return;
 
-        std::vector<rmm::device_uvector<T>> outputs;
+        std::vector<cuda::device_buffer<T>> outputs;
         std::vector<rmm::device_uvector<bool>> valid;
         outputs.reserve(nf);
         valid.reserve(nf);
@@ -652,7 +654,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           int const location_idx = indices[j];
           int const schema_idx   = scalar_field_indices[location_idx];
           auto const field_meta  = schema_context.field(schema_idx);
-          outputs.emplace_back(num_rows, stream, mr);
+          outputs.emplace_back(stream, mr, num_rows, cuda::no_init);
           valid.emplace_back(num_rows, stream, scratch_mr);
           h_descs[j] = {location_idx,
                         outputs.back().data(),
@@ -675,7 +677,7 @@ std::unique_ptr<cudf::column> decode_protobuf_to_struct(cudf::column_view const&
           auto type               = cudf::data_type{schema[schema_idx].output_type};
           auto [mask, null_count] = make_null_mask_from_valid(valid[j], num_rows, stream, mr);
           column_map[schema_idx]  = std::make_unique<cudf::column>(
-            type, num_rows, outputs[j].release(), std::move(mask), null_count);
+            type, num_rows, std::move(outputs[j]), std::move(mask), null_count);
         }
       };
 

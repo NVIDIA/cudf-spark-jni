@@ -32,6 +32,7 @@
 #include <rmm/exec_policy.hpp>
 #include <rmm/resource_ref.hpp>
 
+#include <cuda/buffer>
 #include <cuda/stream>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -153,7 +154,7 @@ struct protobuf_field_decode_request {
 
 struct list_offsets_from_counts_result {
   int32_t total_count;
-  rmm::device_uvector<int32_t> offsets;
+  cuda::device_buffer<int32_t> offsets;
 };
 
 // Offsets become LIST output storage; occurrences remain scratch used by value extraction.
@@ -161,7 +162,7 @@ struct repeated_field_work {
   int schema_idx;
   int depth;
   int32_t total_count;
-  rmm::device_uvector<int32_t> offsets;
+  cuda::device_buffer<int32_t> offsets;
   rmm::device_uvector<field_occurrence> occurrences;
 
   repeated_field_work(int schema_index,
@@ -195,13 +196,13 @@ struct extract_strided_count {
 };
 
 inline std::unique_ptr<cudf::column> make_offsets_column(cudf::size_type num_rows,
-                                                         rmm::device_uvector<int32_t>&& offsets)
+                                                         cuda::device_buffer<int32_t>&& offsets)
 {
   CUDF_EXPECTS(offsets.size() == static_cast<size_t>(num_rows) + 1,
                std::string{__func__} + ": offsets size must match row count");
   return std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                         num_rows + 1,
-                                        offsets.release(),
+                                        std::move(offsets),
                                         cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                         0);
 }
@@ -210,9 +211,10 @@ inline std::unique_ptr<cudf::column> make_zero_offsets_column(cudf::size_type nu
                                                               cuda::stream_ref stream,
                                                               rmm::device_async_resource_ref mr)
 {
-  return make_offsets_column(num_rows,
-                             cudf::detail::make_zeroed_device_uvector_async<int32_t>(
-                               static_cast<std::size_t>(num_rows) + 1, stream, mr));
+  cuda::device_buffer<int32_t> offsets(
+    stream, mr, static_cast<std::size_t>(num_rows) + 1, cuda::no_init);
+  thrust::fill(rmm::exec_policy_nosync(stream, mr), offsets.begin(), offsets.end(), 0);
+  return make_offsets_column(num_rows, std::move(offsets));
 }
 
 inline rmm::device_uvector<int32_t> make_top_row_indices(
@@ -268,7 +270,7 @@ inline list_offsets_from_counts_result make_list_offsets_from_counts(
   CUDF_EXPECTS(num_rows > 0 || total_count == 0,
                std::string{__func__} + ": empty input cannot have repeated elements");
 
-  rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, output_mr);
+  cuda::device_buffer<int32_t> offsets(stream, output_mr, num_rows + 1, cuda::no_init);
   if (num_rows > 0) {
     thrust::exclusive_scan(rmm::exec_policy_nosync(stream, scratch_mr),
                            counts_begin,
@@ -347,7 +349,7 @@ inline repeated_field_work_bundle make_repeated_field_work_bundle(
     auto const total_count = static_cast<int32_t>(total_count_64);
     auto const schema_idx  = schema_indices[field_position];
     auto const field_mr    = schema.is_output(schema_idx) ? output_mr : scratch_mr;
-    rmm::device_uvector<int32_t> offsets(num_rows + 1, stream, field_mr);
+    cuda::device_buffer<int32_t> offsets(stream, field_mr, num_rows + 1, cuda::no_init);
     thrust::transform(rmm::exec_policy_nosync(stream, scratch_mr),
                       wide_offsets[field_position]->begin(),
                       wide_offsets[field_position]->end(),
@@ -541,12 +543,12 @@ void maybe_check_required_fields(required_field_input_view input,
                                  protobuf_decode_runtime_context decode_ctx,
                                  cuda::stream_ref stream);
 
-void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+void validate_enum_values(cudf::device_span<int32_t const> values,
                           rmm::device_uvector<bool>& valid,
                           enum_domain_device_view enum_domain,
                           cuda::stream_ref stream);
 
-void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+void validate_enum_values(cudf::device_span<int32_t const> values,
                           rmm::device_uvector<bool>& valid,
                           cudf::detail::host_vector<int32_t> const& valid_enums,
                           cuda::stream_ref stream);

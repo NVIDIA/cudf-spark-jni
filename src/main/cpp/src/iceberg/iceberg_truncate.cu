@@ -192,7 +192,7 @@ std::unique_ptr<cudf::column> truncate_string_impl(cudf::column_view const& inpu
 
   return cudf::make_strings_column(num_rows,
                                    std::move(offsets),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    input.null_count(),
                                    cudf::copy_bitmask(input, stream, mr));
 }
@@ -229,7 +229,7 @@ std::unique_ptr<cudf::column> truncate_binary_impl(cudf::column_view const& inpu
   auto new_child = std::make_unique<cudf::column>(
     cudf::data_type{cudf::type_id::UINT8},                     // Data type
     new_chars_size,                                            // Number of elements
-    new_chars.release(),                                       // Transfer ownership of the buffer
+    std::move(new_chars).template as_bytes<std::byte>(),       // Transfer ownership of the buffer
     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),  // no nulls in child
     0);
 

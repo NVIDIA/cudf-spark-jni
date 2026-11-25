@@ -28,6 +28,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_histogram.cuh>
+#include <cuda/buffer>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
 #include <cuda/std/tuple>
@@ -116,16 +117,16 @@ __host__ __device__ constexpr std::uint8_t delimiter_candidate(int candidate_ind
 
 }  // namespace
 
-std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
-  cudf::strings_column_view const& input,
-  bool nullify_invalid_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+std::tuple<std::unique_ptr<cuda::device_buffer<std::byte>>, char, std::unique_ptr<cudf::column>>
+concat_json(cudf::strings_column_view const& input,
+            bool nullify_invalid_rows,
+            cuda::stream_ref stream,
+            rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) {
-    return {std::make_unique<rmm::device_buffer>(0, stream, mr),
+    return {std::make_unique<cuda::device_buffer<std::byte>>(stream, mr),
             '\n',
-            std::make_unique<cudf::column>(rmm::device_uvector<bool>{0, stream, mr},
+            std::make_unique<cudf::column>(cuda::device_buffer<bool>{stream, mr},
                                            cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                            0)};
   }
@@ -141,7 +142,7 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
   // Check if the input rows are null, empty (containing only whitespaces), and may also check
   // for invalid JSON strings.
   // This will be returned to the caller to create null mask for the final output.
-  rmm::device_uvector<bool> should_be_nullified(input.size(), stream, mr);
+  cuda::device_buffer<bool> should_be_nullified(stream, mr, input.size(), cuda::no_init);
 
   thrust::for_each(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
@@ -303,11 +304,11 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
 
 }  // namespace detail
 
-std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::column>> concat_json(
-  cudf::strings_column_view const& input,
-  bool nullify_invalid_rows,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+std::tuple<std::unique_ptr<cuda::device_buffer<std::byte>>, char, std::unique_ptr<cudf::column>>
+concat_json(cudf::strings_column_view const& input,
+            bool nullify_invalid_rows,
+            cuda::stream_ref stream,
+            rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
   return detail::concat_json(input, nullify_invalid_rows, stream, mr);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -192,7 +192,7 @@ struct dispatch_decimal_to_non_ansi_string_fn {
 
     return make_strings_column(input.size(),
                                std::move(offsets),
-                               chars.release(),
+                               std::move(chars).template as_bytes<std::byte>(),
                                input.null_count(),
                                cudf::copy_bitmask(input, stream, mr));
   }

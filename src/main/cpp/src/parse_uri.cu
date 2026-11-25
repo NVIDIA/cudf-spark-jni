@@ -33,6 +33,7 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/hierarchy>
@@ -944,7 +945,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
       .value(stream);
 
   // create the chars buffer
-  auto d_out_chars = rmm::device_buffer(out_chars_bytes, stream, mr);
+  auto d_out_chars = cuda::device_buffer<char>(stream, mr, out_chars_bytes, cuda::no_init);
 
   // copy the characters from the input column to the output column
   parse_uri<<<num_threadblocks, threadblock_size, 0, stream.get()>>>(
@@ -959,7 +960,7 @@ std::unique_ptr<column> parse_uri(strings_column_view const& input,
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
-                             std::move(d_out_chars),
+                             std::move(d_out_chars).template as_bytes<std::byte>(),
                              null_count,
                              std::move(null_mask));
 }
@@ -972,7 +973,8 @@ void validate_input_uris(strings_column_view const& input, cuda::stream_ref stre
   auto const d_strings = column_device_view::create(input.parent(), stream);
 
   // Create boolean vector: true for valid URIs, false for completely invalid URIs
-  auto validity_flags = rmm::device_uvector<bool>(input.size(), stream);
+  auto validity_flags = cuda::device_buffer<bool>(
+    stream, cudf::get_current_device_resource_ref(), input.size(), cuda::no_init);
 
   thrust::tabulate(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),

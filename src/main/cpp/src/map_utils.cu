@@ -38,6 +38,7 @@
 #include <rmm/resource_ref.hpp>
 
 #include <cub/device/device_reduce.cuh>
+#include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/stream>
 #include <thrust/iterator/counting_iterator.h>
@@ -283,7 +284,7 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   auto const lists_cv = cudf::lists_column_view(input);
   auto const structs  = lists_cv.child();
 
-  rmm::device_uvector<cudf::size_type> out_offsets(num_rows + 1, stream, mr);
+  cuda::device_buffer<cudf::size_type> out_offsets(stream, mr, num_rows + 1, cuda::no_init);
   CUDF_CUDA_TRY(cudaMemsetAsync(out_offsets.data(), 0, sizeof(cudf::size_type), stream.get()));
   thrust::inclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                          p1.row_size.begin(),
@@ -342,7 +343,7 @@ std::unique_ptr<cudf::column> map_from_entries(cudf::column_view const& input,
   auto offsets_col =
     std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::INT32},
                                    num_rows + 1,
-                                   out_offsets.release(),
+                                   std::move(out_offsets),
                                    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                    0);
 

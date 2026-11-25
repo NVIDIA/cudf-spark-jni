@@ -126,7 +126,7 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
     cudf::detail::offsetalator_factory::make_input_iterator(offsets->view());
 
   // Now build the chars column
-  rmm::device_uvector<char> chars(bytes, stream, mr);
+  cuda::device_buffer<char> chars(stream, mr, bytes, cuda::no_init);
   char* d_chars = chars.data();
 
   // Fill in the chars data
@@ -140,7 +140,7 @@ std::unique_ptr<cudf::column> long_to_binary_string(cudf::column_view const& inp
 
   return cudf::make_strings_column(input.size(),
                                    std::move(offsets),
-                                   chars.release(),
+                                   std::move(chars).template as_bytes<std::byte>(),
                                    input.null_count(),
                                    cudf::copy_bitmask(input, stream, mr));
 }

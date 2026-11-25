@@ -1191,13 +1191,13 @@ void maybe_check_required_fields(required_field_input_view input,
   CUDF_CHECK_CUDA(stream.get());
 }
 
-void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+void validate_enum_values(cudf::device_span<int32_t const> values,
                           rmm::device_uvector<bool>& valid,
                           enum_domain_device_view enum_domain,
                           cuda::stream_ref stream)
 {
   CUDF_EXPECTS(values.size() == valid.size(), "enum values and validity sizes must match");
-  if (values.is_empty() || enum_domain.size == 0) return;
+  if (values.empty() || enum_domain.size == 0) return;
   CUDF_EXPECTS(enum_domain.valid_values != nullptr, "enum validation requires valid enum values");
   launch_validate_enum_values(
     {values.data(), valid.data(), static_cast<cudf::size_type>(values.size())},
@@ -1205,13 +1205,13 @@ void validate_enum_values(rmm::device_uvector<int32_t> const& values,
     stream);
 }
 
-void validate_enum_values(rmm::device_uvector<int32_t> const& values,
+void validate_enum_values(cudf::device_span<int32_t const> values,
                           rmm::device_uvector<bool>& valid,
                           cudf::detail::host_vector<int32_t> const& valid_enums,
                           cuda::stream_ref stream)
 {
   CUDF_EXPECTS(values.size() == valid.size(), "enum values and validity sizes must match");
-  if (values.is_empty() || valid_enums.empty()) return;
+  if (values.empty() || valid_enums.empty()) return;
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
   auto d_valid_enums    = cudf::detail::make_device_uvector_async(valid_enums, stream, scratch_mr);
