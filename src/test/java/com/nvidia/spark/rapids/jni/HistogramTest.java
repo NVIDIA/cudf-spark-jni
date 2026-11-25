@@ -35,6 +35,7 @@ import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.ASCENDING;
 import static com.nvidia.spark.rapids.jni.Histogram.ValueOrder.DESCENDING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
 
 public class HistogramTest {
   private static final HostColumnVector.ListType DOUBLE_HISTOGRAM_TYPE =
@@ -161,7 +162,7 @@ public class HistogramTest {
     try (ColumnVector histogram = histograms(DOUBLE_HISTOGRAM_TYPE,
              Arrays.asList(entry(5.0, 1L), entry(9.0, (1L << 53) + 3)),
              Arrays.asList(entry(47.0, 1L)))) {
-      assertThrows(IndexOutOfBoundsException.class, () -> {
+      assertThrowsExactly(IndexOutOfBoundsException.class, () -> {
         try (ColumnVector ignored = Histogram.percentileFromHistogram(
             histogram, new double[]{0.5, 1.0}, false)) {
           // Close the result if the expected exception is not thrown.

@@ -18,7 +18,6 @@
 #include "histogram.hpp"
 
 #include <bit>
-#include <stdexcept>
 
 extern "C" {
 
@@ -73,8 +72,9 @@ Java_com_nvidia_spark_rapids_jni_Histogram_percentileFromHistogramWithOptions(
         .release());
   }
   JNI_CATCH_BEGIN(env, 0)
-  catch (std::out_of_range const& e)
+  catch (spark_rapids_jni::percentile_rank_out_of_range const& e)
   {
+    JNI_EXCEPTION_OCCURRED_CHECK(env, 0);
     JNI_THROW_NEW(env, "java/lang/IndexOutOfBoundsException", e.what(), 0);
   }
   CATCH_SPECIAL_EXCEPTION(env, 0)

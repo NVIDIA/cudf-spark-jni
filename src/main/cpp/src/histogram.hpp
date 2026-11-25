@@ -24,8 +24,16 @@
 #include <cuda/stream>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace spark_rapids_jni {
+
+/**
+ * @brief A computed percentile rank is outside its histogram.
+ */
+struct percentile_rank_out_of_range : public std::out_of_range {
+  using std::out_of_range::out_of_range;
+};
 
 /**
  * @brief Algorithms for interpolating between adjacent percentile values.
@@ -88,6 +96,7 @@ std::unique_ptr<cudf::column> create_histogram_if_valid(
  * @param mr Device memory resource used to allocate the returned column's device memory
  * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
  * input column
+ * @throws percentile_rank_out_of_range If a computed percentile rank is outside its histogram.
  */
 std::unique_ptr<cudf::column> percentile_from_histogram(
   cudf::column_view const& input,
@@ -111,6 +120,7 @@ std::unique_ptr<cudf::column> percentile_from_histogram(
  * @param mr Device memory resource used to allocate the returned column's device memory
  * @return A lists column, each list stores the percentile value(s) of the corresponding row in the
  * input column
+ * @throws percentile_rank_out_of_range If a computed percentile rank is outside its histogram.
  */
 std::unique_ptr<cudf::column> percentile_from_histogram(
   cudf::column_view const& input,

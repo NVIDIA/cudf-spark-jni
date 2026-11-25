@@ -293,8 +293,9 @@ struct percentile_dispatcher {
                      status.begin(),
                      status.end(),
                      percentile_status::INVALID_RANK);
-      CUDF_EXPECTS(
-        invalid == status.end(), "Percentile rank is outside the histogram.", std::out_of_range);
+      CUDF_EXPECTS(invalid == status.end(),
+                   "Percentile rank is outside the histogram.",
+                   percentile_rank_out_of_range);
       return {std::move(percentiles), std::move(null_mask), null_count};
     }
 

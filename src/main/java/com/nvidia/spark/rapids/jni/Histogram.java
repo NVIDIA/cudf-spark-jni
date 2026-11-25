@@ -106,6 +106,7 @@ public class Histogram {
    * @param outputAsLists Specify whether the output percentiles will be wrapped into a list.
    * @return A lists column, each list stores the output percentile(s) computed for the
    * corresponding row in the input column.
+   * @throws IndexOutOfBoundsException If a computed percentile rank is outside its histogram.
    */
   public static ColumnVector percentileFromHistogram(ColumnView input, double[] percentages,
                                                      boolean outputAsLists) {
@@ -125,6 +126,7 @@ public class Histogram {
    * @param interpolation The interpolation algorithm to use between adjacent values.
    * @return A lists column, each list stores the output percentile(s) computed for the
    * corresponding row in the input column.
+   * @throws IndexOutOfBoundsException If a computed percentile rank is outside its histogram.
    */
   public static ColumnVector percentileFromHistogram(ColumnView input, double[] percentages,
                                                      boolean outputAsLists,
@@ -146,6 +148,7 @@ public class Histogram {
    * @param valueOrder    The ordering direction to use for histogram values.
    * @return A lists column, each list stores the output percentile(s) computed for the
    * corresponding row in the input column.
+   * @throws IndexOutOfBoundsException If a computed percentile rank is outside its histogram.
    */
   public static ColumnVector percentileFromHistogramWithOptions(
       ColumnView input, double[] percentages, boolean outputAsLists,
