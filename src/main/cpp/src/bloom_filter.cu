@@ -339,6 +339,8 @@ void bloom_filter_put(cudf::list_scalar& bloom_filter,
                       cuda::stream_ref stream)
 {
   SRJ_FUNC_RANGE();
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::INT64,
+               "Bloom filter put requires an INT64 input column");
   auto [header, buffer, bloom_filter_bits, seed] = unpack_bloom_filter(bloom_filter.view(), stream);
   auto const hdr_size = bloom_filter_header_size_for_version(header.version);
   CUDF_EXPECTS(static_cast<size_t>(bloom_filter.view().size()) == (buffer.size() * 4) + hdr_size,
@@ -462,6 +464,8 @@ std::unique_ptr<cudf::column> bloom_filter_probe(cudf::column_view const& input,
                                                  rmm::device_async_resource_ref mr)
 {
   SRJ_FUNC_RANGE();
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::INT64,
+               "Bloom filter probe requires an INT64 input column");
   auto [header, buffer, bloom_filter_bits, seed] = unpack_bloom_filter(bloom_filter, stream);
   auto const hdr_size = bloom_filter_header_size_for_version(header.version);
   CUDF_EXPECTS(bloom_filter.size() == static_cast<size_t>((buffer.size() * 4) + hdr_size),

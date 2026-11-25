@@ -15,6 +15,7 @@
  */
 
 #include "cast_string.hpp"
+#include "nvtx_ranges.hpp"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
@@ -29,6 +30,7 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <cuda/cmath>
 #include <cuda/std/algorithm>
+#include <cuda/std/limits>
 #include <cuda/std/optional>
 #include <cuda/std/tuple>
 #include <cuda/std/type_traits>
@@ -36,6 +38,9 @@
 #include <cuda/stream>
 #include <thrust/find.h>
 #include <thrust/iterator/counting_iterator.h>
+
+#include <cstddef>
+#include <cstdint>
 
 using namespace cudf;
 
@@ -254,14 +259,25 @@ CUDF_KERNEL void string_to_integer_kernel(T* out,
 }
 
 template <typename T>
-__device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_exponent(
-  char const* chars, int const len, bool strip)
+struct parsed_decimal_exponent {
+  bool positive;
+  int decimal_location;
+  int first_digit;
+  T exponent_val;
+  bool has_nonzero_mantissa;
+};
+
+template <typename T>
+[[nodiscard]] __device__ cuda::std::optional<parsed_decimal_exponent<T>>
+validate_and_parse_exponent(char const* chars, int const len, bool strip)
 {
-  T exponent_val         = 0;
-  int i                  = 0;
-  bool positive          = true;
-  bool exponent_positive = true;
-  int decimal_location   = -1;
+  T exponent_val            = 0;
+  int i                     = 0;
+  bool positive             = true;
+  bool exponent_positive    = true;
+  bool has_mantissa_digit   = false;
+  bool has_nonzero_mantissa = false;
+  int decimal_location      = -1;
 
   // first pass is validation and figuring out decimal location taking into account possible
   // scientific notation.
@@ -306,8 +322,6 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
         } else if (chr == '-') {
           exponent_positive = false;
           return ST_EXPONENT_SIGN;
-        } else if (strip && is_whitespace(chr) && chr_idx != 0) {
-          return ST_TRAILING_WHITESPACE;
         } else if (chr > '9' || chr < '0') {
           return ST_INVALID;
         } else {
@@ -358,7 +372,13 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
 
     if (state == ST_INVALID) { return cuda::std::nullopt; }
 
-    if (last_state == ST_DIGITS && state != ST_DIGITS && state != ST_DECIMAL_POINT) {
+    if ((last_state == ST_DIGITS || last_state == ST_DECIMAL_POINT) && chr >= '0' && chr <= '9') {
+      has_mantissa_digit   = true;
+      has_nonzero_mantissa = has_nonzero_mantissa || chr != '0';
+    }
+
+    if ((last_state == ST_DIGITS || last_state == ST_DECIMAL_POINT) && state != ST_DIGITS &&
+        state != ST_DECIMAL_POINT) {
       // past digits, save location
       last_digit = c;
     }
@@ -372,13 +392,71 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
     }
   }
 
+  if (!has_mantissa_digit || state == ST_EXPONENT_OR_SIGN || state == ST_EXPONENT_SIGN) {
+    return cuda::std::nullopt;
+  }
+
+  // Spark parses decimal strings through java.math.BigDecimal. Its exponent magnitude and the
+  // scale produced by applying that exponent must both fit in a signed Java int, even for zero.
+  if (!cuda::std::in_range<int>(exponent_val) ||
+      exponent_val == cuda::std::numeric_limits<int>::min()) {
+    return cuda::std::nullopt;
+  }
+  auto const fractional_digits =
+    decimal_location < 0 ? 0 : last_digit - first_digit - decimal_location - 1;
+  auto const decimal_scale =
+    static_cast<int64_t>(fractional_digits) - static_cast<int64_t>(exponent_val);
+  if (!cuda::std::in_range<int>(decimal_scale)) { return cuda::std::nullopt; }
+
   // decimal location moves to end of digits if no decimal found
   if (decimal_location < 0) { decimal_location = last_digit - first_digit; }
 
-  // adjust decimal location based on exponent
-  decimal_location += exponent_val;
+  return parsed_decimal_exponent<T>{
+    positive, decimal_location, first_digit, exponent_val, has_nonzero_mantissa};
+}
 
-  return cuda::std::tuple{positive, decimal_location, first_digit};
+__device__ constexpr bool is_digit(char const chr) { return chr >= '0' && chr <= '9'; }
+
+__device__ bool scan_zero_digits(char const* chars, int len, int& i)
+{
+  auto const start = i;
+  for (; i < len && chars[i] == '0'; ++i) {}
+  return i != start && (i >= len || !is_digit(chars[i]));
+}
+
+__device__ bool scan_digits(char const* chars, int len, int& i)
+{
+  auto const start = i;
+  for (; i < len && is_digit(chars[i]); ++i) {}
+  return i != start;
+}
+
+/**
+ * @brief Check whether an unquoted string is a valid JSON number with a zero mantissa.
+ *
+ * Additional leading zero digits are accepted here. The `from_json_to_structs` path applies its
+ * configured leading-zero policy before conversion; direct conversion callers are responsible
+ * for any leading-zero validation they require.
+ */
+__device__ bool is_valid_unquoted_json_zero(char const* chars, int len)
+{
+  int i = 0;
+  if (i < len && chars[i] == '-') { ++i; }
+
+  if (!scan_zero_digits(chars, len, i)) { return false; }
+
+  if (i < len && chars[i] == '.') {
+    ++i;
+    if (!scan_zero_digits(chars, len, i)) { return false; }
+  }
+
+  if (i < len && (chars[i] == 'e' || chars[i] == 'E')) {
+    ++i;
+    if (i < len && (chars[i] == '+' || chars[i] == '-')) { ++i; }
+    if (!scan_digits(chars, len, i)) { return false; }
+  }
+
+  return i == len;
 }
 
 /**
@@ -393,7 +471,9 @@ __device__ cuda::std::optional<cuda::std::tuple<bool, int, int>> validate_and_ex
  * @param num_rows total number of elements in the integer array
  * @param scale scale of desired decimals
  * @param precision precision of desired decimals
- * @param ansi_mode true if ansi mode is required, which is more strict and throws
+ * @param strip true if leading and trailing whitespace is ignored
+ * @param json_quote_counts number of quote characters in each original JSON value; an empty span
+ *                          disables JSON-specific zero handling
  */
 template <typename T>
 CUDF_KERNEL void string_to_decimal_kernel(T* out,
@@ -404,7 +484,8 @@ CUDF_KERNEL void string_to_decimal_kernel(T* out,
                                           size_type num_rows,
                                           int32_t scale,
                                           int32_t precision,
-                                          bool strip)
+                                          bool strip,
+                                          cudf::device_span<int8_t const> json_quote_counts)
 {
   auto const group = cooperative_groups::this_thread_block();
   auto const warp  = cooperative_groups::tiled_partition<cudf::detail::warp_size>(group);
@@ -443,146 +524,177 @@ CUDF_KERNEL void string_to_decimal_kernel(T* out,
   };
 
   auto const validated =
-    valid ? validate_and_exponent<T>(&chars[row_start], len, strip) : cuda::std::nullopt;
+    valid ? validate_and_parse_exponent<T>(&chars[row_start], len, strip) : cuda::std::nullopt;
   valid = validated.has_value();
 
   if (valid) {
-    bool positive;
-    int decimal_location;
-    int first_digit;
-    cuda::std::tie(positive, decimal_location, first_digit) = *validated;
+    auto const positive             = validated->positive;
+    auto decimal_location           = validated->decimal_location;
+    auto const first_digit          = validated->first_digit;
+    auto const exponent_val         = validated->exponent_val;
+    auto const has_nonzero_mantissa = validated->has_nonzero_mantissa;
 
-    auto const max_digits_before_decimal                   = precision + scale;
-    auto const significant_digits_before_decimal_in_string = count_significant_digits(
-      &chars[row_start + first_digit], len - first_digit, decimal_location);
+    auto const is_zero =
+      !has_nonzero_mantissa && (json_quote_counts.empty() || json_quote_counts[row] > 0 ||
+                                is_valid_unquoted_json_zero(&chars[row_start], len));
+    if (is_zero) {
+      // A zero value is independent of exponent. Avoiding the addition also prevents signed
+      // overflow when the parsed exponent and the mantissa location are individually valid.
+      decimal_location = 0;
+    } else {
+      // Validation bounds the exponent to the Java int range, so this sum fits in int64_t for
+      // every decimal width. Check the int destination before narrowing it.
+      auto const adjusted_location =
+        static_cast<int64_t>(decimal_location) + static_cast<int64_t>(exponent_val);
+      if (!cuda::std::in_range<int>(adjusted_location)) {
+        valid = false;
+      } else {
+        decimal_location = static_cast<int>(adjusted_location);
+      }
+    }
 
-    // last digit we can process is scale units before or after the decimal
-    // depending on the scale sign. Note that rounding still needs to occur after that digit.
-    auto const last_digit = decimal_location - scale;
+    if (valid) {
+      auto const max_digits_before_decimal                   = precision + scale;
+      auto const significant_digits_before_decimal_in_string = count_significant_digits(
+        &chars[row_start + first_digit], len - first_digit, decimal_location);
 
-    // number of precise digits we have encountered
-    int num_precise_digits = 0;
-    // number of digits we have encountered, even leading 0's
-    int total_digits     = 0;
-    T thread_val         = 0;
-    bool found_sig_digit = false;
-    int rounding_digits  = 0;
+      // last digit we can process is scale units before or after the decimal
+      // depending on the scale sign. Note that rounding still needs to occur after that digit.
+      auto const last_digit = static_cast<int64_t>(decimal_location) - scale;
 
-    if (last_digit >= 0) {
-      // march string starting at first_digit and build value
-      for (int i = first_digit; i < len && valid; ++i) {
-        auto const chr = chars[row_start + i];
-        if (chr == '.') {
-          continue;
-        } else if (chr > '9' || chr < '0') {
-          // finished processing
-          break;
-        }
+      // number of precise digits we have encountered
+      int num_precise_digits = 0;
+      // number of digits we have encountered, even leading 0's
+      int total_digits     = 0;
+      T thread_val         = 0;
+      bool found_sig_digit = false;
+      int rounding_digits  = 0;
 
-        T const new_digit = chr - '0';
-        if (num_precise_digits + 1 > precision || total_digits + 1 > last_digit) {
-          // more digits than required, but we need to round
-          if (new_digit >= 5) {
-            auto const orig_val = thread_val;
-            if (will_overflow(thread_val, static_cast<T>(1), positive)) {
-              valid = false;
-              break;
-            } else if (positive) {
-              thread_val++;
-            } else {
-              thread_val--;
-            }
-            // we need to know if the first digit overflowed and added a new digit
-            // this can only happen if the first digit is lower now than before
-            // rounding added a digit. There may be a faster route, but it has to work
-            // with __int128_t as well.
-            auto count_digits = [](T val) {
-              int count = 0;
-              while (val != 0) {
-                count++;
-                val /= 10;
-              }
-              return count;
-            };
-
-            auto before_digits = count_digits(orig_val);
-            auto after_digits  = count_digits(thread_val);
-
-            // if original value is 0, we can round to 1 without adding a digit, but
-            // count_digits will detect the change.
-            if (orig_val != 0 && count_digits(thread_val) > count_digits(orig_val)) {
-              // more digits now than before rounding
-              total_digits++;
-              num_precise_digits++;
-              decimal_location++;
-              rounding_digits++;
-            }
+      if (last_digit >= 0) {
+        // march string starting at first_digit and build value
+        for (int i = first_digit; i < len && valid; ++i) {
+          auto const chr = chars[row_start + i];
+          if (chr == '.') {
+            continue;
+          } else if (chr > '9' || chr < '0') {
+            // finished processing
+            break;
           }
-          break;
-        }
 
-        total_digits++;
-        if (found_sig_digit || total_digits > decimal_location || new_digit != 0) {
-          found_sig_digit = true;
-          num_precise_digits++;
-        }
+          T const new_digit = chr - '0';
+          if (num_precise_digits + 1 > precision || total_digits + 1 > last_digit) {
+            // more digits than required, but we need to round
+            if (new_digit >= 5) {
+              auto const orig_val = thread_val;
+              if (will_overflow(thread_val, static_cast<T>(1), positive)) {
+                valid = false;
+                break;
+              } else if (positive) {
+                thread_val++;
+              } else {
+                thread_val--;
+              }
+              // we need to know if the first digit overflowed and added a new digit
+              // this can only happen if the first digit is lower now than before
+              // rounding added a digit. There may be a faster route, but it has to work
+              // with __int128_t as well.
+              auto count_digits = [](T val) {
+                int count = 0;
+                while (val != 0) {
+                  count++;
+                  val /= 10;
+                }
+                return count;
+              };
 
-        auto const [success, new_val] =
-          process_value(i == first_digit, thread_val, new_digit, positive);
-        if (!success) {
+              auto const before_digits = count_digits(orig_val);
+              auto const after_digits  = count_digits(thread_val);
+
+              // if original value is 0, we can round to 1 without adding a digit, but
+              // count_digits will detect the change.
+              if (orig_val != 0 && after_digits > before_digits) {
+                if (decimal_location == cuda::std::numeric_limits<int>::max()) {
+                  valid = false;
+                  break;
+                }
+                // more digits now than before rounding
+                total_digits++;
+                num_precise_digits++;
+                decimal_location++;
+                rounding_digits++;
+              }
+            }
+            break;
+          }
+
+          total_digits++;
+          if (found_sig_digit || total_digits > decimal_location || new_digit != 0) {
+            found_sig_digit = true;
+            num_precise_digits++;
+          }
+
+          auto const [success, new_val] =
+            process_value(i == first_digit, thread_val, new_digit, positive);
+          if (!success) {
+            valid = false;
+            break;
+          }
+          thread_val = new_val;
+        }
+      }
+
+      auto const significant_preceding_zeros =
+        decimal_location < 0 ? -static_cast<int64_t>(decimal_location) : int64_t{0};
+      auto const zeros_to_decimal = cuda::std::max(
+        int64_t{0},
+        static_cast<int64_t>(decimal_location) - total_digits - (scale > 0 ? scale : 0));
+      auto const significant_digits_before_decimal =
+        significant_digits_before_decimal_in_string + zeros_to_decimal + rounding_digits;
+
+      // too many digits required to store decimal
+      auto const leading_zeros = total_digits - num_precise_digits;
+      if (max_digits_before_decimal < static_cast<int64_t>(decimal_location) - leading_zeros) {
+        valid = false;
+      }
+
+      // at this point we have the precise digits we need, but we might need trailing zeros on this
+      // value both before and after the decimal
+
+      // add zero pad until we hit the decimal location
+      // decimal(6,-2)
+      // string: 123456
+      // thread_value: 1235
+      // result -> 123500
+      for (int64_t i = 0; valid && i < zeros_to_decimal; ++i) {
+        if (will_overflow(thread_val, positive)) {
           valid = false;
           break;
         }
-        thread_val = new_val;
+        thread_val *= 10;
+        num_precise_digits++;
       }
-    }
 
-    auto const significant_preceding_zeros = decimal_location < 0 ? -decimal_location : 0;
-    auto const zeros_to_decimal            = cuda::std::max(
-      0, scale > 0 ? decimal_location - total_digits - scale : decimal_location - total_digits);
-    auto const significant_digits_before_decimal =
-      significant_digits_before_decimal_in_string + zeros_to_decimal + rounding_digits;
+      // add zero pad to get to scale
+      // decimal(6,5)
+      // string: 0.012
+      // thread_value: 12
+      // result -> 1200
+      auto const digits_after_decimal =
+        num_precise_digits - significant_digits_before_decimal + significant_preceding_zeros;
+      auto const digits_needed_after_decimal =
+        cuda::std::min(static_cast<int64_t>(precision) - significant_digits_before_decimal,
+                       -static_cast<int64_t>(scale));
 
-    // too many digits required to store decimal
-    auto const leading_zeros = total_digits - num_precise_digits;
-    if (max_digits_before_decimal < decimal_location - leading_zeros) { valid = false; }
-
-    // at this point we have the precise digits we need, but we might need trailing zeros on this
-    // value both before and after the decimal
-
-    // add zero pad until we hit the decimal location
-    // decimal(6,-2)
-    // string: 123456
-    // thread_value: 1235
-    // result -> 123500
-    for (int i = 0; i < zeros_to_decimal; ++i) {
-      if (will_overflow(thread_val, positive)) {
-        valid = false;
-        break;
+      for (int64_t i = digits_after_decimal; valid && i < digits_needed_after_decimal; ++i) {
+        if (will_overflow(thread_val, positive)) {
+          valid = false;
+          break;
+        }
+        thread_val *= 10;
       }
-      thread_val *= 10;
-      num_precise_digits++;
+
+      if (valid) { out[row] = thread_val; }
     }
-
-    // add zero pad to get to scale
-    // decimal(6,5)
-    // string: 0.012
-    // thread_value: 12
-    // result -> 1200
-    auto const digits_after_decimal =
-      num_precise_digits - significant_digits_before_decimal + significant_preceding_zeros;
-    auto const digits_needed_after_decimal =
-      min(precision - significant_digits_before_decimal, -scale);
-
-    for (int i = digits_after_decimal; i < digits_needed_after_decimal; ++i) {
-      if (will_overflow(thread_val, positive)) {
-        valid = false;
-        break;
-      }
-      thread_val *= 10;
-    }
-
-    if (valid) { out[row] = thread_val; }
   }
 
   auto const validity_int32 = warp.ballot(static_cast<int>(valid));
@@ -663,6 +775,8 @@ struct string_to_integer_impl {
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
+    CUDF_EXPECTS(string_col.offset() == 0, "string_to_integer_impl requires a zero-offset input.");
+
     if (string_col.size() == 0) {
       return std::make_unique<column>(data_type{type_to_id<T>()},
                                       0,
@@ -726,6 +840,8 @@ struct string_to_decimal_impl {
    * @param string_col strings to convert to decimal
    * @param ansi_mode strict ansi mode checking of incoming data, can throw
    * @param strip remove leading and trailing whitespace.
+   * @param json_quote_counts number of quote characters in each original JSON value; an empty span
+   *                          disables JSON-specific zero handling
    * @param stream stream on which to operate
    * @param mr memory resource to use for allocations
    * @return std::unique_ptr<column> decimal column created from strings
@@ -736,9 +852,12 @@ struct string_to_decimal_impl {
                                      strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
+                                     cudf::device_span<int8_t const> json_quote_counts,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
+    CUDF_EXPECTS(string_col.offset() == 0, "string_to_decimal_impl requires a zero-offset input.");
+
     using Type = device_storage_type_t<T>;
 
     rmm::device_uvector<Type> data(string_col.size(), stream, mr);
@@ -757,7 +876,8 @@ struct string_to_decimal_impl {
       string_col.size(),
       dtype.scale(),
       precision,
-      strip);
+      strip,
+      json_quote_counts);
 
     auto null_count = cudf::null_count(
       reinterpret_cast<bitmask_type*>(null_mask.data()), 0, string_col.size(), stream);
@@ -779,6 +899,7 @@ struct string_to_decimal_impl {
                                      strings_column_view const& string_col,
                                      bool ansi_mode,
                                      bool strip,
+                                     cudf::device_span<int8_t const> json_quote_counts,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
   {
@@ -807,6 +928,13 @@ std::unique_ptr<column> string_to_integer(data_type dtype,
                                           cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
+  if (string_col.offset() != 0) {
+    auto const normalized = std::make_unique<cudf::column>(
+      string_col.parent(), stream, cudf::get_current_device_resource_ref());
+    return string_to_integer(
+      dtype, strings_column_view{normalized->view()}, ansi_mode, strip, stream, mr);
+  }
+
   return type_dispatcher(
     dtype, detail::string_to_integer_impl{}, string_col, ansi_mode, strip, stream, mr);
 }
@@ -832,6 +960,24 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
                                           cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
+  return string_to_decimal(precision, scale, string_col, ansi_mode, strip, {}, stream, mr);
+}
+
+std::unique_ptr<column> string_to_decimal(int32_t precision,
+                                          int32_t scale,
+                                          strings_column_view const& string_col,
+                                          bool ansi_mode,
+                                          bool strip,
+                                          cudf::device_span<int8_t const> json_quote_counts,
+                                          cuda::stream_ref stream,
+                                          cudf::memory_resources mr)
+{
+  SRJ_FUNC_RANGE();
+
+  CUDF_EXPECTS(json_quote_counts.empty() ||
+                 json_quote_counts.size() == static_cast<std::size_t>(string_col.size()),
+               "JSON quote counts must be empty or have one entry per input string.");
+
   data_type dtype = [precision, scale]() {
     if (precision <= cuda::std::numeric_limits<int32_t>::digits10)
       return data_type(type_id::DECIMAL32, scale);
@@ -848,6 +994,19 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
       dtype, 0, rmm::device_buffer{}, cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   }
 
+  if (string_col.offset() != 0) {
+    auto const normalized =
+      std::make_unique<cudf::column>(string_col.parent(), stream, mr.get_temporary_mr());
+    return string_to_decimal(precision,
+                             scale,
+                             strings_column_view{normalized->view()},
+                             ansi_mode,
+                             strip,
+                             json_quote_counts,
+                             stream,
+                             mr);
+  }
+
   return type_dispatcher(dtype,
                          detail::string_to_decimal_impl{},
                          dtype,
@@ -855,8 +1014,9 @@ std::unique_ptr<column> string_to_decimal(int32_t precision,
                          string_col,
                          ansi_mode,
                          strip,
+                         json_quote_counts,
                          stream,
-                         mr);
+                         mr.get_output_mr());
 }
 
 }  // namespace spark_rapids_jni

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,16 +26,12 @@ import ai.rapids.cudf.HostColumnVector;
 import ai.rapids.cudf.JCudfSerialization;
 import ai.rapids.cudf.Schema;
 import ai.rapids.cudf.Table;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.nvidia.spark.rapids.jni.Pair;
 import com.nvidia.spark.rapids.jni.schema.Visitors;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -179,7 +175,6 @@ public class KudoSerializer {
   private static final BufferType[] ALL_BUFFER_TYPES =
       new BufferType[] {BufferType.VALIDITY, BufferType.OFFSET,
           BufferType.DATA};
-  private static final Logger log = LoggerFactory.getLogger(KudoSerializer.class);
 
   static {
     Arrays.fill(PADDING, (byte) 0);
@@ -300,42 +295,6 @@ public class KudoSerializer {
   }
 
   /**
-   * Dump a list of kudo tables to a file.
-   *
-   * @param kudoTables list of kudo tables.
-   * @param outputStreamSupplier supplier for the output stream to dump the kudo tables to. The output stream will be closed after the dump.
-   */
-  private void dumpToStream(KudoTable[] kudoTables, Supplier<OutputStream> outputStreamSupplier, String filePath) throws Exception {
-    // dump the kudoTables to a file
-    try (OutputStream outputStream = outputStreamSupplier.get();
-         DataOutputStream dos = new DataOutputStream(outputStream)) {
-      // write the schema information as a string representation
-      dos.write(schema.toString().getBytes());
-    
-      for (int i = 0; i < kudoTables.length; i++) {
-        // write the buffer
-        ai.rapids.cudf.HostMemoryBuffer buffer = kudoTables[i].getBuffer();
-        if (buffer != null) {
-          DataWriter writer = null;
-          try {
-            writer = writerFrom(dos);
-            KudoTableHeader header = kudoTables[i].getHeader();
-            header.writeTo(writer);
-            writer.copyDataFrom(buffer, 0, buffer.getLength());
-          } finally {
-            if (writer != null) {
-              writer.flush();
-            }
-          }
-        }
-      }
-
-      // log warning the file path
-      log.warn("Dumped kudo tables to file: {}", filePath);
-    }
-  }
-
-  /**
    * Merge a list of kudo tables into a table on host memory.
    * <br/>
    * The caller should ensure that the {@link KudoSerializer} used to generate kudo tables have same schema as current
@@ -348,31 +307,6 @@ public class KudoSerializer {
   public KudoHostMergeResult mergeOnHost(KudoTable[] kudoTables) {
     MergedInfoCalc mergedInfoCalc = MergedInfoCalc.calc(schema, kudoTables);
     return KudoTableMerger.merge(schema, mergedInfoCalc);
-  }
-
- /**
-   * Merge a list of kudo tables into a table on host memory.
-   * <br/>
-   * The caller should ensure that the {@link KudoSerializer} used to generate kudo tables have same schema as current
-   * {@link KudoSerializer}, otherwise behavior is undefined.
-   *
-   * @param kudoTables array of kudo tables. This method doesn't take ownership of the input tables, and caller should
-   *                   take care of closing them after calling this method.
-   * @param options merge options, including dump option and output stream. The output stream will be closed after the merge.
-   * @return the merged table.
-   */
-  public KudoHostMergeResult mergeOnHost(KudoTable[] kudoTables, MergeOptions options) throws Exception {
-    if (options.getDumpOption() == DumpOption.Always) {
-      dumpToStream(kudoTables, options.getOutputStreamSupplier(), options.getFilePath());
-    }
-    try {
-      return mergeOnHost(kudoTables);
-    } catch (Exception e) {
-      if (options.getDumpOption() == DumpOption.OnFailure) {
-        dumpToStream(kudoTables, options.getOutputStreamSupplier(), options.getFilePath());
-      }
-      throw new RuntimeException(e);
-    }
   }
 
   /**

@@ -93,7 +93,8 @@ ConfigureTest(ROW_CONVERSION
     row_conversion.cpp)
 
 ConfigureTest(HASH
-    hash.cpp)
+    hash.cpp
+    hash_pmod.cpp)
 
 ConfigureTest(BLOOM_FILTER
     bloom_filter.cu)

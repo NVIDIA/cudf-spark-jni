@@ -26,6 +26,7 @@
 
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/std/concepts>
 #include <cuda/stream>
 
 namespace spark_rapids_jni {
@@ -75,7 +76,7 @@ struct float_to_string_fn {
  */
 template <bool json_string>
 struct dispatch_float_to_string_fn {
-  template <typename FloatType, CUDF_ENABLE_IF(cuda::std::is_floating_point_v<FloatType>)>
+  template <cuda::std::floating_point FloatType>
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& floats,
                                            cuda::stream_ref stream,
                                            rmm::device_async_resource_ref mr)
@@ -97,7 +98,8 @@ struct dispatch_float_to_string_fn {
   }
 
   // non-float types throw an exception
-  template <typename T, CUDF_ENABLE_IF(not cuda::std::is_floating_point_v<T>)>
+  template <typename T>
+    requires(not cuda::std::floating_point<T>)
   std::unique_ptr<cudf::column> operator()(cudf::column_view const&,
                                            cuda::stream_ref,
                                            rmm::device_async_resource_ref)

@@ -59,6 +59,7 @@ ${MVN} clean package ${MVN_MIRROR}  \
   -DUSE_GDS=${USE_GDS} -Dtest=*,!CuFileTest,!CudaFatalTest,!ColumnViewNonEmptyNullsTest,!NativeDepsLoaderTest,!PackagedJarOriginCheck \
   -DBUILD_TESTS=ON \
   -DBUILD_BENCHMARKS=ON \
+  -Dnative.chunks.require=true \
   -DBUILD_FAULTINJ=${BUILD_FAULTINJ} \
   -DBUILD_PROFILER=${BUILD_PROFILER} \
   -Dcuda.version=$CUDA_VER \

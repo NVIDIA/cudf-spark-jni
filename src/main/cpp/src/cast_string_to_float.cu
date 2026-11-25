@@ -973,6 +973,12 @@ std::unique_ptr<column> string_to_float(data_type dtype,
                "invalid float data type");
   if (string_col.size() == 0) { return cudf::make_empty_column(dtype); }
 
+  if (string_col.offset() != 0) {
+    auto const normalized = std::make_unique<cudf::column>(
+      string_col.parent(), stream, cudf::get_current_device_resource_ref());
+    return string_to_float(dtype, strings_column_view{normalized->view()}, ansi_mode, stream, mr);
+  }
+
   auto out = cudf::make_numeric_column(dtype, string_col.size(), mask_state::ALL_NULL, stream, mr);
 
   using ScalarType = cudf::scalar_type_t<size_type>;

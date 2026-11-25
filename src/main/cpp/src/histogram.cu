@@ -170,7 +170,8 @@ struct percentile_dispatcher {
     CUDF_FAIL("Unsupported type in histogram-to-percentile evaluation.");
   }
 
-  template <typename T, CUDF_ENABLE_IF(is_supported<T>())>
+  template <typename T>
+    requires(is_supported<T>())
   output_type operator()(cudf::size_type const* const offsets,
                          cudf::size_type const* const ordered_indices,
                          cudf::column_device_view const& data,
@@ -513,7 +514,8 @@ std::unique_ptr<cudf::column> percentile_from_histogram(cudf::column_view const&
                                lcv_histograms.offsets_end(),
                                histogram_labels.begin(),
                                histogram_labels.end(),
-                               stream);
+                               stream,
+                               default_mr);
   auto const labels_cv = cudf::column_view{cudf::data_type{cudf::type_to_id<cudf::size_type>()},
                                            static_cast<cudf::size_type>(histogram_labels.size()),
                                            histogram_labels.data(),

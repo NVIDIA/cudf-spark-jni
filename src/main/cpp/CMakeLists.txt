@@ -12,7 +12,7 @@
 # the License.
 # =============================================================================
 
-cmake_minimum_required(VERSION 4.0 FATAL_ERROR)
+cmake_minimum_required(VERSION 4.3 FATAL_ERROR)
 
 # CUDF_DIR is set from the environment variable, allowing to specify
 # a custom cudf repository other than `thirdparty/cudf`.
@@ -44,7 +44,7 @@ rapids_cuda_init_architectures(SPARK_RAPIDS_JNI)
 
 project(
   SPARK_RAPIDS_JNI
-  VERSION 26.12.00
+  VERSION 27.02.00
   LANGUAGES CXX CUDA
 )
 
@@ -58,11 +58,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 option(CUDF_USE_PER_THREAD_DEFAULT_STREAM "Build with per-thread default stream" ON)
 option(USE_GDS "Build with GPUDirect Storage (GDS)/cuFile support" OFF)
+option(DEBUG_FROM_JSON "Enable debug output for from_json raw map conversion" OFF)
 option(BUILD_TESTS "Configure CMake to build tests" OFF)
 option(BUILD_BENCHMARKS "Configure CMake to build (google) benchmarks" OFF)
 option(BUILD_FAULTINJ "Configure CMake to build fault injection" ON)
 option(BUILD_PROFILER "Configure CMake to build profiler" ON)
 option(HIDE_PRIVATE_CUDA_SYMBOLS "Hide private symbols from static CUDA compiler libraries" ON)
+
+mark_as_advanced(DEBUG_FROM_JSON)
 
 message(
   VERBOSE "SPARK_RAPIDS_JNI: Build with per-thread default stream:
@@ -209,7 +212,9 @@ add_library(
   src/MapJni.cpp
   src/MapUtilsJni.cpp
   src/MapZipWithUtilsJNI.cpp
+  src/MemoryUtilsJni.cpp
   src/JoinPrimitivesJni.cpp
+  src/NativeFileSourceJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
   src/PageablePoolJni.cpp
@@ -264,6 +269,7 @@ add_library(
   src/map.cu
   src/map_utils.cu
   src/map_zip_with_utils.cu
+  src/memory_utils.cu
   src/multiply.cu
   src/number_converter.cu
   src/parse_timestamp_with_format.cu
@@ -323,6 +329,10 @@ target_compile_definitions(
   spark_rapids_jni PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${CUDF_CXX_DEFINITIONS}>"
                           "$<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CUDA>:${CUDF_CUDA_DEFINITIONS}>>"
 )
+
+if(DEBUG_FROM_JSON)
+  target_compile_definitions(spark_rapids_jni PRIVATE DEBUG_FROM_JSON)
+endif()
 
 # Per-thread default stream
 if(CUDF_USE_PER_THREAD_DEFAULT_STREAM)

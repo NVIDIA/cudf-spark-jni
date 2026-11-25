@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
+#include "integer_utils.cuh"
 #include "murmur_hash.cuh"
+#include "nvtx_ranges.hpp"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/row_operator/hashing.cuh>
@@ -25,6 +27,7 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/functional>
+#include <cuda/std/functional>
 #include <cuda/std/numeric>
 #include <cuda/std/type_traits>
 #include <cuda/stream>
@@ -110,7 +113,8 @@ class murmur_device_row_hasher {
     {
     }
 
-    template <typename T, CUDF_ENABLE_IF(not cudf::is_nested<T>())>
+    template <typename T>
+      requires(not cudf::concepts::nested<T>)
     __device__ murmur_hash_value_type operator()(cudf::column_device_view const& col,
                                                  cudf::size_type row_index) const noexcept
     {
@@ -118,7 +122,7 @@ class murmur_device_row_hasher {
       return hasher.template operator()<T>(col, row_index);
     }
 
-    template <typename T, CUDF_ENABLE_IF(cudf::is_nested<T>())>
+    template <cudf::concepts::nested T>
     __device__ murmur_hash_value_type operator()(cudf::column_device_view const& col,
                                                  cudf::size_type row_index) const noexcept
     {
@@ -188,12 +192,12 @@ void check_hash_compatibility(cudf::table_view const& input)
   }
 }
 
-}  // namespace
-
-std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
-                                              uint32_t seed,
-                                              cuda::stream_ref stream,
-                                              rmm::device_async_resource_ref mr)
+template <typename OutputTransform>
+std::unique_ptr<cudf::column> murmur_hash3_32_impl(cudf::table_view const& input,
+                                                   uint32_t seed,
+                                                   OutputTransform transform,
+                                                   cuda::stream_ref stream,
+                                                   rmm::device_async_resource_ref mr)
 {
   auto output =
     cudf::make_numeric_column(cudf::data_type(cudf::type_to_id<murmur_hash_value_type>()),
@@ -213,14 +217,44 @@ std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
     cudf::detail::row::hash::row_hasher(input, stream, cudf::get_current_device_resource_ref());
   auto output_view = output->mutable_view();
 
-  // Compute the hash value for each row
+  auto const hasher =
+    row_hasher.device_hasher<MurmurHash3_32, murmur_device_row_hasher>(nullable, seed);
   thrust::tabulate(
     rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
     output_view.begin<murmur_hash_value_type>(),
     output_view.end<murmur_hash_value_type>(),
-    row_hasher.device_hasher<MurmurHash3_32, murmur_device_row_hasher>(nullable, seed));
+    [hasher, transform] __device__(cudf::size_type row) { return transform(hasher(row)); });
 
   return output;
+}
+
+}  // namespace
+
+std::unique_ptr<cudf::column> murmur_hash3_32(cudf::table_view const& input,
+                                              uint32_t seed,
+                                              cuda::stream_ref stream,
+                                              rmm::device_async_resource_ref mr)
+{
+  return murmur_hash3_32_impl(input, seed, cuda::std::identity{}, stream, mr);
+}
+
+std::unique_ptr<cudf::column> murmur_hash3_32_pmod(cudf::table_view const& input,
+                                                   cudf::size_type num_partitions,
+                                                   uint32_t seed,
+                                                   cuda::stream_ref stream,
+                                                   rmm::device_async_resource_ref mr)
+{
+  SRJ_FUNC_RANGE();
+  CUDF_EXPECTS(num_partitions > 0, "Number of partitions must be positive");
+  CUDF_EXPECTS(input.num_columns() > 0, "Murmur3 hashing requires at least 1 column of input");
+  return murmur_hash3_32_impl(
+    input,
+    seed,
+    [num_partitions] __device__(int32_t hash) {
+      return integer_utils::floor_mod(hash, num_partitions);
+    },
+    stream,
+    mr);
 }
 
 }  // namespace spark_rapids_jni

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ FROM --platform=$TARGETPLATFORM nvidia/cuda:$CUDA_VERSION-devel-rockylinux$OS_RE
 # Dependency versions
 # Act as default GCC toolset in the image
 ARG TOOLSET_VERSION=14
-ARG CMAKE_VERSION=4.0.3
+ARG CMAKE_VERSION=4.3.6
 ARG CCACHE_VERSION=4.11.2
 
 # Make it available at runtime and to the inherited images (e.g. Dockerfile.devel)
