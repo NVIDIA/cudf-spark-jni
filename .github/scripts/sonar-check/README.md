@@ -38,9 +38,9 @@ title or an unaffected diff also skips Sonar.
   `SONAR_PROJECT_KEY`. The project's quality gate must reject new High/Blocker issues.
 - `SONAR_BUILD_JAVA_VERSION` optionally overrides hosted Java 17; scanner tooling
   comes from the internal runner image.
-- Compilation restores the copied PR's Maven cache first, then the shared main
-  baseline, and saves only to that PR branch. Misses download dependencies normally;
-  no Sonar warmup or schedule is needed. Other Sonar jobs have cache access disabled.
+- Hosted compilation saves `~/.m2/repository` to a dedicated cache on the copied
+  PR branch. Later runs reuse it when the pom and compile script match. An exact
+  hit skips the upload.
 
 Approval covers the copied workflow and helpers. Maven runs on a disposable hosted
 runner without Sonar credentials. Fresh hosted preflight rejects source symlinks

@@ -69,10 +69,6 @@ jobs:
     timeout-minutes: 30
     # Only approved hosted compilation may restore/save dependency caches.
     cache-mode: write
-    env:
-      # Match GPU CI's existing cache archive path as well as its key. Changing
-      # this to the hosted runner.temp path would change the hidden cache version.
-      MAVEN_REPOSITORY: /home/runner/_work/_temp/jni-home/.m2/repository
     permissions:
       contents: read
     outputs:
@@ -98,7 +94,7 @@ jobs:
           distribution: temurin
           java-version: ${{ vars.SONAR_BUILD_JAVA_VERSION || '17' }}
           overwrite-settings: false
-      - name: Restore shared Maven dependencies
+      - name: Restore Sonar Maven dependencies
         id: maven-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
@@ -106,12 +102,9 @@ jobs:
         env:
           SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
         with:
-          path: ${{ env.MAVEN_REPOSITORY }}
-          # Same format as GPU CI: prefer this copied PR, then the main baseline.
-          key: jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/pom.xml') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            jni-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/pom.xml') }}-
-            jni-maven-${{ runner.os }}-${{ runner.arch }}-
+          path: ~/.m2/repository
+          key: jni-sonar-maven-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/pom.xml', 'workflow/.github/scripts/sonar-check/build.sh') }}
+          restore-keys: jni-sonar-maven-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile without Sonar credentials
         id: compile
         env:
@@ -135,7 +128,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         with:
-          path: ${{ env.MAVEN_REPOSITORY }}
+          path: ~/.m2/repository
           key: ${{ steps.maven-cache.outputs.cache-primary-key }}
 
   security:
