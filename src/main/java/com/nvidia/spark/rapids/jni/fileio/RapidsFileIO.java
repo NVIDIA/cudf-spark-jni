@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,6 +35,21 @@ public interface RapidsFileIO extends Serializable {
   RapidsInputFile newInputFile(String path) throws IOException;
 
   /**
+   * Creates a new {@link RapidsInputFile} with a known file length.
+   * Implementations must override this method to support a known file length.
+   * The default implementation throws {@link UnsupportedOperationException} to avoid
+   * silently ignoring the supplied length.
+   * @param path The absolute path to the file.
+   * @param length The known file length in bytes.
+   * @return a new {@link RapidsInputFile} for the given path
+   * @throws IOException If the underlying file system throws IOException
+   * @throws UnsupportedOperationException If known file lengths are not supported
+   */
+  default RapidsInputFile newInputFile(String path, long length) throws IOException {
+    throw new UnsupportedOperationException("Input files with a known length are not supported");
+  }
+
+  /**
    * Creates a new {@link RapidsOutputFile} for the given path.
    * @param path The absolute path to the file.
    * @return a new {@link RapidsOutputFile} for the given path
@@ -54,6 +69,19 @@ public interface RapidsFileIO extends Serializable {
    */
   default RapidsInputFile newInputFile(Path path) throws IOException {
     return newInputFile(path.toString());
+  }
+
+  /**
+   * Creates a new {@link RapidsInputFile} with a known file length.
+   * Delegates to {@link #newInputFile(String, long)}.
+   * @param path The absolute path to the file.
+   * @param length The known file length in bytes.
+   * @return a new {@link RapidsInputFile} for the given path
+   * @throws IOException If the underlying file system throws IOException
+   * @throws UnsupportedOperationException If known file lengths are not supported
+   */
+  default RapidsInputFile newInputFile(Path path, long length) throws IOException {
+    return newInputFile(path.toString(), length);
   }
 
   /**
