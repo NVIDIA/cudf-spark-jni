@@ -36,15 +36,17 @@ public interface RapidsFileIO extends Serializable {
 
   /**
    * Creates a new {@link RapidsInputFile} with a known file length.
-   * Implementations may use the length to avoid a metadata lookup. The default
-   * implementation ignores the length and calls {@link #newInputFile(String)}.
+   * Implementations must override this method to support a known file length.
+   * The default implementation throws {@link UnsupportedOperationException} to avoid
+   * silently ignoring the supplied length.
    * @param path The absolute path to the file.
    * @param length The known file length in bytes.
    * @return a new {@link RapidsInputFile} for the given path
    * @throws IOException If the underlying file system throws IOException
+   * @throws UnsupportedOperationException If known file lengths are not supported
    */
   default RapidsInputFile newInputFile(String path, long length) throws IOException {
-    return newInputFile(path);
+    throw new UnsupportedOperationException("Input files with a known length are not supported");
   }
 
   /**
@@ -76,6 +78,7 @@ public interface RapidsFileIO extends Serializable {
    * @param length The known file length in bytes.
    * @return a new {@link RapidsInputFile} for the given path
    * @throws IOException If the underlying file system throws IOException
+   * @throws UnsupportedOperationException If known file lengths are not supported
    */
   default RapidsInputFile newInputFile(Path path, long length) throws IOException {
     return newInputFile(path.toString(), length);
