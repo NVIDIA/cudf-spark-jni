@@ -22,16 +22,17 @@
 #include <cudf_test/cudf_gtest.hpp>
 
 #include <cudf/column/column.hpp>
-#include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/memory_resource.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -535,42 +536,61 @@ using spark_rapids_jni::path_instruction_type;
 
 namespace {
 
-using path_tuple  = std::tuple<path_instruction_type, std::string, int32_t>;
-using path_list   = std::vector<path_tuple>;
-using multi_paths = std::vector<path_list>;
+using path_list     = std::vector<path_spec>;
+using multi_paths   = std::vector<path_list>;
+using multi_outputs = std::vector<std::unique_ptr<cudf::column>>;
 
-std::vector<std::unique_ptr<cudf::column>> run_fused(cudf::strings_column_view const& input,
-                                                     multi_paths const& paths)
+path_list named(std::initializer_list<std::string> keys)
 {
-  return spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1);
+  path_list path;
+  for (auto const& key : keys) {
+    path.push_back(named_path(key));
+  }
+  return path;
 }
 
-cudf::test::strings_column_wrapper col_from(std::vector<std::string> const& rows)
+auto col_from(std::vector<std::string> const& rows)
 {
   return cudf::test::strings_column_wrapper(rows.begin(), rows.end());
 }
 
-/// Alternate explicit even/odd rows; use `same_rows` when they are identical.
-std::vector<std::string> alt_rows(int n, std::string even, std::string odd)
-{
-  std::vector<std::string> rows;
-  rows.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    rows.push_back(i % 2 == 0 ? even : odd);
-  }
-  return rows;
-}
+auto same_rows(int n, std::string const& row) { return std::vector<std::string>(n, row); }
 
-std::vector<std::string> same_rows(int n, std::string row) { return alt_rows(n, row, row); }
+multi_outputs run_fused(cudf::strings_column_view const& input, multi_paths const& paths)
+{
+  return spark_rapids_jni::get_json_object_multiple_paths(input, paths, -1, -1);
+}
 
 void expect_rows_eq(cudf::column const& col, std::string const& expected, bool all_valid)
 {
   if (all_valid) { ASSERT_EQ(col.null_count(), 0); }
-  auto const vals = std::get<0>(cudf::test::to_host<std::string>(col.view()));
-  ASSERT_EQ(vals.size(), 64u);
-  for (int r = 0; r < 64; ++r) {
-    EXPECT_EQ(vals[r], expected) << "row " << r;
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(64, expected)), col);
+}
+
+// The hook observes first-pass routes in caller order, without changing admission.
+multi_outputs routed(cudf::strings_column_view const& input,
+                     multi_paths const& paths,
+                     std::vector<char> const& expected,
+                     bool last = false)
+{
+  std::vector<char> routes;
+  auto const stream = cudf::get_default_stream();
+  auto const mr     = cudf::get_current_device_resource_ref();
+  auto out =
+    spark_rapids_jni::detail::get_json_object(input, paths, -1, -1, last, stream, mr, &routes);
+  EXPECT_EQ(routes, expected);
+  EXPECT_EQ(out.size(), paths.size());
+  return out;
+}
+
+// Each raw double quote in a single-quoted value adds one byte when serialized.
+std::string quote_bomb(int n, bool escaped = false)
+{
+  std::string out = escaped ? R"({"a":")" : R"({"a":')";
+  for (int i = 0; i < n; ++i) {
+    out += escaped ? R"(\")" : "\"";
   }
+  return out + (escaped ? "\"}" : "'}");
 }
 
 }  // namespace
@@ -600,5 +620,206 @@ TEST_F(GetJsonObjectTest, GeneralGroupMoreThan32Paths)
     SCOPED_TRACE("index path column " + std::to_string(col));
     auto const expected = "v" + std::to_string(col);
     ASSERT_NO_FATAL_FAILURE(expect_rows_eq(*out[col], expected, true));
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteValueKindParity)
+{
+  // Spark's unquoted-key parsing turns 1231 into "23".
+  auto const row =
+    std::string{
+      R"({"r":{"sameA":"first","sameA":"later","sameB":"q\"","SameA":"case","\u0065sc":"\uD83D\uDE00",)"
+      R"("\uD83D\uDE00":"surrogate","n":null,"n":{"v":"late"},"v":{"b":[1,true,null]},)"
+      R"("z": {"b" : -0,"s":"http:\/\/x",1231:2},"":"","f":0.0003,"zero":-0,"i":-42,"flag":true},"pad":")"} +
+    std::string(1024, 'p') + "\"}";
+  auto const col   = col_from(same_rows(32, row));
+  auto const input = cudf::strings_column_view{col};
+  using entry      = std::pair<char const*, char const*>;
+  std::array const cases{entry{"z", R"({"b":0,"s":"http://x","23":2})"},
+                         entry{"sameA", "first"},
+                         entry{"SameA", "case"},
+                         entry{"sameB", "q\""},
+                         entry{"sameC", nullptr},
+                         entry{"esc", "\xF0\x9F\x98\x80"},
+                         entry{"\xF0\x9F\x98\x80", "surrogate"},
+                         entry{"n", nullptr},
+                         entry{"v", R"({"b":[1,true,null]})"},
+                         entry{"", ""},
+                         entry{"f", "3.0E-4"},
+                         entry{"zero", "0"},
+                         entry{"i", "-42"},
+                         entry{"flag", "true"}};
+  multi_paths paths{named({"r"})};
+  for (auto const& c : cases) {
+    paths.push_back(named({"r", c.first}));
+  }
+  paths.resize(16, named({"r", "sameA"}));
+  auto const out    = routed(input, paths, std::vector<char>(16, 1));
+  auto const parent = spark_rapids_jni::get_json_object(input, paths.front());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*parent, *out.at(0));
+  auto const nulls = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
+  for (std::size_t i = 1; i < out.size(); ++i) {
+    auto const* want = i <= cases.size() ? cases[i - 1].second : "first";
+    if (want == nullptr) {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *out[i]);
+    } else {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(32, want)), *out[i]);
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteRootFanoutRoutingParity)
+{
+  auto const col = col_from(same_rows(32, R"({"r0":{"v":"V"}})"));
+  struct fanout_case {
+    int slots;
+    int distinct;
+    int roots;
+    char route;
+  };
+  for (auto const [slots, distinct, roots, route] :
+       std::initializer_list<fanout_case>{{15, 4, 1, 0},
+                                          {16, 4, 1, 1},
+                                          {26, 25, 8, 0},
+                                          {26, 26, 8, 1},
+                                          {63, 62, 20, 0},
+                                          {63, 63, 20, 1}}) {
+    SCOPED_TRACE(testing::Message() << slots << '/' << distinct << '/' << roots);
+    multi_paths paths;
+    for (int i = 0; i < distinct; ++i) {
+      paths.push_back(named({"r" + std::to_string(i % roots), i == 0 ? "v" : std::to_string(i)}));
+    }
+    paths.resize(slots, named({"r0", "v"}));
+    auto const out = routed(cudf::strings_column_view{col}, paths, std::vector<char>(slots, route));
+    auto const hit = col_from(same_rows(32, "V"));
+    auto const miss = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
+    for (std::size_t i = 0; i < out.size(); ++i) {
+      CUDF_TEST_EXPECT_COLUMNS_EQUAL(i == 0 || i >= static_cast<std::size_t>(distinct) ? hit : miss,
+                                     *out[i]);
+    }
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteMixedDepthPartitionParity)
+{
+  auto const col = col_from(same_rows(32, R"({"r":{"v":{"q":"D"}},"a":[1,2]})"));
+  multi_paths paths{named({"r", "v", "q"}),
+                    {named_path("a"), wildcard_path()},
+                    {named_path("a"), {path_instruction_type::INDEX, "", 1}},
+                    named({"r", "v"})};
+  for (int i = 1; i < 16; ++i) {
+    paths.push_back(named({"r", "missing" + std::to_string(i)}));
+  }
+  std::vector<char> routes(19, 1);
+  routes[0] = routes[1] = routes[2] = 0;
+  auto const out                    = routed(cudf::strings_column_view{col}, paths, routes);
+  std::array const values{"D", "[1,2]", "2", R"({"q":"D"})"};
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(32, values[i])), *out.at(i));
+  }
+  auto const nulls = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
+  for (std::size_t i = values.size(); i < out.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *out[i]);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRoutePathCapParity)
+{
+  // The capped set must retain four distinct paths to clear the one-root fanout.
+  auto const row = R"({"r":{"a":"A","b":"B","c":"C","d":"D","y":"Y","z":"Z"}})";
+  auto const col = col_from(same_rows(32, row));
+  multi_paths paths{named({"r", "z"}),
+                    named({"r", "y"}),
+                    named({"r", "a"}),
+                    named({"r", "b"}),
+                    named({"r", "c"}),
+                    named({"r", "d"})};
+  paths.resize(770, named({"r", "a"}));
+  auto routes = std::vector<char>(770, 1);
+  routes[0] = routes[1] = 0;
+  auto const out        = routed(cudf::strings_column_view{col}, paths, routes);
+  std::array const values{"Z", "Y", "A", "B", "C", "D"};
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(col_from(same_rows(32, values[i])), *out.at(i));
+  }
+  auto const rest = col_from(same_rows(32, "A"));
+  for (std::size_t i = values.size(); i < out.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(rest, *out[i]);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRouteDeadPathDepthErrorDoesNotThrow)
+{
+  // A scalar first match kills all descendants; the live control still throws.
+  auto const nested   = R"({"v":)" + std::string(65, '[') + '0' + std::string(65, ']') + '}';
+  auto const dead_col = col_from(same_rows(32, R"({"a":1,"a":)" + nested + '}'));
+  auto const live_col = col_from(same_rows(32, R"({"a":)" + nested + '}'));
+  multi_paths paths{named({"a", "v"})};
+  for (int i = 1; i < 16; ++i) {
+    paths.push_back(named({"a", "missing" + std::to_string(i)}));
+  }
+  auto const routes = std::vector<char>(16, 1);
+  auto const out    = routed(cudf::strings_column_view{dead_col}, paths, routes);
+  auto const nulls  = expected_column(same_rows(32, ""), std::vector<bool>(32, false));
+  for (auto const& col : out) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *col);
+  }
+  EXPECT_THROW(routed(cudf::strings_column_view{live_col}, paths, routes), cudf::logic_error);
+}
+
+TEST_F(GetJsonObjectTest, LastNonNullWideNamedBatches)
+{
+  auto const row =
+    R"({"k":"first","k":"last","k":null,"e":"old","e":"","pad":")" + std::string(512, 'x') + "\"}";
+  auto const col   = col_from(same_rows(32, row));
+  auto const input = cudf::strings_column_view{col};
+  multi_paths paths(40, named({"k"}));
+  paths[0]         = named({"e"});
+  auto const out   = routed(input, paths, std::vector<char>(40, 0), true);
+  auto const last  = col_from(same_rows(32, "last"));
+  auto const empty = col_from(same_rows(32, ""));
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(i == 0 ? empty : last, *out[i]);
+  }
+}
+
+TEST_F(GetJsonObjectTest, MergedRetryMultiplePathsAfterMatch)
+{
+  constexpr int n = 33;
+  std::vector<std::string> rows(n + 2), k(n), u(n);
+  auto const pad = R"(,"pad":")" + std::string(512, 'p') + "\"}";
+  for (int i = 0; i < n; ++i) {
+    k[i]        = std::string(i % 2 == 0 ? 1 : 257, 's') + std::to_string(i);
+    u[i]        = i % 2 == 0 ? "U" : "odd";
+    rows[i + 1] = R"({"k":")" + k[i] + R"(","u":{"v":")" + u[i] + R"("},"e":"")" + pad;
+  }
+  rows.front() = R"({'outside':1})";
+  rows.back()  = R"({"outside":)";
+  // Different rows and write extents force two independent retry offset columns.
+  rows[1] = R"({"k":)" + quote_bomb(60) + R"(,"u":{"v":"U"},"e":""})";
+  rows[2] = R"({"k":"other","u":{"v":)" + quote_bomb(40) + R"(},"e":""})";
+  rows[n] = rows[1].substr(0, rows[1].size() - 1) + R"(,"z":x})";
+  rows[4].clear();
+  k[0] = quote_bomb(60, true);
+  k[1] = "other";
+  u[1] = quote_bomb(40, true);
+  ASSERT_GT(k[0].size(), rows[1].size());
+  ASSERT_GT(u[1].size(), rows[2].size());
+  std::vector<bool> mask(n + 2, true), valid(n, true);
+  mask[5] = valid[4] = false;  // Nonempty masked row.
+  valid[3] = valid.back() = false;
+  auto const col          = make_nonempty_nulls(rows, mask);
+  auto const input        = cudf::strings_column_view{cudf::slice(*col, {1, n + 1}).front()};
+  multi_paths paths{named({"u", "v"}), named({"k"}), named({"e"})};
+  for (int i = 3; i < 18; ++i) {
+    paths.push_back(named({"k", "missing" + std::to_string(i)}));
+  }
+  auto const out = routed(input, paths, std::vector<char>(18, 1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column(u, valid), *out.at(0));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column(k, valid), *out.at(1));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column(same_rows(n, ""), valid), *out.at(2));
+  auto const nulls = expected_column(same_rows(n, ""), std::vector<bool>(n, false));
+  for (std::size_t i = 3; i < out.size(); ++i) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(nulls, *out[i]);
   }
 }
