@@ -1165,7 +1165,6 @@ void maybe_check_required_fields(required_field_input_view input,
 {
   if (input.values.size == 0 || field_indices.empty()) { return; }
 
-  // Stream-ordered pinned deallocation keeps this staging safe without a local sync.
   bool has_required = false;
   auto h_is_required =
     cudf::detail::make_pinned_vector_async<uint8_t>(field_indices.size(), stream);
@@ -1176,7 +1175,9 @@ void maybe_check_required_fields(required_field_input_view input,
   if (!has_required) { return; }
 
   auto const scratch_mr = cudf::get_current_device_resource_ref();
-  auto d_is_required = cudf::detail::make_device_uvector_async(h_is_required, stream, scratch_mr);
+  // The pinned pool may be shared with Java allocations that reuse freed blocks without
+  // synchronizing, so finish the upload before the staging is released on return.
+  auto d_is_required = cudf::detail::make_device_uvector(h_is_required, stream, scratch_mr);
 
   auto const blocks =
     static_cast<int>((input.values.size + THREADS_PER_BLOCK - 1u) / THREADS_PER_BLOCK);
