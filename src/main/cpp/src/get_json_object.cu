@@ -28,26 +28,31 @@
 #include <cudf/strings/detail/strings_children.cuh>
 #include <cudf/strings/string_view.cuh>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/strings/utilities.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
-#include <rmm/exec_policy.hpp>
 
+#include <cub/block/block_reduce.cuh>
+#include <cub/device/device_memcpy.cuh>
+#include <cub/device/device_scan.cuh>
 #include <cuda/atomic>
 #include <cuda/buffer>
 #include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/hierarchy>
+#include <cuda/iterator>
 #include <cuda/std/algorithm>
+#include <cuda/std/execution>
+#include <cuda/std/functional>
 #include <cuda/std/tuple>
 #include <cuda/std/type_traits>
 #include <cuda/std/utility>
 #include <cuda/stream>
 #include <cuda_runtime_api.h>
-#include <thrust/uninitialized_fill.h>
 
 #include <algorithm>
 #include <array>
@@ -57,6 +62,7 @@
 #include <cstring>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -835,63 +841,398 @@ path_staging stage_commands(path_batch const& paths,
   CUDF_CUDA_TRY(cudaMemcpyAsync(d, h, bytes, cudaMemcpyDefault, stream.get()));
   return out;
 }
+constexpr int k_merged_max_paths      = 768;
+constexpr int k_merged_min_paths      = 4;
+constexpr int k_merged_max_depth      = 2;
+constexpr int k_merged_deep_max_depth = 5;
+constexpr int k_deep_merged_min_paths = 8;
+// A smaller group cannot amortize the merged launch overhead.
+constexpr int k_min_rows_per_family     = 32;
+constexpr int k_request_deny            = k_merged_max_paths + 1;
+constexpr int64_t k_request_credit      = 128;
+constexpr int64_t k_request_member_cost = 395;
+constexpr int64_t k_request_width_scale = 57;
+constexpr int64_t k_request_margin      = 88;
+constexpr int k_request_sample_bytes    = 12'288;
+constexpr int k_exact_scan_threads      = 64;
 
-// Scratch uses only the selected offsets, plus slack for speculative writes in the last row.
-__global__ void scratch_size_kernel(cudf::detail::input_offsetalator offsets,
-                                    cudf::size_type rows,
-                                    int64_t* stats)
+// Byte sizing is exact in every state; a zero threshold requests the exact pass.
+struct request_scan {
+  int64_t max_row_bytes;
+  int64_t selected_chars;
+  int64_t base_offset;
+  int32_t min_eligible;
+};
+static_assert(sizeof(request_scan) == 32);
+
+__host__ __device__ int64_t request_width_cost(int64_t avg)
 {
-  constexpr int threads = 256;
-  __shared__ int64_t maxima[threads];
-  int64_t max_row = 0;
-  for (int64_t i = threadIdx.x; i < rows; i += threads) {
-    auto const row   = static_cast<cudf::size_type>(i);
-    auto const bytes = offsets[row + 1] - offsets[row];
-    if (bytes > max_row) { max_row = bytes; }
+  return k_request_member_cost * avg / 5'800;
+}
+
+// Price count and credit from the same row, using the selected-view average.
+__device__ int64_t request_score(int64_t m, int64_t avg, int64_t u)
+{
+  return avg + k_request_member_cost * m +
+         cuda::std::min(request_width_cost(avg) * m,
+                        k_request_member_cost * cuda::std::min(avg, u) / k_request_width_scale);
+}
+
+// Two ceilings preserve equality at the 88% margin. INT64_MAX denies every batch.
+__device__ int32_t request_threshold(int64_t score, int64_t avg)
+{
+  if (score == INT64_MAX) { return k_request_deny; }
+  auto const scaled = (100 * score + k_request_margin - 1) / k_request_margin;
+  auto const q      = scaled / avg + (scaled % avg != 0);
+  return static_cast<int32_t>(
+    cuda::std::min<int64_t>(k_request_deny, cuda::std::max<int64_t>(k_merged_min_paths, q)));
+}
+
+struct request_limit {
+  int64_t avg;
+  int64_t min_members;
+  int64_t min_credit_units;
+
+  __device__ bool denies(int64_t m, int64_t u) const
+  {
+    return m >= min_members &&
+           k_request_width_scale * m + cuda::std::min(avg, u) >= min_credit_units;
   }
-  maxima[threadIdx.x] = max_row;
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    for (int i = 1; i < threads; ++i) {
-      max_row = cuda::std::max(max_row, maxima[i]);
+};
+
+// Both sides of the minimum must exceed the budget. Invert each once; equality admits.
+__host__ __device__ request_limit make_request_limit(int64_t avg, int64_t eligible)
+{
+  auto const allowance   = k_request_margin * eligible * avg / 100 - avg;
+  auto const min_members = 1 + allowance / (k_request_member_cost + request_width_cost(avg));
+  // Invert floor(395 * (57 * m + min(avg, u)) / 57) without multiplying the full allowance.
+  auto const tail             = k_request_width_scale * (allowance % k_request_member_cost + 1);
+  auto const min_credit_units = k_request_width_scale * (allowance / k_request_member_cost) +
+                                (tail + k_request_member_cost - 1) / k_request_member_cost;
+  return {avg, min_members, min_credit_units};
+}
+
+struct request_prefix {
+  int pos;
+  int count;
+  int credit;
+};
+
+// All lanes scan plain pairs; lane 0 gets exact prefix evidence unless denial already follows.
+__device__ request_prefix flat_request_prefix(char const* row, int64_t len, request_limit limit)
+{
+  constexpr int width     = static_cast<int>(warp_size);
+  constexpr unsigned mask = 0xffffffffu;
+  if (len < width || row[0] != '{') { return {}; }
+  auto const lane         = static_cast<int>(threadIdx.x % width);
+  auto const end          = static_cast<int>(cuda::std::min<int64_t>(len, k_request_sample_bytes));
+  auto const lanes_before = (1u << lane) - 1;
+  request_prefix prefix{};
+  int quotes = 0, last_quote = -1, credit = 0;
+  for (int base = 0; base < end; base += width) {
+    // Leave long strings to the word-at-a-time scalar walk.
+    if ((quotes & 1) && base - last_quote >= k_request_credit) { break; }
+    auto const pos   = base + lane;
+    auto const ch    = pos < end ? row[pos] : '\0';
+    auto const prev  = pos > 0 && pos < end ? row[pos - 1] : '\0';
+    auto const hits  = __ballot_sync(mask, ch == '"');
+    auto const prior = hits & lanes_before;
+    auto const role  = (quotes + __popc(prior)) & 3;
+    // Quotes cycle through name open/close, then value open/close.
+    auto const separator  = role == 2 ? ':' : ',';
+    auto const quote_from = pos == 1 ? '{' : separator;
+    bool const valid      = pos == 0 || (role & 1    ? ch != '\\'
+                                         : ch == '"' ? prev == quote_from
+                                                     : prev == '"' && ch == separator);
+    auto const stop       = __ballot_sync(mask, pos < end && !valid);
+    bool const settled    = ch == '"' && role == 3 && (stop == 0 || lane < __ffs(stop) - 1);
+    auto const closes     = __ballot_sync(mask, settled);
+    if (settled) {
+      auto const open = prior == 0 ? last_quote : base + width - 1 - __clz(prior);
+      credit += cuda::std::max(0, static_cast<int>(k_request_credit) - (pos - open - 1));
     }
-    stats[0] = max_row;
-    stats[1] = offsets[rows] - offsets[0];
-    stats[2] = offsets[0];
+    if (closes != 0) {
+      prefix.pos = base + width - __clz(closes);
+      prefix.count += __popc(closes);
+      // Payload bytes fit within the prefix; this bound avoids reducing credit each chunk.
+      auto const lower =
+        cuda::std::max(0, static_cast<int>(k_request_credit) * prefix.count - prefix.pos);
+      if (limit.denies(prefix.count, lower)) { return {prefix.pos, prefix.count, lower}; }
+    }
+    if (stop != 0) { break; }
+    quotes += __popc(hits);
+    if (hits != 0) { last_quote = base + width - 1 - __clz(hits); }
+  }
+  if (prefix.count != 0) {
+#pragma unroll
+    for (int delta = 16; delta > 0; delta /= 2) {
+      credit += __shfl_down_sync(mask, credit, delta);
+    }
+  }
+  prefix.credit = credit;
+  return prefix;
+}
+
+// Starts on the opening quote; returns false at the byte limit, without decoding escapes.
+template <bool sampled>
+__device__ bool scan_raw_quote(char const* row, int64_t& pos, int64_t end, bool& plain)
+{
+  auto const quote = row[pos++];
+  auto const body  = pos;
+  while (pos < end) {
+    auto const c = row[pos];
+    if (c == quote) {
+      ++pos;
+      return true;
+    }
+    if (c == '\\') {
+      plain = false;
+      pos += cuda::std::min<int64_t>(2, end - pos);
+    } else if (end - pos >= 8 &&
+               (sampled ? pos - body >= 23 && (reinterpret_cast<uintptr_t>(row + pos) & 7) == 0
+                        : pos >= 7)) {
+      // Ramp on samples to amortize setup; exact can use any readable masked head.
+      auto const n = static_cast<cudf::size_type>(cuda::std::min<int64_t>(end - pos, INT32_MAX));
+      char_range_reader run{char_range{row + pos, n}};
+      json_parser::swar_safe_run<false>(run, nullptr, quote, false);
+      pos += n - run.size();
+    } else {
+      ++pos;
+    }
+  }
+  return false;
+}
+
+// Below the counted frames, balance the opening delimiter without counting nested names.
+__device__ bool skip_request_scope(char const* row, int64_t& pos, int64_t end)
+{
+  auto const open  = row[pos++];
+  auto const close = open == '{' ? '}' : ']';
+  int64_t depth    = 1;
+  while (pos < end) {
+    auto const c = row[pos];
+    if (c == '"' || c == '\'') {
+      bool plain = false;
+      if (!scan_raw_quote<false>(row, pos, end, plain)) { return false; }
+    } else {
+      ++pos;
+      depth += (c == open) - (c == close);
+      if (depth == 0) { return true; }
+    }
+  }
+  return false;
+}
+
+enum class request_walk_state { complete, clipped, deny };
+struct request_members {
+  int64_t count;
+  int64_t credit;
+  request_walk_state state;
+};
+
+// Offsets, not validity, define the row. This walk estimates work; evaluators validate JSON.
+template <bool sampled>
+__device__ request_members
+walk_request_row(char const* row, int64_t len, request_limit limit, request_prefix prefix = {})
+{
+  using state = request_walk_state;
+  enum { object = 1, want_name = 2, after_comma = 4, unpaid = 8 };
+  if (len == 0) { return {0, 0, state::deny}; }
+  // A warm cursor follows a whole root member; the next token is still unconsumed.
+  auto const end    = sampled ? cuda::std::min<int64_t>(len, k_request_sample_bytes) : len;
+  auto const at_end = end == len ? state::deny : state::clipped;
+  int parents[k_merged_deep_max_depth];
+  int depth       = prefix.pos != 0;
+  int frame       = depth != 0 ? object : 0;
+  int64_t members = prefix.count, credit = prefix.credit, pos = prefix.pos;
+  if constexpr (sampled) {
+    if (limit.denies(members, credit)) { return {members, credit, state::deny}; }
+  }
+  bool root_seen = false;
+  while (pos < end) {
+    auto const ch = row[pos];
+    if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+      ++pos;
+      continue;
+    }
+    bool const name = (frame & want_name) != 0;
+    // A counted name pays for at most one value, even on a permissively swallowed row.
+    bool const pays_credit = !name && (frame & unpaid);
+    if (ch == '"' || ch == '\'') {
+      if (name && ch == '\'') { return {members, credit, state::deny}; }
+      auto const start = pos;
+      // Opening quote + 4095 raw bytes + closing quote.
+      auto const cap = name ? pos + cuda::std::min<int64_t>(4'097, end - pos) : end;
+      bool plain     = ch == '"';
+      if (!scan_raw_quote<sampled>(row, pos, cap, plain)) {
+        return {members, credit, sampled && name && cap - start == 4'097 ? state::clipped : at_end};
+      }
+      if (name) {
+        if (++members > (1 << 20) || limit.denies(members, credit)) {
+          return {members, credit, state::deny};
+        }
+        frame |= unpaid;
+      } else if (pays_credit) {
+        credit += plain ? cuda::std::max<int64_t>(0, k_request_credit - (pos - start - 2))
+                        : k_request_credit;
+        frame &= ~unpaid;
+      }
+    } else if (ch == '{' || ch == '[') {
+      if (pays_credit) {
+        credit += k_request_credit;
+        frame &= ~unpaid;
+      }
+      if (depth == k_merged_deep_max_depth) {
+        if (sampled) { return {members, credit, state::clipped}; }
+        if (!skip_request_scope(row, pos, end)) { return {members, credit, state::deny}; }
+      } else {
+        parents[depth++] = frame;
+        frame            = ch == '{' ? object | want_name : 0;
+        ++pos;
+      }
+    } else if (ch == '}' || ch == ']') {
+      if (depth == 0 || ((ch == '}') != ((frame & object) != 0)) ||
+          (name && (frame & after_comma))) {
+        return {members, credit, state::deny};
+      }
+      ++pos;
+      if (--depth == 0) {
+        return {members,
+                credit,
+                end - pos > 1 ? state::deny
+                : end < len   ? state::clipped
+                              : state::complete};
+      }
+      frame = parents[depth];
+    } else if (ch == ',' || ch == ':') {
+      if (depth == 0 || (ch == ':' && !(frame & object))) { return {members, credit, state::deny}; }
+      frame = ch == ':'          ? frame & ~want_name
+              : (frame & object) ? object | want_name | after_comma
+                                 : 0;
+      ++pos;
+    } else {
+      // Swallow raw scalars such as x so a late invalid token can still exercise merged retry.
+      if (pays_credit) { credit += k_request_credit; }
+      root_seen |= depth == 0;
+      frame &= ~(want_name | unpaid);
+      while (++pos < end && row[pos] != ',' && row[pos] != '}' && row[pos] != ']') {}
+    }
+  }
+  return {members, credit, root_seen && depth == 0 && end == len ? state::complete : at_end};
+}
+
+// Launch once with 256 threads. Offsets are slice-based; chars still points to the allocation base.
+template <bool sample_members>
+__global__ void scan_request_kernel(cudf::detail::input_offsetalator offsets,
+                                    char const* chars,
+                                    cudf::size_type rows,
+                                    int64_t budget,
+                                    int32_t parallel_override,
+                                    int32_t eligible_upper,
+                                    request_scan* out)
+{
+  int64_t longest   = 0;
+  auto const tidx   = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::block).x;
+  auto const stride = cuda::gpu_thread.count_as<cudf::thread_index_type>(cuda::block);
+  for (auto i = tidx; i < rows; i += stride) {
+    auto const r = static_cast<cudf::size_type>(i);
+    longest      = cuda::std::max(longest, offsets[r + 1] - offsets[r]);
+  }
+  using reduce = cub::BlockReduce<int64_t, 256>;
+  __shared__ typename reduce::TempStorage storage;
+  longest        = reduce(storage).Reduce(longest, cuda::maximum{});
+  auto const tid = threadIdx.x;
+  if (tid == 0) {
+    auto const base = rows > 0 ? offsets[0] : int64_t{0};
+    *out            = {longest, rows > 0 ? offsets[rows] - base : int64_t{0}, base, k_request_deny};
+  }
+  // At the merged-record cap the member/credit cutoffs fire long before rows are counted, so
+  // the walk prices counts only and lets the caller treat cap saturation as its limit signal.
+  // The cutoff-free limit prices the full-cap design point on purpose: the cost model's
+  // width-linear extrapolation is invalid there, so the budget clamp that narrows `eligible`
+  // below governs only the non-saturated branch, and narrower executing batches still admit
+  // from the merged minimum.
+  bool const cap_saturated = sample_members && eligible_upper == k_merged_max_paths;
+  if constexpr (sample_members) {
+    __shared__ int64_t eligible;
+    __shared__ request_limit limit;
+    __shared__ request_members samples[8];
+    if (tid == 0) {
+      eligible         = 0;
+      auto const bytes = out->selected_chars;
+      // An average of zero on nonempty input guarantees a physical empty row.
+      if (rows >= k_min_rows_per_family && bytes >= rows) {
+        auto const avg     = bytes / rows;
+        auto const scratch = bytes + 10 * longest;
+        auto const cap     = parallel_override > 0 ? int64_t{parallel_override}
+                             : budget > 0          ? 1 + (budget - 1) / scratch
+                                                   : eligible_upper;
+        eligible           = cuda::std::min<int64_t>(eligible_upper, cap);
+        if (eligible >= k_merged_min_paths) {
+          limit = cap_saturated ? request_limit{avg, INT64_MAX, INT64_MAX}
+                                : make_request_limit(avg, eligible);
+        }
+      }
+    }
+    __syncthreads();
+    if (eligible < k_merged_min_paths) { return; }
+    auto const slot   = tid / warp_size;
+    auto const r      = static_cast<cudf::size_type>(static_cast<int64_t>(slot) * (rows - 1) / 7);
+    auto const begin  = offsets[r];
+    auto const len    = offsets[r + 1] - begin;
+    auto const* row   = chars + begin;
+    auto const prefix = flat_request_prefix(row, len, limit);
+    if (tid % warp_size == 0) { samples[slot] = walk_request_row<true>(row, len, limit, prefix); }
+    __syncthreads();
+    if (tid == 0) {
+      int64_t max_m = 0;
+      bool complete = true;
+      for (auto const& s : samples) {
+        if (s.state == request_walk_state::deny || limit.denies(s.count, s.credit)) { return; }
+        max_m = cuda::std::max(max_m, s.count);
+        complete &= s.state == request_walk_state::complete;
+      }
+      if (cap_saturated) {
+        if (complete) { out->min_eligible = k_merged_max_paths; }
+        return;
+      }
+      auto const upper =
+        request_threshold(request_score(max_m, limit.avg, k_request_credit * max_m), limit.avg);
+      out->min_eligible = complete && upper <= eligible ? upper : 0;
+    }
   }
 }
 
-// Return scratch bytes and the absolute slice base; export the R=2 row bound in the same readback.
-cuda::std::pair<int64_t, int64_t> calc_scratch_size(cudf::strings_column_view const& input,
-                                                    cudf::detail::input_offsetalator offsets,
-                                                    int64_t* max_row_size,
-                                                    cuda::stream_ref stream)
+// Each row stays on one thread; a decisive deny stops that thread's walk.
+__global__ void scan_exact_admission(cudf::detail::input_offsetalator offsets,
+                                     char const* chars,
+                                     cudf::size_type rows,
+                                     request_limit limit,
+                                     request_scan* out)
 {
-  rmm::device_uvector<int64_t> stats(3, stream);
-  scratch_size_kernel<<<1, 256, 0, stream.get()>>>(offsets, input.size(), stats.data());
-  CUDF_CUDA_TRY(cudaPeekAtLastError());
-  auto const host = cudf::detail::make_pinned_vector(stats, stream);
-  if (max_row_size != nullptr) { *max_row_size = host[0]; }
-  return {host[0] * 10 + host[1], host[2]};
-}
-
-// Depth errors take precedence over retry and unwritten output pairs.
-bool check_error(cudf::host_span<int8_t const> flags)
-{
-  CUDF_EXPECTS(flags.back() == 0, "The processed input has nesting depth exceeds depth limit.");
-  return std::none_of(flags.begin(), flags.end(), [](auto flag) { return flag != 0; });
+  auto const tidx   = cuda::gpu_thread.index_as<cudf::thread_index_type>(cuda::grid).x;
+  auto const stride = cuda::gpu_thread.count_as<cudf::thread_index_type>(cuda::grid);
+  int64_t score     = 0;
+  for (auto i = tidx; i < rows; i += stride) {
+    auto const r     = static_cast<cudf::size_type>(i);
+    auto const begin = offsets[r];
+    auto const row   = walk_request_row<false>(chars + begin, offsets[r + 1] - begin, limit);
+    if (row.state != request_walk_state::complete || limit.denies(row.count, row.credit)) {
+      score = INT64_MAX;
+      break;
+    }
+    score = cuda::std::max(score, request_score(row.count, limit.avg, row.credit));
+  }
+  using reduce = cub::BlockReduce<int64_t, k_exact_scan_threads>;
+  __shared__ typename reduce::TempStorage storage;
+  score = reduce(storage).Reduce(score, cuda::maximum{});
+  if (threadIdx.x == 0) {
+    cuda::atomic_ref<int32_t, cuda::thread_scope_device>{out->min_eligible}.fetch_max(
+      request_threshold(score, limit.avg), cuda::memory_order_relaxed);
+  }
 }
 
 namespace {
-
-// Depth-five admission requires eight deep paths; only then may they absorb shallow paths.
-constexpr int k_merged_max_depth              = 2;
-constexpr int k_merged_deep_max_depth         = 5;
-constexpr std::size_t k_merged_min_paths      = 8;
-constexpr std::size_t k_deep_merged_min_paths = 8;
-// Launch overhead dominates small inputs; four warps times 16 B per path gives 768 in 48 KiB.
-constexpr int k_min_rows_per_family      = 32;
-constexpr std::size_t k_merged_max_paths = 768;
 
 // A borrowed trie maps object scopes to name edges and compact output IDs.
 // The grouped upload owns all arrays, including descendant IDs killed by first matches.
@@ -1551,7 +1892,7 @@ void launch_merged_named(cudf::column_device_view const& input,
                          cuda::stream_ref stream)
 {
   constexpr auto warps = k_merged_block_size / warp_size;
-  static_assert(warps * k_merged_max_paths * sizeof(merged_path_out) <= 48 * 1024);
+  static_assert(warps * k_merged_max_paths * sizeof(merged_path_out) <= 48 * 1'024);
   static_assert(sizeof(merged_path_out) == 2 * sizeof(merged_path_packed));
   auto const rows = static_cast<std::size_t>(input.size());
   auto const smem = warps * plan.num_paths * sizeof(merged_path_out);
@@ -1601,7 +1942,10 @@ int named_depth(cudf::host_span<std::tuple<path_instruction_type, std::string, i
 }
 
 // Preserve batch order within each family. A deep group must qualify before absorbing shallow.
-grouped_routes plan_routes(path_batch const& paths, cudf::size_type rows, bool last_non_null)
+grouped_routes plan_routes(path_batch const& paths,
+                           cudf::size_type rows,
+                           bool last_non_null,
+                           std::size_t min_eligible)
 {
   grouped_routes plan{std::vector<char>(paths.size()), {}, {}, false};
   std::vector<std::size_t> deep;
@@ -1615,7 +1959,7 @@ grouped_routes plan_routes(path_batch const& paths, cudf::size_type rows, bool l
       plan.merged.push_back(i);
     }
   }
-  if (deep.size() >= k_deep_merged_min_paths) {
+  if (deep.size() >= std::max<std::size_t>(k_deep_merged_min_paths, min_eligible)) {
     plan.deep = true;
     plan.merged.insert(plan.merged.end(), deep.begin(), deep.end());
     for (auto const i : deep) {
@@ -1624,23 +1968,12 @@ grouped_routes plan_routes(path_batch const& paths, cudf::size_type rows, bool l
   } else {
     plan.general.insert(plan.general.end(), deep.begin(), deep.end());
   }
-  if (!plan.deep && plan.merged.size() < k_merged_min_paths) {
+  if (!plan.deep && plan.merged.size() < min_eligible) {
     plan.general.insert(plan.general.end(), plan.merged.begin(), plan.merged.end());
     plan.merged.clear();
   }
   for (auto const i : plan.merged) {
     if (plan.codes[i] == 0) { plan.codes[i] = 1; }
-  }
-  return plan;
-}
-
-// Retry only the flagged paths, in first-pass route order, without reapplying admission.
-grouped_routes retry_routes(std::vector<char> codes)
-{
-  grouped_routes plan{std::move(codes), {}, {}, false};
-  for (std::size_t i = 0; i < plan.codes.size(); ++i) {
-    (plan.codes[i] == 0 ? plan.general : plan.merged).push_back(i);
-    plan.deep = plan.deep || plan.codes[i] == 2;
   }
   return plan;
 }
@@ -1702,94 +2035,209 @@ std::optional<grouped_upload> launch_grouped(
   return grouped_upload{std::move(host), std::move(device)};
 }
 
+using row_pair = cuda::std::pair<char const*, cudf::size_type>;
+
+// One descriptor per checked path. Pair bytes may borrow either input or scratch.
+struct output_segment {
+  row_pair const* pairs;
+  cudf::bitmask_type* mask;
+  unsigned long long bytes{};
+  cudf::size_type valid{};
+  void* offsets{};
+  char* chars{};
+  cudf::data_type offset_type{};
+};
+
+constexpr int output_block_size = 256;
+
+// Each block owns whole mask words; the descriptors start with zeroed totals.
+CUDF_KERNEL void measure_output(output_segment* cols, int64_t tiles, int rows, int tiles_per_path)
+{
+  using reduce = cub::BlockReduce<unsigned long long, output_block_size>;
+  __shared__ reduce::TempStorage temp;
+  auto const block_idx = cuda::block.index_as<cudf::thread_index_type>(cuda::grid).x;
+  auto const stride    = cuda::block.count_as<cudf::thread_index_type>(cuda::grid);
+  for (auto tile = block_idx; tile < tiles; tile += stride) {
+    auto& col       = cols[tile / tiles_per_path];
+    auto const row  = (tile % tiles_per_path) * output_block_size + threadIdx.x;
+    auto const pair = row < rows ? col.pairs[row] : row_pair{nullptr, 0};
+    auto const mask = __ballot_sync(0xffffffffu, pair.first != nullptr);
+    if (row < rows && threadIdx.x % warp_size == 0) { col.mask[row / warp_size] = mask; }
+    auto const bytes = reduce(temp).Sum(pair.second);
+    auto const valid = cudf::detail::single_lane_block_sum_reduce<output_block_size>(__popc(mask));
+    if (threadIdx.x == 0) {
+      cuda::atomic_ref<unsigned long long, cuda::thread_scope_device>{col.bytes}.fetch_add(
+        bytes, cuda::memory_order_relaxed);
+      cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{col.valid}.fetch_add(
+        valid, cuda::memory_order_relaxed);
+    }
+  }
+}
+
 }  // namespace
 
-std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
+std::vector<std::unique_ptr<cudf::column>> eval_batch(
   cudf::column_device_view const& input,
   cudf::detail::input_offsetalator const& offsets,
-  int64_t base_offset,
   path_batch const& paths,
   int64_t scratch_size,
   bool use_last_non_null,
-  int64_t max_row_size,
+  request_scan const& scan,
+  bool use_segmented_gather,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
   std::vector<char>* routes_out)
 {
   auto const count  = paths.size();
-  auto const rows   = static_cast<std::size_t>(input.size());
-  auto const routes = plan_routes(paths, input.size(), use_last_non_null);
+  auto const rows   = input.size();
+  auto const routes = plan_routes(paths, rows, use_last_non_null, scan.min_eligible);
   for (auto const& path : paths) {
     CUDF_EXPECTS(path.size() <= MAX_JSON_PATH_DEPTH,
                  "JSON Path has depth exceeds the maximum allowed value.");
   }
   auto host_flags     = cudf::detail::make_pinned_vector_async<int8_t>(count + 1, stream);
   auto const commands = stage_commands(paths, routes.general, stream);
-  using pair_type     = cuda::std::pair<char const*, cudf::size_type>;
-  cuda::device_buffer<pair_type> pairs(stream, mr, count * rows, cuda::no_init);
-  std::vector<rmm::device_uvector<char>> scratch;
-  std::vector<json_path_processing_data> host_paths;
+  cuda::device_buffer<row_pair> pairs(stream, mr, count * rows, cuda::no_init);
+  std::vector<cuda::device_buffer<char>> scratch;
+  std::vector<json_path_processing_data> jobs;
   rmm::device_uvector<int8_t> flags(count + 1, stream);
   scratch.reserve(count);
-  host_paths.reserve(count);
+  jobs.reserve(count);
+  using cudf::detail::input_offsetalator;
+  auto const add_slot = [&](std::size_t i, input_offsetalator slots, int64_t base, int64_t bytes) {
+    scratch.emplace_back(stream, mr, bytes, cuda::no_init);
+    jobs.push_back({commands.paths[i],
+                    slots,
+                    base,
+                    pairs.data() + i * rows,
+                    scratch.back().data(),
+                    flags.data() + jobs.size()});
+  };
   for (std::size_t i = 0; i < count; ++i) {
-    scratch.emplace_back(scratch_size, stream);
-    host_paths.push_back({commands.paths[i],
-                          offsets,
-                          base_offset,
-                          pairs.data() + i * rows,
-                          scratch.back().data(),
-                          flags.data() + i});
+    add_slot(i, offsets, scan.base_offset, scratch_size);
   }
-  // The readback also orders both kernels and their asynchronous host uploads.
-  auto const run_pass = [&](path_batch const& pass_paths,
-                            grouped_routes const& pass_routes,
-                            rmm::device_uvector<int8_t>& errors) {
-    thrust::uninitialized_fill(
-      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-      errors.begin(),
-      errors.end(),
-      0);
-    [[maybe_unused]] auto const upload = launch_grouped(input,
-                                                        pass_paths,
-                                                        pass_routes,
-                                                        host_paths,
-                                                        errors.data() + pass_paths.size(),
-                                                        use_last_non_null,
-                                                        max_row_size,
-                                                        stream);
-    CUDF_CUDA_TRY(cudaMemcpyAsync(
-      host_flags.data(), errors.data(), errors.size(), cudaMemcpyDefault, stream.get()));
+  // The flag readback orders both kernels and their uploads before any pair access.
+  auto const run_pass = [&](path_batch const& pass, grouped_routes const& plan) {
+    auto const n = pass.size();
+    CUDF_CUDA_TRY(cudaMemsetAsync(flags.data(), 0, n + 1, stream.get()));
+    auto* const depth = flags.data() + n;
+    [[maybe_unused]] auto const upload =
+      launch_grouped(input, pass, plan, jobs, depth, use_last_non_null, scan.max_row_bytes, stream);
+    CUDF_CUDA_TRY(
+      cudaMemcpyAsync(host_flags.data(), flags.data(), n + 1, cudaMemcpyDefault, stream.get()));
     stream.sync();
-    return cudf::host_span<int8_t const>{host_flags.data(), errors.size()};
+    CUDF_EXPECTS(host_flags[n] == 0, "The processed input has nesting depth exceeds depth limit.");
   };
-  auto const first = run_pass(paths, routes, flags);
+  run_pass(paths, routes);
   if (routes_out != nullptr) { *routes_out = routes.codes; }
+  std::vector<std::unique_ptr<cudf::column>> out(count);
+  // Materialize only checked pairs; flagged scratch may contain overlapping writes.
   auto const gather = [&](std::vector<std::size_t> const& ids) {
-    if (ids.empty()) { return std::vector<std::unique_ptr<cudf::column>>{}; }
-    std::vector<cudf::device_span<pair_type const>> views;
-    views.reserve(ids.size());
-    for (auto const i : ids) {
-      views.emplace_back(pairs.data() + i * rows, rows);
+    if (ids.empty()) { return; }
+    if (!use_segmented_gather) {
+      CUDF_EXPECTS(
+        rows < INT32_MAX, "Size of output exceeds the column size limit", std::overflow_error);
+      auto const i = ids.front();
+      auto const view =
+        cudf::device_span<row_pair const>{pairs.data() + i * rows, static_cast<std::size_t>(rows)};
+      out[i] = std::move(cudf::make_strings_column_batch({view}, stream, mr).front());
+      return;
     }
-    return cudf::make_strings_column_batch(views, stream, mr);
+    auto const n       = static_cast<int64_t>(ids.size());
+    auto const temp_mr = cudf::get_current_device_resource_ref();
+    auto host          = cudf::detail::make_pinned_vector_async<output_segment>(n, stream);
+    cuda::device_buffer<output_segment> d(stream, temp_mr, n, cuda::no_init);
+    auto const bytes = host.size() * sizeof(output_segment);
+    std::vector<cuda::device_buffer<cudf::bitmask_type>> masks;
+    masks.reserve(n);
+    for (int64_t p = 0; p < n; ++p) {
+      masks.push_back(cudf::create_null_mask(rows, cudf::mask_state::UNINITIALIZED, stream, mr));
+      host[p] = {pairs.data() + ids[p] * rows, masks.back().data()};
+    }
+    CUDF_CUDA_TRY(cudaMemcpyAsync(d.data(), host.data(), bytes, cudaMemcpyDefault, stream.get()));
+    auto const per_path = cuda::ceil_div(rows, output_block_size);
+    auto const tiles    = n * per_path;
+    measure_output<<<std::min<int64_t>(tiles, INT32_MAX), output_block_size, 0, stream.get()>>>(
+      d.data(), tiles, rows, per_path);
+    CUDF_CUDA_TRY(cudaGetLastError());
+    CUDF_CUDA_TRY(cudaMemcpyAsync(host.data(), d.data(), bytes, cudaMemcpyDefault, stream.get()));
+    stream.sync();
+
+    auto const limit = static_cast<unsigned long long>(cudf::strings::get_offset64_threshold());
+    auto const wide  = [limit](output_segment const& col) { return col.bytes >= limit; };
+    CUDF_EXPECTS(rows < INT32_MAX && (cudf::strings::is_large_strings_enabled() ||
+                                      std::none_of(host.begin(), host.end(), wide)),
+                 "Size of output exceeds the column size limit",
+                 std::overflow_error);
+    for (int64_t p = 0; p < n; ++p) {
+      auto& col       = host[p];
+      col.offset_type = cudf::data_type{wide(col) ? cudf::type_id::INT64 : cudf::type_id::INT32};
+      auto child      = cudf::make_numeric_column(
+        col.offset_type, rows + 1, cudf::mask_state::UNALLOCATED, stream, mr);
+      rmm::device_buffer chars(col.bytes, stream, mr);
+      col.offsets      = child->mutable_view().head();
+      col.chars        = static_cast<char*>(chars.data());
+      auto const nulls = rows - col.valid;
+      if (nulls == 0) { masks[p] = cuda::device_buffer<cudf::bitmask_type>(stream, mr); }
+      out[ids[p]] = cudf::make_strings_column(
+        rows, std::move(child), std::move(chars), nulls, std::move(masks[p]));
+    }
+
+    // Zero-byte columns still need offsets, but have no destination buffer for CUB.
+    auto const end =
+      std::partition(host.begin(), host.end(), [](auto const& c) { return c.bytes; });
+    CUDF_CUDA_TRY(cudaMemcpyAsync(d.data(), host.data(), bytes, cudaMemcpyDefault, stream.get()));
+    stream.sync();  // The descriptor upload borrows the host table.
+    auto const* cols  = d.data();
+    auto const idx    = cuda::counting_iterator<int64_t>{0};
+    auto const stride = cuda::fast_mod_div<int64_t>{rows};
+    auto const keys   = cuda::transform_iterator(
+      idx, [stride] __device__(int64_t i) -> int64_t { return i / stride; });
+    auto const pairs_it =
+      cuda::transform_iterator(idx, [cols, stride] __device__(int64_t i) -> row_pair const& {
+        return cols[i / stride].pairs[i % stride];
+      });
+    auto const sizes = cuda::transform_iterator(pairs_it, &row_pair::second);
+    // Inclusive prefixes write offsets at row + 1 without a sentinel input per path.
+    auto const store = [cols, stride] __device__(int64_t i, int64_t value) -> void {
+      auto const& col = cols[i / stride];
+      auto const row  = static_cast<cudf::size_type>(i % stride);
+      cudf::detail::output_offsetalator const target{col.offsets, col.offset_type};
+      if (row == 0) { target[0] = 0; }
+      target[row + 1] = value;
+    };
+    auto const stream_prop = cuda::std::execution::prop{cuda::get_stream_t{}, stream};
+    auto const mr_prop     = cuda::std::execution::prop{cuda::mr::get_memory_resource_t{}, temp_mr};
+    auto const env         = cuda::std::execution::env{stream_prop, mr_prop};
+    auto const target      = cuda::tabulate_output_iterator(store);
+    CUDF_CUDA_TRY(cub::DeviceScan::InclusiveScanByKey(
+      keys, sizes, target, cuda::std::plus<int64_t>{}, n * rows, cuda::std::equal_to<>{}, env));
+    if (end == host.begin()) { return; }
+    auto const dst = [cols, stride] __device__(int64_t i) -> char* {
+      auto const& col = cols[i / stride];
+      return col.chars + cudf::detail::input_offsetalator{col.offsets, col.offset_type}[i % stride];
+    };
+    auto const src  = cuda::transform_iterator(pairs_it, &row_pair::first);
+    auto const dest = cuda::transform_iterator(idx, dst);
+    CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(src, dest, sizes, (end - host.begin()) * rows, env));
   };
-  std::vector<std::size_t> small, large;
-  auto const ok = check_error(first);
+  std::vector<std::size_t> accepted, flagged;
   for (std::size_t i = 0; i < count; ++i) {
-    (first[i] == 0 ? small : large).push_back(i);
+    (host_flags[i] == 0 ? accepted : flagged).push_back(i);
   }
-  if (ok) { return gather(small); }
-  // Flagged scratch may contain overlapping writes; only gather accepted columns.
-  auto unmoved = gather(small);
-  scratch.clear();
+  gather(accepted);
+  if (flagged.empty()) { return out; }
+  scratch.clear();  // Device frees follow the accepted gather on this stream.
 
   path_batch retry_paths;
-  std::vector<char> retry_codes;
+  grouped_routes retry_routes;
   std::vector<std::unique_ptr<cudf::column>> retry_offsets;
-  rmm::device_uvector<int8_t> retry_flags(large.size() + 1, stream);
-  host_paths.clear();
-  for (auto const i : large) {
+  jobs.clear();
+  // A different evaluator can exceed the slots measured by the first pass.
+  for (auto const i : flagged) {
+    auto const code = routes.codes[i];
+    (code == 0 ? retry_routes.general : retry_routes.merged).push_back(retry_paths.size());
+    retry_routes.deep |= code == 2;
     auto* const view = pairs.data() + i * rows;
     // Rows that did not overflow may have discarded writes up to their original slot size.
     auto const sizes = spark_rapids_jni::util::make_counting_transform_iterator(
@@ -1800,29 +2248,16 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object_batch(
       }));
     auto [col, bytes] =
       cudf::strings::detail::make_offsets_child_column(sizes, sizes + input.size(), stream, mr);
-    scratch.emplace_back(bytes, stream, mr);
-    host_paths.push_back({commands.paths[i],
-                          cudf::detail::offsetalator_factory::make_input_iterator(col->view()),
-                          0,
-                          view,
-                          scratch.back().data(),
-                          retry_flags.data() + retry_paths.size()});
+    add_slot(i, cudf::detail::offsetalator_factory::make_input_iterator(col->view()), 0, bytes);
     retry_offsets.emplace_back(std::move(col));
     retry_paths.emplace_back(paths[i]);
-    retry_codes.push_back(routes.codes[i]);
   }
-  CUDF_EXPECTS(
-    check_error(run_pass(retry_paths, retry_routes(std::move(retry_codes)), retry_flags)),
-    "Unexpected out-of-bound write in get_json_object kernel.");
+  run_pass(retry_paths, retry_routes);
+  auto const end = host_flags.begin() + flagged.size();
+  CUDF_EXPECTS(std::none_of(host_flags.begin(), end, [](auto v) { return v != 0; }),
+               "Unexpected out-of-bound write in get_json_object kernel.");
   // Retry offsets are capacities, not committed lengths; gather from the rewritten pairs.
-  auto retried = gather(large);
-  std::vector<std::unique_ptr<cudf::column>> out(count);
-  for (std::size_t j = 0; j < small.size(); ++j) {
-    out[small[j]] = std::move(unmoved[j]);
-  }
-  for (std::size_t j = 0; j < large.size(); ++j) {
-    out[large[j]] = std::move(retried[j]);
-  }
+  gather(flagged);
   return out;
 }
 
@@ -1834,11 +2269,13 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   bool use_last_non_null,
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr,
-  std::vector<char>* routes_out)
+  std::vector<char>* routes_out,
+  gjo_scan_mode* scan_mode)
 {
   auto const count = paths.size();
   std::vector<std::unique_ptr<cudf::column>> out(count);
   if (routes_out != nullptr) { routes_out->assign(count, 0); }
+  if (scan_mode != nullptr) { *scan_mode = gjo_scan_mode::offset_only; }
   if (count == 0) { return out; }
   if (input.is_empty() || input.size() == input.null_count()) {
     for (auto& col : out) {
@@ -1848,36 +2285,99 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
   }
   auto const offsets =
     cudf::detail::offsetalator_factory::make_input_iterator(input.offsets(), input.offset());
+  auto const rows  = input.size();
+  auto const chars = input.chars_begin(stream);
+  int32_t eligible = 0;
+  if (!use_last_non_null && rows >= k_min_rows_per_family && count >= k_merged_min_paths &&
+      (parallel_override <= 0 || parallel_override >= k_merged_min_paths)) {
+    int32_t shallow = 0, deep = 0;
+    for (auto const& path : paths) {
+      auto const depth = named_depth(path);
+      if (depth > k_merged_max_depth) {
+        if (deep < k_merged_max_paths) { ++deep; }
+      } else if (depth != 0 && shallow < k_merged_max_paths) {
+        ++shallow;
+      }
+    }
+    if (deep < k_deep_merged_min_paths ||
+        (parallel_override > 0 && parallel_override < k_deep_merged_min_paths)) {
+      deep = 0;
+    }
+    eligible = std::max(shallow, deep);
+  }
+  auto h_scan = cudf::detail::make_pinned_vector_async<request_scan>(1, stream);
+  rmm::device_uvector<request_scan> d_scan(1, stream);
+  if (eligible >= k_merged_min_paths) {
+    scan_request_kernel<true><<<1, 256, 0, stream.get()>>>(
+      offsets, chars, rows, memory_budget_bytes, parallel_override, eligible, d_scan.data());
+    if (scan_mode != nullptr) { *scan_mode = gjo_scan_mode::sampled; }
+  } else {
+    scan_request_kernel<false><<<1, 256, 0, stream.get()>>>(
+      offsets, nullptr, rows, memory_budget_bytes, parallel_override, 0, d_scan.data());
+  }
+  CUDF_CUDA_TRY(cudaPeekAtLastError());
+  CUDF_CUDA_TRY(cudaMemcpyAsync(
+    h_scan.data(), d_scan.data(), sizeof(request_scan), cudaMemcpyDefault, stream.get()));
   std::vector<std::size_t> order(count);
   std::iota(order.begin(), order.end(), std::size_t{0});
   std::sort(order.begin(), order.end(), [&](auto a, auto b) { return paths[a] < paths[b]; });
-  int64_t max_row_size                   = 0;
-  auto const [scratch_size, base_offset] = calc_scratch_size(input, offsets, &max_row_size, stream);
-  auto const device_input                = cudf::column_device_view::create(
-    input.parent(), stream, cudf::get_current_device_resource_ref());
+  stream.sync();
+  request_scan scan       = h_scan[0];
+  auto const scratch_size = scan.max_row_bytes * 10 + scan.selected_chars;
   // A budget charges each path after accepting it, even if a single path exceeds the budget.
   auto const width = parallel_override > 0 ? static_cast<std::size_t>(parallel_override)
                      : (memory_budget_bytes <= 0 || scratch_size == 0)
                        ? count
                        : static_cast<std::size_t>(1 + (memory_budget_bytes - 1) / scratch_size);
+  if (scan.min_eligible == 0) {
+    int device = 0, sms = 0;
+    CUDF_CUDA_TRY(cudaGetDevice(&device));
+    CUDF_CUDA_TRY(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+    auto const blocks = std::min(1 + (rows - 1) / k_exact_scan_threads, 8 * sms);
+    auto const limit =
+      make_request_limit(scan.selected_chars / rows, std::min<std::size_t>(width, eligible));
+    scan_exact_admission<<<blocks, k_exact_scan_threads, 0, stream.get()>>>(
+      offsets, chars, rows, limit, d_scan.data());
+    CUDF_CUDA_TRY(cudaPeekAtLastError());
+    CUDF_CUDA_TRY(cudaMemcpyAsync(&h_scan[0].min_eligible,
+                                  &d_scan.data()->min_eligible,
+                                  sizeof(scan.min_eligible),
+                                  cudaMemcpyDefault,
+                                  stream.get()));
+    stream.sync();
+    scan.min_eligible = h_scan[0].min_eligible;
+    if (scan_mode != nullptr) { *scan_mode = gjo_scan_mode::exact; }
+  } else if (scan.min_eligible == k_merged_max_paths && eligible == k_merged_max_paths) {
+    // Cap saturation is the cost model's validity limit: the model's linear width extrapolation
+    // cannot price the general route's per-path work, so the sampled completeness evidence alone
+    // admits the request at its design point. Batches below the minimum still spill general.
+    // The design point prices the request's path census, not the executing chunk width:
+    // budget-clamped widths and tail chunks below the cap still admit from the merged minimum.
+    scan.min_eligible = k_merged_min_paths;
+  }
+  auto const device = cudf::column_device_view::create(
+    input.parent(), stream, cudf::get_current_device_resource_ref());
   path_batch batch;
   std::vector<char> batch_routes;
+  auto* const observed = routes_out == nullptr ? nullptr : &batch_routes;
+  // Keep singleton tails and retries of wider requests on the segmented gather.
+  auto const use_segmented_gather = std::min(count, width) > 1;
   for (std::size_t begin = 0; begin < count; begin += width) {
     auto const size = std::min(width, count - begin);
     batch.clear();
     for (std::size_t i = 0; i < size; ++i) {
       batch.emplace_back(paths[order[begin + i]]);
     }
-    auto next = get_json_object_batch(*device_input,
-                                      offsets,
-                                      base_offset,
-                                      batch,
-                                      scratch_size,
-                                      use_last_non_null,
-                                      max_row_size,
-                                      stream,
-                                      mr,
-                                      routes_out == nullptr ? nullptr : &batch_routes);
+    auto next = eval_batch(*device,
+                           offsets,
+                           batch,
+                           scratch_size,
+                           use_last_non_null,
+                           scan,
+                           use_segmented_gather,
+                           stream,
+                           mr,
+                           observed);
     for (std::size_t i = 0; i < size; ++i) {
       auto const id = order[begin + i];
       out[id]       = std::move(next[i]);
