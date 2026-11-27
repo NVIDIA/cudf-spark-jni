@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,11 +26,12 @@ public class RowConversion {
 
   /**
    * For details about how this method functions refer to
-   * {@link #convertToRowsFixedWidthOptimized()}.
+   * {@link #convertToRowsFixedWidthOptimized(Table)}.
    *
-   * The only thing different between this method and {@link #convertToRowsFixedWidthOptimized()}
-   * is that this can handle rougly 250M columns while {@link #convertToRowsFixedWidthOptimized()}
-   * can only handle columns less than 100
+   * Unlike {@link #convertToRowsFixedWidthOptimized(Table)}, this method supports up to ~250M
+   * columns (the optimized variant handles fewer than 100) and also supports STRING columns: each
+   * string is encoded as an 8-byte (offset, length) slot in the fixed-width region, with the
+   * payload in the row's trailing variable-width region.
    */
   public static ColumnVector[] convertToRows(Table table) {
     long[] ptrs = convertToRows(table.getNativeView());
