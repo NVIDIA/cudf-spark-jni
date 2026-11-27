@@ -132,6 +132,16 @@ public class DecimalUtils {
     return new Table(remainder128(a.getNativeView(), b.getNativeView(), remainderScale));
   }
 
+  private static final int MAX_ADD_SUB_SCALE_DIFF = 76;
+
+  private static void checkAddSubScaleDiff(ColumnView a, ColumnView b) {
+    if (java.lang.Math.abs((long) a.getType().getScale() - b.getType().getScale()) >
+        MAX_ADD_SUB_SCALE_DIFF) {
+      throw new IllegalArgumentException("The intermediate scale for calculating the result " +
+          "exceeds 256-bit representation");
+    }
+  }
+
   /**
    * Subtract two DECIMAL128 columns and produce a DECIMAL128 result rounded to the specified
    * scale with overflow detection. This method considers a precision greater than 38 as overflow
@@ -148,12 +158,8 @@ public class DecimalUtils {
    *         DECIMAL128 result value. A null input row will result in a corresponding null output
    *         row.
    */
-
   public static Table subtract128(ColumnView a, ColumnView b, int targetScale) {
-    if (java.lang.Math.abs(a.getType().getScale() - b.getType().getScale()) > 77) {
-      throw new IllegalArgumentException("The intermediate scale for calculating the result " +
-          "exceeds 256-bit representation");
-    }
+    checkAddSubScaleDiff(a, b);
     return new Table(subtract128(a.getNativeView(), b.getNativeView(), targetScale));
   }
 
@@ -174,10 +180,7 @@ public class DecimalUtils {
    *         row.
    */
   public static Table add128(ColumnView a, ColumnView b, int targetScale) {
-    if (java.lang.Math.abs(a.getType().getScale() - b.getType().getScale()) > 77) {
-      throw new IllegalArgumentException("The intermediate scale for calculating the result " +
-          "exceeds 256-bit representation");
-    }
+    checkAddSubScaleDiff(a, b);
     return new Table(add128(a.getNativeView(), b.getNativeView(), targetScale));
   }
 
