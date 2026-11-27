@@ -31,6 +31,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
@@ -1432,6 +1433,36 @@ TEST_F(RowToColumnTests, RejectWiderSchemaThanRowData)
   }
 }
 
+TEST_F(RowToColumnTests, FromRowsStringSizeCheckBoundary)
+{
+  // One row with 15 zero bytes against [STRING, INT8]: the unrounded real row size is 10, so
+  // without the 8-byte alignment on `min_row_bytes` the check would pass (10 <= 15) despite the
+  // row being one byte short of the aligned minimum of 16.
+  std::vector<int8_t> bytes(15, 0);
+  cudf::test::lists_column_wrapper<int8_t> rows{{bytes.begin(), bytes.end()}};
+  std::vector<cudf::data_type> schema{cudf::data_type{cudf::type_id::STRING},
+                                      cudf::data_type{cudf::type_id::INT8}};
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows(cudf::lists_column_view(rows), schema),
+               cudf::logic_error);
+}
+
+TEST_F(RowToColumnTests, FromRowsStringSizeCheck64BitProduct)
+{
+  // The guard multiplies `min_row_bytes * num_rows` in 64 bits: 10,000 INT64 columns give a
+  // minimum row of 81,256 bytes, and 81,256 * 30,000 overflows int32 (wraps negative, letting
+  // the check pass) when computed in 32 bits. The row buffer is only 240 KB, so the guard must
+  // reject the decode before any output allocation.
+  std::vector<int8_t> vals(30000);
+  std::iota(vals.begin(), vals.end(), int8_t{0});
+  cudf::test::fixed_width_column_wrapper<int8_t> col(vals.begin(), vals.end());
+  cudf::table_view in({col});
+  auto rows = spark_rapids_jni::convert_to_rows(in);
+  ASSERT_EQ(rows.size(), 1u);
+  std::vector<cudf::data_type> wide_schema(10000, cudf::data_type{cudf::type_id::INT64});
+  EXPECT_THROW(spark_rapids_jni::convert_from_rows(cudf::lists_column_view(*rows[0]), wide_schema),
+               cudf::logic_error);
+}
+
 TEST_F(RowToColumnTests, FromRowsStringSizeCheckFuzz)
 {
   // Random schemas with strings: round-trip to catch any schema where the producer's row size
@@ -1442,7 +1473,7 @@ TEST_F(RowToColumnTests, FromRowsStringSizeCheckFuzz)
   // needs narrow (INT8/INT16) elements to stretch the fixed region plus strings, and the
   // earliest divergent schemas are only 6 columns; hence INT8/INT16 in the mix and up to 48
   // columns. Every 8th trial is all-empty or all-null strings (the minimum-row shapes).
-  std::mt19937 rng(2026'10'22);
+  std::mt19937 rng(20261022);
   std::uniform_int_distribution<int> col_count(2, 48);
   std::uniform_int_distribution<int> str_len(0, 5);
   std::uniform_int_distribution<int> type_pick(0, 3);
@@ -1467,42 +1498,28 @@ TEST_F(RowToColumnTests, FromRowsStringSizeCheckFuzz)
         columns.push_back(
           cudf::test::strings_column_wrapper(payload.begin(), payload.end(), validity.begin())
             .release());
-      } else if (kind == 1) {
-        schema.push_back(cudf::data_type{cudf::type_id::INT32});
-        std::vector<int32_t> vals;
-        std::vector<bool> validity;
-        for (int r = 0; r < 8; ++r) {
-          vals.push_back(static_cast<int32_t>(rng()));
-          validity.push_back(rng() % 4 != 0);
-        }
-        columns.push_back(cudf::test::fixed_width_column_wrapper<int32_t>(
-                            vals.begin(), vals.end(), validity.begin())
-                            .release());
-      } else if (kind == 2) {
-        // INT8/INT16: narrow elements shift the fixed-region boundaries, putting the two
-        // validity counts in different 8-byte blocks. Schema type and column element type must
-        // match exactly - a wider schema over narrower elements misaligns the decode.
-        schema.push_back(cudf::data_type{cudf::type_id::INT8});
-        std::vector<int8_t> vals;
-        std::vector<bool> validity;
-        for (int r = 0; r < 8; ++r) {
-          vals.push_back(static_cast<int8_t>(rng()));
-          validity.push_back(rng() % 4 != 0);
-        }
-        columns.push_back(
-          cudf::test::fixed_width_column_wrapper<int8_t>(vals.begin(), vals.end(), validity.begin())
-            .release());
       } else {
-        schema.push_back(cudf::data_type{cudf::type_id::INT16});
-        std::vector<int16_t> vals;
-        std::vector<bool> validity;
-        for (int r = 0; r < 8; ++r) {
-          vals.push_back(static_cast<int16_t>(rng()));
-          validity.push_back(rng() % 4 != 0);
+        // Narrow elements (INT8/INT16) shift the fixed-region boundaries, putting the two
+        // validity counts in different 8-byte blocks. The templated lambda ties the schema
+        // entry and the column element type to the same T, so a wider schema over narrower
+        // elements cannot be constructed by accident.
+        auto make_fixed = [&]<typename T>() {
+          schema.push_back(cudf::data_type{cudf::type_to_id<T>()});
+          std::vector<T> vals;
+          std::vector<bool> validity;
+          for (int r = 0; r < 8; ++r) {
+            vals.push_back(static_cast<T>(rng()));
+            validity.push_back(rng() % 4 != 0);
+          }
+          columns.push_back(
+            cudf::test::fixed_width_column_wrapper<T>(vals.begin(), vals.end(), validity.begin())
+              .release());
+        };
+        switch (kind) {
+          case 1: make_fixed.template operator()<int32_t>(); break;
+          case 2: make_fixed.template operator()<int8_t>(); break;
+          default: make_fixed.template operator()<int16_t>(); break;
         }
-        columns.push_back(cudf::test::fixed_width_column_wrapper<int16_t>(
-                            vals.begin(), vals.end(), validity.begin())
-                            .release());
       }
     }
     std::vector<cudf::column_view> views;
