@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.jni.fileio;
 
 import java.io.IOException;
-import java.io.OutputStream;
+import java.util.Optional;
 
 /**
  * Represents an output file that can be written to.
@@ -44,9 +44,22 @@ public interface RapidsOutputFile {
   }
 
   /**
+   * Create a consumer that accepts encoded host buffers directly. Implementations return an
+   * empty result when the output configuration requires the stream path. This method must not
+   * create the output file when it returns an empty result.
+   *
+   * @param overwrite Whether an existing file should be overwritten.
+   * @return an optional direct host-buffer consumer
+   * @throws IOException if an I/O error occurs while creating the consumer
+   */
+  default Optional<RapidsHostBufferConsumer> createHostBufferConsumer(boolean overwrite)
+      throws IOException {
+    return Optional.empty();
+  }
+
+  /**
    * Get the absolute path of the file as a String.
    * @return the absolute path of the file
    */
   String getPath();
 }
-
